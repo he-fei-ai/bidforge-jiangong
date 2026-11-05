@@ -13,6 +13,7 @@
 而 500 崩溃。本测试用代理 DB 模拟 db.execute 返回 None，验证每个函数
 都能 fail-soft 降级而非抛异常。
 """
+
 from __future__ import annotations
 
 import pytest
@@ -20,6 +21,7 @@ import pytest
 
 class _NoneResult:
     """模拟 aiosqlite cursor 返回 None 的场景：fetchone/fetchall 抛 AttributeError。"""
+
     async def fetchone(self):
         raise AttributeError("cursor is None (simulated)")
 
@@ -66,8 +68,7 @@ async def test_build_completeness_report_handles_none_cursor():
     from app.services.doc_pipeline.pipeline import build_completeness_report
 
     db = _FakeDBNoneOnQuery()
-    report = await build_completeness_report(
-        db, doc_id="doc_none1", project_id="proj1")
+    report = await build_completeness_report(db, doc_id="doc_none1", project_id="proj1")
     # 不应抛异常，应返回结构化错误
     assert "errors" in report
     assert any("不可用" in e or "不存在" in e for e in report["errors"])
@@ -79,8 +80,7 @@ async def test_sync_extract_layer_handles_none_cursor():
     from app.services.doc_pipeline.pipeline import sync_extract_layer
 
     db = _FakeDBNoneOnQuery()
-    result = await sync_extract_layer(
-        db, doc_id="doc_none2", project_id="proj1")
+    result = await sync_extract_layer(db, doc_id="doc_none2", project_id="proj1")
     # 空集 → written_types 为空 → extract_status=pending
     assert result["extract_status"] == "pending"
     assert result["written_types"] == []
@@ -94,8 +94,7 @@ async def test_detect_cross_source_conflicts_handles_none_cursor():
     from app.services.doc_pipeline.pipeline import detect_cross_source_conflicts
 
     db = _FakeDBNoneOnQuery()
-    conflicts, flagged, resolved = await detect_cross_source_conflicts(
-        db, project_id="proj1")
+    conflicts, flagged, resolved = await detect_cross_source_conflicts(db, project_id="proj1")
     assert conflicts == []
     assert flagged == set()
     assert resolved == set()
@@ -132,9 +131,13 @@ async def test_backfill_document_handles_none_cursor():
 
     db = _FakeDBNoneOnQuery()
     result = await backfill_document(
-        db, doc_id="doc_none5", project_id="proj1",
-        file_path="/nonexistent/file.pdf", file_name="test.pdf",
-        file_type="pdf")
+        db,
+        doc_id="doc_none5",
+        project_id="proj1",
+        file_path="/nonexistent/file.pdf",
+        file_name="test.pdf",
+        file_type="pdf",
+    )
     # 文件不存在 → ok=False
     assert result["ok"] is False
     assert "原始文件缺失" in result.get("reason", "")
@@ -149,11 +152,18 @@ class _FakeDBWithDoc:
     async def execute(self, sql, params=()):
         s = sql.strip().upper()
         if "FROM PROJECT_DOCUMENTS" in s and "WHERE ID=?" in s:
-            return _FakeCursor([{
-                "file_name": "test.pdf", "page_count": 10,
-                "parsed_markdown": "", "parse_status": "success",
-                "parse_warnings": "[]", "completeness_json": "{}",
-            }])
+            return _FakeCursor(
+                [
+                    {
+                        "file_name": "test.pdf",
+                        "page_count": 10,
+                        "parsed_markdown": "",
+                        "parse_status": "success",
+                        "parse_warnings": "[]",
+                        "completeness_json": "{}",
+                    }
+                ]
+            )
         if s.startswith("SELECT"):
             return _FakeCursor([])  # 空结果
         return _FakeCursor()
@@ -169,8 +179,7 @@ async def test_build_completeness_report_with_doc_but_none_chunk_query():
 
     db = _FakeDBWithDoc()
     # chunk 查询会返回空 cursor（不是 None），走正常路径
-    report = await build_completeness_report(
-        db, doc_id="doc_ok1", project_id="proj1")
+    report = await build_completeness_report(db, doc_id="doc_ok1", project_id="proj1")
     assert report["doc_id"] == "doc_ok1"
     assert report["completeness"]["chunk_count"] == 0
     assert "quality_score" in report
@@ -196,8 +205,7 @@ async def test_sync_extract_layer_write_path_none_cursor():
 
     db = _FakeDBNoneOnQuery()
     # items 查询返回 None → items=[] → 空集路径，不触发写循环
-    result = await sync_extract_layer(
-        db, doc_id="doc_none7", project_id="proj1")
+    result = await sync_extract_layer(db, doc_id="doc_none7", project_id="proj1")
     assert result["extract_status"] == "pending"
     assert result["written_types"] == []
 
@@ -221,5 +229,4 @@ async def test_pipeline_guards_are_present_static():
     none_guards = src.count("is None")
     # 至少要有合理数量的守卫（R13 原修复 + 本轮补全）
     # ingest_parse_result 有 3 处守卫 + 本轮补全约 10 处 = 至少 10 处
-    assert none_guards >= 10, \
-        f"db.execute None 守卫数 {none_guards} 过少，可能 R13 补全被回退"
+    assert none_guards >= 10, f"db.execute None 守卫数 {none_guards} 过少，可能 R13 补全被回退"

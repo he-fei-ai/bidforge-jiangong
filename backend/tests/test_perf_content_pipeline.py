@@ -12,6 +12,7 @@
 - P1-3 `build_inline_chart_plan` / `apply_inline_chart_plan`：纯计算与写库分离
   （计算阶段不触碰 DB），且沿用既有 DELETE→INSERT 事务契约。
 """
+
 import asyncio
 import json
 import time
@@ -32,21 +33,22 @@ from app.services.content_utils import (
     max_tokens_for_budget,
 )
 
-VALID_FLOWCHART = (
-    'flowchart TD\n    A["开始"] --> B["施工"]\n'
-    '    B --> C{"验收合格?"}\n    C --> D["结束"]'
-)
+VALID_FLOWCHART = 'flowchart TD\n    A["开始"] --> B["施工"]\n' '    B --> C{"验收合格?"}\n    C --> D["结束"]'
 
 
 # ---------------------------------------------------------------------------
 # P1-2 输出 token 上限折算
 # ---------------------------------------------------------------------------
 
-class TestMaxTokensForBudget:
 
+class TestMaxTokensForBudget:
     def test_scales_with_budget(self):
-        assert max_tokens_for_budget(4000) > max_tokens_for_budget(2000)
-        assert max_tokens_for_budget(2000) > max_tokens_for_budget(1000)
+        # ✅ 2026-11-05（方案 A · 正文预算 1536→4000）：下限抬到 4000 后，
+        #    低于 ~5000 字的预算都会落在下限上（4000/2000/1000 同为 4000），
+        #    「随预算增大而增大」的护城河必须在上限区间内验证，故改用 8000。
+        #    断言意图不变：输出上限仍随目标预算单调增加，且不低于下限。
+        assert max_tokens_for_budget(8000) > max_tokens_for_budget(4000) >= MAX_TOKENS_FLOOR
+        assert max_tokens_for_budget(6000) > MAX_TOKENS_FLOOR
 
     def test_floor_protects_short_sections(self):
         assert max_tokens_for_budget(10) == MAX_TOKENS_FLOOR
@@ -55,7 +57,9 @@ class TestMaxTokensForBudget:
 
     def test_follows_char_gap_for_continuation(self):
         """续写按"剩余待补字数"折算：缺口小 → 上限小（但不低于下限）。"""
-        big = max_tokens_for_budget(3000, chars=2000)
+        # ✅ 2026-11-05：缺口 2000 字折算 1600 token < 4000 下限，两者会同为
+        #    4000；改用 6000 字缺口（折算 4800 token > 4000）保留原意图。
+        big = max_tokens_for_budget(3000, chars=6000)
         small = max_tokens_for_budget(3000, chars=200)
         assert big > small >= MAX_TOKENS_FLOOR
 
@@ -69,8 +73,8 @@ class TestMaxTokensForBudget:
 # P0-2 自适应并发控制器（反向棘轮修复）
 # ---------------------------------------------------------------------------
 
-class TestAdaptiveConcurrencyNoRatchet:
 
+class TestAdaptiveConcurrencyNoRatchet:
     def _saturate(self, ctl, duration, status=200):
         for _ in range(ctl.WINDOW_SIZE):
             ctl.record(duration, status=status)
@@ -120,6 +124,7 @@ class TestAdaptiveConcurrencyNoRatchet:
 # P0-1 候选排序：死配置剔除 + 主配置后置
 # ---------------------------------------------------------------------------
 
+
 @pytest.fixture
 def clean_reliability():
     pf._provider_reliability.clear()
@@ -128,7 +133,6 @@ def clean_reliability():
 
 
 class TestOrderCandidates:
-
     def _cands(self):
         return [
             {"provider_name": "primary", "api_key": "k", "_is_primary": True},
@@ -137,12 +141,12 @@ class TestOrderCandidates:
 
     def test_dead_config_dropped(self, clean_reliability):
         pf._provider_reliability["primary"] = {"ok": 30, "fail": 0}
-        pf._provider_reliability["backup"] = {"ok": 0, "fail": 20}   # 0% 成功率
+        pf._provider_reliability["backup"] = {"ok": 0, "fail": 20}  # 0% 成功率
         out = pf._order_candidates(self._cands())
         assert [c["provider_name"] for c in out] == ["primary"]
 
     def test_low_rate_primary_demoted_to_tail(self, clean_reliability):
-        pf._provider_reliability["primary"] = {"ok": 4, "fail": 6}   # 40%
+        pf._provider_reliability["primary"] = {"ok": 4, "fail": 6}  # 40%
         pf._provider_reliability["backup"] = {"ok": 19, "fail": 1}
         out = pf._order_candidates(self._cands())
         assert [c["provider_name"] for c in out] == ["backup", "primary"]
@@ -171,8 +175,8 @@ class TestOrderCandidates:
 # P0-3 每候选独立超时
 # ---------------------------------------------------------------------------
 
-class TestCandidateTimeout:
 
+class TestCandidateTimeout:
     def test_primary_uses_full_budget(self):
         c = {"_is_primary": True, "timeout": 60}
         assert pf._candidate_timeout(c, 300) == 300
@@ -190,13 +194,13 @@ class TestCandidateTimeout:
         # ✅ 2026-10-03（缺省值单一出口）：缺 timeout 的主候选按声明默认 900s
         # （schema / AIConfigIn / 前端表单一致），不再回落旧硬编码 60s ——
         # 配置行缺该字段或为 0 时，长正文生成曾因主候选超时静默缩水到 60s 必超时。
-        assert pf._candidate_timeout({"_is_primary": True}, None) == \
-            pf.DEFAULT_CONFIG_NUMBERS["timeout"]
+        assert pf._candidate_timeout({"_is_primary": True}, None) == pf.DEFAULT_CONFIG_NUMBERS["timeout"]
 
 
 # ---------------------------------------------------------------------------
 # P0-1 对冲请求（hedged request）
 # ---------------------------------------------------------------------------
+
 
 class _FakeProvider:
     """可控时延/结果的假 Provider。"""
@@ -208,8 +212,7 @@ class _FakeProvider:
         self.model = "fake-model"
         self.last_usage = {}
 
-    async def chat(self, messages, temperature=None, json_mode=False,
-                   max_tokens=None, **_kw) -> str:
+    async def chat(self, messages, temperature=None, json_mode=False, max_tokens=None, **_kw) -> str:
         await asyncio.sleep(self.delay)
         if self.exc is not None:
             raise self.exc
@@ -219,6 +222,7 @@ class _FakeProvider:
 @pytest.fixture
 def isolated_fallback(monkeypatch):
     """隔离 chat_with_fallback 的外部依赖：不读 DB、不写审计、无历史可靠性/熔断污染。"""
+
     async def _noop_flush():
         return None
 
@@ -232,21 +236,34 @@ def isolated_fallback(monkeypatch):
     pf.circuit_breaker._per_provider.clear()
 
 
-def _setup_candidates(monkeypatch, primary, fallbacks, *, hedge_delay=0.05,
-                      hedge_enabled=True):
+def _setup_candidates(monkeypatch, primary, fallbacks, *, hedge_delay=0.05, hedge_enabled=True):
     monkeypatch.setattr(settings, "ai_hedge_enabled", hedge_enabled)
     monkeypatch.setattr(settings, "ai_hedge_delay_seconds", hedge_delay)
 
     async def _cfg():
-        return {"provider_name": primary[0].get("name", "primary"),
-                "api_key": "k", "base_url": "https://x", "model": "m",
-                "max_tokens": 4096, "temperature": 0.7, "timeout": 60}
+        return {
+            "provider_name": primary[0].get("name", "primary"),
+            "api_key": "k",
+            "base_url": "https://x",
+            "model": "m",
+            "max_tokens": 4096,
+            "temperature": 0.7,
+            "timeout": 60,
+        }
 
     async def _chain():
-        return [{"provider_name": p.get("name", f"fb{i}"), "api_key": "k",
-                 "base_url": "https://x", "model": "m", "max_tokens": 4096,
-                 "temperature": 0.7, "timeout": 60}
-                for i, p in enumerate(fallbacks)]
+        return [
+            {
+                "provider_name": p.get("name", f"fb{i}"),
+                "api_key": "k",
+                "base_url": "https://x",
+                "model": "m",
+                "max_tokens": 4096,
+                "temperature": 0.7,
+                "timeout": 60,
+            }
+            for i, p in enumerate(fallbacks)
+        ]
 
     monkeypatch.setattr(pf, "_load_active_config", _cfg)
     monkeypatch.setattr(pf, "_fallback_chain", _chain)
@@ -256,8 +273,7 @@ def _setup_candidates(monkeypatch, primary, fallbacks, *, hedge_delay=0.05,
     by_name = {}
     for item in [*primary, *fallbacks]:
         by_name[item.get("name", "")] = item
-    monkeypatch.setattr(pf, "_build_provider",
-                        lambda pname, *a, **kw: by_name[pname]["provider"])
+    monkeypatch.setattr(pf, "_build_provider", lambda pname, *a, **kw: by_name[pname]["provider"])
     return by_name
 
 
@@ -268,7 +284,8 @@ def test_hedge_slow_primary_loses_to_fast_fallback(isolated_fallback):
         monkeypatch,
         primary=[{"name": "slow", "provider": _FakeProvider(1.5, "SLOW-RESULT")}],
         fallbacks=[{"name": "fast", "provider": _FakeProvider(0.02, "FAST-RESULT")}],
-        hedge_delay=0.05)
+        hedge_delay=0.05,
+    )
     t0 = time.monotonic()
     out = asyncio.run(pf.chat_with_fallback([{"role": "user", "content": "hi"}]))
     elapsed = time.monotonic() - t0
@@ -283,17 +300,15 @@ def test_no_hedge_when_disabled(isolated_fallback):
         monkeypatch,
         primary=[{"name": "slow", "provider": _FakeProvider(0.05, "SLOW-RESULT")}],
         fallbacks=[{"name": "fast", "provider": _FakeProvider(0.0, "FAST-RESULT")}],
-        hedge_enabled=False)
+        hedge_enabled=False,
+    )
     out = asyncio.run(pf.chat_with_fallback([{"role": "user", "content": "hi"}]))
     assert out == "SLOW-RESULT"
 
 
 def test_single_candidate_no_hedge_path(isolated_fallback):
     monkeypatch = isolated_fallback
-    _setup_candidates(
-        monkeypatch,
-        primary=[{"name": "only", "provider": _FakeProvider(0.0, "ONLY")}],
-        fallbacks=[])
+    _setup_candidates(monkeypatch, primary=[{"name": "only", "provider": _FakeProvider(0.0, "ONLY")}], fallbacks=[])
     out = asyncio.run(pf.chat_with_fallback([{"role": "user", "content": "hi"}]))
     assert out == "ONLY"
 
@@ -304,7 +319,8 @@ def test_all_candidates_fail_raises(isolated_fallback):
         monkeypatch,
         primary=[{"name": "p", "provider": _FakeProvider(0.0, exc=RuntimeError("boom-p"))}],
         fallbacks=[{"name": "f", "provider": _FakeProvider(0.0, exc=RuntimeError("boom-f"))}],
-        hedge_delay=0.05)
+        hedge_delay=0.05,
+    )
     with pytest.raises(RuntimeError, match="所有 AI 提供商调用失败"):
         asyncio.run(pf.chat_with_fallback([{"role": "user", "content": "hi"}]))
 
@@ -313,8 +329,8 @@ def test_all_candidates_fail_raises(isolated_fallback):
 # P0-4 共享 HTTP 连接池
 # ---------------------------------------------------------------------------
 
-class TestHttpPoolReuse:
 
+class TestHttpPoolReuse:
     @pytest.mark.asyncio
     async def test_same_key_reuses_client(self):
         http_pool.reset_clients_for_test()
@@ -331,8 +347,7 @@ class TestHttpPoolReuse:
         http_pool.reset_clients_for_test()
         try:
             c1 = http_pool.get_async_client("https://api.example.com/v1")
-            c2 = http_pool.get_async_client("https://api.example.com/v1",
-                                           "http://127.0.0.1:7890")
+            c2 = http_pool.get_async_client("https://api.example.com/v1", "http://127.0.0.1:7890")
             assert c1 is not c2, "不同代理必须使用不同连接池"
         finally:
             await http_pool.aclose_all_clients()
@@ -342,6 +357,7 @@ class TestHttpPoolReuse:
 # ---------------------------------------------------------------------------
 # P1-3 图表计划/写入分离（计算不触碰 DB）
 # ---------------------------------------------------------------------------
+
 
 class _RecordingDb:
     def __init__(self):
@@ -353,13 +369,12 @@ class _RecordingDb:
 
 
 class TestInlineChartPlanSplit:
-
     def test_plan_is_pure_and_returns_rows(self):
         """build_inline_chart_plan 不接收 db —— 结构上保证计算不触碰数据库。"""
         content = "前文\n```mermaid\n" + VALID_FLOWCHART + "\n```\n后文"
         new_content, rows = build_inline_chart_plan(
-            "scheme-1", "sec-1", content, enforce_limits=True,
-            scheme_type_counts={})
+            "scheme-1", "sec-1", content, enforce_limits=True, scheme_type_counts={}
+        )
         assert new_content == content
         assert len(rows) == 1
         # rows 为 INSERT 参数元组：8 项（含 1 个字面量列 needed=1）
@@ -371,8 +386,7 @@ class TestInlineChartPlanSplit:
         assert payload["mermaid_code"] == VALID_FLOWCHART
 
     def test_plan_no_charts_returns_empty_rows(self):
-        new_content, rows = build_inline_chart_plan(
-            "scheme-1", "sec-2", "纯文本，无图表。")
+        new_content, rows = build_inline_chart_plan("scheme-1", "sec-2", "纯文本，无图表。")
         assert rows == []
         assert new_content == "纯文本，无图表。"
 
@@ -390,8 +404,7 @@ class TestInlineChartPlanSplit:
         """无图表也必须清理历史登记（防僵尸图）。"""
         db = _RecordingDb()
         asyncio.run(apply_inline_chart_plan(db, "sec-4", []))
-        assert db.rows == [
-            ("DELETE FROM chart_predictions WHERE section_id=?", ("sec-4",))]
+        assert db.rows == [("DELETE FROM chart_predictions WHERE section_id=?", ("sec-4",))]
 
 
 async def test_apply_enforces_scheme_wide_type_limit(tmp_path):
@@ -402,34 +415,29 @@ async def test_apply_enforces_scheme_wide_type_limit(tmp_path):
     """
     import app.db as _appdb
     from app.db import get_conn, init_db
+
     _appdb.DB_PATH = tmp_path / "chart-limit.sqlite"
     await init_db()
     db = await get_conn()
     sid = "scheme-limit"
-    await db.execute(
-        "INSERT INTO projects(id,name) VALUES(?,?)", ("p", "p"))
-    await db.execute(
-        "INSERT INTO schemes(id,project_id,name) VALUES(?,?,?)", (sid, "p", "s"))
+    await db.execute("INSERT INTO projects(id,name) VALUES(?,?)", ("p", "p"))
+    await db.execute("INSERT INTO schemes(id,project_id,name) VALUES(?,?,?)", (sid, "p", "s"))
     await db.commit()
-    rows_a = [(str(uuid.uuid4()), "secA", sid, "gantt", "t", 5, "generated", "{}")
-              for _ in range(3)]
+    rows_a = [(str(uuid.uuid4()), "secA", sid, "gantt", "t", 5, "generated", "{}") for _ in range(3)]
     await apply_inline_chart_plan(db, "secA", rows_a)
-    rows_b = [(str(uuid.uuid4()), "secB", sid, "gantt", "t", 5, "generated", "{}")
-              for _ in range(3)]
+    rows_b = [(str(uuid.uuid4()), "secB", sid, "gantt", "t", 5, "generated", "{}") for _ in range(3)]
     await apply_inline_chart_plan(db, "secB", rows_b)
-    cur = await db.execute(
-        "SELECT count(*) FROM chart_predictions WHERE scheme_id=?", (sid,))
+    cur = await db.execute("SELECT count(*) FROM chart_predictions WHERE scheme_id=?", (sid,))
     assert (await cur.fetchone())[0] == 3  # 不超过全方案同类型上限
     await db.close()
 
     def test_limits_trim_extra_block_in_plan(self):
         """per-chapter 上限在纯计算阶段生效（第 2 块被裁出正文）。"""
         second = "flowchart LR\n    C --> D"
-        content = ("```mermaid\n" + VALID_FLOWCHART + "\n```\n正文\n"
-                   "```mermaid\n" + second + "\n```")
+        content = "```mermaid\n" + VALID_FLOWCHART + "\n```\n正文\n" "```mermaid\n" + second + "\n```"
         new_content, rows = build_inline_chart_plan(
-            "scheme-1", "sec-5", content, enforce_limits=True,
-            scheme_type_counts={})
+            "scheme-1", "sec-5", content, enforce_limits=True, scheme_type_counts={}
+        )
         assert second not in new_content
         assert len(rows) == 1
 
@@ -438,9 +446,11 @@ async def test_apply_enforces_scheme_wide_type_limit(tmp_path):
 # 链路常量回归锁
 # ---------------------------------------------------------------------------
 
+
 def test_continue_rounds_capped():
     """P1-1：续写轮数上限收敛为 2（旧实现 4 轮 × 每轮重试 → 单章最多 9 次调用）。"""
     from app.routers.sse_handlers import CONTENT_CONTINUE_MAX_ROUNDS
+
     assert CONTENT_CONTINUE_MAX_ROUNDS == 2
 
 

@@ -23,13 +23,15 @@ describe("sourceNotice（提取依据完整性）", () => {
     expect(sourceNotice(undefined)).toBeNull();
     expect(sourceNotice({})).toBeNull();
     expect(sourceNotice({ source_truncated: false })).toBeNull();
-    expect(sourceNotice({
-      source_truncated: false,
-      used_doc_count: 3,
-      input_doc_count: 3,
-      dropped_doc_count: 0,
-      truncated_docs: [],
-    })).toBeNull();
+    expect(
+      sourceNotice({
+        source_truncated: false,
+        used_doc_count: 3,
+        input_doc_count: 3,
+        dropped_doc_count: 0,
+        truncated_docs: [],
+      }),
+    ).toBeNull();
   });
 
   it("被截断的文档 → warning，且给出文件名", () => {
@@ -70,8 +72,7 @@ describe("sourceNotice（提取依据完整性）", () => {
   it("多文件名超过 3 个时折叠（避免标题过长挤爆告警条）", () => {
     const n = sourceNotice({
       source_truncated: true,
-      truncated_docs: [{ name: "a.pdf" }, { name: "b.pdf" },
-                       { name: "c.pdf" }, { name: "d.pdf" }],
+      truncated_docs: [{ name: "a.pdf" }, { name: "b.pdf" }, { name: "c.pdf" }, { name: "d.pdf" }],
     });
     expect(n!.title).toContain("a.pdf、b.pdf、c.pdf");
     expect(n!.title).toContain("等 4 份");
@@ -79,11 +80,14 @@ describe("sourceNotice（提取依据完整性）", () => {
   });
 
   it("空 name 的条目被过滤（后端契约缺失时不得渲染空白）", () => {
-    expect(sourceNotice({ source_truncated: true, truncated_docs: [{}, { name: "" }] }))
-      .not.toBeNull();
+    expect(
+      sourceNotice({ source_truncated: true, truncated_docs: [{}, { name: "" }] }),
+    ).not.toBeNull();
     // 无有效文件名、也无跳过数 → 退化为通用文案
-    expect(sourceNotice({ source_truncated: true, truncated_docs: [{}] }))
-      .toMatchObject({ kind: "warning", title: "提取依据不完整：部分源文档内容缺失" });
+    expect(sourceNotice({ source_truncated: true, truncated_docs: [{}] })).toMatchObject({
+      kind: "warning",
+      title: "提取依据不完整：部分源文档内容缺失",
+    });
   });
 });
 
@@ -109,7 +113,9 @@ describe("previewNotices（预览弹窗提示）", () => {
 
   it("解析级截断 + 预览也被截取 → 只报 warning（更严重的优先）", () => {
     const notices = previewNotices({
-      text_len: 120000, truncated: true, preview_truncated: true,
+      text_len: 120000,
+      truncated: true,
+      preview_truncated: true,
     });
     expect(notices).toHaveLength(1);
     expect(notices[0].kind).toBe("warning");
@@ -118,7 +124,9 @@ describe("previewNotices（预览弹窗提示）", () => {
 
   it("仅预览级截取 → info，并说明正文总长", () => {
     const notices = previewNotices({
-      text_len: 20000, truncated: false, preview_truncated: true,
+      text_len: 20000,
+      truncated: false,
+      preview_truncated: true,
     });
     expect(notices).toHaveLength(1);
     expect(notices[0].kind).toBe("info");
@@ -128,7 +136,8 @@ describe("previewNotices（预览弹窗提示）", () => {
 
   it("解析告警 → info，逐条拼接（编码降级 / OCR 兜底等诊断必须知情）", () => {
     const notices = previewNotices({
-      is_parsed: true, text_len: 800,
+      is_parsed: true,
+      text_len: 800,
       parse_warnings: ["第 50 页之后已截断", "源文件编码无法识别，已按 UTF-8 容错解码"],
     });
     // 无 truncated / preview_truncated 时只有告警一条
@@ -140,10 +149,10 @@ describe("previewNotices（预览弹窗提示）", () => {
   });
 
   it("解析告警为非数组/含空串 → 降级为空提示（不得抛错或渲染空白）", () => {
-    expect(previewNotices({ is_parsed: true, text_len: 100,
-                            parse_warnings: undefined })).toEqual([]);
-    expect(previewNotices({ is_parsed: true, text_len: 100,
-                            parse_warnings: [] })).toEqual([]);
+    expect(previewNotices({ is_parsed: true, text_len: 100, parse_warnings: undefined })).toEqual(
+      [],
+    );
+    expect(previewNotices({ is_parsed: true, text_len: 100, parse_warnings: [] })).toEqual([]);
     // @ts-expect-error 故意传非数组，验证防御性
     expect(previewNotices({ parse_warnings: "不是数组" })).toEqual([]);
     // 后端 JSON 里可能夹带 null（历史脏数据）：过滤掉后仍保留有效告警
@@ -155,15 +164,18 @@ describe("previewNotices（预览弹窗提示）", () => {
 
   it("三种信号同时存在 → warning 与 info 各一条，顺序稳定", () => {
     const notices = previewNotices({
-      is_parsed: true, text_len: 500,
-      truncated: true, preview_truncated: false,
+      is_parsed: true,
+      text_len: 500,
+      truncated: true,
+      preview_truncated: false,
       parse_warnings: ["第 50 页之后已截断"],
     });
     expect(notices.map((n) => n.kind)).toEqual(["warning", "info"]);
   });
 
   it("未解析文档 → 空数组（由调用方用 message 提示，不重复）", () => {
-    expect(previewNotices({ is_parsed: false, message: "该文档尚未解析，请先执行解析" }))
-      .toEqual([]);
+    expect(previewNotices({ is_parsed: false, message: "该文档尚未解析，请先执行解析" })).toEqual(
+      [],
+    );
   });
 });

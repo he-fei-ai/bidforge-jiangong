@@ -13,6 +13,7 @@ ParseError」，但各格式解析器会把底层库异常直接外泄 —— �
 本轮在格式分派层统一归一：库异常 → ParseError（可读文案），ParseError
 原样透传（压缩炸弹/加密/缺依赖等既有语义与文案一字不改）。
 """
+
 from __future__ import annotations
 
 import ast
@@ -101,8 +102,10 @@ class TestDispatchContractNormalization:
 class TestParseErrorPassthrough:
     def test_guard_archive_parseerror_preserved(self, monkeypatch):
         """压缩炸弹闸门的 ParseError 必须原样透传（不被包装成「文件已损坏」）。"""
+
         def _bomb(content, ftype):  # noqa: ANN001
             raise ParseError("归档条目过多，疑似压缩炸弹，已拒绝解析")
+
         monkeypatch.setattr(fp, "_guard_zip_archive", _bomb)
         with pytest.raises(ParseError) as ei:
             fp.parse_file_content_ex(b"PK\x03\x04" + b"\x00" * 32, "a.docx")
@@ -110,8 +113,10 @@ class TestParseErrorPassthrough:
 
     def test_ocr_parseerror_preserved(self, monkeypatch):
         """OCR 无引擎的 ParseError 必须原样透传（用户侧提示不变）。"""
+
         def _ocr(content, ftype, diag):  # noqa: ANN001
             raise ParseError("无可用 OCR 引擎，请安装 tesseract 或配置视觉模型")
+
         monkeypatch.setattr(fp, "_parse_image_ocr", _ocr)
         with pytest.raises(ParseError) as ei:
             fp.parse_file_content_ex(b"\x89PNG\r\n\x1a\n" + b"\x00" * 16, "a.png")
@@ -124,8 +129,10 @@ class TestParseErrorPassthrough:
 class TestDefenseInDepth:
     def test_unknown_runtime_error_becomes_parse_error(self, monkeypatch):
         """解析器抛任意 RuntimeError → ParseError（而非逃逸成 500）。"""
+
         def _boom(content):  # noqa: ANN001
             raise RuntimeError("模拟解析器内部故障")
+
         monkeypatch.setattr(fp, "_parse_docx", _boom)
         with pytest.raises(ParseError) as ei:
             fp.parse_file_content_ex(b"PK\x03\x04" + b"\x00" * 32, "a.docx")
@@ -133,8 +140,7 @@ class TestDefenseInDepth:
 
     def test_valid_csv_still_parsed(self):
         """回归控制：合法文件不受影响。"""
-        text, diag = fp.parse_file_content_ex(
-            "设备名称,数量\n塔吊,2\n".encode("utf-8"), "a.csv")
+        text, diag = fp.parse_file_content_ex("设备名称,数量\n塔吊,2\n".encode("utf-8"), "a.csv")
         assert "设备名称" in text
         assert diag["file_type"] == "csv"
 
@@ -155,8 +161,7 @@ class TestDispatchWrapperStaticGuard:
         assert "重新上传" in src, "归一化 ParseError 文案被摘除"
         # 归一分支必须覆盖整个分派区（出现在 _parse_excel / _parse_image_ocr
         # 调用之后的位置），防止包装只罩住前半段
-        assert src.index("except Exception") > src.index("_parse_image_ocr"), (
-            "泛化归一 except 必须在全部格式分派之后")
+        assert src.index("except Exception") > src.index("_parse_image_ocr"), "泛化归一 except 必须在全部格式分派之后"
 
 
 # =========================================================================
@@ -168,10 +173,20 @@ _CFB_HEADER_SIZE = 512
 _CFB_SIG = fp.OLE_COMPOUND_HEADERS[0]
 
 
-def _cfb_header(*, n_fat=1, n_dir=1, n_mini=0, n_difat=0,
-                first_dir=1, minor=0x003E, major=4,
-                byte_order=0xFFFE, sec_shift=9, mini_shift=6,
-                extra_bytes=1024) -> bytes:
+def _cfb_header(
+    *,
+    n_fat=1,
+    n_dir=1,
+    n_mini=0,
+    n_difat=0,
+    first_dir=1,
+    minor=0x003E,
+    major=4,
+    byte_order=0xFFFE,
+    sec_shift=9,
+    mini_shift=6,
+    extra_bytes=1024,
+) -> bytes:
     """构造「结构自洽的最小 CFB」，单字段可覆写。
 
     默认参数下扇区算术恰好成立（2 个 512B 扇区承载 1 FAT + 1 目录），
@@ -179,8 +194,7 @@ def _cfb_header(*, n_fat=1, n_dir=1, n_mini=0, n_difat=0,
     """
     h = bytearray(_CFB_HEADER_SIZE)
     h[0:8] = _CFB_SIG
-    struct.pack_into("<HHHHH", h, 0x18,
-                     minor, major, byte_order, sec_shift, mini_shift)
+    struct.pack_into("<HHHHH", h, 0x18, minor, major, byte_order, sec_shift, mini_shift)
     struct.pack_into("<III", h, 0x28, n_dir, n_fat, first_dir)
     struct.pack_into("<I", h, 0x40, n_mini)
     struct.pack_into("<I", h, 0x48, n_difat)
@@ -190,8 +204,7 @@ def _cfb_header(*, n_fat=1, n_dir=1, n_mini=0, n_difat=0,
 class TestQuotaPlaceholderRemoved:
     """G2：上传配额的静态占位删除，权威值只剩 global_facts 一处。"""
 
-    _QUOTA = ("MAX_UPLOAD_BYTES", "MAX_UPLOAD_FILES_PER_REQUEST",
-              "MAX_UPLOAD_TOTAL_BYTES")
+    _QUOTA = ("MAX_UPLOAD_BYTES", "MAX_UPLOAD_FILES_PER_REQUEST", "MAX_UPLOAD_TOTAL_BYTES")
 
     def test_docs_module_has_no_local_quota_constant(self):
         """不得再出现配额的**字面量副本**（本仓「同一判据两份取值」同族反例）。"""
@@ -205,8 +218,7 @@ class TestQuotaPlaceholderRemoved:
 
     def test_dead_gf_const_helper_gone(self):
         """`_gf_const` 从未被调用（配额读点直接走 `gf.*`），留着就是死代码。"""
-        funcs = {n.name for n in ast.parse(inspect.getsource(gfd)).body
-                 if isinstance(n, ast.FunctionDef)}
+        funcs = {n.name for n in ast.parse(inspect.getsource(gfd)).body if isinstance(n, ast.FunctionDef)}
         assert "_gf_const" not in funcs
 
     def test_quota_authority_still_in_global_facts(self):
@@ -228,13 +240,11 @@ class TestDocstringTestPathDrift:
 
     def test_r72_reference_points_to_a_real_file(self):
         mod = importlib.import_module("test_import_parse_closeout_r72_20261012")
-        refs = re.findall(r"``([A-Za-z0-9_.\-/]+\.(?:test\.[jt]sx?))``",
-                          mod.__doc__ or "")
+        refs = re.findall(r"``([A-Za-z0-9_.\-/]+\.(?:test\.[jt]sx?))``", mod.__doc__ or "")
         assert refs, "R72 docstring 不再引用前端测试文件（G3 护栏失去锚点）"
         tests_dir = Path(__file__).resolve().parents[2] / "frontend" / "src" / "tests"
         for ref in refs:
-            assert (tests_dir / ref).is_file(), (
-                f"docstring 引用的前端测试文件不存在：{ref}")
+            assert (tests_dir / ref).is_file(), f"docstring 引用的前端测试文件不存在：{ref}"
 
 
 class TestOleHeaderPreflight:
@@ -248,10 +258,18 @@ class TestOleHeaderPreflight:
         assert lo.validate_ole_compound_header(b"PK\x03\x04" + b"\x00" * 4000) is None
         assert lo.validate_ole_compound_header(b"abc") is None
 
-    @pytest.mark.parametrize("kwargs", [
-        {"minor": 0x003F}, {"major": 99}, {"byte_order": 0xFEFF},
-        {"sec_shift": 6}, {"sec_shift": 13}, {"mini_shift": 7},
-    ], ids=lambda d: f"{next(iter(d))}={next(iter(d.values()))}")
+    @pytest.mark.parametrize(
+        "kwargs",
+        [
+            {"minor": 0x003F},
+            {"major": 99},
+            {"byte_order": 0xFEFF},
+            {"sec_shift": 6},
+            {"sec_shift": 13},
+            {"mini_shift": 7},
+        ],
+        ids=lambda d: f"{next(iter(d))}={next(iter(d.values()))}",
+    )
     def test_header_field_out_of_spec_rejected(self, kwargs):
         assert lo.validate_ole_compound_header(_cfb_header(**kwargs)), kwargs
 
@@ -273,14 +291,18 @@ class TestOleHeaderPreflight:
         1 个迷你 FAT 扇区 · 共 2408 扇区）—— 早期版本因扇区计数偏移读错，
         把这份正常文件误判成「已截断」；这条用例钉住该回归。
         """
-        h = _cfb_header(major=3, n_dir=0, n_fat=19, n_mini=1, n_difat=0,
-                        first_dir=1, extra_bytes=2408 * 512 - 512)
+        h = _cfb_header(major=3, n_dir=0, n_fat=19, n_mini=1, n_difat=0, first_dir=1, extra_bytes=2408 * 512 - 512)
         assert lo.validate_ole_compound_header(h) is None
 
-    @pytest.mark.parametrize("kwargs", [
-        {"first_dir": 0xFFFFFFFE}, {"first_dir": 0xFFFFFFFF},
-        {"first_dir": 99},
-    ], ids=["保留值ENDOFCHAIN", "保留值FATSECT", "目录索引越界"])
+    @pytest.mark.parametrize(
+        "kwargs",
+        [
+            {"first_dir": 0xFFFFFFFE},
+            {"first_dir": 0xFFFFFFFF},
+            {"first_dir": 99},
+        ],
+        ids=["保留值ENDOFCHAIN", "保留值FATSECT", "目录索引越界"],
+    )
     def test_reserved_or_out_of_range_sector_rejected(self, kwargs):
         assert lo.validate_ole_compound_header(_cfb_header(**kwargs)), kwargs
 
@@ -297,8 +319,7 @@ class TestOlePreflightWiring:
 
         monkeypatch.setattr(lo, "detect_office_backends", _probe)
         with pytest.raises(ParseError) as ei:
-            lo.convert_legacy_word_to_docx(
-                _cfb_header(first_dir=0xFFFFFFFE), "broken.doc")
+            lo.convert_legacy_word_to_docx(_cfb_header(first_dir=0xFFFFFFFE), "broken.doc")
         assert "已损坏" in str(ei.value)
         assert probed["n"] == 0, "预检早退后不应再探测/调用转换后端"
 
@@ -307,23 +328,23 @@ class TestOlePreflightWiring:
         monkeypatch.setattr(lo, "legacy_ole_preflight_enabled", lambda: False)
         monkeypatch.setattr(lo, "detect_office_backends", lambda ext="doc": [])
         with pytest.raises(ParseError) as ei:
-            lo.convert_legacy_word_to_docx(
-                _cfb_header(first_dir=0xFFFFFFFE), "b.doc")
+            lo.convert_legacy_word_to_docx(_cfb_header(first_dir=0xFFFFFFFE), "b.doc")
         assert str(ei.value) == lo.LEGACY_OFFICE_REQUIRED_MESSAGE
 
     def test_preflight_reason_fail_open_on_own_exception(self, monkeypatch):
         """预检自身异常必须 fail-open，不得阻断原本可解析的老版 Word。"""
         monkeypatch.setattr(
-            lo, "validate_ole_compound_header",
-            lambda _c: (_ for _ in ()).throw(RuntimeError("模拟预检故障")))
+            lo, "validate_ole_compound_header", lambda _c: (_ for _ in ()).throw(RuntimeError("模拟预检故障"))
+        )
         assert lo.ole_preflight_reason(_cfb_header(first_dir=0xFFFFFFFE)) is None
 
     def test_switch_off_skips_validation_entirely(self, monkeypatch):
         monkeypatch.setattr(lo, "legacy_ole_preflight_enabled", lambda: False)
         monkeypatch.setattr(
-            lo, "validate_ole_compound_header",
-            lambda _c: (_ for _ in ()).throw(
-                AssertionError("开关关闭时不得执行判定")))
+            lo,
+            "validate_ole_compound_header",
+            lambda _c: (_ for _ in ()).throw(AssertionError("开关关闭时不得执行判定")),
+        )
         assert lo.ole_preflight_reason(_cfb_header(first_dir=0xFFFFFFFE)) is None
 
     def test_config_default_on_and_flag_readable(self):
@@ -334,8 +355,7 @@ class TestOlePreflightWiring:
         """预检调用必须位于 `detect_office_backends` 之前，否则仍白等后端。"""
         src = inspect.getsource(lo.convert_legacy_word_to_docx)
         assert "ole_preflight_reason(content)" in src
-        assert src.index("ole_preflight_reason(content)") < src.index(
-            "detect_office_backends("), "预检必须早于后端探测"
+        assert src.index("ole_preflight_reason(content)") < src.index("detect_office_backends("), "预检必须早于后端探测"
 
 
 # =========================================================================
@@ -351,35 +371,40 @@ class TestGlobalFactsQuotaFallback:
 
     def test_zero_falls_back_to_default(self, monkeypatch):
         from app.routers import global_facts as gf
+
         monkeypatch.setattr(gf.settings, "upload_max_bytes", 0)
         assert gf._positive_int_setting("upload_max_bytes", 30 * 1024 * 1024) == 30 * 1024 * 1024
 
     def test_negative_falls_back_to_default(self, monkeypatch):
         from app.routers import global_facts as gf
+
         monkeypatch.setattr(gf.settings, "upload_max_bytes", -5)
         assert gf._positive_int_setting("upload_max_bytes", 30 * 1024 * 1024) == 30 * 1024 * 1024
 
     def test_non_numeric_falls_back_to_default(self, monkeypatch):
         from app.routers import global_facts as gf
+
         monkeypatch.setattr(gf.settings, "upload_max_bytes", "abc")
         assert gf._positive_int_setting("upload_max_bytes", 30 * 1024 * 1024) == 30 * 1024 * 1024
 
     def test_none_falls_back_to_default(self, monkeypatch):
         from app.routers import global_facts as gf
+
         monkeypatch.setattr(gf.settings, "upload_max_bytes", None)
         assert gf._positive_int_setting("upload_max_bytes", 30 * 1024 * 1024) == 30 * 1024 * 1024
 
     def test_positive_value_passes_through(self, monkeypatch):
         from app.routers import global_facts as gf
+
         monkeypatch.setattr(gf.settings, "upload_max_bytes", 50 * 1024 * 1024)
         assert gf._positive_int_setting("upload_max_bytes", 30 * 1024 * 1024) == 50 * 1024 * 1024
 
     def test_missing_attr_falls_back_to_default(self):
         """settings 没有该字段时回落默认（防御：未来字段改名不致崩溃）。"""
         from app.routers import global_facts as gf
+
         # 用一个 settings 上不存在的字段名，getattr 的第三参兜底
         assert gf._positive_int_setting("upload_max_bytes_does_not_exist", 30 * 1024 * 1024) == 30 * 1024 * 1024
-
 
 
 # =========================================================================
@@ -394,16 +419,17 @@ class TestOlePreflightHeaderOnly:
     流式读取，本护栏会立即红，迫使新增能力另立函数、不污染本预检。
     """
 
-    _FORBIDDEN = ("olefile", "ZipFile", "compound_file", "CompoundFile",
-                  ".read(", "open(", "io.BytesIO")
+    _FORBIDDEN = ("olefile", "ZipFile", "compound_file", "CompoundFile", ".read(", "open(", "io.BytesIO")
 
     def test_validate_function_body_is_header_only(self):
         import inspect
+
         src = inspect.getsource(lo.validate_ole_compound_header)
         for token in self._FORBIDDEN:
             assert token not in src, (
                 f"validate_ole_compound_header 不得引用 {token!r}（违反「只读头部、"
-                f"不解析内容流」红线 —— 内容级损坏判定应另立函数，不污染本预检）")
+                f"不解析内容流」红线 —— 内容级损坏判定应另立函数，不污染本预检）"
+            )
 
     def test_validate_function_only_uses_struct_unpack_from(self):
         """头部字段读取只能经 ``struct.unpack_from``（固定偏移读字节），不得有文件/流 I/O。
@@ -416,6 +442,7 @@ class TestOlePreflightHeaderOnly:
         """
         import ast
         import inspect
+
         tree = ast.parse(inspect.getsource(lo.validate_ole_compound_header))
         allowed = {"unpack_from", "len", "bytes", "isinstance", "range"}
         for n in ast.walk(tree):
@@ -430,7 +457,8 @@ class TestOlePreflightHeaderOnly:
                 continue
             assert name in allowed, (
                 f"validate_ole_compound_header 出现非头部读取调用 {name!r}"
-                f"（仅允许 struct.unpack_from + 纯内置；内容流解析应另立函数）")
+                f"（仅允许 struct.unpack_from + 纯内置；内容流解析应另立函数）"
+            )
 
 
 # =========================================================================
@@ -462,7 +490,8 @@ class TestZipContainerNoPreflightNeeded:
             assert ext not in self._ZIP_EXTS, (
                 f"扩展名 {ext!r} 是 ZIP 容器却进了 LEGACY_WORD_EXTENSIONS —— "
                 f"ZIP 容器走 zipfile 快路径，不该经 LibreOffice（会引入「损坏 ZIP "
-                f"白等 120s」症状，违背 G4 递延项 ① 的架构依据）")
+                f"白等 120s」症状，违背 G4 递延项 ① 的架构依据）"
+            )
 
     def test_docx_parser_catches_bad_zipfile(self):
         """损坏 ZIP 作为 .docx → ``ParseError``（毫秒级快失败，不白等、不逃逸成 500）。
@@ -473,9 +502,10 @@ class TestZipContainerNoPreflightNeeded:
         截断）验证全部快失败 —— 证明「损坏 ZIP 白等 120s」的症状**结构上不存在**。
         """
         from app.services import file_parser as fp
+
         samples = [
-            b"PK\x03\x04" + b"\x00" * 40,        # 坏本地文件头
-            b"PK" + b"\x00" * 40,                 # 根本不是 ZIP
+            b"PK\x03\x04" + b"\x00" * 40,  # 坏本地文件头
+            b"PK" + b"\x00" * 40,  # 根本不是 ZIP
             b"PK\x03\x04\x14\x00" + b"\x00" * 30,  # 截断
         ]
         for data in samples:
@@ -504,17 +534,27 @@ class TestHeaderCheckIsFormatAgnostic:
     .xls」往头预检里加流名读取（那会破坏格式无关性，且违背「只判必要条件」红线）。
     """
 
-    _STREAM_NAMES = ("Workbook", "WordDocument", "Book", "0Table", "1Table",
-                     "Data", "SummaryInformation", "DocumentSummaryInformation")
+    _STREAM_NAMES = (
+        "Workbook",
+        "WordDocument",
+        "Book",
+        "0Table",
+        "1Table",
+        "Data",
+        "SummaryInformation",
+        "DocumentSummaryInformation",
+    )
 
     def test_validate_does_not_read_stream_names(self):
         """头预检源码不得引用任何 CFB 流名（格式无关性的硬锁）。"""
         import inspect
+
         src = inspect.getsource(lo.validate_ole_compound_header)
         for name in self._STREAM_NAMES:
             assert name not in src, (
                 f"validate_ole_compound_header 引用了流名 {name!r} —— 头预检必须是"
-                f"格式无关的（不读流名），区分 .doc/.xls 是内容语义层职责，不在 G4")
+                f"格式无关的（不读流名），区分 .doc/.xls 是内容语义层职责，不在 G4"
+            )
 
     def test_v3_excel_shape_structurally_covers_v3_doc(self):
         """v3 Excel 形态护栏（test_v3_excel_shape_accepted）用的字段布局对 v3 .doc 同样成立。
@@ -522,9 +562,7 @@ class TestHeaderCheckIsFormatAgnostic:
         此例用同一布局但**显式标注**「这是 v3 CFB 容器形态，.doc 与 .xls 在头级
         无差异」—— 让「为何不需要单独的 v3 .doc 形态测试」可审计。
         """
-        h = _cfb_header(major=3, n_dir=0, n_fat=19, n_mini=1, n_difat=0,
-                        first_dir=1, extra_bytes=2408 * 512 - 512)
+        h = _cfb_header(major=3, n_dir=0, n_fat=19, n_mini=1, n_difat=0, first_dir=1, extra_bytes=2408 * 512 - 512)
         # 同一份头布局对 .doc（WordDocument 流）与 .xls（Workbook 流）都合法 ——
         # 头预检不看流名，故 test_v3_excel_shape_accepted 已覆盖 v3 .doc 头形态。
         assert lo.validate_ole_compound_header(h) is None
-

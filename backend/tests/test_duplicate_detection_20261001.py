@@ -15,6 +15,7 @@
 
 测试策略：纯函数断言 + 端到端 run_preflight，零 AI、零 DB。
 """
+
 from __future__ import annotations
 
 import ast
@@ -42,8 +43,7 @@ def _fn(path: str, name: str) -> str:
     """取模块顶层**函数**的源码片段（静态护栏用，避免行号漂移）。"""
     src = _src(path)
     for node in ast.parse(src).body:
-        if isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef)) \
-                and node.name == name:
+        if isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef)) and node.name == name:
             return ast.get_source_segment(src, node) or ""
     raise AssertionError(f"未找到函数 {name} in {path}")
 
@@ -57,8 +57,7 @@ def _body(path: str, name: str) -> str:
     """
     src = _src(path)
     for node in ast.parse(src).body:
-        if isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef)) \
-                and node.name == name:
+        if isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef)) and node.name == name:
             doc = ast.get_docstring(node, clean=False)
             text = ast.get_source_segment(src, node) or ""
             if doc:
@@ -72,9 +71,11 @@ def _assigned(path: str, target: str) -> str:
     src = _src(path)
     for node in ast.parse(src).body:
         if isinstance(node, (ast.Assign, ast.AnnAssign)):
-            names = ([t.id for t in node.targets if isinstance(t, ast.Name)]
-                     if isinstance(node, ast.Assign)
-                     else [node.target.id if isinstance(node.target, ast.Name) else ""])
+            names = (
+                [t.id for t in node.targets if isinstance(t, ast.Name)]
+                if isinstance(node, ast.Assign)
+                else [node.target.id if isinstance(node.target, ast.Name) else ""]
+            )
             if target in names:
                 return ast.get_source_segment(src, node) or ""
     raise AssertionError(f"未找到顶层赋值 {target} in {path}")
@@ -100,15 +101,23 @@ def _sections(*items):
     """把 ``(id, title, content)`` 快速展开成 PreflightContext 可吃的章节列表。"""
     out = []
     for i, (sid, title, content) in enumerate(items):
-        out.append({"id": sid, "title": title, "content": content,
-                    "word_count": len(content), "parent_id": "",
-                    "sort_order": i})
+        out.append(
+            {
+                "id": sid,
+                "title": title,
+                "content": content,
+                "word_count": len(content),
+                "parent_id": "",
+                "sort_order": i,
+            }
+        )
     return out
 
 
 # ---------------------------------------------------------------------------
 # 1. 归一化与骨架键
 # ---------------------------------------------------------------------------
+
 
 def test_normalize_nfkc_folds_fullwidth():
     assert dd.normalize_comparable("３ｍ") == "3m"
@@ -173,6 +182,7 @@ def test_skeleton_unit_normalization_is_deliberately_out_of_scope():
 # 2. 相似度度量
 # ---------------------------------------------------------------------------
 
+
 def test_dice_formula_and_empty():
     a, b = frozenset("abcd"), frozenset("abef")
     # 交集 2 → 2*2/(4+4) = 0.5
@@ -189,7 +199,7 @@ def test_containment_formula():
 
 
 def test_bigrams_short_text_returns_empty():
-    assert dd.char_bigrams("a") == frozenset()       # 不足 n
+    assert dd.char_bigrams("a") == frozenset()  # 不足 n
     assert dd.char_bigrams("") == frozenset()
     assert dd.char_bigrams("ab") == frozenset({"ab"})  # 恰好 n → 1 个 gram
     assert len(dd.char_bigrams("abcd")) == 3
@@ -205,6 +215,7 @@ def test_tiers_long_vs_short():
 # ---------------------------------------------------------------------------
 # 3. 两级判定
 # ---------------------------------------------------------------------------
+
 
 def test_exact_skeleton_match_across_number_changes():
     m = dd.sentences_near_match(
@@ -229,10 +240,13 @@ def test_near_match_requires_both_thresholds():
 
 
 def test_near_match_rejects_unrelated_content():
-    assert dd.sentences_near_match(
-        "基坑开挖深度为3m，边坡坡度1:0.75放坡，坡顶留1m宽压顶土",
-        "脚手架立杆间距1.5m，步距1.8m，连墙件按两步三跨设置",
-    ) is None
+    assert (
+        dd.sentences_near_match(
+            "基坑开挖深度为3m，边坡坡度1:0.75放坡，坡顶留1m宽压顶土",
+            "脚手架立杆间距1.5m，步距1.8m，连墙件按两步三跨设置",
+        )
+        is None
+    )
 
 
 def test_near_match_rejects_short_sentences():
@@ -248,10 +262,8 @@ def test_near_match_accepts_skeleton_tier():
     注意：仅改数字 / 标准号会命中 **exact**（骨架键相同），
     要触发 skeleton 必须让**中文用词**发生小幅变化。
     """
-    base = ("基坑开挖深度为3m，边坡坡度1:0.75放坡，坡顶留1m宽压顶土，"
-            "采用GB 50202-2018执行施工")
-    variant = ("基坑开挖深度为3m，边坡坡度1:0.75放坡，坡顶留1m宽压顶土，"
-               "按GB 50203-2002执行施工")
+    base = "基坑开挖深度为3m，边坡坡度1:0.75放坡，坡顶留1m宽压顶土，" "采用GB 50202-2018执行施工"
+    variant = "基坑开挖深度为3m，边坡坡度1:0.75放坡，坡顶留1m宽压顶土，" "按GB 50203-2002执行施工"
     m = dd.sentences_near_match(base, variant)
     assert m is not None
     assert m["reason"] == "skeleton"
@@ -262,8 +274,7 @@ def test_near_match_accepts_skeleton_tier():
 
 def test_sentence_similarity_returns_metrics():
     m = dd.sentence_similarity("基坑开挖深度为3m", "基坑开挖深度为5m")
-    for key in ("skeleton_a", "skeleton_b", "dice", "containment",
-                "length_ratio", "tier_cont", "tier_dice"):
+    for key in ("skeleton_a", "skeleton_b", "dice", "containment", "length_ratio", "tier_cont", "tier_dice"):
         assert key in m
     assert m["length_ratio"] == pytest.approx(1.0)
     assert 0.0 <= m["dice"] <= 1.0
@@ -317,6 +328,7 @@ def test_split_min_chars_is_configurable():
 # 5. 跨章节搬运检测
 # ---------------------------------------------------------------------------
 
+
 def test_copies_exact_across_sections():
     dup = "基坑开挖深度为3m，边坡坡度1:0.75放坡，采用GB 50202-2018执行。"
     secs = _sections(
@@ -353,8 +365,7 @@ def test_copies_no_double_report_between_two_levels():
         ("a", "施工工艺", dup + "本章节描述其它独有的施工工艺流程。"),
         ("b", "安全保证", dup + "本章节描述安全组织与职责分工的不同内容。"),
     )
-    pairs = [tuple(g["section_pairs"][0][:2]) for g in
-             dd.find_cross_section_copies(secs)["groups"]]
+    pairs = [tuple(g["section_pairs"][0][:2]) for g in dd.find_cross_section_copies(secs)["groups"]]
     assert len(pairs) == len(set(pairs)), "同一章节对被两个级别重复报告"
 
 
@@ -386,10 +397,10 @@ def test_copies_tolerates_dirty_input():
         ("a", "施工工艺", _S1 + "补充说明A。"),
         ("b", "", _S1 + "补充说明B。"),
     )
-    secs.append({"title": "无 id 章节", "content": _S1})      # 缺 id → 跳过
-    secs.append({"id": "c", "title": "空正文"})               # 空正文 → 跳过
-    secs.append("not-a-dict")                                  # 非 dict → 跳过
-    secs.append({"id": "d", "title": "无正文键"})              # 缺 content → 跳过
+    secs.append({"title": "无 id 章节", "content": _S1})  # 缺 id → 跳过
+    secs.append({"id": "c", "title": "空正文"})  # 空正文 → 跳过
+    secs.append("not-a-dict")  # 非 dict → 跳过
+    secs.append({"id": "d", "title": "无正文键"})  # 缺 content → 跳过
     res = dd.find_cross_section_copies(secs)
     assert res["groups"]
 
@@ -397,14 +408,14 @@ def test_copies_tolerates_dirty_input():
 def test_copies_exclude_pairs_tolerates_garbage():
     """exclude_pairs 收到脏数据（None / 长度不对 / 空串）时不得抛异常。"""
     secs = _sections(("a", "施工工艺", _S1))
-    res = dd.find_cross_section_copies(
-        secs, exclude_pairs=[None, (), ("a",), ("", "b"), ("a", "b")])
+    res = dd.find_cross_section_copies(secs, exclude_pairs=[None, (), ("a",), ("", "b"), ("a", "b")])
     assert "groups" in res
 
 
 # ---------------------------------------------------------------------------
 # 6. 标题近似雷同
 # ---------------------------------------------------------------------------
+
 
 def test_title_similarity_known_values():
     assert dd.title_similarity("基坑降水与支护施工", "基坑降水及支护施工") > 0.70
@@ -443,7 +454,7 @@ def test_find_similar_titles_skips_identical_titles():
 
 def test_find_similar_titles_skips_too_short_and_sorts_desc():
     nodes = [
-        {"path": "1", "title": "AB"},                    # 归一化 < 3 → 跳过
+        {"path": "1", "title": "AB"},  # 归一化 < 3 → 跳过
         {"path": "2", "title": "基坑降水与支护施工"},
         {"path": "3", "title": "基坑降水及支护施工"},
         {"path": "4", "title": "质量验收标准"},
@@ -464,6 +475,7 @@ def test_find_similar_titles_tolerates_garbage():
 # 7. CON-06 接线（规则注册 + 预检引擎）
 # ---------------------------------------------------------------------------
 
+
 def test_con06_registered_with_basis_and_program_mode():
     rule = get_rule("CON-06")
     assert rule is not None, "CON-06 必须登记进规则唯一事实源"
@@ -476,13 +488,14 @@ def test_con06_registered_with_basis_and_program_mode():
 def test_con06_registered_in_program_emitted_ids():
     """新增规则必须同步 _PROGRAM_EMITTED_RULE_IDS，否则注册表自检无法覆盖。"""
     assert "CON-06" in _PROGRAM_EMITTED_RULE_IDS
-    assert validate_rule_registry(
-        emitted_rule_ids=_PROGRAM_EMITTED_RULE_IDS) == []
+    assert validate_rule_registry(emitted_rule_ids=_PROGRAM_EMITTED_RULE_IDS) == []
 
 
 def test_rule_version_bumped_for_con06():
-    assert tuple(int(x) for x in RULE_VERSION.split(".")[:2]) >= (1, 7), (
-        f"新增 CON-06 后必须 bump RULE_VERSION，当前 {RULE_VERSION}")
+    assert tuple(int(x) for x in RULE_VERSION.split(".")[:2]) >= (
+        1,
+        7,
+    ), f"新增 CON-06 后必须 bump RULE_VERSION，当前 {RULE_VERSION}"
 
 
 def test_con06_emitted_by_run_preflight():
@@ -520,10 +533,8 @@ def test_con06_large_copy_escalates_to_high():
             ("b", "安全保证", big + "本章节描述安全组织与职责分工的不同内容。"),
         ),
     )
-    con06 = [f for f in run_preflight(ctx)
-             if f["rule_id"].startswith("CON-06")]
-    assert con06 and con06[0]["severity"] == "high", (
-        "大段照抄必须升级为 high，否则评分无法体现评审硬伤")
+    con06 = [f for f in run_preflight(ctx) if f["rule_id"].startswith("CON-06")]
+    assert con06 and con06[0]["severity"] == "high", "大段照抄必须升级为 high，否则评分无法体现评审硬伤"
 
 
 def test_con05_and_con06_do_not_double_report():
@@ -538,17 +549,14 @@ def test_con05_and_con06_do_not_double_report():
     ctx = PreflightContext(
         sections=_sections(("a", "施工工艺", body), ("b", "安全保证", body)),
     )
-    dup_pairs = [frozenset((d["a_id"], d["b_id"]))
-                 for d in _find_duplicates(ctx.sections)]
+    dup_pairs = [frozenset((d["a_id"], d["b_id"])) for d in _find_duplicates(ctx.sections)]
     assert dup_pairs, "构造应触发 CON-05 的整章雷同判定"
-    con06_titles = {f["section_title"] for f in run_preflight(ctx)
-                    if f["rule_id"].startswith("CON-06")}
+    con06_titles = {f["section_title"] for f in run_preflight(ctx) if f["rule_id"].startswith("CON-06")}
     for d in _find_duplicates(ctx.sections):
         assert frozenset((d["a_id"], d["b_id"])) in dup_pairs
-        assert d["a_title"] not in con06_titles and \
-            d["b_title"] not in con06_titles, (
-                f"整章雷同章节对 {d['a_title']} / {d['b_title']} "
-                f"被 CON-05 与 CON-06 双报")
+        assert d["a_title"] not in con06_titles and d["b_title"] not in con06_titles, (
+            f"整章雷同章节对 {d['a_title']} / {d['b_title']} " f"被 CON-05 与 CON-06 双报"
+        )
     # 整章雷同应只走 CON-05，CON-06 必须为零
     assert not con06_titles
 
@@ -567,14 +575,14 @@ def test_no_duplication_finding_without_copy():
             ("c", "验收要求", "分项工程验收按现行规范逐条执行并留存书面记录。"),
         ),
     )
-    con06 = [f for f in run_preflight(ctx)
-             if f["rule_id"].startswith("CON-06")]
+    con06 = [f for f in run_preflight(ctx) if f["rule_id"].startswith("CON-06")]
     assert con06 == [], f"无搬运内容却报出 CON-06：{[f['detail'] for f in con06]}"
 
 
 # ---------------------------------------------------------------------------
 # 8. 目录侧接线（加法式附加键）
 # ---------------------------------------------------------------------------
+
 
 def test_outline_continuity_has_similar_titles_key():
     outline = [
@@ -586,8 +594,7 @@ def test_outline_continuity_has_similar_titles_key():
     assert "similar_titles" in rep
     assert len(rep["similar_titles"]) == 1
     r = rep["similar_titles"][0]
-    assert {r["a_title"], r["b_title"]} == {
-        "基坑降水与支护施工", "基坑降水及支护施工"}
+    assert {r["a_title"], r["b_title"]} == {"基坑降水与支护施工", "基坑降水及支护施工"}
     assert r["a_path"] == "1" and r["b_path"] == "2"
 
 
@@ -630,12 +637,13 @@ def test_outline_continuity_still_reports_exact_duplicates():
     rep = check_outline_continuity(outline)
     assert rep["issue_counts"]["duplicate_titles"] == 1
     assert rep["ok"] is False
-    assert rep["similar_titles"] == []   # 完全同名不进 similar_titles
+    assert rep["similar_titles"] == []  # 完全同名不进 similar_titles
 
 
 # ---------------------------------------------------------------------------
 # 9. 静态护栏（防止修复点被整段删掉 / 被后人改回分叉写法）
 # ---------------------------------------------------------------------------
+
 
 def test_split_never_treats_ascii_colon_as_terminator():
     """⚠️ 本轮实测复现的缺陷：``:`` 在施工文本里是**比值**（坡度 1:0.75）。
@@ -644,14 +652,18 @@ def test_split_never_treats_ascii_colon_as_terminator():
     护栏用 AST 取正则字面量（纯文本匹配会被注释里的「:」假命中）。
     """
     tree = ast.parse(_src(DD_PATH))
-    consts = [n.value for n in ast.walk(tree)
-              if isinstance(n, ast.Constant) and isinstance(n.value, str)
-              and "?" in n.value and "：" not in n.value
-              and any(ch in n.value for ch in "。！？；")]
+    consts = [
+        n.value
+        for n in ast.walk(tree)
+        if isinstance(n, ast.Constant)
+        and isinstance(n.value, str)
+        and "?" in n.value
+        and "：" not in n.value
+        and any(ch in n.value for ch in "。！？；")
+    ]
     assert consts, "未找到句子切分正则字面量"
     for value in consts:
-        assert ":" not in value, (
-            f"句子切分正则重新包含 ASCII 冒号：{value!r}（坡度 1:0.75 会被切开）")
+        assert ":" not in value, f"句子切分正则重新包含 ASCII 冒号：{value!r}（坡度 1:0.75 会被切开）"
 
 
 def test_skeleton_applies_field_rules_before_stripping_punctuation():
@@ -663,16 +675,14 @@ def test_skeleton_applies_field_rules_before_stripping_punctuation():
     i_keep = fn.find("_keep_only")
     assert i_rules > 0 and i_keep > 0, "骨架键实现结构变化，需同步更新护栏"
     # 字段规则必须夹在 NFKC 折叠之后、标点清理之前
-    assert i_norm < i_rules < i_keep, (
-        "处理顺序必须是「NFKC 折叠 → 套字段规则 → 剔除标点」")
+    assert i_norm < i_rules < i_keep, "处理顺序必须是「NFKC 折叠 → 套字段规则 → 剔除标点」"
 
 
 def test_skeleton_placeholder_braces_are_whitelisted_not_global():
     """占位符花括号只对骨架键放行，不得把 ``normalize_comparable`` 也改成保留
     （那会让「3m。」与「3m」不再等价，破坏相似度稳定性）。"""
     fn = _fn(DD_PATH, "normalize_comparable")
-    assert "_SKELETON_KEEP_EXTRA" not in fn, (
-        "normalize_comparable 不得引入占位符白名单")
+    assert "_SKELETON_KEEP_EXTRA" not in fn, "normalize_comparable 不得引入占位符白名单"
     fn = _fn(DD_PATH, "build_skeleton_key")
     assert "extra=_SKELETON_KEEP_EXTRA" in fn
 
@@ -681,13 +691,10 @@ def test_cleanup_has_single_implementation():
     """``_keep_only`` 是唯一清理实现：两处不得各写一遍字符过滤。"""
     src = _src(DD_PATH)
     tree = ast.parse(src)
-    funcs = {n.name for n in ast.walk(tree)
-             if isinstance(n, (ast.FunctionDef, ast.AsyncFunctionDef))}
+    funcs = {n.name for n in ast.walk(tree) if isinstance(n, (ast.FunctionDef, ast.AsyncFunctionDef))}
     assert "_keep_only" in funcs
     # 除 _keep_only 外不得再有 unicodedata.category 过滤
-    hits = [n.lineno for n in ast.walk(tree)
-            if isinstance(n, ast.Attribute)
-            and n.attr == "category"]
+    hits = [n.lineno for n in ast.walk(tree) if isinstance(n, ast.Attribute) and n.attr == "category"]
     # 允许 2 处：_keep_only 的实现 + (若有) 注释性引用
     assert len(hits) <= 2, f"出现多处 unicodedata.category 过滤（判据分叉）：{hits}"
 
@@ -695,8 +702,7 @@ def test_cleanup_has_single_implementation():
 def test_check_duplication_excludes_con05_pairs():
     """CON-06 的排除集合必须直接取自 CON-05 的判定，不得重写相似度口径。"""
     fn = _body(PE_PATH, "check_duplication")
-    assert "_find_duplicates(ctx.sections)" in fn, (
-        "CON-06 未复用 CON-05 的整章判定 → 两处相似度口径可能分叉")
+    assert "_find_duplicates(ctx.sections)" in fn, "CON-06 未复用 CON-05 的整章判定 → 两处相似度口径可能分叉"
     assert "exclude_pairs" in fn
     # 不得内联任何 Jaccard / 阈值常量（口径必须留在 CON-05 一侧）
     for forbidden in ("_jaccard", "_shingles", "DUP_SIMILARITY_THRESHOLD"):
@@ -706,8 +712,7 @@ def test_check_duplication_excludes_con05_pairs():
 def test_check_duplication_registered_in_runner():
     """⚠️ 漏进 ``run_preflight`` 的 checker 列表 = 规则注册了但永不执行。"""
     fn = _body(PE_PATH, "run_preflight")
-    assert "check_duplication" in fn, (
-        "check_duplication 未接入 run_preflight 的 checker 列表")
+    assert "check_duplication" in fn, "check_duplication 未接入 run_preflight 的 checker 列表"
 
 
 def test_check_duplication_fail_soft():
@@ -715,19 +720,18 @@ def test_check_duplication_fail_soft():
     fn = _body(PE_PATH, "check_duplication")
     assert "except Exception" in fn
     i = fn.find("except Exception")
-    assert "exc_info=True" in fn[i:i + 200], "查重异常必须留堆栈，否则无法定位"
+    assert "exc_info=True" in fn[i : i + 200], "查重异常必须留堆栈，否则无法定位"
 
 
 def test_con06_not_counted_in_ok_or_issue_counts():
     """⚠️ 加法式红线：similar_titles 不得混入 ``issues`` 字典。"""
     fn = _body(OQ_PATH, "check_outline_continuity")
-    decl = fn[fn.find("issues: dict[str, list]"):fn.find("seen: dict")]
+    decl = fn[fn.find("issues: dict[str, list]") : fn.find("seen: dict")]
     assert decl.strip(), "未找到 issues 字典声明"
-    assert "similar_titles" not in decl, (
-        "similar_titles 混入 issues → ok 语义被改变、目录被误判不合格")
+    assert "similar_titles" not in decl, "similar_titles 混入 issues → ok 语义被改变、目录被误判不合格"
     assert '"similar_titles": similar_titles,' in fn
     # 确认它确实是顶层返回键（而不是 issues 内部键）
-    ret = fn[fn.find("return {"):]
+    ret = fn[fn.find("return {") :]
     assert '"similar_titles"' in ret
 
 
@@ -742,10 +746,30 @@ def test_audit_rules_con06_registered_in_consistency_group():
 def test_inverted_index_candidate_generation():
     """倒排索引：候选必须共享足够 bigram，且遍历顺序确定（结论可复现）。"""
     flat = [
-        ("a", "A", "\u7532\u4e59\u4e19\u4e01\u620a\u5df1\u5e9a\u8f9b", dd.char_bigrams("\u7532\u4e59\u4e19\u4e01\u620a\u5df1\u5e9a\u8f9b")),
-        ("b", "B", "\u7532\u4e59\u4e19\u4e01\u620a\u5df1\u5e9a\u8f9b", dd.char_bigrams("\u7532\u4e59\u4e19\u4e01\u620a\u5df1\u5e9a\u8f9b")),
-        ("c", "C", "\u5b50\u4e11\u5bc5\u536f\u8fb0\u5df3\u5348\u672a", dd.char_bigrams("\u5b50\u4e11\u5bc5\u536f\u8fb0\u5df3\u5348\u672a")),
-        ("a", "A", "\u7532\u4e59\u4e19\u4e01\u620a\u5df1\u5e9a\u8f9b\u58ec", dd.char_bigrams("\u7532\u4e59\u4e19\u4e01\u620a\u5df1\u5e9a\u8f9b\u58ec")),
+        (
+            "a",
+            "A",
+            "\u7532\u4e59\u4e19\u4e01\u620a\u5df1\u5e9a\u8f9b",
+            dd.char_bigrams("\u7532\u4e59\u4e19\u4e01\u620a\u5df1\u5e9a\u8f9b"),
+        ),
+        (
+            "b",
+            "B",
+            "\u7532\u4e59\u4e19\u4e01\u620a\u5df1\u5e9a\u8f9b",
+            dd.char_bigrams("\u7532\u4e59\u4e19\u4e01\u620a\u5df1\u5e9a\u8f9b"),
+        ),
+        (
+            "c",
+            "C",
+            "\u5b50\u4e11\u5bc5\u536f\u8fb0\u5df3\u5348\u672a",
+            dd.char_bigrams("\u5b50\u4e11\u5bc5\u536f\u8fb0\u5df3\u5348\u672a"),
+        ),
+        (
+            "a",
+            "A",
+            "\u7532\u4e59\u4e19\u4e01\u620a\u5df1\u5e9a\u8f9b\u58ec",
+            dd.char_bigrams("\u7532\u4e59\u4e19\u4e01\u620a\u5df1\u5e9a\u8f9b\u58ec"),
+        ),
     ]
     inv = dd._build_bigram_inverted_index(flat)
     assert inv, "倒排索引为空"
@@ -762,12 +786,12 @@ def test_high_df_gram_is_pruned():
     上万条，全量展开会让 4.8 万句的方案跑不完（实测 >30s 未完成）。
     """
     common = "\u5de5\u7a0b\u8981\u6c42"
-    flat = [("s%d" % i, "t%d" % i,
-             common + "\u7ec6\u8282%04d" % i,
-             dd.char_bigrams(common + "\u7ec6\u8282%04d" % i))
-            for i in range(50)]
+    flat = [
+        ("s%d" % i, "t%d" % i, common + "\u7ec6\u8282%04d" % i, dd.char_bigrams(common + "\u7ec6\u8282%04d" % i))
+        for i in range(50)
+    ]
     inv = dd._build_bigram_inverted_index(flat)
-    inv[common[:2]] = list(range(50))          # 人为制造高频 gram
+    inv[common[:2]] = list(range(50))  # 人为制造高频 gram
     cands = dd._candidate_indices(flat[0][3], inv, 0, flat)
     assert 1 in cands, "真实候选（靠低频大数字段）被误剪"
     assert len(cands) < 50, f"高频 gram 未被剪枝：{len(cands)} 候选"
@@ -779,11 +803,11 @@ def test_pairwise_pruning_is_lossless():
     构造：两章共享一段**低频** bigram 充足的文本（真实照抄必然如此），
     同时全库塞满高频模板句制造噪声。剪枝后仍必须检出。
     """
-    noise = "\u3002".join(
-        "\u5de5\u7a0b\u8981\u6c42\u8fdb\u884c\u9a8c\u6536\u7ec8\u6e05%04d" % i
-        for i in range(400))
-    dup = ("\u57fa\u5751\u5143\u5751\u9762\u6e05\u9664\u4e0e\u79e9\u5ea6\u9a8c\u6536"
-           "\u8981\u6c42\u5e94\u5728\u5f00\u63a7\u5751\u524d\u5b8c\u6210")
+    noise = "\u3002".join("\u5de5\u7a0b\u8981\u6c42\u8fdb\u884c\u9a8c\u6536\u7ec8\u6e05%04d" % i for i in range(400))
+    dup = (
+        "\u57fa\u5751\u5143\u5751\u9762\u6e05\u9664\u4e0e\u79e9\u5ea6\u9a8c\u6536"
+        "\u8981\u6c42\u5e94\u5728\u5f00\u63a7\u5751\u524d\u5b8c\u6210"
+    )
     secs = _sections(
         ("a", "\u65bd\u5de5\u5de5\u827a", dup + "\u3002\u672c\u7ae0\u4e13\u6709\u5185\u5bb9\u3002" + noise),
         ("b", "\u5b89\u5168\u4fdd\u8bc1", dup + "\u3002\u53e6\u7ae0\u4e13\u6709\u5185\u5bb9\u3002" + noise),
@@ -800,5 +824,4 @@ def test_all_changed_modules_parse():
 def test_no_replacement_character_in_changed_files():
     """防编码损坏（AGENTS.md §5.9：编辑工具曾把中文写成 U+FFFD）。"""
     for path in (DD_PATH, PE_PATH, OQ_PATH, AR_PATH):
-        assert b"\xef\xbf\xbd" not in open(path, "rb").read(), \
-            f"{path} 出现 U+FFFD 替换字符，中文已损坏"
+        assert b"\xef\xbf\xbd" not in open(path, "rb").read(), f"{path} 出现 U+FFFD 替换字符，中文已损坏"

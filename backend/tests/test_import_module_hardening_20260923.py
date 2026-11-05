@@ -22,6 +22,7 @@
    单项提取的 JSON 修复也被记到 `bid_analysis_merge`，/ai/stats 按场景聚合时
    单项提取量被错记到分段合并（违反 AGENTS.md §4.5 的 scene 语义）。
 """
+
 import uuid
 
 import app.routers.bid_analysis as ba
@@ -36,10 +37,7 @@ from fastapi import HTTPException
 
 # 多标段文本：显式声明总数 + 两个标段定义，规则检测必命中
 MULTI_SECTION_TEXT = (
-    "本项目划分为三个标段。\n"
-    "一标段：土建工程施工\n"
-    "二标段：安装工程施工\n"
-    "三标段：装饰装修工程\n"
+    "本项目划分为三个标段。\n" "一标段：土建工程施工\n" "二标段：安装工程施工\n" "三标段：装饰装修工程\n"
 )
 
 
@@ -51,12 +49,11 @@ def _label(item_id: str) -> str:
 # 公共夹具
 # ---------------------------------------------------------------------------
 
+
 async def _seed_scheme(db) -> tuple[str, str]:
     pid, sid = uuid.uuid4().hex, uuid.uuid4().hex
     await db.execute("INSERT INTO projects(id,name) VALUES(?,?)", (pid, "p"))
-    await db.execute(
-        "INSERT INTO schemes(id,project_id,name) VALUES(?,?,?)",
-        (sid, pid, "s"))
+    await db.execute("INSERT INTO schemes(id,project_id,name) VALUES(?,?,?)", (sid, pid, "s"))
     await db.commit()
     return pid, sid
 
@@ -67,7 +64,8 @@ async def _seed_parsed_doc(db, pid: str, text: str = MULTI_SECTION_TEXT) -> str:
         "INSERT INTO project_documents"
         " (id, project_id, file_name, file_type, parsed_markdown, doc_category,"
         "  parse_status) VALUES (?,?,?,?,?,?,?)",
-        (doc_id, pid, "招标文件.txt", "txt", text, "招标文件", "success"))
+        (doc_id, pid, "招标文件.txt", "txt", text, "招标文件", "success"),
+    )
     await db.commit()
     return doc_id
 
@@ -79,17 +77,27 @@ async def _seed_selected_section(db, pid: str, sid: str) -> None:
         " (id, project_id, scheme_id, is_multi, total_declared, detected_sections,"
         "  selected_section_id, selected_section_title, selected_section_json,"
         "  status, error) VALUES (?,?,?,?,?,?,?,?,?,?,?)",
-        (f"{pid}_default", pid, sid, 1, 3,
-         '["标段:1","标段:2","标段:3"]',
-         "section-2", "二标段",
-         '{"id": "section-2", "title": "二标段", "headLine": "二标段：安装工程"}',
-         "success", ""))
+        (
+            f"{pid}_default",
+            pid,
+            sid,
+            1,
+            3,
+            '["标段:1","标段:2","标段:3"]',
+            "section-2",
+            "二标段",
+            '{"id": "section-2", "title": "二标段", "headLine": "二标段：安装工程"}',
+            "success",
+            "",
+        ),
+    )
     await db.commit()
 
 
 # ---------------------------------------------------------------------------
 # 1. /check-sections 不得清空已选投标范围
 # ---------------------------------------------------------------------------
+
 
 @pytest.mark.asyncio
 async def test_check_sections_preserves_selected_section(db_conn):
@@ -110,7 +118,9 @@ async def test_check_sections_preserves_selected_section(db_conn):
     # 库里也必须保留（前端随后会读 GET /bid-sections）
     cur = await db_conn.execute(
         "SELECT selected_section_id, selected_section_title, selected_section_json,"
-        " status FROM bid_sections WHERE id=?", (f"{pid}_default",))
+        " status FROM bid_sections WHERE id=?",
+        (f"{pid}_default",),
+    )
     row = await cur.fetchone()
     assert row["selected_section_id"] == "section-2"
     assert row["selected_section_title"] == "二标段"
@@ -129,8 +139,9 @@ async def test_check_sections_reports_needs_selection_when_unselected(db_conn):
     pid, sid = await _seed_scheme(db_conn)
     await _seed_parsed_doc(db_conn, pid)
     await db_conn.execute(
-        "INSERT INTO bid_sections (id, project_id, scheme_id, is_multi)"
-        " VALUES (?,?,?,?)", (f"{pid}_default", pid, sid, 1))
+        "INSERT INTO bid_sections (id, project_id, scheme_id, is_multi)" " VALUES (?,?,?,?)",
+        (f"{pid}_default", pid, sid, 1),
+    )
     await db_conn.commit()
 
     result = await ba.check_bid_sections(scheme_id=sid, project_id="", db=db_conn)
@@ -143,8 +154,7 @@ async def test_check_sections_reports_needs_selection_when_unselected(db_conn):
 async def test_check_sections_single_section_never_requires_selection(db_conn):
     """单标段（未命中多标段特征）→ needs_selection 恒为 False。"""
     pid, sid = await _seed_scheme(db_conn)
-    await _seed_parsed_doc(db_conn, pid,
-                           text="# 施工组织设计\n本工程为单一标段施工。")
+    await _seed_parsed_doc(db_conn, pid, text="# 施工组织设计\n本工程为单一标段施工。")
 
     result = await ba.check_bid_sections(scheme_id=sid, project_id="", db=db_conn)
     assert result["has_multiple"] is False
@@ -154,6 +164,7 @@ async def test_check_sections_single_section_never_requires_selection(db_conn):
 # ---------------------------------------------------------------------------
 # 2. /select-section 契约：query 参数（前端写法）与 body 参数（旧写法）都可用
 # ---------------------------------------------------------------------------
+
 
 def test_select_section_declares_scope_as_query_params():
     """OpenAPI 契约层校验：scheme_id / project_id 必须是 query 参数。
@@ -165,16 +176,14 @@ def test_select_section_declares_scope_as_query_params():
     """
     schema = app.openapi()
     post = schema["paths"]["/api/v1/bid-analysis/select-section"]["post"]
-    query_names = {p["name"] for p in post.get("parameters", [])
-                   if p.get("in") == "query"}
+    query_names = {p["name"] for p in post.get("parameters", []) if p.get("in") == "query"}
     assert {"scheme_id", "project_id"} <= query_names, (
-        "select-section 必须把 scheme_id/project_id 声明为 query 参数，"
-        f"实际 query 参数为 {sorted(query_names)}")
+        "select-section 必须把 scheme_id/project_id 声明为 query 参数，" f"实际 query 参数为 {sorted(query_names)}"
+    )
 
     # 对照：同模块其它端点保持同口径（防再次漂移）
     cs = schema["paths"]["/api/v1/bid-analysis/check-sections"]["post"]
-    cs_query = {p["name"] for p in cs.get("parameters", [])
-                if p.get("in") == "query"}
+    cs_query = {p["name"] for p in cs.get("parameters", []) if p.get("in") == "query"}
     assert {"scheme_id", "project_id"} <= cs_query, "check-sections 口径应保持 query"
 
 
@@ -185,17 +194,19 @@ async def test_select_section_accepts_query_params(db_conn):
     await _seed_selected_section(db_conn, pid, sid)
 
     got = await ba.select_bid_section(
-        {"section_id": "section-3", "section_title": "三标段",
-         "head_line": "三标段：装饰装修工程"},
-        scheme_id=sid, project_id="", db=db_conn)
+        {"section_id": "section-3", "section_title": "三标段", "head_line": "三标段：装饰装修工程"},
+        scheme_id=sid,
+        project_id="",
+        db=db_conn,
+    )
 
     assert got["ok"] is True
     assert got["selected_section_id"] == "section-3"
     assert got["selected_section_title"] == "三标段"
 
     cur = await db_conn.execute(
-        "SELECT selected_section_id, detected_sections FROM bid_sections"
-        " WHERE id=?", (f"{pid}_default",))
+        "SELECT selected_section_id, detected_sections FROM bid_sections" " WHERE id=?", (f"{pid}_default",)
+    )
     row = await cur.fetchone()
     assert row["selected_section_id"] == "section-3"
     # 检测结果（detected_sections）不得因「选择」操作被清空
@@ -210,7 +221,10 @@ async def test_select_section_still_accepts_body_params(db_conn):
 
     got = await ba.select_bid_section(
         {"scheme_id": sid, "section_id": "section-1", "section_title": "一标段"},
-        scheme_id="", project_id="", db=db_conn)
+        scheme_id="",
+        project_id="",
+        db=db_conn,
+    )
 
     assert got["ok"] is True
     assert got["selected_section_id"] == "section-1"
@@ -220,14 +234,14 @@ async def test_select_section_still_accepts_body_params(db_conn):
 async def test_select_section_requires_scope_anywhere(db_conn):
     """query 与 body 都没有 scope → 必须 400（不能静默写入空项目）。"""
     with pytest.raises(HTTPException) as ei:
-        await ba.select_bid_section(
-            {"section_id": "section-1"}, scheme_id="", project_id="", db=db_conn)
+        await ba.select_bid_section({"section_id": "section-1"}, scheme_id="", project_id="", db=db_conn)
     assert ei.value.status_code == 400
 
 
 # ---------------------------------------------------------------------------
 # 3. _run_bid_analysis_sync 不得「假成功」
 # ---------------------------------------------------------------------------
+
 
 @pytest.mark.asyncio
 async def test_sync_first_item_db_failure_is_not_fake_success(db_conn, monkeypatch):
@@ -248,26 +262,22 @@ async def test_sync_first_item_db_failure_is_not_fake_success(db_conn, monkeypat
     real_update = ba._update_item_status
     calls = {"n": 0}
 
-    async def flaky_update_item_status(db, project_id, iid, status,
-                                       content="", error="", evidence=None):
+    async def flaky_update_item_status(db, project_id, iid, status, content="", error="", evidence=None):
         calls["n"] += 1
         if calls["n"] == 1:  # 第一次（success 落库）失败
             raise OSError("database is locked")
-        return await real_update(db, project_id, iid, status,
-                                 content, error, evidence)
+        return await real_update(db, project_id, iid, status, content, error, evidence)
 
     monkeypatch.setattr(ba, "_run_single_item", fake_run_single_item)
     monkeypatch.setattr(ba, "_update_item_status", flaky_update_item_status)
 
-    result = await ba._run_bid_analysis_sync(
-        db_conn, pid, sid, config, "本项目建筑面积 12000 平方米。")
+    result = await ba._run_bid_analysis_sync(db_conn, pid, sid, config, "本项目建筑面积 12000 平方米。")
 
     assert result["ok"] is False, "落库失败不得被报告为成功"
     assert _label(item_id) in result["missing_required"], "缺失清单必须包含预热项"
 
     # DB 里的真实状态是 error
-    cur = await db_conn.execute(
-        "SELECT status FROM bid_analysis_items WHERE id=?", (f"{pid}_{item_id}",))
+    cur = await db_conn.execute("SELECT status FROM bid_analysis_items WHERE id=?", (f"{pid}_{item_id}",))
     row = await cur.fetchone()
     assert row is not None and row["status"] == "error"
 
@@ -284,8 +294,7 @@ async def test_sync_first_item_ai_failure_is_not_fake_success(db_conn, monkeypat
 
     monkeypatch.setattr(ba, "_run_single_item", boom)
 
-    result = await ba._run_bid_analysis_sync(
-        db_conn, pid, sid, config, "本项目建筑面积 12000 平方米。")
+    result = await ba._run_bid_analysis_sync(db_conn, pid, sid, config, "本项目建筑面积 12000 平方米。")
 
     assert result["ok"] is False
     assert _label(item_id) in result["missing_required"]
@@ -309,8 +318,7 @@ async def test_sync_all_items_fail_reports_all_missing(db_conn, monkeypatch):
     # 隔离 DB 写入：本用例只关心返回契约，不把断言绑死在写库副作用上
     monkeypatch.setattr(ba, "_update_item_status", _noop)
 
-    result = await ba._run_bid_analysis_sync(
-        db_conn, pid, sid, config, "本项目建筑面积 12000 平方米。")
+    result = await ba._run_bid_analysis_sync(db_conn, pid, sid, config, "本项目建筑面积 12000 平方米。")
 
     assert result["ok"] is False
     for rid in REQUIRED_ITEM_IDS:
@@ -321,6 +329,7 @@ async def test_sync_all_items_fail_reports_all_missing(db_conn, monkeypatch):
 # ---------------------------------------------------------------------------
 # 4. _repair_json 的 scene 必须由调用方显式指定
 # ---------------------------------------------------------------------------
+
 
 @pytest.mark.asyncio
 async def test_repair_json_default_scene_is_merge(db_conn, monkeypatch):
@@ -347,8 +356,7 @@ async def test_repair_json_accepts_explicit_scene(db_conn, monkeypatch):
 
     monkeypatch.setattr(ba, "chat_with_fallback", fake_chat)
 
-    out = await ba._repair_json("{bad", [{"role": "user", "content": "x"}],
-                                scene="bid_analysis")
+    out = await ba._repair_json("{bad", [{"role": "user", "content": "x"}], scene="bid_analysis")
     assert out == '{"ok":true}'
     assert seen["scene"] == "bid_analysis"
 
@@ -369,11 +377,8 @@ async def test_single_call_repair_uses_bid_analysis_scene(db_conn, monkeypatch):
     monkeypatch.setattr(ba, "chat_with_fallback", fake_chat)
     monkeypatch.setattr(ba, "_repair_json", fake_repair)
 
-    await ba._run_single_call(
-        get_item_def("projectBasicInfo"), "本项目建筑面积 12000 平方米。",
-        output_type="json")
+    await ba._run_single_call(get_item_def("projectBasicInfo"), "本项目建筑面积 12000 平方米。", output_type="json")
 
     assert seen and seen[0] == "bid_analysis"
     assert "bid_analysis" in seen, "修复调用必须显式指定场景"
-    assert "bid_analysis_merge" not in seen, (
-        f"单项提取的修复被错记到合并场景：{seen}")
+    assert "bid_analysis_merge" not in seen, f"单项提取的修复被错记到合并场景：{seen}"

@@ -11,6 +11,7 @@
   POST /api/v1/documents/{doc_id}/cross-check     交叉校验（阶段5）
   GET  /api/v1/projects/{project_id}/documents/index 文档索引（项目全景）
 """
+
 from __future__ import annotations
 
 import asyncio
@@ -35,7 +36,9 @@ async def _load_doc(db, doc_id: str) -> dict:
         " parse_version, parsed_at, parse_duration_ms, parse_engine,"
         " extract_status, extract_time, quality_score, completeness_json,"
         " expires_at, status, created_at "
-        "FROM project_documents WHERE id=?", (doc_id,))
+        "FROM project_documents WHERE id=?",
+        (doc_id,),
+    )
     # ✅ P1 修复（2026-09-27 · R13 漏改点）：db.execute() 在全局单连接 + aiosqlite 下
     #    可能返回 None（连接/事务异常），直接 .fetchone() → AttributeError → 500。
     #    语义选择：返回 **503** 而非 404 —— 前端会据 404 把仍在库里的文档
@@ -50,14 +53,17 @@ async def _load_doc(db, doc_id: str) -> dict:
         raise HTTPException(404, "文档不存在")
     return dict(row)
 
+
 def _doc_project_root(doc: dict):
     from app.routers.global_facts import _managed_upload_path
+
     return _managed_upload_path(doc.get("file_path") or "")
 
 
 # ---------------------------------------------------------------------------
 # 状态查询（四层概览）
 # ---------------------------------------------------------------------------
+
 
 @router.get("/documents/{doc_id}/status")
 async def document_status(doc_id: str, db=Depends(get_db)):
@@ -67,8 +73,7 @@ async def document_status(doc_id: str, db=Depends(get_db)):
     layers = {}
     for layer in store.ALL_LAYERS:
         d = store.layer_dir(doc["project_id"], doc_id, layer)
-        layers[layer] = await asyncio.to_thread(
-            lambda p=d: sorted(f.name for f in p.iterdir()) if p.exists() else [])
+        layers[layer] = await asyncio.to_thread(lambda p=d: sorted(f.name for f in p.iterdir()) if p.exists() else [])
     completeness = {}
     try:
         completeness = json.loads(doc.get("completeness_json") or "{}")
@@ -118,6 +123,7 @@ async def document_status(doc_id: str, db=Depends(get_db)):
 # 提取结果查询
 # ---------------------------------------------------------------------------
 
+
 @router.get("/documents/{doc_id}/extractions")
 async def get_extractions(
     doc_id: str,
@@ -126,14 +132,15 @@ async def get_extractions(
 ):
     """提取层查询：按类别返回 AI 提取结果（含 confidence 与 source_refs 溯源）。"""
     doc = await _load_doc(db, doc_id)
-    sql = ("SELECT extraction_id, doc_id, extract_type, extract_data,"
-           " confidence, source_refs, extract_time, extract_engine, status"
-           " FROM doc_extractions WHERE doc_id=?")
+    sql = (
+        "SELECT extraction_id, doc_id, extract_type, extract_data,"
+        " confidence, source_refs, extract_time, extract_engine, status"
+        " FROM doc_extractions WHERE doc_id=?"
+    )
     params: list = [doc_id]
     if type:
         if type not in store.EXTRACT_TYPES:
-            raise HTTPException(400,
-                               f"未知提取类别：{type}（可选 {', '.join(store.EXTRACT_TYPES)}）")
+            raise HTTPException(400, f"未知提取类别：{type}（可选 {', '.join(store.EXTRACT_TYPES)}）")
         sql += " AND extract_type=?"
         params.append(type)
     sql += " ORDER BY extract_type"
@@ -142,8 +149,7 @@ async def get_extractions(
     # ✅ P1：同 R13 守卫（查询异常时返回空列表而非 500）
     if cur is None:
         logger.warning("查询提取结果失败（db.execute 返回 None），返回空列表")
-        return {"doc_id": doc_id, "project_id": doc["project_id"],
-                "items": [], "types": list(store.EXTRACT_TYPES)}
+        return {"doc_id": doc_id, "project_id": doc["project_id"], "items": [], "types": list(store.EXTRACT_TYPES)}
     for r in await cur.fetchall():
         d = dict(r)
         try:
@@ -155,8 +161,7 @@ async def get_extractions(
         except ValueError:
             d["source_refs"] = []
         items.append(d)
-    return {"doc_id": doc_id, "project_id": doc["project_id"],
-            "items": items, "types": list(store.EXTRACT_TYPES)}
+    return {"doc_id": doc_id, "project_id": doc["project_id"], "items": items, "types": list(store.EXTRACT_TYPES)}
 
 
 @router.get("/documents/{doc_id}/chunks")
@@ -182,15 +187,16 @@ async def get_chunks(
     if page_num:
         where += " AND page_num=?"
         filter_params.append(page_num)
-    cur = await db.execute(
-        f"SELECT COUNT(*) AS n FROM doc_chunks {where}", filter_params)
+    cur = await db.execute(f"SELECT COUNT(*) AS n FROM doc_chunks {where}", filter_params)
     # ✅ P1：COUNT 返回 None 时降级为 0（不抛异常），避免 total 为 None
     #    让前端分页计算负数或报错。
     total = int(((await cur.fetchone()) or ["0"])[0] or 0) if cur is not None else 0
-    sql = ("SELECT chunk_id, chunk_type, title, level, page_num, text,"
-           " source_ref, tables_json, images_json, hash, meta_json"
-           f" FROM doc_chunks {where}"
-           " ORDER BY chunk_id LIMIT ? OFFSET ?")
+    sql = (
+        "SELECT chunk_id, chunk_type, title, level, page_num, text,"
+        " source_ref, tables_json, images_json, hash, meta_json"
+        f" FROM doc_chunks {where}"
+        " ORDER BY chunk_id LIMIT ? OFFSET ?"
+    )
     params: list = filter_params + [limit, offset]
     cur = await db.execute(sql, params)
     items = []
@@ -213,9 +219,9 @@ async def get_chunks(
 # 增量更新（指纹比对 → 未变更跳过）
 # ---------------------------------------------------------------------------
 
+
 @router.post("/documents/{doc_id}/reparse")
-async def reparse_document(doc_id: str, body: dict | None = None,
-                           db=Depends(get_db)):
+async def reparse_document(doc_id: str, body: dict | None = None, db=Depends(get_db)):
     """增量重解析：mode=incremental（默认）指纹未变直接跳过；force=true 强制。
 
     复用全局事实模块的解析主链路（parse_document），在其之上刷新四层产物。
@@ -235,11 +241,14 @@ async def reparse_document(doc_id: str, body: dict | None = None,
         current_md5 = store.file_fingerprints(content)["md5"]
     stored_md5 = doc.get("file_hash_md5") or ""
     unchanged = bool(current_md5) and stored_md5 == current_md5
-    if not force and unchanged and (doc.get("parsed_markdown") or "") \
-            and doc.get("parse_status") == "success":
-        return {"ok": True, "skipped": True, "reason": "文件指纹未变更，跳过重新解析",
-                "parse_version": doc.get("parse_version") or "v1",
-                "file_hash_md5": stored_md5}
+    if not force and unchanged and (doc.get("parsed_markdown") or "") and doc.get("parse_status") == "success":
+        return {
+            "ok": True,
+            "skipped": True,
+            "reason": "文件指纹未变更，跳过重新解析",
+            "parse_version": doc.get("parse_version") or "v1",
+            "file_hash_md5": stored_md5,
+        }
 
     # 走既有解析链路（内部完成 parse + 四层落盘 + 版本递增）
     result = await _parse_document(doc_id, force=True, db=db)
@@ -253,16 +262,18 @@ async def reparse_document(doc_id: str, body: dict | None = None,
 # 完整性 / 时效性
 # ---------------------------------------------------------------------------
 
+
 @router.get("/documents/{doc_id}/completeness")
-async def document_completeness(doc_id: str, refresh: bool = False,
-                                db=Depends(get_db)):
+async def document_completeness(doc_id: str, refresh: bool = False, db=Depends(get_db)):
     """完整性校验：解析/表格/图片/字段覆盖率 + 质量评分（可重复执行）。"""
     doc = await _load_doc(db, doc_id)
     if not refresh:
         cur = await db.execute(
             "SELECT report_json, created_at FROM doc_validation_reports"
             " WHERE doc_id=? AND kind='completeness'"
-            " ORDER BY created_at DESC LIMIT 1", (doc_id,))
+            " ORDER BY created_at DESC LIMIT 1",
+            (doc_id,),
+        )
         # ✅ P1（R13 漏改点 · 2026-09-29）：同文件 _load_doc / get_extractions /
         #    get_chunks 四处均已对 db.execute() 返回 None 加守卫，唯独此处漏改。
         #    命中即 AttributeError → 500，而本端点正是「解析质量体检」入口，
@@ -281,8 +292,8 @@ async def document_completeness(doc_id: str, refresh: bool = False,
                 report["cached_at"] = row["created_at"]
                 return report
     report = await pipeline.build_completeness_report(
-        db, doc_id=doc_id, project_id=doc["project_id"],
-        total_pages_hint=int(doc.get("page_count") or 0))
+        db, doc_id=doc_id, project_id=doc["project_id"], total_pages_hint=int(doc.get("page_count") or 0)
+    )
     # ✅ 响应结构一致（2026-09-25）：缓存命中分支会注入 cached_at，实时计算
     #    分支此前没有该字段 —— 前端/调用方无法用统一形状判读「是否走缓存」。
     #    现两分支均携带：cached_at=None 表示实时计算（generated_at 为计算时刻）。
@@ -317,11 +328,9 @@ async def document_freshness(doc_id: str, db=Depends(get_db)):
         #    而状态漂移回写**静默丢失**（无异常、无日志），表现为
         #    「/freshness 说过期，project_documents.status 却一直是 valid」。
         #    写路径不能像读路径那样 fail-soft 继续，只能明确告警后跳过 commit。
-        _fcur = await db.execute("UPDATE project_documents SET status=? WHERE id=?",
-                                 (fresh["status"], doc_id))
+        _fcur = await db.execute("UPDATE project_documents SET status=? WHERE id=?", (fresh["status"], doc_id))
         if _fcur is None:
-            logger.warning("文档状态漂移回写失败（db.execute 返回 None），跳过 commit：%s",
-                           doc_id)
+            logger.warning("文档状态漂移回写失败（db.execute 返回 None），跳过 commit：%s", doc_id)
             return fresh
         await db.commit()
     return fresh
@@ -331,26 +340,26 @@ async def document_freshness(doc_id: str, db=Depends(get_db)):
 # 提取层物化 / 交叉校验
 # ---------------------------------------------------------------------------
 
+
 @router.post("/documents/{doc_id}/sync-extractions")
 async def sync_extractions(doc_id: str, db=Depends(get_db)):
     """阶段7 入库与索引：把 AI 提取结果（解析项 + 全局事实）按标准格式
     物化到提取层（doc_extractions 表 + extracted/*.json），人工校正后重调用即可刷新。"""
     doc = await _load_doc(db, doc_id)
-    return await pipeline.sync_extract_layer(
-        db, doc_id=doc_id, project_id=doc["project_id"])
+    return await pipeline.sync_extract_layer(db, doc_id=doc_id, project_id=doc["project_id"])
 
 
 @router.post("/documents/{doc_id}/cross-check")
 async def cross_check(doc_id: str, db=Depends(get_db)):
     """阶段5 交叉校验：多文档事实冲突 + 一致性规则跑批。"""
     doc = await _load_doc(db, doc_id)
-    return await pipeline.run_cross_check(db, project_id=doc["project_id"],
-                                          doc_id=doc_id)
+    return await pipeline.run_cross_check(db, project_id=doc["project_id"], doc_id=doc_id)
 
 
 # ---------------------------------------------------------------------------
 # 项目文档索引（全景视图）
 # ---------------------------------------------------------------------------
+
 
 @router.get("/projects/{project_id}/documents/index")
 async def project_documents_index(project_id: str, db=Depends(get_db)):
@@ -360,7 +369,8 @@ async def project_documents_index(project_id: str, db=Depends(get_db)):
         " parse_status, parse_version, extract_status, page_count,"
         " quality_score, file_hash_md5, expires_at, status, created_at"
         " FROM project_documents WHERE project_id=? ORDER BY created_at, id",
-        (project_id,))
+        (project_id,),
+    )
     # ✅ P1（R13 漏改点 · 2026-09-29）：与同文件 _load_doc / get_extractions /
     #    get_chunks / document_completeness 同口径补判空。本端点是前端「资料列表」
     #    的数据源，命中 None → AttributeError → 500，用户看不到项目资料全景。
@@ -379,6 +389,9 @@ async def project_documents_index(project_id: str, db=Depends(get_db)):
         d = disk_map.pop(r["id"], None) or {}
         r["layers_on_disk"] = bool(d)
         r["disk_updated_at"] = d.get("updated_at", "")
-    return {"project_id": project_id, "documents": rows,
-            "orphan_disk_entries": list(disk_map.values()),
-            "count": len(rows)}
+    return {
+        "project_id": project_id,
+        "documents": rows,
+        "orphan_disk_entries": list(disk_map.values()),
+        "count": len(rows),
+    }

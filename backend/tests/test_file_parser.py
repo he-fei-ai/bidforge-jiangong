@@ -7,6 +7,7 @@
 - json_response.renumber_outline（循环引用防护、children修复）
 - heading_standard.HeadingNumberingGeneratorV2（level 8不越界、完整流程）
 """
+
 import json
 
 import pytest
@@ -26,6 +27,7 @@ from app.services.file_parser import (
 # ============================================================
 # simple_parse_outline
 # ============================================================
+
 
 class TestSimpleParseOutline:
     def test_empty_text(self):
@@ -84,21 +86,17 @@ class TestSimpleParseOutline:
         text = "1.1 A\n1.2 B\n1.3 C\n"
         result = simple_parse_outline(text)
         all_ids = []
+
         def collect(nodes):
             for n in nodes:
                 all_ids.append(n["id"])
                 collect(n["children"])
+
         collect(result)
         assert len(all_ids) == len(set(all_ids)), f"ID 重复: {all_ids}"
 
     def test_mixed_formats(self):
-        text = (
-            "第一章 编制说明\n"
-            "1.1 编制依据\n"
-            "一、设计文件\n"
-            "（一）施工图纸\n"
-            "# 备注\n"
-        )
+        text = "第一章 编制说明\n" "1.1 编制依据\n" "一、设计文件\n" "（一）施工图纸\n" "# 备注\n"
         result = simple_parse_outline(text)
         assert len(result) == 2
         assert result[0]["title"] == "编制说明"
@@ -124,6 +122,7 @@ class TestSimpleParseOutline:
 # ============================================================
 # parse_file_content
 # ============================================================
+
 
 class TestParseFileContent:
     def test_empty_content(self):
@@ -169,6 +168,7 @@ class TestParseFileContent:
         # ✅ F1：.exe 改名为 .txt 应被二进制防护拒绝（避免乱码入库污染事实库）
         content = b"MZ" + b"\x00" * 64 + b"\x01\x02\x03"
         from app.services.file_parser import ParseError
+
         with pytest.raises(ParseError):
             parse_file_content_ex(content, "evil.txt")
 
@@ -176,6 +176,7 @@ class TestParseFileContent:
         # PNG 二进制头改名 .txt 同样应拒绝
         content = b"\x89PNG\r\n\x1a\n" + b"\x00" * 64
         from app.services.file_parser import ParseError
+
         with pytest.raises(ParseError):
             parse_file_content_ex(content, "img.txt")
 
@@ -217,27 +218,30 @@ def _ole_with_stream(*stream_names: str) -> bytes:
 class TestOleSniffing:
     def test_sniff_xls_by_workbook_stream(self):
         from app.services.file_parser import _sniff_type
+
         assert _sniff_type(_ole_with_stream("Workbook")) == "xls"
 
     def test_sniff_doc_by_worddocument_stream(self):
         from app.services.file_parser import _sniff_type
+
         assert _sniff_type(_ole_with_stream("WordDocument")) == "doc"
 
     def test_ambiguous_markers_fall_back_to_doc(self):
         from app.services.file_parser import _sniff_type
+
         # 双标记（如 .doc 正文里恰好含英文 Workbook）→ 维持 doc 兜底
         assert _sniff_type(_ole_with_stream("Workbook", "WordDocument")) == "doc"
 
     def test_renamed_xls_routed_to_xlrd_channel(self):
         # ✅ 回归：改名为 .doc 的旧版 .xls 不再走 LibreOffice→docx 次优转换
         from app.services import file_parser as fp
+
         diag: dict = {"file_type": "", "text_len": 0, "truncated": False, "warnings": []}
         captured = {}
         monkey_fp = fp
 
         orig = monkey_fp._parse_excel
-        monkey_fp._parse_excel = lambda content, ftype, diag: (
-            captured.__setitem__("ftype", ftype) or "SHEET")
+        monkey_fp._parse_excel = lambda content, ftype, diag: (captured.__setitem__("ftype", ftype) or "SHEET")
         try:
             monkey_fp.parse_file_content_ex(_ole_with_stream("Workbook"), "fake.doc")
         finally:
@@ -247,10 +251,10 @@ class TestOleSniffing:
     def test_renamed_doc_routed_to_legacy_word_channel(self):
         # ✅ 回归：改名为 .xls 的旧版 Word 不再误入 xlrd
         from app.services import file_parser as fp
+
         captured = {}
         orig = fp._parse_legacy_word
-        fp._parse_legacy_word = lambda content, fname, diag: (
-            captured.__setitem__("fname", fname) or "DOC")
+        fp._parse_legacy_word = lambda content, fname, diag: (captured.__setitem__("fname", fname) or "DOC")
         try:
             fp.parse_file_content_ex(_ole_with_stream("WordDocument"), "fake.xls")
         finally:
@@ -261,6 +265,7 @@ class TestOleSniffing:
 # ============================================================
 # CSV / XLSX → Markdown 表格（下游表格保护与高权重区分类依赖竖线语法）
 # ============================================================
+
 
 class TestStructuredTableExport:
     def test_csv_becomes_markdown_table(self):
@@ -280,6 +285,7 @@ class TestStructuredTableExport:
 
     def test_csv_rows_truncated_to_limit(self, monkeypatch):
         import app.services.file_parser as fp
+
         monkeypatch.setattr(fp, "MAX_CSV_ROWS", 2)
         content = ("h\n" + "\n".join(f"r{i}" for i in range(5))).encode("utf-8")
         out = parse_file_content(content, "a.csv")
@@ -287,12 +293,13 @@ class TestStructuredTableExport:
         #    （分隔行是 GFM 渲染表格的必要条件，见 file_parser._md_separator）
         assert out.count("\n|") == 3
         assert "| --- |" in out
-        assert "| r1 |" not in out      # 第 3 行起被截断
+        assert "| r1 |" not in out  # 第 3 行起被截断
 
     def test_xlsx_becomes_markdown_table_with_sheet_name(self):
         import io as _io
 
         from openpyxl import Workbook
+
         wb = Workbook()
         ws = wb.active
         ws.title = "机械表"
@@ -310,12 +317,13 @@ class TestStructuredTableExport:
 # extract_json / _extract_balanced
 # ============================================================
 
+
 class TestExtractJson:
     def test_plain_object(self):
         assert extract_json('{"a": 1}') == '{"a": 1}'
 
     def test_plain_array(self):
-        assert extract_json('[1, 2, 3]') == '[1, 2, 3]'
+        assert extract_json("[1, 2, 3]") == "[1, 2, 3]"
 
     def test_code_block_json(self):
         text = '```json\n{"outline": []}\n```'
@@ -326,7 +334,7 @@ class TestExtractJson:
         assert extract_json(text) == '{"a": 1}'
 
     def test_multiple_code_blocks(self):
-        text = "说明\n```python\nprint(1)\n```\n```json\n{\"outline\": []}\n```"
+        text = '说明\n```python\nprint(1)\n```\n```json\n{"outline": []}\n```'
         result = extract_json(text)
         assert result == '{"outline": []}'
 
@@ -375,6 +383,7 @@ class TestExtractJson:
 # renumber_outline
 # ============================================================
 
+
 class TestRenumberOutline:
     def test_basic_renumber(self):
         nodes = [{"title": "A", "children": []}, {"title": "B", "children": []}]
@@ -405,9 +414,11 @@ class TestRenumberOutline:
 # _mineru_image_fallback 单图大小阈值（审计报告 §4-4，2026-09-23）
 # ============================================================
 
+
 class TestMineruImageFallbackSizeCap:
     def _patch_settings(self, monkeypatch, enabled=True, provider="agent", cap=100):
         import app.config as cfg
+
         monkeypatch.setattr(cfg.settings, "mineru_enabled", enabled)
         monkeypatch.setattr(cfg.settings, "mineru_provider", provider)
         monkeypatch.setattr(cfg.settings, "mineru_image_max_bytes", cap)
@@ -420,8 +431,7 @@ class TestMineruImageFallbackSizeCap:
             called["hit"] = True
             return "云端结果"
 
-        monkeypatch.setattr(
-            "app.services.mineru_client.parse_with_mineru", fake_parse)
+        monkeypatch.setattr("app.services.mineru_client.parse_with_mineru", fake_parse)
         diag: dict = {}
         out = _mineru_image_fallback(b"x" * 200, "png", diag)
         # 超过阈值 → 直接跳过云端兜底、不调用云端
@@ -434,17 +444,15 @@ class TestMineruImageFallbackSizeCap:
         self._patch_settings(monkeypatch, cap=0)
         # 注意：云端结果需 ≥5 个有效字符才会被判定为"可用"（_has_usable_image_text）
         monkeypatch.setattr(
-            "app.services.mineru_client.parse_with_mineru",
-            lambda content, fname: "云端解析得到的有效文本内容")
+            "app.services.mineru_client.parse_with_mineru", lambda content, fname: "云端解析得到的有效文本内容"
+        )
         diag: dict = {}
         out = _mineru_image_fallback(b"small", "png", diag)
         assert out == "云端解析得到的有效文本内容"
 
     def test_disabled_provider_returns_empty(self, monkeypatch):
         self._patch_settings(monkeypatch, provider="")
-        monkeypatch.setattr(
-            "app.services.mineru_client.parse_with_mineru",
-            lambda content, fname: "云端结果")
+        monkeypatch.setattr("app.services.mineru_client.parse_with_mineru", lambda content, fname: "云端结果")
         diag: dict = {}
         out = _mineru_image_fallback(b"small", "png", diag)
         assert out == ""
@@ -464,6 +472,7 @@ class TestMineruImageFallbackSizeCap:
 # ============================================================
 # HeadingNumberingGeneratorV2
 # ============================================================
+
 
 class TestHeadingNumberingGeneratorV2:
     def test_level_8_no_index_error(self):
@@ -519,6 +528,7 @@ class TestHeadingNumberingGeneratorV2:
 # HeadingNumberingGenerator (静态版)
 # ============================================================
 
+
 class TestHeadingNumberingGenerator:
     def test_next_heading_level_8(self):
         counters = [0] * 8
@@ -542,6 +552,7 @@ class TestHeadingNumberingGenerator:
 # ============================================================
 # format_heading_by_id
 # ============================================================
+
 
 class TestFormatHeadingById:
     def test_level_1(self):

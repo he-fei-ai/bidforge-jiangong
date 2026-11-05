@@ -14,6 +14,7 @@
 
 顺带修掉一个**恒空死分支**（见 ``TestPendingDocsNeverFires``）。
 """
+
 from __future__ import annotations
 
 import asyncio
@@ -42,6 +43,7 @@ class TestPdfPageLimit:
     def test_aligned_with_storage_char_limit(self):
         """与 MAX_PARSED_CHARS 对齐：约 800 字/页 × 500 页 ≈ 400000 字。"""
         from app.routers.global_facts import MAX_PARSED_CHARS
+
         assert MAX_PARSED_CHARS >= 400_000
         # 不允许出现「解析上限页数 × 每页估字 < 落库上限」这种二次浪费
         assert fp.MAX_PDF_PAGES * 800 >= MAX_PARSED_CHARS
@@ -73,6 +75,8 @@ class TestPdfPageLimit:
         src = inspect.getsource(fp)
         assert src.count("MAX_PDF_PAGES") >= 5
         assert "import MAX_PDF_PAGES" not in src
+
+
 # =========================================================================
 # 二、截断诊断读取（三层降级）
 # =========================================================================
@@ -83,17 +87,18 @@ def _make_db(tmp_path, rows, *, cols="both"):
     ``parse_warnings``）/ ``"none"``（两列都没有）。
     """
     import sqlite3
+
     conn = sqlite3.connect(tmp_path / "t.db")
     conn.row_factory = sqlite3.Row
-    conn.execute("CREATE TABLE project_documents ("
-                 "id TEXT PRIMARY KEY, project_id TEXT, file_name TEXT,"
-                 "parsed_markdown TEXT, created_at TEXT DEFAULT '')")
+    conn.execute(
+        "CREATE TABLE project_documents ("
+        "id TEXT PRIMARY KEY, project_id TEXT, file_name TEXT,"
+        "parsed_markdown TEXT, created_at TEXT DEFAULT '')"
+    )
     if cols in ("both", "warn_only"):
-        conn.execute("ALTER TABLE project_documents "
-                     "ADD COLUMN parse_warnings TEXT DEFAULT ''")
+        conn.execute("ALTER TABLE project_documents " "ADD COLUMN parse_warnings TEXT DEFAULT ''")
     if cols == "both":
-        conn.execute("ALTER TABLE project_documents "
-                     "ADD COLUMN parse_truncated INTEGER DEFAULT 0")
+        conn.execute("ALTER TABLE project_documents " "ADD COLUMN parse_truncated INTEGER DEFAULT 0")
     for r in rows:
         vals = list(r[:4])
         if cols == "both":
@@ -101,17 +106,20 @@ def _make_db(tmp_path, rows, *, cols="both"):
             conn.execute(
                 "INSERT INTO project_documents(id,project_id,file_name,"
                 "parsed_markdown,parse_warnings,parse_truncated) "
-                "VALUES(?,?,?,?,?,?)", tuple(vals))
+                "VALUES(?,?,?,?,?,?)",
+                tuple(vals),
+            )
         elif cols == "warn_only":
             vals.append(r[4] if len(r) >= 5 else "")
             conn.execute(
                 "INSERT INTO project_documents(id,project_id,file_name,"
                 "parsed_markdown,parse_warnings) VALUES(?,?,?,?,?)",
-                tuple(vals))
+                tuple(vals),
+            )
         else:
             conn.execute(
-                "INSERT INTO project_documents(id,project_id,file_name,parsed_markdown)"
-                " VALUES(?,?,?,?)", tuple(vals))
+                "INSERT INTO project_documents(id,project_id,file_name,parsed_markdown)" " VALUES(?,?,?,?)", tuple(vals)
+            )
     conn.commit()
     return conn
 
@@ -171,20 +179,24 @@ class TestTruncationSurfacing:
         rows = [("1", "p1", "a.pdf", "正文A"), ("2", "p1", "empty.pdf", "")]
         db = _AsyncShim(_make_db(tmp_path, rows, cols="none"))
         names, bodies, trunc = asyncio.run(sh._load_facts_source_docs(db, "p1"))
-        assert names == ["a.pdf"]          # 空正文被过滤
+        assert names == ["a.pdf"]  # 空正文被过滤
         assert bodies == ["正文A"]
         assert trunc == []
 
     def test_query_failure_degrades_not_raises(self, tmp_path):
         """读失败必须降级为空而非抛异常（绝不阻断提取）。"""
+
         class Boom:
             async def execute(self, *a, **k):
                 raise RuntimeError("db down")
+
         assert asyncio.run(sh._load_facts_source_docs(Boom(), "p1")) == ([], [], [])
 
     def test_empty_project_returns_empty(self, tmp_path):
         db = _AsyncShim(_make_db(tmp_path, []))
         assert asyncio.run(sh._load_facts_source_docs(db, "p1")) == ([], [], [])
+
+
 # =========================================================================
 # 三、「待解析文档」告警原本恒不触发（死分支）
 # =========================================================================
@@ -216,6 +228,7 @@ class TestPendingDocsNeverFires:
         class Boom:
             async def execute(self, *a, **k):
                 raise RuntimeError("db down")
+
         assert asyncio.run(sh._count_docs_pending_parse(Boom(), "p1")) == (False, [])
 
 

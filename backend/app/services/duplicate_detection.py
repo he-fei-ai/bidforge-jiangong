@@ -42,18 +42,30 @@
 
 所有函数均为纯函数（无 DB、无 AI、无 IO），可直接单测。
 """
+
 from __future__ import annotations
 
 import re
 import unicodedata
 
 __all__ = [
-    "BIGRAM_SIZE", "MIN_SENTENCE_CHARS", "MIN_TITLE_CHARS",
-    "TITLE_DICE_THRESHOLD", "MAX_COPY_GROUPS", "COPY_GROUP_LARGE_CHARS",
-    "normalize_comparable", "build_skeleton_key", "char_bigrams",
-    "dice", "containment", "split_sentences", "sentence_similarity",
-    "sentences_near_match", "find_cross_section_copies",
-    "title_similarity", "find_similar_titles",
+    "BIGRAM_SIZE",
+    "MIN_SENTENCE_CHARS",
+    "MIN_TITLE_CHARS",
+    "TITLE_DICE_THRESHOLD",
+    "MAX_COPY_GROUPS",
+    "COPY_GROUP_LARGE_CHARS",
+    "normalize_comparable",
+    "build_skeleton_key",
+    "char_bigrams",
+    "dice",
+    "containment",
+    "split_sentences",
+    "sentence_similarity",
+    "sentences_near_match",
+    "find_cross_section_copies",
+    "title_similarity",
+    "find_similar_titles",
 ]
 
 # ---------------------------------------------------------------------------
@@ -95,8 +107,8 @@ COPY_GROUP_LARGE_CHARS = 60
 #: ``(最小归一化长度, containment 阈值, dice 阈值)``。
 #: 对长句用较低阈值（长句偶然重合多但比例低），对短句用更严阈值（易误报）。
 _SIMILARITY_TIERS: tuple[tuple[int, float, float], ...] = (
-    (30, 0.90, 0.82),   # ≥30 字：主体段落
-    (0, 0.95, 0.88),    # <30 字：短段落从严
+    (30, 0.90, 0.82),  # ≥30 字：主体段落
+    (0, 0.95, 0.88),  # <30 字：短段落从严
 )
 
 # ---------------------------------------------------------------------------
@@ -121,9 +133,7 @@ def _keep_only(text: str, extra: frozenset = frozenset()) -> str:
     **唯一清理实现**：normalize_comparable 与 build_skeleton_key 共用，
     避免两套清理口径再次分叉。
     """
-    return "".join(ch for ch in text
-                   if ch in extra
-                   or unicodedata.category(ch)[0] in _KEEP_CATEGORY)
+    return "".join(ch for ch in text if ch in extra or unicodedata.category(ch)[0] in _KEEP_CATEGORY)
 
 
 def normalize_comparable(text: str) -> str:
@@ -148,9 +158,13 @@ _SKELETON_RULES: tuple[tuple[re.Pattern, str], ...] = (
     (re.compile(r"\d{4}\s*年\s*\d{1,2}\s*月"), "{date}"),
     (re.compile(r"\d{4}\s*[-/.]\s*\d{1,2}\s*[-/.]\s*\d{1,2}"), "{date}"),
     # 标准编号：GB 50202-2018 / JGJ 120-2012 / GB/T 50502 / DBJ …（含年号）
-    (re.compile(
-        r"(?:GB(?:/T)?|JGJ(?:/T)?|JTG(?:/T)?|DBJ|CECS|CJJ(?:/T)?)\s*"
-        r"\d{2,5}(?:\.\d{1,3})?(?:[—\-－]\s*\d{4})?", re.IGNORECASE), "{code}"),
+    (
+        re.compile(
+            r"(?:GB(?:/T)?|JGJ(?:/T)?|JTG(?:/T)?|DBJ|CECS|CJJ(?:/T)?)\s*" r"\d{2,5}(?:\.\d{1,3})?(?:[—\-－]\s*\d{4})?",
+            re.IGNORECASE,
+        ),
+        "{code}",
+    ),
     # 百分数 / 金额 / 页码
     (re.compile(r"\d+(?:\.\d+)?\s*%"), "{percent}"),
     (re.compile(r"\d+(?:\.\d+)?\s*万元"), "{money}"),
@@ -199,7 +213,7 @@ def char_bigrams(text: str) -> frozenset:
     n = BIGRAM_SIZE
     if len(text) < n:
         return frozenset()
-    return frozenset(text[i:i + n] for i in range(len(text) - n + 1))
+    return frozenset(text[i : i + n] for i in range(len(text) - n + 1))
 
 
 def dice(a: frozenset, b: frozenset) -> float:
@@ -322,8 +336,9 @@ def sentences_near_match(a: str, b: str) -> dict | None:
 _SENTENCE_SPLIT_RE = re.compile(r"[。！？；!?;\n\r]+")
 
 
-def split_sentences(text: str, *, min_chars: int = MIN_SENTENCE_CHARS,
-                    max_sentences: int = MAX_SENTENCES_PER_SECTION) -> list[str]:
+def split_sentences(
+    text: str, *, min_chars: int = MIN_SENTENCE_CHARS, max_sentences: int = MAX_SENTENCES_PER_SECTION
+) -> list[str]:
     """按句末标点切分正文，返回**原句**（相似度计算内部再归一化）。
 
     过滤规则：
@@ -442,8 +457,7 @@ def _build_bigram_inverted_index(flat: list) -> dict:
     return inv
 
 
-def _candidate_indices(a_bg: frozenset, inv: dict, self_idx: int,
-                       flat: list) -> list:
+def _candidate_indices(a_bg: frozenset, inv: dict, self_idx: int, flat: list) -> list:
     """收集与 ``self_idx`` 共享 ≥ ``_MIN_SHARED_BIGRAMS`` 个 bigram 的候选下标。
 
     返回**升序且去重**的下标列表（保持与朴素两两一致的遍历顺序 → 结论可复现）。
@@ -462,7 +476,7 @@ def _candidate_indices(a_bg: frozenset, inv: dict, self_idx: int,
             continue
         for idx in posting:
             if idx == self_idx or flat[idx][0] == self_sid:
-                continue      # 同章节内不比（自我重复由 split 去重处理）
+                continue  # 同章节内不比（自我重复由 split 去重处理）
             hits[idx] = hits.get(idx, 0) + 1
     return sorted(i for i, n in hits.items() if n >= _MIN_SHARED_BIGRAMS)
 
@@ -482,8 +496,7 @@ def _to_exclude_set(exclude_pairs) -> set:
     return out
 
 
-def find_cross_section_copies(sections: list, *,
-                              exclude_pairs=None) -> dict:
+def find_cross_section_copies(sections: list, *, exclude_pairs=None) -> dict:
     """跨章节段落搬运检测，返回 ``{groups, truncated, pairwise_compared}``。
 
     Args:
@@ -539,14 +552,16 @@ def find_cross_section_copies(sections: list, *,
         if not pairs:
             continue
         claimed |= {frozenset((p[0], p[1])) for p in pairs}
-        groups.append({
-            "reason": "exact",
-            "skeleton": sk[:120],
-            "sentences": _sample_sentences(sk, flat),
-            "section_pairs": pairs,
-            "large": len(sk) >= COPY_GROUP_LARGE_CHARS,
-            "dice": 1.0,
-        })
+        groups.append(
+            {
+                "reason": "exact",
+                "skeleton": sk[:120],
+                "sentences": _sample_sentences(sk, flat),
+                "section_pairs": pairs,
+                "large": len(sk) >= COPY_GROUP_LARGE_CHARS,
+                "dice": 1.0,
+            }
+        )
 
     # ---- 第二级：skeleton 近似匹配 ----
     # ⚠️ 性能（2026-10-01 压测修复）：朴素两两在 80 章 × 600 句（48000 句）下
@@ -580,19 +595,19 @@ def find_cross_section_copies(sections: list, *,
             if m is None:
                 continue
             claimed.add(key)
-            groups.append({
-                "reason": m["reason"],
-                "skeleton": (a_sk or "")[:120],
-                "sentences": [a_sk[:160]],
-                "section_pairs": [(a_id, b_id, a_title, b_title)],
-                "large": max(a_len, len(b_sk)) >= COPY_GROUP_LARGE_CHARS,
-                "dice": float(m.get("dice") if m.get("dice") is not None
-                              else 1.0),
-            })
+            groups.append(
+                {
+                    "reason": m["reason"],
+                    "skeleton": (a_sk or "")[:120],
+                    "sentences": [a_sk[:160]],
+                    "section_pairs": [(a_id, b_id, a_title, b_title)],
+                    "large": max(a_len, len(b_sk)) >= COPY_GROUP_LARGE_CHARS,
+                    "dice": float(m.get("dice") if m.get("dice") is not None else 1.0),
+                }
+            )
 
     # 排序：大段优先 → Dice 降序 → 覆盖章节数多者优先
-    groups.sort(key=lambda g: (not g["large"], -g["dice"],
-                               -len(g["section_pairs"])))
+    groups.sort(key=lambda g: (not g["large"], -g["dice"], -len(g["section_pairs"])))
     overflow = len(groups) > MAX_COPY_GROUPS
     return {
         "groups": groups[:MAX_COPY_GROUPS],
@@ -619,9 +634,7 @@ def title_similarity(a: str, b: str) -> float:
     return round(dice(char_bigrams(na), char_bigrams(nb)), 4)
 
 
-def find_similar_titles(nodes: list, *,
-                        threshold: float = TITLE_DICE_THRESHOLD,
-                        max_groups: int = 20) -> list[dict]:
+def find_similar_titles(nodes: list, *, threshold: float = TITLE_DICE_THRESHOLD, max_groups: int = 20) -> list[dict]:
     """检测**近似雷同**的标题对（2-gram Dice ≥ 阈值，且不完全同名）。
 
     Args:
@@ -650,10 +663,14 @@ def find_similar_titles(nodes: list, *,
         for j in range(i + 1, len(clean)):
             sim = title_similarity(clean[i][2], clean[j][2])
             if sim >= threshold:
-                out.append({
-                    "a_path": clean[i][0], "a_title": clean[i][1],
-                    "b_path": clean[j][0], "b_title": clean[j][1],
-                    "similarity": sim,
-                })
+                out.append(
+                    {
+                        "a_path": clean[i][0],
+                        "a_title": clean[i][1],
+                        "b_path": clean[j][0],
+                        "b_title": clean[j][1],
+                        "similarity": sim,
+                    }
+                )
     out.sort(key=lambda x: -x["similarity"])
     return out[:max_groups]

@@ -44,10 +44,7 @@ export const NARROW_QUERY = "(max-width: 767px)";
 // 该 sharedState 的实例广播一次「脏了」信号。避免 React context 层级的引入成本，
 // 也避免直接依赖 useEffect 时序（useEffect 只保证一次渲染后的触发，无法把变更
 // 传递给"尚未挂载/正在挂载"的另一实例）。
-const SHARED_STATE_SUBSCRIBERS = new Map<
-  ParsePanelSharedState,
-  Set<(version: number) => void>
->();
+const SHARED_STATE_SUBSCRIBERS = new Map<ParsePanelSharedState, Set<(version: number) => void>>();
 const SHARED_STATE_VERSIONS = new Map<ParsePanelSharedState, number>();
 
 /**
@@ -133,9 +130,11 @@ export function baStatusTag(
   if (status === "success") {
     const absent = isMissingBaResult(content, def?.output_type || "markdown");
     if (stored?.source === "manual") return <Tag color="purple">✎ 人工 {content.length}字符</Tag>;
-    return absent
-      ? <Tag color="volcano">⚠ 无内容</Tag>
-      : <Tag color="green">✓ {content.length}字符</Tag>;
+    return absent ? (
+      <Tag color="volcano">⚠ 无内容</Tag>
+    ) : (
+      <Tag color="green">✓ {content.length}字符</Tag>
+    );
   }
   return <Tag color="default">待执行</Tag>;
 }
@@ -364,7 +363,10 @@ export default function ParseResultCategoryPanel({
       <div className="parse-cat-bar">
         {(groups || []).map((g) => {
           const { total, done } = groupCounts(g, storedMap);
-          const isOpen = !!expanded[g.key];
+          // 2026-11-04：不大于 1 项的分类取消折叠，直接展开显示其标题；
+          // 多于 1 项的分类（如「施工组织设计（新增）」）保持默认收起、按需展开。
+          const autoOpen = total <= 1;
+          const isOpen = autoOpen || !!expanded[g.key];
           const isActive = activeKey === g.key;
           return (
             <div key={g.key} className="parse-cat-group">
@@ -374,11 +376,17 @@ export default function ParseResultCategoryPanel({
                 role="button"
                 tabIndex={0}
                 aria-expanded={isOpen}
-                onClick={() => toggleGroup(g.key)}
+                data-auto-open={autoOpen ? "1" : undefined}
+                onClick={() => {
+                  // 单（或零）项分类不折叠：点击分类头只切换激活态，不触发收起/展开
+                  if (autoOpen) setActiveKey(() => g.key);
+                  else toggleGroup(g.key);
+                }}
                 onKeyDown={(e) => {
                   if (e.key === "Enter" || e.key === " ") {
                     e.preventDefault();
-                    toggleGroup(g.key);
+                    if (autoOpen) setActiveKey(() => g.key);
+                    else toggleGroup(g.key);
                   }
                 }}
                 style={{
@@ -393,8 +401,23 @@ export default function ParseResultCategoryPanel({
                   fontWeight: isActive ? 600 : 500,
                 }}
               >
-                {isOpen ? <DownOutlined style={{ fontSize: 10 }} /> : <RightOutlined style={{ fontSize: 10 }} />}
-                <span style={{ flex: 1, minWidth: 0, overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap" }}>
+                {autoOpen ? (
+                  // 单（或零）项分类常显，不展示折叠箭头
+                  <span style={{ width: 10, flexShrink: 0 }} />
+                ) : isOpen ? (
+                  <DownOutlined style={{ fontSize: 10 }} />
+                ) : (
+                  <RightOutlined style={{ fontSize: 10 }} />
+                )}
+                <span
+                  style={{
+                    flex: 1,
+                    minWidth: 0,
+                    overflow: "hidden",
+                    textOverflow: "ellipsis",
+                    whiteSpace: "nowrap",
+                  }}
+                >
                   {g.label}
                 </span>
                 {/* 数量角标：已完成 / 总数 */}
@@ -436,7 +459,15 @@ export default function ParseResultCategoryPanel({
                           fontSize: 13,
                         }}
                       >
-                        <span style={{ flex: 1, minWidth: 0, overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap" }}>
+                        <span
+                          style={{
+                            flex: 1,
+                            minWidth: 0,
+                            overflow: "hidden",
+                            textOverflow: "ellipsis",
+                            whiteSpace: "nowrap",
+                          }}
+                        >
                           {def.required ? <span style={{ color: "#ff4d4f" }}>* </span> : null}
                           {def.label || def.item_id}
                         </span>
@@ -488,24 +519,38 @@ export default function ParseResultCategoryPanel({
                 </Button>
               </Tooltip>
               {onEditItem && (
-                <Tooltip title={
-                  running
-                    ? "AI 正在提取，完成后人工校正会被覆盖，请等本轮提取结束再校正"
-                    : "人工校正：直接修改该项提取结果（AI 抽错关键参数时的唯一可靠出口）"
-                }>
-                  <Button size="small" icon={<EditOutlined />} disabled={running} onClick={() => onEditItem(selectedItem)}>
+                <Tooltip
+                  title={
+                    running
+                      ? "AI 正在提取，完成后人工校正会被覆盖，请等本轮提取结束再校正"
+                      : "人工校正：直接修改该项提取结果（AI 抽错关键参数时的唯一可靠出口）"
+                  }
+                >
+                  <Button
+                    size="small"
+                    icon={<EditOutlined />}
+                    disabled={running}
+                    onClick={() => onEditItem(selectedItem)}
+                  >
                     人工校正
                   </Button>
                 </Tooltip>
               )}
               {onOpenFullView && (
-                <Button size="small" icon={<EyeOutlined />} onClick={() => onOpenFullView(selectedItem)}>
+                <Button
+                  size="small"
+                  icon={<EyeOutlined />}
+                  onClick={() => onOpenFullView(selectedItem)}
+                >
                   查看完整
                 </Button>
               )}
             </Space>
           </div>
-          <div className="parse-cat-detail-body" style={{ flex: 1, minHeight: 0, overflow: "auto", padding: 12 }}>
+          <div
+            className="parse-cat-detail-body"
+            style={{ flex: 1, minHeight: 0, overflow: "auto", padding: 12 }}
+          >
             <BidAnalysisItemBody item={selectedItem} />
             {/* 来源位置：与「提取项目」Tab 同口径（无证据时整块不渲染） */}
             <BidAnalysisEvidenceList item={selectedItem} />
@@ -553,13 +598,29 @@ export default function ParseResultCategoryPanel({
                   }}
                 >
                   <div style={{ display: "flex", alignItems: "center", gap: 8 }}>
-                    <span style={{ flex: 1, minWidth: 0, fontSize: 13, fontWeight: def.required ? 600 : 400 }}>
+                    <span
+                      style={{
+                        flex: 1,
+                        minWidth: 0,
+                        fontSize: 13,
+                        fontWeight: def.required ? 600 : 400,
+                      }}
+                    >
                       {def.required ? <span style={{ color: "#ff4d4f" }}>* </span> : null}
                       {def.label || def.item_id}
                     </span>
                     {baStatusTag(stored, def)}
                   </div>
-                  <div style={{ fontSize: 12, color: "#999", marginTop: 4, overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap" }}>
+                  <div
+                    style={{
+                      fontSize: 12,
+                      color: "#999",
+                      marginTop: 4,
+                      overflow: "hidden",
+                      textOverflow: "ellipsis",
+                      whiteSpace: "nowrap",
+                    }}
+                  >
                     {snippet}
                   </div>
                 </div>
@@ -621,13 +682,13 @@ export default function ParseResultCategoryPanel({
           </div>
         );
       }
-      return (
-        <div style={{ flex: 1, minHeight: 0, overflow: "hidden" }}>
-          {renderContent()}
-        </div>
-      );
+      return <div style={{ flex: 1, minHeight: 0, overflow: "hidden" }}>{renderContent()}</div>;
     };
-    return <div className="parse-cat-panel" style={panelStyle}>{body()}</div>;
+    return (
+      <div className="parse-cat-panel" style={panelStyle}>
+        {body()}
+      </div>
+    );
   }
 
   // 首次加载（无数据）且非错误时，直接给出整栏加载态，避免左右空白
@@ -679,7 +740,13 @@ export default function ParseResultCategoryPanel({
     <div className="parse-cat-panel" style={{ display: "flex", gap: 12, minHeight: 400 }}>
       <div
         className="parse-cat-bar-wrap"
-        style={{ flex: "0 0 260px", minWidth: 0, border: "1px solid #f0f0f0", borderRadius: 6, overflow: "hidden" }}
+        style={{
+          flex: "0 0 260px",
+          minWidth: 0,
+          border: "1px solid #f0f0f0",
+          borderRadius: 6,
+          overflow: "hidden",
+        }}
       >
         <div
           style={{
@@ -696,7 +763,13 @@ export default function ParseResultCategoryPanel({
           <span>解析信息分类</span>
           {onRefresh && (
             <Tooltip title="刷新解析结果">
-              <Button size="small" type="text" icon={<ReloadOutlined />} onClick={onRefresh} aria-label="刷新解析结果" />
+              <Button
+                size="small"
+                type="text"
+                icon={<ReloadOutlined />}
+                onClick={onRefresh}
+                aria-label="刷新解析结果"
+              />
             </Tooltip>
           )}
         </div>
@@ -704,7 +777,13 @@ export default function ParseResultCategoryPanel({
       </div>
       <div
         className="parse-cat-content"
-        style={{ flex: 1, minWidth: 0, border: "1px solid #f0f0f0", borderRadius: 6, overflow: "hidden" }}
+        style={{
+          flex: 1,
+          minWidth: 0,
+          border: "1px solid #f0f0f0",
+          borderRadius: 6,
+          overflow: "hidden",
+        }}
       >
         {renderContent()}
       </div>

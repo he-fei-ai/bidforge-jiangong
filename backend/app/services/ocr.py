@@ -23,6 +23,7 @@
     绝不返回「OCR 解析失败：...」这类字符串 —— 后者会被上层误当作正文入库。
   - 可选依赖全部惰性导入，缺库不影响服务启动。
 """
+
 from __future__ import annotations
 
 import asyncio
@@ -68,6 +69,7 @@ class OcrResult:
 # 引擎可用性探测
 # ---------------------------------------------------------------------------
 
+
 def _tesseract_binary() -> str:
     """返回 tesseract 可执行路径（未安装返回空串）。"""
     try:
@@ -105,6 +107,7 @@ def _get_rapid_engine():
     with _RAPID_LOCK:
         if _RAPID_ENGINE is None:
             from rapidocr_onnxruntime import RapidOCR
+
             _RAPID_ENGINE = RapidOCR()
     return _RAPID_ENGINE
 
@@ -112,11 +115,11 @@ def _get_rapid_engine():
 async def vision_available(force: bool = False) -> bool:
     """当前是否配置了「支持视觉」的 AI Provider。结果带 TTL 缓存。"""
     now = time.time()
-    if not force and _VISION_CACHE["value"] is not None \
-            and now - _VISION_CACHE["ts"] < _VISION_TTL:
+    if not force and _VISION_CACHE["value"] is not None and now - _VISION_CACHE["ts"] < _VISION_TTL:
         return bool(_VISION_CACHE["value"])
     try:
         from app.services.ai.provider_factory import get_vision_providers
+
         value = bool(await get_vision_providers())
     except Exception as e:
         # ✅ P1（B4 · 2026-10-05）：探测异常是**瞬时故障**（DB/配置读抖动），与
@@ -136,6 +139,7 @@ async def vision_available(force: bool = False) -> bool:
 def _engine_order() -> list[str]:
     """按配置与可用性给出引擎尝试顺序。"""
     from app.config import settings
+
     prefer = (getattr(settings, "ocr_engine", "auto") or "auto").strip().lower()
     local = ["tesseract", "rapidocr"]
     if prefer in ("tesseract", "rapidocr"):
@@ -161,6 +165,7 @@ def _unavailable_hint() -> str:
 # 图像预处理（提升识别率）
 # ---------------------------------------------------------------------------
 
+
 def _preprocess(data: bytes):
     """转灰度 + 小图放大 + 自动对比度，返回 PIL.Image（缺 PIL 时返回 None）。"""
     try:
@@ -169,6 +174,7 @@ def _preprocess(data: bytes):
         return None
     try:
         import io as _io
+
         img = Image.open(_io.BytesIO(data))
         img = img.convert("L")  # 灰度：OCR 引擎对灰度更稳
         w, h = img.size
@@ -187,10 +193,12 @@ def _preprocess(data: bytes):
 # 单引擎实现
 # ---------------------------------------------------------------------------
 
+
 def _ocr_tesseract(data: bytes, lang: str) -> str:
     import pytesseract
 
     from app.config import settings
+
     if getattr(settings, "tesseract_path", ""):
         pytesseract.pytesseract.tesseract_cmd = settings.tesseract_path
     cfg = getattr(settings, "tesseract_data_path", "")
@@ -202,9 +210,9 @@ def _ocr_tesseract(data: bytes, lang: str) -> str:
     import io as _io
 
     from PIL import Image
+
     with _OCR_CALL_LOCK:
-        return pytesseract.image_to_string(Image.open(_io.BytesIO(data)),
-                                           lang=lang, config=config) or ""
+        return pytesseract.image_to_string(Image.open(_io.BytesIO(data)), lang=lang, config=config) or ""
 
 
 def _ocr_rapidocr(data: bytes) -> str:
@@ -214,6 +222,7 @@ def _ocr_rapidocr(data: bytes) -> str:
     if img is not None:
         try:
             import numpy as np
+
             target = np.array(img)
         except ImportError:
             target = data
@@ -224,11 +233,7 @@ def _ocr_rapidocr(data: bytes) -> str:
 
 def _looks_like_single_line(x) -> bool:
     """判断 x 是否形如单行结果 [box, text, score]。"""
-    return (
-        isinstance(x, (list, tuple)) and len(x) == 3
-        and isinstance(x[1], str)
-        and isinstance(x[2], (int, float))
-    )
+    return isinstance(x, (list, tuple)) and len(x) == 3 and isinstance(x[1], str) and isinstance(x[2], (int, float))
 
 
 def _extract_rapidocr_text(out) -> str:
@@ -241,7 +246,7 @@ def _extract_rapidocr_text(out) -> str:
     """
     result = out
     if isinstance(out, tuple) and len(out) == 2:
-        result = out[0]              # (result, elapse)
+        result = out[0]  # (result, elapse)
     elif hasattr(out, "txts"):
         texts = getattr(out, "txts", None)
         if texts is not None:
@@ -275,16 +280,20 @@ def _extract_rapidocr_text(out) -> str:
 # 视觉大模型 OCR
 # ---------------------------------------------------------------------------
 
-_VISION_PROMPT = (
-    "你是 OCR 引擎。请逐行、完整地提取这张图片中的全部文字，保持原始阅读顺序与"
-    "版式结构（表格用 | 分隔行）。只输出识别到的文字本身，不要翻译、不要总结、"
-    "不要添加任何解释或说明。若图片中没有文字，输出空。"
-)
+
+# ✅ R175（2026-11-03 · BUG-3 收编）：OCR 提示词已迁至注册表
+#    （key=``ocr_extract_system``），本模块不再保留字面量副本。
+#    **原文语义逐字保留**（只输出识别文字、不翻译/不总结/不解释）。
+def _vision_prompt() -> str:
+    from app.services.ai.prompts import get_prompt
+
+    return get_prompt("ocr_extract_system")
 
 
 async def ocr_bytes_vision(data: bytes, prompt: str = "") -> str:
     """用已配置的视觉大模型识别图片（OpenAI Vision 多模态格式）。"""
     from app.services.ai.provider_factory import get_vision_providers
+
     providers = await get_vision_providers()
     if not providers:
         raise OcrUnavailableError(_unavailable_hint())
@@ -294,6 +303,7 @@ async def ocr_bytes_vision(data: bytes, prompt: str = "") -> str:
     if img is not None:
         try:
             import io as _io
+
             buf = _io.BytesIO()
             img.convert("RGB").save(buf, format="PNG")
             png = buf.getvalue()
@@ -302,7 +312,8 @@ async def ocr_bytes_vision(data: bytes, prompt: str = "") -> str:
     data_url = "data:image/png;base64," + base64.b64encode(png).decode("ascii")
 
     from app.services.ai.providers.base import BaseProvider
-    messages = [BaseProvider.build_vision_message(prompt or _VISION_PROMPT, [data_url])]
+
+    messages = [BaseProvider.build_vision_message(prompt or _vision_prompt(), [data_url])]
     last_err: Exception | None = None
     for provider in providers:
         try:
@@ -321,6 +332,7 @@ async def ocr_bytes_vision(data: bytes, prompt: str = "") -> str:
 # 同步桥接（file_parser 为同步函数）
 # ---------------------------------------------------------------------------
 
+
 def _run_coro_sync(coro):
     """在同步上下文中执行协程：无线程外事件循环时直接 asyncio.run；
     若当前线程已有运行中的循环，则放到独立线程执行，避免重入错误。"""
@@ -330,6 +342,7 @@ def _run_coro_sync(coro):
         loop = None
     if loop and loop.is_running():
         import concurrent.futures
+
         with concurrent.futures.ThreadPoolExecutor(max_workers=1) as pool:
             return pool.submit(asyncio.run, coro).result()
     return asyncio.run(coro)
@@ -346,13 +359,13 @@ def _vision_available_sync() -> bool:
 # 对外统一入口
 # ---------------------------------------------------------------------------
 
+
 def ocr_bytes_sync(data: bytes, *, lang: str = "") -> OcrResult:
     """同步 OCR：按引擎顺序尝试，全部失败抛出 OcrUnavailableError。"""
     from app.config import settings
-    if not getattr(settings, "ocr_enabled", True) or \
-            (getattr(settings, "ocr_engine", "auto") or "").lower() == "off":
-        raise OcrUnavailableError(
-            "OCR 已被配置禁用（OCR_ENABLED=false 或 OCR_ENGINE=off）")
+
+    if not getattr(settings, "ocr_enabled", True) or (getattr(settings, "ocr_engine", "auto") or "").lower() == "off":
+        raise OcrUnavailableError("OCR 已被配置禁用（OCR_ENABLED=false 或 OCR_ENGINE=off）")
 
     if not data:
         return OcrResult("", "none")
@@ -396,6 +409,7 @@ def ocr_bytes_sync(data: bytes, *, lang: str = "") -> OcrResult:
 def ocr_capabilities() -> dict:
     """同步能力报告（不含视觉模型探测，用于日志/同步场景）。"""
     from app.config import settings
+
     return {
         "enabled": bool(getattr(settings, "ocr_enabled", True)),
         "engine_pref": getattr(settings, "ocr_engine", "auto"),

@@ -11,6 +11,7 @@
 
 测试直接调用路由/服务函数（与 test_bid_analysis.py 风格一致）。
 """
+
 import json
 import uuid
 
@@ -39,10 +40,7 @@ _COMBINED = (
 # =========================================================================
 def test_build_evidence_markdown_containment_hit():
     """整句抄写的内容必须命中原文出处：文档名/行号/标题/摘录齐全。"""
-    result = (
-        "## 工程概况\n"
-        "- 基坑深度 8.5m，支护形式为钻孔灌注桩，混凝土强度等级 C30。\n"
-    )
+    result = "## 工程概况\n" "- 基坑深度 8.5m，支护形式为钻孔灌注桩，混凝土强度等级 C30。\n"
     ev = build_evidence(result, "markdown", _COMBINED)
     assert ev, "逐字抄写的结果句必须能反查到出处"
     hit = ev[0]
@@ -63,10 +61,13 @@ def test_build_evidence_token_anchor_hit():
 
 def test_build_evidence_json_field_paths():
     """json 项按字段值反查，证据需携带 field 路径；「没有提及」不产证据。"""
-    content = json.dumps({
-        "支护形式": "钻孔灌注桩，混凝土强度等级 C30",
-        "开工日期": "没有提及",
-    }, ensure_ascii=False)
+    content = json.dumps(
+        {
+            "支护形式": "钻孔灌注桩，混凝土强度等级 C30",
+            "开工日期": "没有提及",
+        },
+        ensure_ascii=False,
+    )
     ev = build_evidence(content, "json", _COMBINED)
     assert ev, "有实义的字段值必须能溯源"
     assert ev[0]["field"] == "支护形式"
@@ -75,8 +76,7 @@ def test_build_evidence_json_field_paths():
 
 def test_build_evidence_no_fabrication():
     """原文里找不到出处时如实留空 —— 宁缺勿滥，绝不编造来源。"""
-    ev = build_evidence("本项目坐落于火星基地，采用反重力施工工艺保障进度。",
-                        "markdown", _COMBINED)
+    ev = build_evidence("本项目坐落于火星基地，采用反重力施工工艺保障进度。", "markdown", _COMBINED)
     assert ev == []
 
 
@@ -88,9 +88,7 @@ def test_build_evidence_missing_marker_empty():
 
 def test_build_evidence_respects_max_items():
     """候选再多也按 max_items 截断（成本护栏）。"""
-    result = "\n".join(
-        f"第{i}条：基坑深度 8.5m，支护形式为钻孔灌注桩，混凝土强度等级 C30。"
-        for i in range(30))
+    result = "\n".join(f"第{i}条：基坑深度 8.5m，支护形式为钻孔灌注桩，混凝土强度等级 C30。" for i in range(30))
     ev = build_evidence(result, "markdown", _COMBINED, max_items=5)
     assert len(ev) <= 5
 
@@ -98,8 +96,7 @@ def test_build_evidence_respects_max_items():
 def test_build_evidence_index_cache_rebuild_on_change():
     """索引单槽缓存以原文哈希为键：原文变化必须重建索引（不吃旧缓存）。"""
     other = "# 文档：另一份.pdf（分类：其他）\n\n地下室底板厚度 1200mm，属于大体积混凝土。\n"
-    ev = build_evidence("底板厚度 1200mm 按大体积混凝土控制裂缝。",
-                        "markdown", other)
+    ev = build_evidence("底板厚度 1200mm 按大体积混凝土控制裂缝。", "markdown", other)
     assert ev and ev[0]["doc"] == "另一份.pdf"
 
 
@@ -109,16 +106,13 @@ def test_build_evidence_index_cache_rebuild_on_change():
 async def _seed_scheme(db) -> tuple[str, str]:
     pid, sid = uuid.uuid4().hex, uuid.uuid4().hex
     await db.execute("INSERT INTO projects(id,name) VALUES(?,?)", (pid, "p"))
-    await db.execute("INSERT INTO schemes(id,project_id,name) VALUES(?,?,?)",
-                     (sid, pid, "深基坑专项方案"))
+    await db.execute("INSERT INTO schemes(id,project_id,name) VALUES(?,?,?)", (sid, pid, "深基坑专项方案"))
     await db.commit()
     return pid, sid
 
 
 async def _get_row(db, pid: str, item_id: str) -> dict:
-    cur = await db.execute(
-        "SELECT * FROM bid_analysis_items WHERE project_id=? AND item_id=?",
-        (pid, item_id))
+    cur = await db.execute("SELECT * FROM bid_analysis_items WHERE project_id=? AND item_id=?", (pid, item_id))
     r = await cur.fetchone()
     return dict(r) if r else {}
 
@@ -131,8 +125,7 @@ async def test_update_item_status_evidence_contract(db_conn):
     ev_json = json.dumps([{"doc": "招标文件.pdf", "line": 6}], ensure_ascii=False)
 
     # 新行 + evidence（INSERT 分支）
-    await ba._update_item_status(db, pid, "schemeBasicInfo", "success",
-                                 "内容一", "", evidence=ev_json)
+    await ba._update_item_status(db, pid, "schemeBasicInfo", "success", "内容一", "", evidence=ev_json)
     row = await _get_row(db, pid, "schemeBasicInfo")
     assert row["evidence"] == ev_json
 
@@ -141,8 +134,7 @@ async def test_update_item_status_evidence_contract(db_conn):
     assert (await _get_row(db, pid, "schemeBasicInfo"))["evidence"] == ev_json
 
     # 成功重跑但本轮没匹配到 → 传空串必须覆盖旧证据（不允许陈旧证据残留）
-    await ba._update_item_status(db, pid, "schemeBasicInfo", "success",
-                                 "内容二", "", evidence="")
+    await ba._update_item_status(db, pid, "schemeBasicInfo", "success", "内容二", "", evidence="")
     assert (await _get_row(db, pid, "schemeBasicInfo"))["evidence"] == ""
 
 
@@ -164,19 +156,16 @@ async def test_manual_edit_and_clear_invalidate_evidence(db_conn):
     """PUT/DELETE 后 evidence 必须清零 —— 旧出处对人工修改后的内容不再成立。"""
     db = db_conn
     pid, sid = await _seed_scheme(db)
-    await ba._update_item_status(db, pid, "schemeBasicInfo", "success",
-                                 "AI 内容", "", evidence='[{"doc":"x"}]')
+    await ba._update_item_status(db, pid, "schemeBasicInfo", "success", "AI 内容", "", evidence='[{"doc":"x"}]')
 
     res = await ba.update_single_result(
-        "schemeBasicInfo", {"content": "## 人工修正内容"},
-        scheme_id=sid, project_id="", db=db)
+        "schemeBasicInfo", {"content": "## 人工修正内容"}, scheme_id=sid, project_id="", db=db
+    )
     assert res["item"]["source"] == "manual"
     assert res["item"]["evidence"] == ""
 
-    await ba._update_item_status(db, pid, "schemeBasicInfo", "success",
-                                 "AI 内容", "", evidence='[{"doc":"x"}]')
-    res2 = await ba.clear_single_result(
-        "schemeBasicInfo", scheme_id=sid, project_id="", db=db)
+    await ba._update_item_status(db, pid, "schemeBasicInfo", "success", "AI 内容", "", evidence='[{"doc":"x"}]')
+    res2 = await ba.clear_single_result("schemeBasicInfo", scheme_id=sid, project_id="", db=db)
     assert res2["item"]["evidence"] == ""
 
 
@@ -191,9 +180,21 @@ async def test_results_and_single_get_attach_scheme_name(db_conn):
         "(id, project_id, scheme_id, item_id, label, output_type, required, "
         " status, content, sort_order, source, evidence) "
         "VALUES (?,?,?,?,?,?,?,?,?,?,?,?)",
-        (f"{pid}_schemeBasicInfo", pid, sid, "schemeBasicInfo", "方案级基本信息",
-         "markdown", 1, "success", "深基坑支护方案。", 2, "ai",
-         '[{"doc":"招标文件.pdf","line":6}]'))
+        (
+            f"{pid}_schemeBasicInfo",
+            pid,
+            sid,
+            "schemeBasicInfo",
+            "方案级基本信息",
+            "markdown",
+            1,
+            "success",
+            "深基坑支护方案。",
+            2,
+            "ai",
+            '[{"doc":"招标文件.pdf","line":6}]',
+        ),
+    )
     await db.commit()
 
     res = await ba.list_analysis_results(scheme_id="", project_id=pid, db=db)
@@ -201,6 +202,5 @@ async def test_results_and_single_get_attach_scheme_name(db_conn):
     assert item["scheme_name"] == "深基坑专项方案"
     assert json.loads(item["evidence"])[0]["doc"] == "招标文件.pdf"
 
-    single = await ba.get_single_result(
-        "schemeBasicInfo", scheme_id="", project_id=pid, db=db)
+    single = await ba.get_single_result("schemeBasicInfo", scheme_id="", project_id=pid, db=db)
     assert single["scheme_name"] == "深基坑专项方案"

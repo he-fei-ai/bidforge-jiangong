@@ -7,6 +7,7 @@
 可追溯性：每张表格/图片均归属页码，并生成 source_ref
 （`{doc_id}#page:N#table:tK` / `{doc_id}#page:N#img:iK`）。
 """
+
 from __future__ import annotations
 
 import logging
@@ -31,9 +32,7 @@ _TABLE_TITLE_RE = re.compile(r"^(?:[【表]\s*(?:表格|表)\s*[\d\-—\.]*[】]
 _SEP_ROW_RE = re.compile(r"^\|\s*:?-+:?\s*(\|\s*:?-+:?\s*)*\|?$")
 # 图片标记：![](src) / [IMAGE: file, page:N] / 图N-M 题注行
 _MD_IMG_RE = re.compile(r"!\[([^\]]*)\]\(([^)\s]+)[^)]*\)")
-_BRACKET_IMG_RE = re.compile(
-    r"\[\s*IMAGE\s*[:：]\s*([^\],]+?)\s*(?:[,，]\s*page\s*:?\s*(\d+)\s*)?\]",
-    re.I)
+_BRACKET_IMG_RE = re.compile(r"\[\s*IMAGE\s*[:：]\s*([^\],]+?)\s*(?:[,，]\s*page\s*:?\s*(\d+)\s*)?\]", re.I)
 _CAPTION_RE = re.compile(r"^[（(]?\s*(?:图|附圖|附图)\s*[\d]+(?:[-—.]\d+)?\s*[）)]?\s*(.*)$")
 # 公式标记：块级 $$...$$ 与行内 \( \) / 常见公式特征
 _BLOCK_MATH_RE = re.compile(r"\$\$([\s\S]+?)\$\$")
@@ -94,10 +93,16 @@ def parse_markdown_structured(markdown: str, *, doc_id: str = "") -> dict[str, A
     pages: dict[int, dict] = {}
 
     def _page_entry(num: int) -> dict:
-        return pages.setdefault(num, {
-            "page_num": num, "line_idx": [], "tables": [], "images": [],
-            "formulas": [],
-        })
+        return pages.setdefault(
+            num,
+            {
+                "page_num": num,
+                "line_idx": [],
+                "tables": [],
+                "images": [],
+                "formulas": [],
+            },
+        )
 
     for i, ln in enumerate(lines):
         if _PAGE_MARK_RE.search(ln.strip()) and ln.strip().startswith("<!--"):
@@ -115,18 +120,21 @@ def parse_markdown_structured(markdown: str, *, doc_id: str = "") -> dict[str, A
         end_line = text.count("\n", 0, max(m.start(), m.end() - 1))
         pnum = page_of_line[start_line]
         f_id = f"f{len(formulas) + 1}"
-        formulas.append({
-            "formula_id": f_id, "page_num": pnum,
-            "latex": m.group(1).strip(),
-            "source_ref": f"{doc_id}#page:{pnum}#formula:{f_id}",
-        })
+        formulas.append(
+            {
+                "formula_id": f_id,
+                "page_num": pnum,
+                "latex": m.group(1).strip(),
+                "source_ref": f"{doc_id}#page:{pnum}#formula:{f_id}",
+            }
+        )
         _page_entry(pnum)["formulas"].append(f_id)
         _math_line_spans.append((start_line, end_line))
 
     # ---- 2. 表格抽取（全篇顺序扫描，保证跨页表格也归位起始页）----
     tables: list[dict] = []
-    consumed: set[int] = set()   # 已被表格消费的行的全局行号
-    last_plain = ""              # 表格前最近的普通文本行（标题候选）
+    consumed: set[int] = set()  # 已被表格消费的行的全局行号
+    last_plain = ""  # 表格前最近的普通文本行（标题候选）
 
     def _in_math_span(idx: int) -> bool:
         # E1：块公式的分隔行/内部 LaTeX 行不是正文，不能污染表格标题候选
@@ -136,8 +144,8 @@ def parse_markdown_structured(markdown: str, *, doc_id: str = "") -> dict[str, A
     while i < len(lines):
         stripped = lines[i].strip()
         is_table_anchor = stripped == "【表格】" or (
-            stripped.startswith("|") and i + 1 < len(lines)
-            and _SEP_ROW_RE.match(lines[i + 1].strip() or ""))
+            stripped.startswith("|") and i + 1 < len(lines) and _SEP_ROW_RE.match(lines[i + 1].strip() or "")
+        )
         if not is_table_anchor:
             if stripped and not stripped.startswith("#") and not _in_math_span(i):
                 # D6：纯标记行（页注释 / 图片占位）不覆盖标题候选；
@@ -158,8 +166,11 @@ def parse_markdown_structured(markdown: str, *, doc_id: str = "") -> dict[str, A
         # GFM 合法表：表头行的【下一行】必须是分隔行（| --- | :--: |）。
         # 旧实现误判 lines[i]（此时 i 已推进到整块表格之后），
         # 导致所有管道表被判为非法、表格/图片抽取整体失效。
-        if header_line_idx is None or header_line_idx + 1 >= len(lines) or \
-                not _SEP_ROW_RE.match(lines[header_line_idx + 1].strip() or ""):
+        if (
+            header_line_idx is None
+            or header_line_idx + 1 >= len(lines)
+            or not _SEP_ROW_RE.match(lines[header_line_idx + 1].strip() or "")
+        ):
             # 不构成 GFM 表（无分隔行）→ 当作普通文本继续
             if stripped == "【表格】":
                 # 【表格】后紧跟非法表：跳过锚点，避免死循环
@@ -212,25 +223,26 @@ def parse_markdown_structured(markdown: str, *, doc_id: str = "") -> dict[str, A
                     body_lines.append("> 〔表格见 tables 结构化数据〕")
                 continue
             # 公式行不重复入页文本（已在 formulas 结构化），整块只在起始行留占位
-            math_span = next((sp for sp in _math_line_spans
-                             if sp[0] <= g_idx <= sp[1]), None)
+            math_span = next((sp for sp in _math_line_spans if sp[0] <= g_idx <= sp[1]), None)
             if math_span is not None:
                 if g_idx == math_span[0]:
                     body_lines.append("> 〔公式见 formulas 结构化数据〕")
                 continue
             for m in _MD_IMG_RE.finditer(ln):
                 img_id = f"img_{len(images) + 1:03d}"
-                images.append({
-                    "image_id": img_id,
-                    "page_num": num,
-                    "file_path": m.group(2),
-                    "alt": m.group(1),
-                    "caption": m.group(1),
-                    "ocr_text": "",
-                    "image_type": "embedded",
-                    "confidence": None,
-                    "source_ref": f"{doc_id}#page:{num}#img:{img_id}",
-                })
+                images.append(
+                    {
+                        "image_id": img_id,
+                        "page_num": num,
+                        "file_path": m.group(2),
+                        "alt": m.group(1),
+                        "caption": m.group(1),
+                        "ocr_text": "",
+                        "image_type": "embedded",
+                        "confidence": None,
+                        "source_ref": f"{doc_id}#page:{num}#img:{img_id}",
+                    }
+                )
                 entry["images"].append(img_id)
             for m in _BRACKET_IMG_RE.finditer(ln):
                 img_id = f"img_{len(images) + 1:03d}"
@@ -250,20 +262,21 @@ def parse_markdown_structured(markdown: str, *, doc_id: str = "") -> dict[str, A
                 #    现按「标记实际所在的页」归位（未知页回退到当前页），
                 #    只留 DEBUG 痕迹，绝不阻断解析主链路。
                 if pnum not in pages:
-                    logger.debug("图片 %s 引用的页 %d 不存在，按标记所在页 %d 归位",
-                                 m.group(1), pnum, num)
+                    logger.debug("图片 %s 引用的页 %d 不存在，按标记所在页 %d 归位", m.group(1), pnum, num)
                     pnum = num
-                images.append({
-                    "image_id": img_id,
-                    "page_num": pnum,
-                    "file_path": m.group(1),
-                    "alt": "",
-                    "caption": "",
-                    "ocr_text": "",
-                    "image_type": "ocr",
-                    "confidence": None,
-                    "source_ref": f"{doc_id}#page:{pnum}#img:{img_id}",
-                })
+                images.append(
+                    {
+                        "image_id": img_id,
+                        "page_num": pnum,
+                        "file_path": m.group(1),
+                        "alt": "",
+                        "caption": "",
+                        "ocr_text": "",
+                        "image_type": "ocr",
+                        "confidence": None,
+                        "source_ref": f"{doc_id}#page:{pnum}#img:{img_id}",
+                    }
+                )
                 _page_entry(pnum)["images"].append(img_id)
             cap = _CAPTION_RE.match(ln.strip())
             if cap and images and ln.strip():
@@ -279,16 +292,18 @@ def parse_markdown_structured(markdown: str, *, doc_id: str = "") -> dict[str, A
     page_list = []
     for num in page_nums:
         e = pages[num]
-        page_list.append({
-            "page_num": num,
-            # ✅ 防御（2026-09-27）：正常路径下上面已为每个页写好 text；
-            #    万一有别的分支在拼装之后/之中新增页条目，也不能让
-            #    KeyError('text') 把整批解析产物带走（空文本优于崩溃）。
-            "text": e.get("text", ""),
-            "tables": e["tables"],
-            "images": e["images"],
-            "formulas": e["formulas"],
-        })
+        page_list.append(
+            {
+                "page_num": num,
+                # ✅ 防御（2026-09-27）：正常路径下上面已为每个页写好 text；
+                #    万一有别的分支在拼装之后/之中新增页条目，也不能让
+                #    KeyError('text') 把整批解析产物带走（空文本优于崩溃）。
+                "text": e.get("text", ""),
+                "tables": e["tables"],
+                "images": e["images"],
+                "formulas": e["formulas"],
+            }
+        )
 
     return {
         "doc_id": doc_id,
@@ -303,14 +318,7 @@ def parse_markdown_structured(markdown: str, *, doc_id: str = "") -> dict[str, A
     }
 
 
-def wrap_parsed_markdown(doc_id: str, title: str, markdown: str,
-                         page_count: int) -> str:
+def wrap_parsed_markdown(doc_id: str, title: str, markdown: str, page_count: int) -> str:
     """按规范 §2.2.1 给解析层 Markdown 加 front-matter 头。"""
-    head = (
-        "---\n"
-        f"doc_id: {doc_id}\n"
-        f"title: {title}\n"
-        f"page_count: {page_count}\n"
-        "---\n\n"
-    )
+    head = "---\n" f"doc_id: {doc_id}\n" f"title: {title}\n" f"page_count: {page_count}\n" "---\n\n"
     return head + markdown

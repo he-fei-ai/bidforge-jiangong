@@ -68,7 +68,7 @@ describe("DocumentPipelineSummary", () => {
 
   it("error 态：降级为非阻断告警并展示原因", () => {
     const { container } = render(
-      <DocumentPipelineSummary status={null} error="磁盘 meta 读取失败" />
+      <DocumentPipelineSummary status={null} error="磁盘 meta 读取失败" />,
     );
     const txt = container.textContent || "";
     expect(txt).toContain("解析质量信息读取失败");
@@ -102,19 +102,15 @@ describe("DocumentPipelineSummary", () => {
 
   it("四层产物：有产物蓝色 Tag 带数量，无产物中性 Tag；meta 缺失时追加告警", () => {
     const { container } = render(<DocumentPipelineSummary status={status()} />);
-    const tags = Array.from(container.querySelectorAll(".ant-tag")).map(
-      (t) => t.textContent || ""
-    );
+    const tags = Array.from(container.querySelectorAll(".ant-tag")).map((t) => t.textContent || "");
     expect(tags.join("|")).toContain("原文层 1");
     expect(tags.join("|")).toContain("解析层 2");
     expect(tags.join("|")).toContain("提取层 0");
     expect(tags.join("|")).toContain("语义层 0");
     expect(tags.join("|")).not.toContain("meta 缺失");
 
-    const warn = render(
-      <DocumentPipelineSummary status={status({ meta_on_disk: false })} />
-    );
-    expect((warn.container.textContent || "")).toContain("meta 缺失");
+    const warn = render(<DocumentPipelineSummary status={status({ meta_on_disk: false })} />);
+    expect(warn.container.textContent || "").toContain("meta 缺失");
   });
 });
 
@@ -192,7 +188,7 @@ describe("formatDurationMs", () => {
 /** 在容器内按精确文案找按钮 */
 function btnByText(root: HTMLElement, text: string): HTMLButtonElement | null {
   const b = Array.from(root.querySelectorAll("button")).find(
-    (x) => (x.textContent || "").trim() === text
+    (x) => (x.textContent || "").trim() === text,
   );
   return (b as HTMLButtonElement) || null;
 }
@@ -206,9 +202,7 @@ describe("DocumentPipelineSummary 管线操作", () => {
 
   it("传入 onAction 且解析成功：四个动作按钮齐全，点击回传对应 key", () => {
     const onAction = vi.fn();
-    const { container } = render(
-      <DocumentPipelineSummary status={status()} onAction={onAction} />
-    );
+    const { container } = render(<DocumentPipelineSummary status={status()} onAction={onAction} />);
     expect(container.textContent || "").toContain("管线操作");
     for (const label of ["重新解析", "物化提取层", "交叉校验", "刷新质量"]) {
       expect(btnByText(container, label)).not.toBeNull();
@@ -225,10 +219,7 @@ describe("DocumentPipelineSummary 管线操作", () => {
 
   it("未解析成功：隐藏「物化提取层」（无源可物化），其余动作仍在", () => {
     const { container } = render(
-      <DocumentPipelineSummary
-        status={status({ parse_status: "pending" })}
-        onAction={() => {}}
-      />
+      <DocumentPipelineSummary status={status({ parse_status: "pending" })} onAction={() => {}} />,
     );
     expect(btnByText(container, "物化提取层")).toBeNull();
     expect(btnByText(container, "重新解析")).not.toBeNull();
@@ -237,11 +228,7 @@ describe("DocumentPipelineSummary 管线操作", () => {
 
   it("actionBusy：当前动作按钮 loading，其余按钮禁用（防并发重入）", () => {
     const { container } = render(
-      <DocumentPipelineSummary
-        status={status()}
-        onAction={() => {}}
-        actionBusy="reparse"
-      />
+      <DocumentPipelineSummary status={status()} onAction={() => {}} actionBusy="reparse" />,
     );
     const reparse = btnByText(container, "重新解析")!;
     const cross = btnByText(container, "交叉校验")!;
@@ -250,12 +237,10 @@ describe("DocumentPipelineSummary 管线操作", () => {
   });
 
   it("loading / error 态：操作区不渲染（数据未到不可操作）", () => {
-    const l = render(
-      <DocumentPipelineSummary loading onAction={() => {}} status={null} />
-    );
+    const l = render(<DocumentPipelineSummary loading onAction={() => {}} status={null} />);
     expect(l.container.textContent || "").not.toContain("管线操作");
     const e = render(
-      <DocumentPipelineSummary error="读取失败" onAction={() => {}} status={null} />
+      <DocumentPipelineSummary error="读取失败" onAction={() => {}} status={null} />,
     );
     expect(e.container.textContent || "").not.toContain("管线操作");
   });
@@ -274,4 +259,3 @@ describe("isActionAvailable", () => {
     }
   });
 });
-

@@ -17,6 +17,7 @@
 Prompt 文本使用 __PLACEHOLDER__ 占位符避免与 Python .format() 冲突，统一在 render() 时
 替换。
 """
+
 from __future__ import annotations
 
 import json
@@ -33,9 +34,38 @@ from typing import Optional
 #    若本模块又从包顶层 import，包 __init__ 初始化未完成时 `_reg` 尚未导出
 #    → 「cannot import name _reg from partially initialized module」，
 #    且钩子的幂等锁已被置位 → 注册**永久缺失**（关联回归 8 处 KeyError）。
-#    `_registry` / `_cache` 都不反向依赖本模块，环在此被打断。
-from app.services.ai.prompts._cache import get_prompt
+#
+# ⚠️ `get_prompt` **不能**在模块顶层 import（2026-11-04 修复）：
+#    本模块在 `_registry` 尾部惰性注册钩子中被反向 import 时，`_cache` 正
+#    处于**半初始化**状态（`_cache` 顶层 import `_registry`，而 `_registry`
+#    尾部又触发本钩子），此时 `_cache.get_prompt` 尚未定义 → 抛
+#    「cannot import name 'get_prompt' from partially initialized module」。
+#    因此 `get_prompt` 改为**惰性绑定**：模块顶层只占位为 None，首次
+#    **调用时**才从 `_cache` 取出并写回模块全局 —— 运行时各模块必然已
+#    全部加载完成，此时局部 import 无循环风险。调用点仍以**全局名**
+#    `get_prompt(...)` 引用（而非函数体内局部 import），既满足 AST 护栏
+#    （test_get_item_prompt_goes_through_registry 断言直接调用 get_prompt），
+#    也保留测试 monkeypatch `factory.get_prompt` 的替换能力（全局名查找）。
+#    `_reg` 仍在顶层 import（其定义先于 `_cache` 完成、且本模块注册路径确需它）。
 from app.services.ai.prompts._registry import _reg
+
+#: `_cache.get_prompt` 的惰性绑定占位（None = 尚未绑定）。
+#: 见上方注释与 :func:`_bind_get_prompt`。
+get_prompt = None  # type: ignore[assignment]  # 实际类型: Callable[[str, ...], str]
+
+
+def _bind_get_prompt():
+    """幂等地把 ``_cache.get_prompt`` 绑定到模块全局 ``get_prompt``。
+
+    仅在本模块被惰性注册钩子半初始化反向 import 的窗口内避免循环导入：
+    首次调用发生在运行时（各模块已加载完），局部 import 安全。
+    """
+    global get_prompt
+    if get_prompt is None:
+        from app.services.ai.prompts._cache import get_prompt as _gp
+
+        get_prompt = _gp
+
 
 # ✅ R76b · G1：围栏保护区间委托全仓唯一事实源。`fence_common` 是仅依赖 `re` 的
 #    叶子模块（不反向引用本模块、也不经 `ai.prompts` 包顶层），因此这里可以安全地
@@ -55,52 +85,100 @@ logger = logging.getLogger("bid_analysis")
 ANALYSIS_ITEMS: list[dict] = [
     # --- 方案基本信息 12 大类（需求清单一~十二）---
     {
-        "item_id": "projectBasicInfo", "label": "项目级基本信息", "required": 1,
-        "output_type": "json", "sort_order": 1, "group": "project_info",
+        "item_id": "projectBasicInfo",
+        "label": "项目级基本信息",
+        "required": 1,
+        "output_type": "json",
+        "sort_order": 1,
+        "group": "project_info",
     },
     {
-        "item_id": "schemeBasicInfo", "label": "方案级基本信息", "required": 1,
-        "output_type": "markdown", "sort_order": 2, "group": "scheme_info",
+        "item_id": "schemeBasicInfo",
+        "label": "方案级基本信息",
+        "required": 1,
+        "output_type": "markdown",
+        "sort_order": 2,
+        "group": "scheme_info",
     },
     {
-        "item_id": "overviewParams", "label": "工程概况与设计参数", "required": 1,
-        "output_type": "markdown", "sort_order": 3, "group": "overview_params",
+        "item_id": "overviewParams",
+        "label": "工程概况与设计参数",
+        "required": 1,
+        "output_type": "markdown",
+        "sort_order": 3,
+        "group": "overview_params",
     },
     {
-        "item_id": "compilationBasis", "label": "编制依据", "required": 1,
-        "output_type": "markdown", "sort_order": 4, "group": "basis",
+        "item_id": "compilationBasis",
+        "label": "编制依据",
+        "required": 1,
+        "output_type": "markdown",
+        "sort_order": 4,
+        "group": "basis",
     },
     {
-        "item_id": "siteConditions", "label": "施工条件与环境", "required": 1,
-        "output_type": "markdown", "sort_order": 5, "group": "condition",
+        "item_id": "siteConditions",
+        "label": "施工条件与环境",
+        "required": 1,
+        "output_type": "markdown",
+        "sort_order": 5,
+        "group": "condition",
     },
     {
-        "item_id": "deploymentSchedule", "label": "施工部署与进度", "required": 1,
-        "output_type": "markdown", "sort_order": 6, "group": "deployment",
+        "item_id": "deploymentSchedule",
+        "label": "施工部署与进度",
+        "required": 1,
+        "output_type": "markdown",
+        "sort_order": 6,
+        "group": "deployment",
     },
     {
-        "item_id": "constructionTechnique", "label": "施工工艺与技术", "required": 1,
-        "output_type": "markdown", "sort_order": 7, "group": "technique",
+        "item_id": "constructionTechnique",
+        "label": "施工工艺与技术",
+        "required": 1,
+        "output_type": "markdown",
+        "sort_order": 7,
+        "group": "technique",
     },
     {
-        "item_id": "resourceAllocation", "label": "资源配置", "required": 0,
-        "output_type": "markdown", "sort_order": 8, "group": "resource",
+        "item_id": "resourceAllocation",
+        "label": "资源配置",
+        "required": 0,
+        "output_type": "markdown",
+        "sort_order": 8,
+        "group": "resource",
     },
     {
-        "item_id": "safetyMeasures", "label": "安全保证措施", "required": 1,
-        "output_type": "markdown", "sort_order": 9, "group": "safety",
+        "item_id": "safetyMeasures",
+        "label": "安全保证措施",
+        "required": 1,
+        "output_type": "markdown",
+        "sort_order": 9,
+        "group": "safety",
     },
     {
-        "item_id": "qualityAcceptance", "label": "质量管理与验收", "required": 1,
-        "output_type": "markdown", "sort_order": 10, "group": "quality",
+        "item_id": "qualityAcceptance",
+        "label": "质量管理与验收",
+        "required": 1,
+        "output_type": "markdown",
+        "sort_order": 10,
+        "group": "quality",
     },
     {
-        "item_id": "emergencyResponse", "label": "应急处置", "required": 1,
-        "output_type": "markdown", "sort_order": 11, "group": "emergency",
+        "item_id": "emergencyResponse",
+        "label": "应急处置",
+        "required": 1,
+        "output_type": "markdown",
+        "sort_order": 11,
+        "group": "emergency",
     },
     {
-        "item_id": "calcAndDrawings", "label": "计算书与图纸", "required": 1,
-        "output_type": "markdown", "sort_order": 12, "group": "calc_drawing",
+        "item_id": "calcAndDrawings",
+        "label": "计算书与图纸",
+        "required": 1,
+        "output_type": "markdown",
+        "sort_order": 12,
+        "group": "calc_drawing",
     },
     # ================================================================
     # ✅ 施工组织设计相关（新增 6 项，2026-09-17 保留）
@@ -108,28 +186,52 @@ ANALYSIS_ITEMS: list[dict] = [
     # 约束。提取的是「须覆盖哪些方面、有哪些硬性要求」。
     # ================================================================
     {
-        "item_id": "materialManagement", "label": "材料管理", "required": 1,
-        "output_type": "markdown", "sort_order": 13, "group": "construction",
+        "item_id": "materialManagement",
+        "label": "材料管理",
+        "required": 1,
+        "output_type": "markdown",
+        "sort_order": 13,
+        "group": "construction",
     },
     {
-        "item_id": "equipmentManagement", "label": "机械管理", "required": 1,
-        "output_type": "markdown", "sort_order": 14, "group": "construction",
+        "item_id": "equipmentManagement",
+        "label": "机械管理",
+        "required": 1,
+        "output_type": "markdown",
+        "sort_order": 14,
+        "group": "construction",
     },
     {
-        "item_id": "constructionDeployment", "label": "施工部署", "required": 1,
-        "output_type": "markdown", "sort_order": 15, "group": "construction",
+        "item_id": "constructionDeployment",
+        "label": "施工部署",
+        "required": 1,
+        "output_type": "markdown",
+        "sort_order": 15,
+        "group": "construction",
     },
     {
-        "item_id": "constructionProcess", "label": "施工流程", "required": 1,
-        "output_type": "markdown", "sort_order": 16, "group": "construction",
+        "item_id": "constructionProcess",
+        "label": "施工流程",
+        "required": 1,
+        "output_type": "markdown",
+        "sort_order": 16,
+        "group": "construction",
     },
     {
-        "item_id": "workInterfaceDivision", "label": "工作界面划分", "required": 1,
-        "output_type": "markdown", "sort_order": 17, "group": "construction",
+        "item_id": "workInterfaceDivision",
+        "label": "工作界面划分",
+        "required": 1,
+        "output_type": "markdown",
+        "sort_order": 17,
+        "group": "construction",
     },
     {
-        "item_id": "engineeringMethods", "label": "工程做法", "required": 1,
-        "output_type": "markdown", "sort_order": 18, "group": "construction",
+        "item_id": "engineeringMethods",
+        "label": "工程做法",
+        "required": 1,
+        "output_type": "markdown",
+        "sort_order": 18,
+        "group": "construction",
     },
     # ⚠️ 2026-10-01 定位切换（招投标 → 专项施工方案）：
     #    「技术评分要求」提取项（原 item_id="techScoring"，sort_order=19，
@@ -154,136 +256,250 @@ ANALYSIS_ITEMS: list[dict] = [
 # ================================================================
 BID_RESPONSE_ITEMS: list[dict] = [
     {
-        "item_id": "projectOverview", "label": "项目概述", "required": 1,
-        "output_type": "markdown", "sort_order": 1, "group": "overview",
+        "item_id": "projectOverview",
+        "label": "项目概述",
+        "required": 1,
+        "output_type": "markdown",
+        "sort_order": 1,
+        "group": "overview",
         "description": "提取项目基本信息、背景目的、规模预算、时间安排、实施内容和技术特点。",
     },
     {
-        "item_id": "techRequirements", "label": "技术评分要求", "required": 1,
-        "output_type": "markdown", "sort_order": 2, "group": "scoring",
+        "item_id": "techRequirements",
+        "label": "技术评分要求",
+        "required": 1,
+        "output_type": "markdown",
+        "sort_order": 2,
+        "group": "scoring",
         "description": "提取技术评分项、权重分值、评分标准和招标文件中的位置。",
     },
     {
-        "item_id": "projectInfo", "label": "项目信息", "required": 1,
-        "output_type": "json", "sort_order": 3, "group": "subject",
+        "item_id": "projectInfo",
+        "label": "项目信息",
+        "required": 1,
+        "output_type": "json",
+        "sort_order": 3,
+        "group": "subject",
         "description": "项目名称、编号、类型、预算和地址。",
-        "fields": [["project_name", "项目名称"], ["project_number", "项目编号"],
-                   ["project_type", "项目类型"], ["project_budget", "项目预算"],
-                   ["project_address", "项目地址"]],
+        "fields": [
+            ["project_name", "项目名称"],
+            ["project_number", "项目编号"],
+            ["project_type", "项目类型"],
+            ["project_budget", "项目预算"],
+            ["project_address", "项目地址"],
+        ],
     },
     {
-        "item_id": "partAInfo", "label": "甲方信息", "required": 1,
-        "output_type": "json", "sort_order": 4, "group": "subject",
+        "item_id": "partAInfo",
+        "label": "甲方信息",
+        "required": 1,
+        "output_type": "json",
+        "sort_order": 4,
+        "group": "subject",
         "description": "招标人公司、地址、联系人和电话。",
-        "fields": [["company_name", "公司名称"], ["address", "地址"],
-                   ["contact_person", "联系人"], ["contact_phone", "联系电话"]],
+        "fields": [
+            ["company_name", "公司名称"],
+            ["address", "地址"],
+            ["contact_person", "联系人"],
+            ["contact_phone", "联系电话"],
+        ],
     },
     {
-        "item_id": "deliveryAndServiceRequirements", "label": "交货和服务要求",
-        "required": 1, "output_type": "json", "sort_order": 5, "group": "subject",
+        "item_id": "deliveryAndServiceRequirements",
+        "label": "交货和服务要求",
+        "required": 1,
+        "output_type": "json",
+        "sort_order": 5,
+        "group": "subject",
         "description": "实施周期、交付范围、地点、验收、质保、售后、响应、培训和文档要求。",
-        "fields": [["implementation_period", "实施周期/工期/交付期限"],
-                   ["delivery_scope", "交付范围"], ["delivery_location", "交付/实施地点"],
-                   ["acceptance_requirements", "验收要求"], ["warranty_period", "质保期"],
-                   ["after_sales_service", "售后服务要求"], ["response_time", "响应时限"],
-                   ["training_requirements", "培训要求"],
-                   ["documentation_requirements", "资料/文档交付要求"]],
+        "fields": [
+            ["implementation_period", "实施周期/工期/交付期限"],
+            ["delivery_scope", "交付范围"],
+            ["delivery_location", "交付/实施地点"],
+            ["acceptance_requirements", "验收要求"],
+            ["warranty_period", "质保期"],
+            ["after_sales_service", "售后服务要求"],
+            ["response_time", "响应时限"],
+            ["training_requirements", "培训要求"],
+            ["documentation_requirements", "资料/文档交付要求"],
+        ],
     },
     {
-        "item_id": "procurementList", "label": "采购清单", "required": 0,
-        "output_type": "markdown", "sort_order": 6, "group": "subject",
+        "item_id": "procurementList",
+        "label": "采购清单",
+        "required": 0,
+        "output_type": "markdown",
+        "sort_order": 6,
+        "group": "subject",
         "description": "采购内容、数量、规格参数、交付和验收要求。",
     },
     {
-        "item_id": "responseFileRequirements", "label": "响应文件要求", "required": 1,
-        "output_type": "markdown", "sort_order": 7, "group": "response",
+        "item_id": "responseFileRequirements",
+        "label": "响应文件要求",
+        "required": 1,
+        "output_type": "markdown",
+        "sort_order": 7,
+        "group": "response",
         "description": "响应文件组成、格式模板、签章、递交和偏离表要求。",
     },
     {
-        "item_id": "agentInfo", "label": "代理机构信息", "required": 0,
-        "output_type": "json", "sort_order": 8, "group": "subject",
+        "item_id": "agentInfo",
+        "label": "代理机构信息",
+        "required": 0,
+        "output_type": "json",
+        "sort_order": 8,
+        "group": "subject",
         "description": "代理机构联系方式和账户信息。",
-        "fields": [["company_name", "公司名称"], ["address", "地址"],
-                   ["contact_person", "联系人"], ["contact_phone", "联系电话"],
-                   ["email", "联系邮箱"], ["bank_account_name", "银行账户名称"],
-                   ["bank_account_number", "银行账户账号"],
-                   ["bank_account_address", "银行账户开户行"],
-                   ["bank_account_address_detail", "银行账户开户行地址"]],
+        "fields": [
+            ["company_name", "公司名称"],
+            ["address", "地址"],
+            ["contact_person", "联系人"],
+            ["contact_phone", "联系电话"],
+            ["email", "联系邮箱"],
+            ["bank_account_name", "银行账户名称"],
+            ["bank_account_number", "银行账户账号"],
+            ["bank_account_address", "银行账户开户行"],
+            ["bank_account_address_detail", "银行账户开户行地址"],
+        ],
     },
     {
-        "item_id": "keyInfo", "label": "投标关键节点", "required": 0,
-        "output_type": "json", "sort_order": 9, "group": "schedule",
+        "item_id": "keyInfo",
+        "label": "投标关键节点",
+        "required": 0,
+        "output_type": "json",
+        "sort_order": 9,
+        "group": "schedule",
         "description": "公告、获取文件、递交、截止和开标信息。",
-        "fields": [["bid_announcement_time", "招标公告发布日期"],
-                   ["bid_file_get_way", "招标文件获取方式"], ["bid_file_price", "招标文件售价"],
-                   ["get_bid_file_time", "获取招标文件时间"],
-                   ["bid_document_submission_location", "投标文件提交地点"],
-                   ["bid_submission_deadline", "投标截止时间"],
-                   ["bid_opening_time", "开标时间"], ["bid_opening_address", "开标地点"],
-                   ["other_notes", "其他注意事项"]],
+        "fields": [
+            ["bid_announcement_time", "招标公告发布日期"],
+            ["bid_file_get_way", "招标文件获取方式"],
+            ["bid_file_price", "招标文件售价"],
+            ["get_bid_file_time", "获取招标文件时间"],
+            ["bid_document_submission_location", "投标文件提交地点"],
+            ["bid_submission_deadline", "投标截止时间"],
+            ["bid_opening_time", "开标时间"],
+            ["bid_opening_address", "开标地点"],
+            ["other_notes", "其他注意事项"],
+        ],
     },
     {
-        "item_id": "marginInfo", "label": "投标保证金", "required": 0,
-        "output_type": "json", "sort_order": 10, "group": "margin",
+        "item_id": "marginInfo",
+        "label": "投标保证金",
+        "required": 0,
+        "output_type": "json",
+        "sort_order": 10,
+        "group": "margin",
         "description": "保证金金额、方式、截止和退还条件。",
-        "fields": [["bidding_deposit", "投标保证金"], ["payment_method", "缴纳方式"],
-                   ["due_date", "截止日期"], ["refund_conditions", "退还条件"],
-                   ["non_refundable_conditions", "不予退还的情形"],
-                   ["other_notes", "其他注意事项"]],
+        "fields": [
+            ["bidding_deposit", "投标保证金"],
+            ["payment_method", "缴纳方式"],
+            ["due_date", "截止日期"],
+            ["refund_conditions", "退还条件"],
+            ["non_refundable_conditions", "不予退还的情形"],
+            ["other_notes", "其他注意事项"],
+        ],
     },
 ]
 
 BID_RESPONSE_ITEMS += [
     {
-        "item_id": "qualificationReview", "label": "资格性审查", "required": 0,
-        "output_type": "markdown", "sort_order": 11, "group": "review",
+        "item_id": "qualificationReview",
+        "label": "资格性审查",
+        "required": 0,
+        "output_type": "markdown",
+        "sort_order": 11,
+        "group": "review",
         "description": "投标人资格条件和资格审查要求。",
     },
     {
-        "item_id": "complianceCheck", "label": "符合性检查", "required": 0,
-        "output_type": "markdown", "sort_order": 12, "group": "review",
+        "item_id": "complianceCheck",
+        "label": "符合性检查",
+        "required": 0,
+        "output_type": "markdown",
+        "sort_order": 12,
+        "group": "review",
         "description": "文件完整性、有效性、规范和偏差处理要求。",
     },
     {
-        "item_id": "openBid", "label": "开标要求", "required": 0,
-        "output_type": "json", "sort_order": 13, "group": "open_bid",
+        "item_id": "openBid",
+        "label": "开标要求",
+        "required": 0,
+        "output_type": "json",
+        "sort_order": 13,
+        "group": "open_bid",
         "description": "开标时间地点、参与要求、无效标和流程。",
-        "fields": [["time_place", "时间地点"], ["part_req", "参与要求"],
-                   ["invalid_bid", "无效标认定"], ["objection", "异议处理"],
-                   ["bid_process", "开标流程"]],
+        "fields": [
+            ["time_place", "时间地点"],
+            ["part_req", "参与要求"],
+            ["invalid_bid", "无效标认定"],
+            ["objection", "异议处理"],
+            ["bid_process", "开标流程"],
+        ],
     },
     {
-        "item_id": "evaluationBid", "label": "评标要求", "required": 0,
-        "output_type": "json", "sort_order": 14, "group": "evaluation",
+        "item_id": "evaluationBid",
+        "label": "评标要求",
+        "required": 0,
+        "output_type": "json",
+        "sort_order": 14,
+        "group": "evaluation",
         "description": "评标委员会、评分构成、方法和原则。",
-        "fields": [["committee", "评标委员会组成"], ["duties", "评标委员会职责"],
-                   ["scoring", "评分构成"], ["method", "评标方法类型"],
-                   ["principles", "评标原则和方法细节"],
-                   ["others", "其他和评标相关的说明"]],
+        "fields": [
+            ["committee", "评标委员会组成"],
+            ["duties", "评标委员会职责"],
+            ["scoring", "评分构成"],
+            ["method", "评标方法类型"],
+            ["principles", "评标原则和方法细节"],
+            ["others", "其他和评标相关的说明"],
+        ],
     },
     {
-        "item_id": "businessScoring", "label": "商务评分要求", "required": 0,
-        "output_type": "markdown", "sort_order": 15, "group": "scoring",
+        "item_id": "businessScoring",
+        "label": "商务评分要求",
+        "required": 0,
+        "output_type": "markdown",
+        "sort_order": 15,
+        "group": "scoring",
         "description": "商务评分因素，为商务方案准备。",
     },
     {
-        "item_id": "discardedBids", "label": "无效标与废标项", "required": 0,
-        "output_type": "markdown", "sort_order": 16, "group": "risk",
+        "item_id": "discardedBids",
+        "label": "无效标与废标项",
+        "required": 0,
+        "output_type": "markdown",
+        "sort_order": 16,
+        "group": "risk",
         "description": "投标无效、废标相关风险项。",
     },
     {
-        "item_id": "signingProcess", "label": "合同授予与签订", "required": 0,
-        "output_type": "json", "sort_order": 17, "group": "contract",
+        "item_id": "signingProcess",
+        "label": "合同授予与签订",
+        "required": 0,
+        "output_type": "json",
+        "sort_order": 17,
+        "group": "contract",
         "description": "中标公示、合同签订、履约保证金和合同文本。",
-        "fields": [["bid_notice", "中标公示"], ["contract_sign", "合同签订"],
-                   ["performance_bond", "履约保证金"], ["contract_text", "合同文本"]],
+        "fields": [
+            ["bid_notice", "中标公示"],
+            ["contract_sign", "合同签订"],
+            ["performance_bond", "履约保证金"],
+            ["contract_text", "合同文本"],
+        ],
     },
     {
-        "item_id": "terminationCondition", "label": "合同解除和终止", "required": 0,
-        "output_type": "json", "sort_order": 18, "group": "contract",
+        "item_id": "terminationCondition",
+        "label": "合同解除和终止",
+        "required": 0,
+        "output_type": "json",
+        "sort_order": 18,
+        "group": "contract",
         "description": "违约解除、不可抗力、合同终止和争议解决。",
-        "fields": [["breach_termination", "违约解除"], ["force_majeure", "不可抗力"],
-                   ["contract_termination", "合同终止"], ["dispute_resolution", "争议解决"]],
+        "fields": [
+            ["breach_termination", "违约解除"],
+            ["force_majeure", "不可抗力"],
+            ["contract_termination", "合同终止"],
+            ["dispute_resolution", "争议解决"],
+        ],
     },
 ]
 
@@ -328,19 +544,51 @@ REQUIRED_ITEM_IDS = [it["item_id"] for it in ANALYSIS_ITEMS if it["required"]]
 
 # 13 个分组定义（供前端展示用，分组名对齐需求清单章节）
 GROUPS: list[dict] = [
-    {"group": "project_info", "label": "项目级基本信息", "items": [it for it in ANALYSIS_ITEMS if it["group"] == "project_info"]},
-    {"group": "scheme_info", "label": "方案级基本信息", "items": [it for it in ANALYSIS_ITEMS if it["group"] == "scheme_info"]},
-    {"group": "overview_params", "label": "工程概况与设计参数", "items": [it for it in ANALYSIS_ITEMS if it["group"] == "overview_params"]},
+    {
+        "group": "project_info",
+        "label": "项目级基本信息",
+        "items": [it for it in ANALYSIS_ITEMS if it["group"] == "project_info"],
+    },
+    {
+        "group": "scheme_info",
+        "label": "方案级基本信息",
+        "items": [it for it in ANALYSIS_ITEMS if it["group"] == "scheme_info"],
+    },
+    {
+        "group": "overview_params",
+        "label": "工程概况与设计参数",
+        "items": [it for it in ANALYSIS_ITEMS if it["group"] == "overview_params"],
+    },
     {"group": "basis", "label": "编制依据", "items": [it for it in ANALYSIS_ITEMS if it["group"] == "basis"]},
-    {"group": "condition", "label": "施工条件与环境", "items": [it for it in ANALYSIS_ITEMS if it["group"] == "condition"]},
-    {"group": "deployment", "label": "施工部署与进度", "items": [it for it in ANALYSIS_ITEMS if it["group"] == "deployment"]},
-    {"group": "technique", "label": "施工工艺与技术", "items": [it for it in ANALYSIS_ITEMS if it["group"] == "technique"]},
+    {
+        "group": "condition",
+        "label": "施工条件与环境",
+        "items": [it for it in ANALYSIS_ITEMS if it["group"] == "condition"],
+    },
+    {
+        "group": "deployment",
+        "label": "施工部署与进度",
+        "items": [it for it in ANALYSIS_ITEMS if it["group"] == "deployment"],
+    },
+    {
+        "group": "technique",
+        "label": "施工工艺与技术",
+        "items": [it for it in ANALYSIS_ITEMS if it["group"] == "technique"],
+    },
     {"group": "resource", "label": "资源配置", "items": [it for it in ANALYSIS_ITEMS if it["group"] == "resource"]},
     {"group": "safety", "label": "安全保证措施", "items": [it for it in ANALYSIS_ITEMS if it["group"] == "safety"]},
     {"group": "quality", "label": "质量管理与验收", "items": [it for it in ANALYSIS_ITEMS if it["group"] == "quality"]},
     {"group": "emergency", "label": "应急处置", "items": [it for it in ANALYSIS_ITEMS if it["group"] == "emergency"]},
-    {"group": "calc_drawing", "label": "计算书与图纸", "items": [it for it in ANALYSIS_ITEMS if it["group"] == "calc_drawing"]},
-    {"group": "construction", "label": "施工组织设计（新增）", "items": [it for it in ANALYSIS_ITEMS if it["group"] == "construction"]},
+    {
+        "group": "calc_drawing",
+        "label": "计算书与图纸",
+        "items": [it for it in ANALYSIS_ITEMS if it["group"] == "calc_drawing"],
+    },
+    {
+        "group": "construction",
+        "label": "施工组织设计（新增）",
+        "items": [it for it in ANALYSIS_ITEMS if it["group"] == "construction"],
+    },
     # ⚠️ 2026-10-01 定位切换：「技术评分要求」分组（原 group="scoring"）
     # 已随 techScoring 提取项一并移除 —— 招投标评审语境，与专项施工方案无关。
 ]
@@ -389,8 +637,7 @@ MARKDOWN_MISSING_RULE_SUFFIX = (
 #: 技术评分项小节标题（is_missing_technical_score_items 的唯一锚点）
 TECH_SCORE_ITEMS_HEADING = "技术评分项"
 _TECH_SCORE_ITEMS_RE = re.compile(
-    r"^##[\t ]+" + re.escape(TECH_SCORE_ITEMS_HEADING)
-    + r"[\t ]*\r?\n([\s\S]*?)(?=^#{1,2}[\t ]|\Z)",
+    r"^##[\t ]+" + re.escape(TECH_SCORE_ITEMS_HEADING) + r"[\t ]*\r?\n([\s\S]*?)(?=^#{1,2}[\t ]|\Z)",
     re.MULTILINE,
 )
 
@@ -408,6 +655,7 @@ def is_missing_technical_score_items(content: str) -> bool:
         return True
     m = _TECH_SCORE_ITEMS_RE.search(text)
     return m is not None and m.group(1).strip() == PARTIAL_MISSING_TEXT
+
 
 # =========================================================================
 # 二、通用约束 Prompt（system）
@@ -432,7 +680,6 @@ Markdown 格式任务的额外约束：
 # =========================================================================
 # 使用 __CONTEXT__ 占位符注入项目资料文本
 _ITEM_PROMPTS: dict[str, str] = {
-
     # ================================================================
     # 一、项目级基本信息（JSON，37 字段平铺模板）
     # ================================================================
@@ -488,7 +735,6 @@ _ITEM_PROMPTS: dict[str, str] = {
 
 项目资料文本：
 __CONTEXT__""",
-
     # ================================================================
     # 二、方案级基本信息
     # ================================================================
@@ -505,7 +751,6 @@ __CONTEXT__""",
 
 项目资料文本：
 __CONTEXT__""",
-
     # ================================================================
     # 三、工程概况与设计参数
     # ================================================================
@@ -529,7 +774,6 @@ __CONTEXT__""",
 
 项目资料文本：
 __CONTEXT__""",
-
     # ================================================================
     # 四、编制依据
     # ================================================================
@@ -550,7 +794,6 @@ __CONTEXT__""",
 
 项目资料文本：
 __CONTEXT__""",
-
     # ================================================================
     # 五、施工条件与环境
     # ================================================================
@@ -571,7 +814,6 @@ __CONTEXT__""",
 
 项目资料文本：
 __CONTEXT__""",
-
     # ================================================================
     # 六、施工部署与进度
     # ================================================================
@@ -593,7 +835,6 @@ __CONTEXT__""",
 
 项目资料文本：
 __CONTEXT__""",
-
     # ================================================================
     # 七、施工工艺与技术
     # ================================================================
@@ -614,7 +855,6 @@ __CONTEXT__""",
 
 项目资料文本：
 __CONTEXT__""",
-
     # ================================================================
     # 八、资源配置
     # ================================================================
@@ -632,7 +872,6 @@ __CONTEXT__""",
 
 项目资料文本：
 __CONTEXT__""",
-
     # ================================================================
     # 九、安全保证措施
     # ================================================================
@@ -655,7 +894,6 @@ __CONTEXT__""",
 
 项目资料文本：
 __CONTEXT__""",
-
     # ================================================================
     # 十、质量管理与验收
     # ================================================================
@@ -674,7 +912,6 @@ __CONTEXT__""",
 
 项目资料文本：
 __CONTEXT__""",
-
     # ================================================================
     # 十一、应急处置
     # ================================================================
@@ -693,7 +930,6 @@ __CONTEXT__""",
 
 项目资料文本：
 __CONTEXT__""",
-
     # ================================================================
     # 十二、计算书与图纸
     # ================================================================
@@ -711,15 +947,12 @@ __CONTEXT__""",
 
 项目资料文本：
 __CONTEXT__""",
-
     # ================================================================
     # 十三、全局事实变量
     # ================================================================
-
     # ================================================================
     # 十四、输出与导出偏好
     # ================================================================
-
     # ================================================================
     # ✅ 施工组织设计相关 6 项（保留，2026-09-17）
     # 注意：项目资料中通常以「投标人/施工单位须在施工组织设计中包含 XX 内容」
@@ -739,7 +972,6 @@ __CONTEXT__""",
 
 项目资料文本：
 __CONTEXT__""",
-
     "equipmentManagement": """请从以下项目资料中提取【机械管理】相关要求，输出为 Markdown。
 
 提取要点：
@@ -753,7 +985,6 @@ __CONTEXT__""",
 
 项目资料文本：
 __CONTEXT__""",
-
     "constructionDeployment": """请从以下项目资料中提取【施工部署】相关要求，输出为 Markdown。
 
 提取要点：
@@ -767,7 +998,6 @@ __CONTEXT__""",
 
 项目资料文本：
 __CONTEXT__""",
-
     "constructionProcess": """请从以下项目资料中提取【施工流程/施工顺序】相关要求，输出为 Markdown。
 
 提取要点：
@@ -780,7 +1010,6 @@ __CONTEXT__""",
 
 项目资料文本：
 __CONTEXT__""",
-
     "workInterfaceDivision": """请从以下项目资料中提取【工作界面划分】相关要求，输出为 Markdown。
 
 提取要点：
@@ -793,7 +1022,6 @@ __CONTEXT__""",
 
 项目资料文本：
 __CONTEXT__""",
-
     "engineeringMethods": """请从以下项目资料中提取【工程做法/技术要求】相关内容，输出为 Markdown。
 
 提取要点：
@@ -811,13 +1039,11 @@ __CONTEXT__""",
 
 项目资料文本：
 __CONTEXT__""",
-
     # ========================================================================
     # ⚠️ 2026-10-01 定位切换：「技术评分要求」提示词（原 "techScoring" 键）
     # 已随提取项一并移除 —— 招投标评审语境，专项施工方案不需要。
     # 若日后确有「技术评分」类需求，应作为独立域重新设计，不得回流 scheme 域。
     # ========================================================================
-
 }
 
 
@@ -880,44 +1106,133 @@ def _reg_bid_prompts() -> None:
     global _BID_PROMPTS_REGISTERED
     if _BID_PROMPTS_REGISTERED:
         return
-    _reg("bid_analysis_system", "bid_analysis", "投标资料提取 · 通用约束", STABLE_SYSTEM_PROMPT,
-           requires=[])
-    _reg("bid_item_projectBasicInfo", "bid_analysis", "投标资料提取 · projectBasicInfo", _ITEM_PROMPTS["projectBasicInfo"],
-           requires=[])
-    _reg("bid_item_schemeBasicInfo", "bid_analysis", "投标资料提取 · schemeBasicInfo", _ITEM_PROMPTS["schemeBasicInfo"],
-           requires=[])
-    _reg("bid_item_overviewParams", "bid_analysis", "投标资料提取 · overviewParams", _ITEM_PROMPTS["overviewParams"],
-           requires=[])
-    _reg("bid_item_compilationBasis", "bid_analysis", "投标资料提取 · compilationBasis", _ITEM_PROMPTS["compilationBasis"],
-           requires=[])
-    _reg("bid_item_siteConditions", "bid_analysis", "投标资料提取 · siteConditions", _ITEM_PROMPTS["siteConditions"],
-           requires=[])
-    _reg("bid_item_deploymentSchedule", "bid_analysis", "投标资料提取 · deploymentSchedule", _ITEM_PROMPTS["deploymentSchedule"],
-           requires=[])
-    _reg("bid_item_constructionTechnique", "bid_analysis", "投标资料提取 · constructionTechnique", _ITEM_PROMPTS["constructionTechnique"],
-           requires=[])
-    _reg("bid_item_resourceAllocation", "bid_analysis", "投标资料提取 · resourceAllocation", _ITEM_PROMPTS["resourceAllocation"],
-           requires=[])
-    _reg("bid_item_safetyMeasures", "bid_analysis", "投标资料提取 · safetyMeasures", _ITEM_PROMPTS["safetyMeasures"],
-           requires=[])
-    _reg("bid_item_qualityAcceptance", "bid_analysis", "投标资料提取 · qualityAcceptance", _ITEM_PROMPTS["qualityAcceptance"],
-           requires=[])
-    _reg("bid_item_emergencyResponse", "bid_analysis", "投标资料提取 · emergencyResponse", _ITEM_PROMPTS["emergencyResponse"],
-           requires=[])
-    _reg("bid_item_calcAndDrawings", "bid_analysis", "投标资料提取 · calcAndDrawings", _ITEM_PROMPTS["calcAndDrawings"],
-           requires=[])
-    _reg("bid_item_materialManagement", "bid_analysis", "投标资料提取 · materialManagement", _ITEM_PROMPTS["materialManagement"],
-           requires=[])
-    _reg("bid_item_equipmentManagement", "bid_analysis", "投标资料提取 · equipmentManagement", _ITEM_PROMPTS["equipmentManagement"],
-           requires=[])
-    _reg("bid_item_constructionDeployment", "bid_analysis", "投标资料提取 · constructionDeployment", _ITEM_PROMPTS["constructionDeployment"],
-           requires=[])
-    _reg("bid_item_constructionProcess", "bid_analysis", "投标资料提取 · constructionProcess", _ITEM_PROMPTS["constructionProcess"],
-           requires=[])
-    _reg("bid_item_workInterfaceDivision", "bid_analysis", "投标资料提取 · workInterfaceDivision", _ITEM_PROMPTS["workInterfaceDivision"],
-           requires=[])
-    _reg("bid_item_engineeringMethods", "bid_analysis", "投标资料提取 · engineeringMethods", _ITEM_PROMPTS["engineeringMethods"],
-           requires=[])
+    _reg("bid_analysis_system", "bid_analysis", "投标资料提取 · 通用约束", STABLE_SYSTEM_PROMPT, requires=[])
+    _reg(
+        "bid_item_projectBasicInfo",
+        "bid_analysis",
+        "投标资料提取 · projectBasicInfo",
+        _ITEM_PROMPTS["projectBasicInfo"],
+        requires=[],
+    )
+    _reg(
+        "bid_item_schemeBasicInfo",
+        "bid_analysis",
+        "投标资料提取 · schemeBasicInfo",
+        _ITEM_PROMPTS["schemeBasicInfo"],
+        requires=[],
+    )
+    _reg(
+        "bid_item_overviewParams",
+        "bid_analysis",
+        "投标资料提取 · overviewParams",
+        _ITEM_PROMPTS["overviewParams"],
+        requires=[],
+    )
+    _reg(
+        "bid_item_compilationBasis",
+        "bid_analysis",
+        "投标资料提取 · compilationBasis",
+        _ITEM_PROMPTS["compilationBasis"],
+        requires=[],
+    )
+    _reg(
+        "bid_item_siteConditions",
+        "bid_analysis",
+        "投标资料提取 · siteConditions",
+        _ITEM_PROMPTS["siteConditions"],
+        requires=[],
+    )
+    _reg(
+        "bid_item_deploymentSchedule",
+        "bid_analysis",
+        "投标资料提取 · deploymentSchedule",
+        _ITEM_PROMPTS["deploymentSchedule"],
+        requires=[],
+    )
+    _reg(
+        "bid_item_constructionTechnique",
+        "bid_analysis",
+        "投标资料提取 · constructionTechnique",
+        _ITEM_PROMPTS["constructionTechnique"],
+        requires=[],
+    )
+    _reg(
+        "bid_item_resourceAllocation",
+        "bid_analysis",
+        "投标资料提取 · resourceAllocation",
+        _ITEM_PROMPTS["resourceAllocation"],
+        requires=[],
+    )
+    _reg(
+        "bid_item_safetyMeasures",
+        "bid_analysis",
+        "投标资料提取 · safetyMeasures",
+        _ITEM_PROMPTS["safetyMeasures"],
+        requires=[],
+    )
+    _reg(
+        "bid_item_qualityAcceptance",
+        "bid_analysis",
+        "投标资料提取 · qualityAcceptance",
+        _ITEM_PROMPTS["qualityAcceptance"],
+        requires=[],
+    )
+    _reg(
+        "bid_item_emergencyResponse",
+        "bid_analysis",
+        "投标资料提取 · emergencyResponse",
+        _ITEM_PROMPTS["emergencyResponse"],
+        requires=[],
+    )
+    _reg(
+        "bid_item_calcAndDrawings",
+        "bid_analysis",
+        "投标资料提取 · calcAndDrawings",
+        _ITEM_PROMPTS["calcAndDrawings"],
+        requires=[],
+    )
+    _reg(
+        "bid_item_materialManagement",
+        "bid_analysis",
+        "投标资料提取 · materialManagement",
+        _ITEM_PROMPTS["materialManagement"],
+        requires=[],
+    )
+    _reg(
+        "bid_item_equipmentManagement",
+        "bid_analysis",
+        "投标资料提取 · equipmentManagement",
+        _ITEM_PROMPTS["equipmentManagement"],
+        requires=[],
+    )
+    _reg(
+        "bid_item_constructionDeployment",
+        "bid_analysis",
+        "投标资料提取 · constructionDeployment",
+        _ITEM_PROMPTS["constructionDeployment"],
+        requires=[],
+    )
+    _reg(
+        "bid_item_constructionProcess",
+        "bid_analysis",
+        "投标资料提取 · constructionProcess",
+        _ITEM_PROMPTS["constructionProcess"],
+        requires=[],
+    )
+    _reg(
+        "bid_item_workInterfaceDivision",
+        "bid_analysis",
+        "投标资料提取 · workInterfaceDivision",
+        _ITEM_PROMPTS["workInterfaceDivision"],
+        requires=[],
+    )
+    _reg(
+        "bid_item_engineeringMethods",
+        "bid_analysis",
+        "投标资料提取 · engineeringMethods",
+        _ITEM_PROMPTS["engineeringMethods"],
+        requires=[],
+    )
     _BID_PROMPTS_REGISTERED = True
 
 
@@ -930,6 +1245,7 @@ _reg_bid_prompts()
 #   不会下发 meta → 合约表不能监督到本批模板。
 try:  # pragma: no cover - 幂等补套，失败不影响注册结果
     from app.services.ai.prompts._registry import _apply_variable_contracts
+
     _apply_variable_contracts()
 except Exception as _e:  # noqa: BLE001
     logger.warning("补套变量契约校验失败（不影响提示词注册）: %s", _e)
@@ -941,6 +1257,7 @@ def get_bid_system_prompt() -> str:
     ✅ R39 · T1：接入统一注册表后，用户在提示词后台的编辑即时生效。
     """
     try:
+        _bind_get_prompt()
         prompt = get_prompt("bid_analysis_system")
     except Exception:  # noqa: BLE001 - 注册表不可用不得阻断提取
         logger.warning("投标分析通用约束提示词读取失败，回退出厂字面量")
@@ -958,6 +1275,7 @@ def get_item_prompt(item_id: str) -> str | None:
     if not key:
         return _ITEM_PROMPTS.get(item_id)
     try:
+        _bind_get_prompt()
         prompt = get_prompt(key)
     except Exception:  # noqa: BLE001 - 注册表不可用不得阻断提取
         logger.warning("解析项 %s 的提示词读取失败，回退出厂字面量", item_id)
@@ -1004,7 +1322,7 @@ def parse_item_pk(pk: str) -> tuple:
     idx = str(pk or "").rfind("_")
     if idx <= 0:
         return "", "", "scheme"
-    return str(pk)[:idx], str(pk)[idx + 1:], "scheme"
+    return str(pk)[:idx], str(pk)[idx + 1 :], "scheme"
 
 
 async def fetch_success_item_ids(db, project_id: str, domain: str = "scheme") -> set:
@@ -1022,8 +1340,7 @@ async def fetch_success_item_ids(db, project_id: str, domain: str = "scheme") ->
     """
     if not db or not project_id:
         return set()
-    base = ("SELECT item_id FROM bid_analysis_items "
-            "WHERE project_id=? AND status='success'")
+    base = "SELECT item_id FROM bid_analysis_items " "WHERE project_id=? AND status='success'"
     params: tuple = (project_id,)
     sql = base + " AND domain=?"
     args = (project_id, domain)
@@ -1067,9 +1384,11 @@ def build_json_template(item_id: str) -> str:
     模板值填中文标签，模型按标签理解语义后回填真实取值；键名固定为英文键。
     """
     import json as _json
+
     return _json.dumps(
         {key: label for key, label in get_item_fields(item_id)},
-        ensure_ascii=False, indent=2,
+        ensure_ascii=False,
+        indent=2,
     )
 
 
@@ -1100,15 +1419,18 @@ def build_task_prompt(item_id: str, *, template_body: str = "", goals: str = "")
         if not template_text:
             return f"任务：{label}\n\n请从项目资料中提取相关 JSON 信息。"
         return _JSON_TASK_TEMPLATE.format(
-            title=label, goals=goals_text or f"提取{label}信息。",
-            partial=PARTIAL_MISSING_TEXT, template=template_text,
+            title=label,
+            goals=goals_text or f"提取{label}信息。",
+            partial=PARTIAL_MISSING_TEXT,
+            template=template_text,
         )
 
     body = (template_body or "").rstrip()
     if not body:
         body = f"任务：提取并整理{label}信息。\n\n请保持原文准确性，直接返回整理结果。"
     return body + MARKDOWN_MISSING_RULE_SUFFIX.format(
-        full=MARKDOWN_MISSING_RESULT, partial=PARTIAL_MISSING_TEXT,
+        full=MARKDOWN_MISSING_RESULT,
+        partial=PARTIAL_MISSING_TEXT,
     )
 
 
@@ -1126,16 +1448,26 @@ def get_groups() -> list[dict]:
     """返回 13 分组视图（供前端展示用，与 GROUPS 同源）。"""
     result = []
     for g in GROUPS:
-        result.append({
-            "group": g["group"],
-            "label": g["label"],
-            "items": [dict(it) for it in g["items"]],
-        })
+        result.append(
+            {
+                "group": g["group"],
+                "label": g["label"],
+                "items": [dict(it) for it in g["items"]],
+            }
+        )
     return result
 
 
 def build_item(content: str, item: dict) -> str:
-    """组装完整的 user 消息内容：Prompt 模板 + 替换 __CONTEXT__ 占位符。"""
+    """组装完整的 user 消息内容：Prompt 模板 + 替换 __CONTEXT__ 占位符。
+
+    ✅ R175（2026-11-03 · BUG-1 接线）：``content`` 是项目/招标资料原文，
+    注入前统一治理（围栏 → 凭据脱敏 → 预算）。三个开关默认关闭时
+    输出与修复前逐字节一致。
+    """
+    from app.services.prompt_material_guard import govern_blob
+
+    content = govern_blob(content, "投标分析项目资料")
     prompt_template = get_item_prompt(item["item_id"])
     if not prompt_template:
         # 无专属 Prompt，返回通用 Prompt（极端兜底）
@@ -1164,8 +1496,7 @@ def build_system_prompt(section_hint: str = "", classification_hint: str = "") -
     return prompt
 
 
-def build_system_messages(section_hint: str = "",
-                          classification_hint: str = "") -> list[dict]:
+def build_system_messages(section_hint: str = "", classification_hint: str = "") -> list[dict]:
     """组装 messages 里的 **system 段**（对齐易标 ``buildTenderContextMessages``）。
 
     易标把「标段上下文」作为**独立的第二条 system 消息**下发，而不是拼进通用
@@ -1188,13 +1519,11 @@ def build_system_messages(section_hint: str = "",
     """
     system = get_bid_system_prompt()
     if classification_hint:
-        system += (f"\n\n【本方案危大工程分类结论（提取重点参考）】"
-                   f"{classification_hint}")
+        system += f"\n\n【本方案危大工程分类结论（提取重点参考）】" f"{classification_hint}"
     msgs: list[dict] = [{"role": "system", "content": system}]
     if section_hint:
         # 独立第二条 system 消息（易标口径）
-        msgs.append({"role": "system",
-                     "content": f"【当前处理标段上下文】{section_hint}"})
+        msgs.append({"role": "system", "content": f"【当前处理标段上下文】{section_hint}"})
     return msgs
 
 
@@ -1226,14 +1555,14 @@ DEFAULT_CHUNK_OVERLAP = 500
 #: 断点取匹配结束位置（分隔符之后），使标点/换行归属当前段。
 _BOUNDARY_GROUPS = (
     re.compile(r"\r?\n(?=[ \t]{0,3}#{1,6}\s)|\r?\n[ \t]*\r?\n"),  # 标题前换行 / 空行
-    re.compile(r"\r?\n"),                                            # 普通换行
-    re.compile(r"[。！？!?]"),                                        # 句末标点
-    re.compile(r"[；;]"),                                             # 分号
-    re.compile(r"[，,、：:]"),                                        # 逗号/顿号/冒号
+    re.compile(r"\r?\n"),  # 普通换行
+    re.compile(r"[。！？!?]"),  # 句末标点
+    re.compile(r"[；;]"),  # 分号
+    re.compile(r"[，,、：:]"),  # 逗号/顿号/冒号
 )
 
-_BACK_WINDOW = 200   # 向前搜索边界的最大回退字符数（与旧实现一致）
-_FWD_WINDOW = 100    # 向后搜索边界的最大前伸字符数（与旧实现一致）
+_BACK_WINDOW = 200  # 向前搜索边界的最大回退字符数（与旧实现一致）
+_FWD_WINDOW = 100  # 向后搜索边界的最大前伸字符数（与旧实现一致）
 
 
 # ---------------------------------------------------------------------------
@@ -1280,9 +1609,15 @@ def _avoids_surrogate_pair(text: str, cut: int) -> int:
     return cut
 
 
-def _can_use_candidate(candidate: int, *, previous_cut: int, total_length: int,
-                       remaining_segments: int, minimum_segment_length: int,
-                       maximum_segment_length: int) -> bool:
+def _can_use_candidate(
+    candidate: int,
+    *,
+    previous_cut: int,
+    total_length: int,
+    remaining_segments: int,
+    minimum_segment_length: int,
+    maximum_segment_length: int,
+) -> bool:
     """判断候选切点是否合法（对齐易标 ``canUseCandidate`` 的四重约束）。
 
     关键在**剩余量校验**：保证剩余长度至少够填满剩余段数，且平均起来不超过
@@ -1302,8 +1637,9 @@ def _can_use_candidate(candidate: int, *, previous_cut: int, total_length: int,
     return True
 
 
-def _find_boundary_for_group(text: str, from_: int, to: int, pattern: "re.Pattern",
-                             state: dict, fence_ranges: list[tuple[int, int]]) -> int:
+def _find_boundary_for_group(
+    text: str, from_: int, to: int, pattern: "re.Pattern", state: dict, fence_ranges: list[tuple[int, int]]
+) -> int:
     """在 [from_, to) 内按单组边界正则挑「离理想点最近且不在围栏内」的切点。"""
     best_cut = 0
     best_score = None
@@ -1313,7 +1649,9 @@ def _find_boundary_for_group(text: str, from_: int, to: int, pattern: "re.Patter
         if _inside_fence(candidate, fence_ranges):
             continue
         if not _can_use_candidate(
-            candidate, previous_cut=state["previous_cut"], total_length=state["total_length"],
+            candidate,
+            previous_cut=state["previous_cut"],
+            total_length=state["total_length"],
             remaining_segments=state["remaining_segments"],
             minimum_segment_length=state["minimum_segment_length"],
             maximum_segment_length=state["maximum_segment_length"],
@@ -1326,12 +1664,10 @@ def _find_boundary_for_group(text: str, from_: int, to: int, pattern: "re.Patter
     return best_cut
 
 
-def _find_natural_cut(text: str, radius: int, state: dict,
-                      fence_ranges: list[tuple[int, int]]) -> int:
+def _find_natural_cut(text: str, radius: int, state: dict, fence_ranges: list[tuple[int, int]]) -> int:
     """在理想点 ± radius 窗口内按边界优先级找切点；找不到返回 0。"""
     from_ = max(state["previous_cut"] + 1, int(state["ideal_cut"] - radius))
-    to = min(state["total_length"] - state["remaining_segments"],
-             int(state["ideal_cut"] + radius))
+    to = min(state["total_length"] - state["remaining_segments"], int(state["ideal_cut"] + radius))
     if to <= from_:
         return 0
     for group in _BOUNDARY_GROUPS:
@@ -1378,8 +1714,7 @@ def _fence_end_at(idx: int, ranges: list[tuple[int, int]]) -> Optional[int]:
     return None
 
 
-def _choose_boundary_cut(text: str, start: int, end: int, limit: int,
-                         fence_ranges: list[tuple[int, int]]) -> int:
+def _choose_boundary_cut(text: str, start: int, end: int, limit: int, fence_ranges: list[tuple[int, int]]) -> int:
     """在 end 附近的 ±窗口内按边界优先级挑一个「不在代码围栏内」的最佳断点。
 
     返回断点位置（>start）；窗口内找不到任何可接受边界时返回 -1。
@@ -1407,12 +1742,15 @@ def _choose_boundary_cut(text: str, start: int, end: int, limit: int,
     return -1
 
 
-def _split_even(text: str, context_length_limit: int,
-                limit_ratio: float = SEGMENT_LIMIT_RATIO,
-                strict_ratio: float = SEGMENT_STRICT_RATIO,
-                relaxed_ratio: float = SEGMENT_RELAXED_RATIO,
-                min_ratio: float = SEGMENT_MIN_RATIO,
-                max_ratio: float = SEGMENT_MAX_RATIO) -> list[str]:
+def _split_even(
+    text: str,
+    context_length_limit: int,
+    limit_ratio: float = SEGMENT_LIMIT_RATIO,
+    strict_ratio: float = SEGMENT_STRICT_RATIO,
+    relaxed_ratio: float = SEGMENT_RELAXED_RATIO,
+    min_ratio: float = SEGMENT_MIN_RATIO,
+    max_ratio: float = SEGMENT_MAX_RATIO,
+) -> list[str]:
     """均分切分（对齐易标 ``splitUserTextByContextLimit``）。
 
     步骤：① 段上限 = 上下文上限 × limit_ratio；② 段数 = ceil(总长 / 段上限)；
@@ -1450,14 +1788,18 @@ def _split_even(text: str, context_length_limit: int,
             "minimum_segment_length": minimum_segment_length,
             "maximum_segment_length": maximum_segment_length,
         }
-        cut = (_find_natural_cut(source, strict_radius, state, fence_ranges)
-               or _find_natural_cut(source, relaxed_radius, state, fence_ranges))
+        cut = _find_natural_cut(source, strict_radius, state, fence_ranges) or _find_natural_cut(
+            source, relaxed_radius, state, fence_ranges
+        )
         if not cut:
             # 硬切兜底：夹在 [previous_cut+1, 总长-剩余段数] 内，保证每段非空
             minimum_cut = previous_cut + 1
             maximum_cut = len(source) - remaining_segments
-            ideal = min(maximum_cut, max(minimum_cut, round(ideal_cut))) \
-                if maximum_cut >= minimum_cut else min(len(source), minimum_cut)
+            ideal = (
+                min(maximum_cut, max(minimum_cut, round(ideal_cut)))
+                if maximum_cut >= minimum_cut
+                else min(len(source), minimum_cut)
+            )
             cut = _avoids_surrogate_pair(source, ideal)
         cuts.append(cut)
         previous_cut = cut
@@ -1471,10 +1813,14 @@ def _split_even(text: str, context_length_limit: int,
     return parts
 
 
-def split_for_analysis(text: str, chunk_size: int = DEFAULT_CHUNK_SIZE,
-                        overlap: int = DEFAULT_CHUNK_OVERLAP,
-                        *, even: bool = False,
-                        context_length_limit: int = SEGMENT_CONTEXT_LENGTH_LIMIT) -> list[str]:
+def split_for_analysis(
+    text: str,
+    chunk_size: int = DEFAULT_CHUNK_SIZE,
+    overlap: int = DEFAULT_CHUNK_OVERLAP,
+    *,
+    even: bool = False,
+    context_length_limit: int = SEGMENT_CONTEXT_LENGTH_LIMIT,
+) -> list[str]:
     """把超长项目资料按字符切分为多段，保证 AI 调用不超上下文。
 
     切分策略：优先在自然边界（标题/空行 > 换行 > 句末 > 分号 > 逗号）断开，
@@ -1566,9 +1912,7 @@ def format_downstream_context(items: dict[str, dict]) -> str:
                     #    与对象形态同为「平铺键值」语义。
                     for entry in data:
                         if isinstance(entry, dict):
-                            kv = "，".join(
-                                f"{k}：{v}" for k, v in entry.items()
-                                if v not in (None, "", "没有提及"))
+                            kv = "，".join(f"{k}：{v}" for k, v in entry.items() if v not in (None, "", "没有提及"))
                             if kv:
                                 lines.append(f"- {kv}")
                         elif entry and entry != "没有提及":
@@ -1612,8 +1956,9 @@ DOWNSTREAM_CONTEXT_MAX_CHARS = 12_000
 DOWNSTREAM_PER_ITEM_MAX_CHARS = 2_000
 
 
-def _apply_downstream_budget(text: str, max_chars: int = DOWNSTREAM_CONTEXT_MAX_CHARS,
-                             per_item: int = DOWNSTREAM_PER_ITEM_MAX_CHARS) -> str:
+def _apply_downstream_budget(
+    text: str, max_chars: int = DOWNSTREAM_CONTEXT_MAX_CHARS, per_item: int = DOWNSTREAM_PER_ITEM_MAX_CHARS
+) -> str:
     """给「提取项目结果」文本加预算上限（对齐 facts 链路的预算治理思路）。
 
     两级裁剪，**均不丢项**：
@@ -1650,8 +1995,7 @@ def _apply_downstream_budget(text: str, max_chars: int = DOWNSTREAM_CONTEXT_MAX_
         kept.append(seg)
         used += len(seg) + 2
     if dropped:
-        kept.append(f"（另有 {dropped} 个提取项因超出下发预算被省略，"
-                    f"可在「提取项目」页查看完整结果）")
+        kept.append(f"（另有 {dropped} 个提取项因超出下发预算被省略，" f"可在「提取项目」页查看完整结果）")
     return "\n\n".join(kept)
 
 
@@ -1746,6 +2090,7 @@ class AnalysisConfig:
       ⚠️ force_rerun 或显式指定 task_ids（单项重跑）时必须忽略 skip_done，
       否则「重跑失败项」会变成空操作。
     """
+
     mode: str = "key"  # key | full | custom | item
     selected_item_ids: list[str] = field(default_factory=list)
     force_rerun: bool = False
@@ -1777,8 +2122,7 @@ class AnalysisConfig:
             # ✅ 单项重跑不补全必选项：其余必选项已在前一轮落库，_get_missing_required
             #    会回退 DB 校验；若强行补全，「重跑 1 项」会变成「重跑 17 项」
             #    （AI 调用 ×17，且前端「单项重新提取」按钮语义被静默改变）。
-            self.selected_item_ids = [i for i in self.selected_item_ids
-                                      if get_item_def(i)]
+            self.selected_item_ids = [i for i in self.selected_item_ids if get_item_def(i)]
         else:  # custom
             # 强制包含必选项
             for rid in required_ids:
@@ -1786,8 +2130,7 @@ class AnalysisConfig:
                     self.selected_item_ids.append(rid)
         return self
 
-    def get_task_items(self, done_item_ids: Optional[set] = None,
-                       skip_done: Optional[bool] = None) -> list[dict]:
+    def get_task_items(self, done_item_ids: Optional[set] = None, skip_done: Optional[bool] = None) -> list[dict]:
         """返回实际要执行的解析项列表（按 sort_order 排序）。
 
         ``done_item_ids`` 传入已成功落库的 item_id 集合时启用断点续跑过滤。
@@ -1813,14 +2156,12 @@ class AnalysisConfig:
         """异步版本：自行查库取已成功项集合后再过滤（路由层唯一调用入口）。"""
         self.normalize()
         items = self.get_task_items()
-        if (not self.skip_done or self.mode == "item" or self.force_rerun
-                or not db or not project_id):
+        if not self.skip_done or self.mode == "item" or self.force_rerun or not db or not project_id:
             return items
         done_ids = await fetch_success_item_ids(db, project_id, self.domain)
         if not done_ids:
             return items
-        logger.info("断点续跑：%s 域跳过 %d/%d 个已成功解析项",
-                    self.domain, len(done_ids), len(items))
+        logger.info("断点续跑：%s 域跳过 %d/%d 个已成功解析项", self.domain, len(done_ids), len(items))
         return [it for it in items if it["item_id"] not in done_ids]
 
 
@@ -1842,8 +2183,7 @@ _DOC_HEADER_RE = re.compile(r"^#\s*文档：(.+?)（分类：.*?）\s*$")
 _HEADING_RE = re.compile(r"^(#{1,6})\s+(.+?)\s*$")
 # 特征 token：字母+数字规格号（C30/HRB400/GB50300）、数字+单位（8.5m/1200mm）、
 # 纯数字（由 _token_set 按长度/小数过滤掉无区分度的个位数）
-_TOKEN_RE = re.compile(
-    r"[A-Za-z]{1,6}\d+(?:\.\d+)?|\d+(?:\.\d+)?(?:[A-Za-z]{1,6})?")
+_TOKEN_RE = re.compile(r"[A-Za-z]{1,6}\d+(?:\.\d+)?|\d+(?:\.\d+)?(?:[A-Za-z]{1,6})?")
 _NORM_STRIP_RE = re.compile(r"[#>*`|_~\-—\[\]()（）【】:：,，。；;、'\"“”‘’!！?？\s]+")
 
 
@@ -1859,6 +2199,7 @@ def _doc_line_index(combined_text: str) -> list[dict]:
     O(总字数)，缓存后整个运行只建一次（以哈希为键，原文变化自动失效）。
     """
     import hashlib
+
     key = hashlib.blake2b(combined_text.encode("utf-8"), digest_size=16).hexdigest()
     cache = getattr(_doc_line_index, "_cache", None)
     if cache and cache[0] == key:
@@ -1878,19 +2219,23 @@ def _doc_line_index(combined_text: str) -> list[dict]:
         if hm:
             level = len(hm.group(1))
             title = hm.group(2).strip()
-            path = current["headings"][:level - 1] + [title]
+            path = current["headings"][: level - 1] + [title]
             current["headings"] = path
         norm = _norm_evidence(raw)
         if len(norm) >= 6:
             toks = _token_set(raw)
-            current["lines"].append({
-                "line": ln, "raw": raw.strip(), "norm": norm,
-                "heading": " › ".join(current["headings"]),
-                # 预拆两类 token：含字母规格号（C30/HRB400）与纯数字，
-                # 匹配热路径直接取集合，不再逐行重算
-                "atokens": {t for t in toks if any(c.isalpha() for c in t)},
-                "ntokens": {t for t in toks if not any(c.isalpha() for c in t)},
-            })
+            current["lines"].append(
+                {
+                    "line": ln,
+                    "raw": raw.strip(),
+                    "norm": norm,
+                    "heading": " › ".join(current["headings"]),
+                    # 预拆两类 token：含字母规格号（C30/HRB400）与纯数字，
+                    # 匹配热路径直接取集合，不再逐行重算
+                    "atokens": {t for t in toks if any(c.isalpha() for c in t)},
+                    "ntokens": {t for t in toks if not any(c.isalpha() for c in t)},
+                }
+            )
     index = [d for d in docs if d["lines"]]
     _doc_line_index._cache = (key, index)
     return index
@@ -1908,8 +2253,7 @@ def _token_set(s: str) -> set[str]:
     return out
 
 
-def _evidence_entry(doc: dict, line: dict, matched: str,
-                    field_path: str = "") -> dict:
+def _evidence_entry(doc: dict, line: dict, matched: str, field_path: str = "") -> dict:
     """组装一条证据：文档名 + 行号 + 标题路径 + 原文摘录（截断）。"""
     entry = {
         "doc": doc["file_name"],
@@ -1923,8 +2267,7 @@ def _evidence_entry(doc: dict, line: dict, matched: str,
     return entry
 
 
-def _match_candidate(cand_norm: str, cand_tokens: set[str],
-                     docs: list[dict]) -> Optional[tuple[dict, dict]]:
+def _match_candidate(cand_norm: str, cand_tokens: set[str], docs: list[dict]) -> Optional[tuple[dict, dict]]:
     """在一个候选句上找原文出处：优先整句包含，其次数字锚点。返回 (doc, line)。"""
     cand_alpha = {t for t in cand_tokens if any(c.isalpha() for c in t)}
     cand_num = cand_tokens - cand_alpha
@@ -1937,14 +2280,12 @@ def _match_candidate(cand_norm: str, cand_tokens: set[str],
                 return doc, line
             if anchor_hit is None:
                 # 锚点命中先记下，继续扫描看是否有整句命中
-                if cand_alpha & line["atokens"] \
-                        or len(cand_num & line["ntokens"]) >= 2:
+                if cand_alpha & line["atokens"] or len(cand_num & line["ntokens"]) >= 2:
                     anchor_hit = (doc, line)
     return anchor_hit
 
 
-def build_evidence(result_text: str, output_type: str,
-                   combined_text: str, max_items: int = 10) -> list[dict]:
+def build_evidence(result_text: str, output_type: str, combined_text: str, max_items: int = 10) -> list[dict]:
     """为一条提取结果反查来源位置（见模块注释的匹配口径）。
 
     result_text: 落库内容（markdown 文本或 JSON 字符串）；
@@ -1952,8 +2293,7 @@ def build_evidence(result_text: str, output_type: str,
     返回证据列表（可为空——匹配不上时如实留空，绝不编造出处）。
     """
     result_text = (result_text or "").strip()
-    if (not result_text or not combined_text
-            or is_missing_result(result_text, output_type)):
+    if not result_text or not combined_text or is_missing_result(result_text, output_type):
         return []
     docs = _doc_line_index(combined_text)
     if not docs:
@@ -2019,8 +2359,7 @@ def build_evidence(result_text: str, output_type: str,
     return evidences
 
 
-def build_evidence_json(result_text: str, output_type: str,
-                        combined_text: str) -> str:
+def build_evidence_json(result_text: str, output_type: str, combined_text: str) -> str:
     """build_evidence 的落库封装：空结果返回 ''，异常由调用方兜底。"""
     items = build_evidence(result_text, output_type, combined_text)
     if not items:

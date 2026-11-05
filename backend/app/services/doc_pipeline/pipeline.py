@@ -16,6 +16,7 @@
 所有文件 IO 走 asyncio.to_thread，不阻塞事件循环；任何一层落盘失败只降级
 告警，绝不影响既有上传/解析主链路。
 """
+
 from __future__ import annotations
 
 import asyncio
@@ -96,14 +97,14 @@ async def _safe_io(fn, *args, **kwargs):
     try:
         return await asyncio.to_thread(fn, *args, **kwargs)
     except Exception:
-        logger.exception("四层存储写入失败（不影响主流程）: %s",
-                         getattr(fn, "__name__", fn))
+        logger.exception("四层存储写入失败（不影响主流程）: %s", getattr(fn, "__name__", fn))
         return None
 
 
 # ---------------------------------------------------------------------------
 # 行读取工具（aiosqlite.Row 没有 .get()，统一转 dict 再取值）
 # ---------------------------------------------------------------------------
+
 
 def _row_get(row: Any, key: str, default=None):
     try:
@@ -119,23 +120,38 @@ def _row_get(row: Any, key: str, default=None):
 # 阶段1：文件上传 —— 原文层入库（指纹 + meta + 索引）
 # ---------------------------------------------------------------------------
 
-async def ingest_upload(*, doc_id: str, project_id: str, file_name: str,
-                        file_type: str, saved_path: Path, size: int,
-                        doc_category: str = "",
-                        supersedes: str | None = None) -> dict:
+
+async def ingest_upload(
+    *,
+    doc_id: str,
+    project_id: str,
+    file_name: str,
+    file_type: str,
+    saved_path: Path,
+    size: int,
+    doc_category: str = "",
+    supersedes: str | None = None,
+) -> dict:
     """原文层落盘登记：计算 MD5/SHA256、写 meta、拷贝原件、更新文档索引。
 
     返回 {"md5","sha256","page_count":0,...}，调用方将指纹写入
     project_documents 对应行（时效性判定的依据）。
     """
+
     def _sync() -> dict:
         content = saved_path.read_bytes()
         fp = store.file_fingerprints(content)
         meta = store.build_meta(
-            doc_id=doc_id, project_id=project_id, file_name=file_name,
-            file_type=file_type, file_size=size,
-            md5=fp["md5"], sha256=fp["sha256"],
-            doc_category=doc_category, supersedes=supersedes)
+            doc_id=doc_id,
+            project_id=project_id,
+            file_name=file_name,
+            file_type=file_type,
+            file_size=size,
+            md5=fp["md5"],
+            sha256=fp["sha256"],
+            doc_category=doc_category,
+            supersedes=supersedes,
+        )
         # 原件双份保存：原始上传路径（FACT_UPLOADS_DIR，兼容既有）+ 四层 raw/
         raw_dir = store.layer_dir(project_id, doc_id, store.LAYER_RAW)
         raw_dir.mkdir(parents=True, exist_ok=True)
@@ -172,12 +188,20 @@ def _index_entry(meta: dict) -> dict:
 # 阶段2+3：解析落盘（解析层）+ 分块入库（chunk 层）
 # ---------------------------------------------------------------------------
 
-async def ingest_parse_result(db, *, doc_id: str, project_id: str,
-                              file_name: str, markdown: str,
-                              page_count: int, parse_duration_s: float,
-                              parse_engine: str,
-                              warnings: list[str] | None = None,
-                              prev_version: str = "") -> dict:
+
+async def ingest_parse_result(
+    db,
+    *,
+    doc_id: str,
+    project_id: str,
+    file_name: str,
+    markdown: str,
+    page_count: int,
+    parse_duration_s: float,
+    parse_engine: str,
+    warnings: list[str] | None = None,
+    prev_version: str = "",
+) -> dict:
     """解析成功后：写解析层四份产物 + front-matter Markdown、分块入 doc_chunks、
     回写 meta 与 project_documents 时效列。
 
@@ -201,8 +225,7 @@ async def ingest_parse_result(db, *, doc_id: str, project_id: str,
     #    hash diff 的两个用途：① 统计 changed_chunks；② 未变更块继承旧
     #    created_at（时间线连续）。存储侧仍是「全删全插」+ 确定性 chunk_id
     #    幂等；不做真正的跳插（prev/next 链会随内容变更整体重建，见 docstring）。
-    cur = await db.execute("SELECT chunk_id, hash, created_at FROM doc_chunks"
-                           " WHERE doc_id=?", (doc_id,))
+    cur = await db.execute("SELECT chunk_id, hash, created_at FROM doc_chunks" " WHERE doc_id=?", (doc_id,))
     # ✅ P1（R13 漏改点 · 2026-10-04）：同模块路由层 doc_pipeline.py 的 5 处
     #    （_load_doc / get_extractions / get_chunks / completeness / sync）均已对
     #    `db.execute()` 返回 None 加守卫，唯独本服务层函数漏改 —— 而它正是
@@ -216,11 +239,9 @@ async def ingest_parse_result(db, *, doc_id: str, project_id: str,
         logger.warning("查询历史分块失败（db.execute 返回 None），按无历史块处理：%s", doc_id)
         old_rows = {}
     else:
-        old_rows = {r["chunk_id"]: (r["hash"], r["created_at"] or "")
-                    for r in await cur.fetchall()}
+        old_rows = {r["chunk_id"]: (r["hash"], r["created_at"] or "") for r in await cur.fetchall()}
     old_hashes = {cid: h for cid, (h, _t) in old_rows.items()}
-    changed = [c for c in chunks
-               if old_hashes.get(c["chunk_id"]) != c["hash"]]
+    changed = [c for c in chunks if old_hashes.get(c["chunk_id"]) != c["hash"]]
     # 删除已不存在的块（文件变更后旧块自然失配）
     # ✅ P1（R13 写路径漏改 · 2026-10-05）：本函数的读路径（上方 SELECT）已在
     #    R39 补过判空，但**写路径**两处至今裸取返回值。此处置于「全删全插」的
@@ -231,14 +252,13 @@ async def ingest_parse_result(db, *, doc_id: str, project_id: str,
     #    处置：跳过本次重建并告警 —— 保留陈旧旧块（仍可被下游读到）比
     #    「旧块残留 + 新块主键冲突」更安全，且与读路径「按无历史块降级」不同，
     #    这里降级方向必须是**不写**（写了才会冲突）。
-    del_cur = await db.execute(
-        "DELETE FROM doc_chunks WHERE doc_id=?", (doc_id,))
+    del_cur = await db.execute("DELETE FROM doc_chunks WHERE doc_id=?", (doc_id,))
     chunks_rebuilt = True
     if del_cur is None:
         chunks_rebuilt = False
         logger.warning(
-            "分块全量重建的 DELETE 未生效（db.execute 返回 None，R13），"
-            "跳过本次分块写入以避免主键冲突：%s", doc_id)
+            "分块全量重建的 DELETE 未生效（db.execute 返回 None，R13），" "跳过本次分块写入以避免主键冲突：%s", doc_id
+        )
     created = _now()
     ins_cur = None
     if chunks and chunks_rebuilt:
@@ -247,15 +267,14 @@ async def ingest_parse_result(db, *, doc_id: str, project_id: str,
             " page_num, text, source_ref, parent_chunk_id, prev_chunk_id,"
             " next_chunk_id, tables_json, images_json, hash, meta_json, created_at)"
             " VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)",
-            [_patched_row(c, created, old_rows) for c in chunks])
+            [_patched_row(c, created, old_rows) for c in chunks],
+        )
         # ✅ P1（R13 写路径 · 2026-10-05）：executemany 同样可能返回 None 而不抛。
         #    此时上方 DELETE 已经生效、新块一行没插 —— doc_chunks 会整批清空。
         #    没有可回滚的余地（旧块已删），但必须留痕：静默丢分块会让下游
         #    （AI 检索 / 四层完整性报告）读到「有解析正文却零分块」而无从解释。
         if ins_cur is None:
-            logger.warning(
-                "分块 INSERT 未生效（db.executemany 返回 None，R13），"
-                "本次分块可能缺失：%s", doc_id)
+            logger.warning("分块 INSERT 未生效（db.executemany 返回 None，R13），" "本次分块可能缺失：%s", doc_id)
     # 仅当「本该插却没插」才计降级（DELETE 已失败时另计，空正文本就不插不算）
     chunks_insert_degraded = bool(chunks) and chunks_rebuilt and ins_cur is None
 
@@ -263,22 +282,24 @@ async def ingest_parse_result(db, *, doc_id: str, project_id: str,
     pages_payload = {
         "doc_id": doc_id,
         "page_count": structured["page_count"],
-        "pages": [{k: p[k] for k in
-                   ("page_num", "text", "tables", "images")} |
-                  {"bbox": None, "rotation": 0, "header": "", "footer": ""}
-                  for p in structured["pages"]],
+        "pages": [
+            {k: p[k] for k in ("page_num", "text", "tables", "images")}
+            | {"bbox": None, "rotation": 0, "header": "", "footer": ""}
+            for p in structured["pages"]
+        ],
     }
-    tables_payload = {"doc_id": doc_id,
-                      "table_count": structured["table_count"],
-                      "tables": structured["tables"]}
-    images_payload = {"doc_id": doc_id,
-                      "image_count": structured["image_count"],
-                      "images": structured["images"]}
-    md_with_front = wrap_parsed_markdown(doc_id, file_name, markdown,
-                                         structured["page_count"])
-    await _safe_io(store.write_parsed_layer, project_id, doc_id,
-                   markdown=md_with_front, pages=pages_payload,
-                   tables=tables_payload, images=images_payload)
+    tables_payload = {"doc_id": doc_id, "table_count": structured["table_count"], "tables": structured["tables"]}
+    images_payload = {"doc_id": doc_id, "image_count": structured["image_count"], "images": structured["images"]}
+    md_with_front = wrap_parsed_markdown(doc_id, file_name, markdown, structured["page_count"])
+    await _safe_io(
+        store.write_parsed_layer,
+        project_id,
+        doc_id,
+        markdown=md_with_front,
+        pages=pages_payload,
+        tables=tables_payload,
+        images=images_payload,
+    )
 
     # ---- meta / 索引 / 时效性回写 ----
     meta = await _safe_io(store.read_meta, project_id, doc_id) or {}
@@ -286,20 +307,27 @@ async def ingest_parse_result(db, *, doc_id: str, project_id: str,
     def _finish_sync(meta_obj: dict) -> dict:
         m = dict(meta_obj or {})
         base = store.build_meta(
-            doc_id=doc_id, project_id=project_id, file_name=file_name,
-            file_type=m.get("file_type", ""), file_size=m.get("file_size", 0),
-            md5=m.get("file_hash_md5", ""), sha256=m.get("file_hash_sha256", ""),
-            doc_category=m.get("doc_category", ""))
+            doc_id=doc_id,
+            project_id=project_id,
+            file_name=file_name,
+            file_type=m.get("file_type", ""),
+            file_size=m.get("file_size", 0),
+            md5=m.get("file_hash_md5", ""),
+            sha256=m.get("file_hash_sha256", ""),
+            doc_category=m.get("doc_category", ""),
+        )
         base.update({k: v for k, v in m.items() if v not in (None, "")})
-        base.update({
-            "page_count": structured["page_count"],
-            "parse_status": "success",
-            "parse_version": parse_version,
-            "parse_time": _now(),
-            "parse_duration_ms": int(parse_duration_s * 1000),
-            "parse_engine": f"{parse_engine}+{PARSER_VERSION}",
-            "parse_warnings": warnings or [],
-        })
+        base.update(
+            {
+                "page_count": structured["page_count"],
+                "parse_status": "success",
+                "parse_version": parse_version,
+                "parse_time": _now(),
+                "parse_duration_ms": int(parse_duration_s * 1000),
+                "parse_engine": f"{parse_engine}+{PARSER_VERSION}",
+                "parse_warnings": warnings or [],
+            }
+        )
         store.write_meta(project_id, doc_id, base)
         store.update_index(project_id, _index_entry(base))
         store.write_semantic_index(project_id, doc_id, chunks=chunks)
@@ -327,14 +355,22 @@ async def ingest_parse_result(db, *, doc_id: str, project_id: str,
         " page_count=?,"
         " parse_engine=?, completeness_json=?, status='valid' "
         "WHERE id=?",
-        (int(parse_duration_s * 1000), parse_version, _now(),
-         meta.get("file_hash_md5", ""), meta.get("file_hash_sha256", ""),
-         structured["page_count"], f"{parse_engine}+{PARSER_VERSION}",
-         _jdump(_completeness_snapshot(structured, chunks, None)), doc_id))
+        (
+            int(parse_duration_s * 1000),
+            parse_version,
+            _now(),
+            meta.get("file_hash_md5", ""),
+            meta.get("file_hash_sha256", ""),
+            structured["page_count"],
+            f"{parse_engine}+{PARSER_VERSION}",
+            _jdump(_completeness_snapshot(structured, chunks, None)),
+            doc_id,
+        ),
+    )
     if meta_cur is None:
         logger.warning(
-            "回写 project_documents 解析元数据未生效（db.execute 返回 None，R13），"
-            "分块与解析层照常提交：%s", doc_id)
+            "回写 project_documents 解析元数据未生效（db.execute 返回 None，R13），" "分块与解析层照常提交：%s", doc_id
+        )
     await db.commit()
     return {
         "parse_version": parse_version,
@@ -346,13 +382,11 @@ async def ingest_parse_result(db, *, doc_id: str, project_id: str,
         "page_count": structured["page_count"],
         # ✅ R13 写路径降级标记（加法式，2026-10-05）：True = 本次分块重建或
         #    元数据回写至少有一笔未生效，供调用方与护栏区分「真写成功」。
-        "db_write_degraded": ((del_cur is None) or chunks_insert_degraded
-                              or (meta_cur is None)),
+        "db_write_degraded": ((del_cur is None) or chunks_insert_degraded or (meta_cur is None)),
     }
 
 
-def _patched_row(c: dict, created: str,
-                 old_rows: dict[str, tuple[str, str]] | None = None) -> tuple:
+def _patched_row(c: dict, created: str, old_rows: dict[str, tuple[str, str]] | None = None) -> tuple:
     """chunk dict → doc_chunks 插入行；内容未变更（同 id 同 hash）的块
     继承旧 created_at，保持入库时间线连续（增量审计可区分新旧块）。"""
     if old_rows:
@@ -366,28 +400,27 @@ def _patched_row(c: dict, created: str,
 # 阶段5 辅助：完整性 / 时效性
 # ---------------------------------------------------------------------------
 
-def _completeness_snapshot(structured: dict, chunks: list[dict],
-                           extractions: dict | None) -> dict:
+
+def _completeness_snapshot(structured: dict, chunks: list[dict], extractions: dict | None) -> dict:
     """解析层覆盖率快照（提取字段覆盖在 build_completeness_report 里合并）。"""
     return {
         "parsed_pages": structured.get("page_count", 0),
         "total_tables": structured.get("table_count", 0),
         "extracted_tables": structured.get("table_count", 0),
         "total_images": structured.get("image_count", 0),
-        "ocr_images": sum(1 for im in structured.get("images", [])
-                          if im.get("ocr_text")),
+        "ocr_images": sum(1 for im in structured.get("images", []) if im.get("ocr_text")),
         "total_formulas": structured.get("formula_count", 0),
         "chunk_count": len(chunks),
     }
 
 
-async def build_completeness_report(db, *, doc_id: str, project_id: str,
-                                    total_pages_hint: int = 0) -> dict:
+async def build_completeness_report(db, *, doc_id: str, project_id: str, total_pages_hint: int = 0) -> dict:
     """完整性校验报告（规范 §4.1）：解析/表格/图片/字段覆盖率 + 质量评分。"""
     cur = await db.execute(
         "SELECT file_name, page_count, parsed_markdown, parse_status,"
         " parse_warnings, completeness_json FROM project_documents WHERE id=?",
-        (doc_id,))
+        (doc_id,),
+    )
     # ✅ R13 补全（2026-10-06）：本函数 5 处 db.execute 此前均未判空。
     #    路由层 _load_doc 虽已做过一次查询验证，但本函数内部是**独立的**后续
     #    查询——连接在两次查询之间断开时，cur=None → fetchone() AttributeError → 500。
@@ -415,7 +448,9 @@ async def build_completeness_report(db, *, doc_id: str, project_id: str,
     cur = await db.execute(
         "SELECT COUNT(*) AS n, "
         "SUM(CASE WHEN source_ref != '' THEN 1 ELSE 0 END) AS traced "
-        "FROM doc_chunks WHERE doc_id=?", (doc_id,))
+        "FROM doc_chunks WHERE doc_id=?",
+        (doc_id,),
+    )
     # ✅ R13 补全（2026-10-06）：同上，读路径降级为 0 块。
     if cur is None:
         logger.warning("完整性报告查询分块统计失败（db.execute 返回 None）：%s", doc_id)
@@ -431,9 +466,9 @@ async def build_completeness_report(db, *, doc_id: str, project_id: str,
         #    「本轮已无源」的提取类别标记为 status='stale'（保留数据以便回溯）。
         #    若此处不过滤，被清空的项目基本信息仍以旧内容计入字段覆盖率，
         #    完整性报告与「提取结果已被清空」的实际状态分叉。
-        "SELECT extract_type, extract_data FROM doc_extractions"
-        " WHERE doc_id=? AND COALESCE(status,'') != 'stale'",
-        (doc_id,))
+        "SELECT extract_type, extract_data FROM doc_extractions" " WHERE doc_id=? AND COALESCE(status,'') != 'stale'",
+        (doc_id,),
+    )
     # ✅ R13 补全（2026-10-06）：读路径降级为空提取集。
     if cur is None:
         logger.warning("完整性报告查询提取结果失败（db.execute 返回 None）：%s", doc_id)
@@ -460,11 +495,9 @@ async def build_completeness_report(db, *, doc_id: str, project_id: str,
         except ValueError:
             pass
 
-    total_pages = max(int(_row_get(row, "page_count", 0) or 0), total_pages_hint,
-                      int(snap.get("parsed_pages") or 0))
+    total_pages = max(int(_row_get(row, "page_count", 0) or 0), total_pages_hint, int(snap.get("parsed_pages") or 0))
     parsed_pages = int(snap.get("parsed_pages") or 0)
-    parse_coverage = min(parsed_pages / total_pages, 1.0) if total_pages else (
-        1.0 if parsed_pages else 0.0)
+    parse_coverage = min(parsed_pages / total_pages, 1.0) if total_pages else (1.0 if parsed_pages else 0.0)
     chunk_traced = (traced_chunks / chunk_count) if chunk_count else 0.0
     field_coverage = (extracted_fields / required_fields) if required_fields else None
 
@@ -476,12 +509,13 @@ async def build_completeness_report(db, *, doc_id: str, project_id: str,
     conflict_count = 0
     try:
         cur = await db.execute(
-            "SELECT COUNT(*) AS n FROM global_facts "
-            "WHERE project_id=? AND has_conflict=1", (project_id,))
+            "SELECT COUNT(*) AS n FROM global_facts " "WHERE project_id=? AND has_conflict=1", (project_id,)
+        )
         conflict_count = int(((await cur.fetchone()) or ["0"])[0] or 0)
     except Exception as e:
-        logger.warning("冲突事实计数查询失败（doc_id=%s project_id=%s，报告按 0 计）: %s",
-                       doc_id, str(project_id)[:8], e)
+        logger.warning(
+            "冲突事实计数查询失败（doc_id=%s project_id=%s，报告按 0 计）: %s", doc_id, str(project_id)[:8], e
+        )
 
     scores = [parse_coverage, chunk_traced]
     if field_coverage is not None:
@@ -496,12 +530,14 @@ async def build_completeness_report(db, *, doc_id: str, project_id: str,
             "parse_coverage": round(parse_coverage, 3),
             "total_tables": int(snap.get("total_tables") or 0),
             "extracted_tables": int(snap.get("extracted_tables") or 0),
-            "table_coverage": 1.0 if not snap.get("total_tables") else round(
-                int(snap.get("extracted_tables") or 0) / int(snap.get("total_tables") or 1), 3),
+            "table_coverage": 1.0
+            if not snap.get("total_tables")
+            else round(int(snap.get("extracted_tables") or 0) / int(snap.get("total_tables") or 1), 3),
             "total_images": int(snap.get("total_images") or 0),
             "ocr_images": int(snap.get("ocr_images") or 0),
-            "image_coverage": 1.0 if not snap.get("total_images") else round(
-                int(snap.get("ocr_images") or 0) / int(snap.get("total_images") or 1), 3),
+            "image_coverage": 1.0
+            if not snap.get("total_images")
+            else round(int(snap.get("ocr_images") or 0) / int(snap.get("total_images") or 1), 3),
             "total_formulas": int(snap.get("total_formulas") or 0),
             "chunk_count": chunk_count,
             "required_fields": required_fields,
@@ -513,8 +549,7 @@ async def build_completeness_report(db, *, doc_id: str, project_id: str,
         },
         "quality_score": quality,
         "warnings": [str(w) for w in warnings],
-        "errors": [] if _row_get(row, "parse_status") == "success"
-        else ["文档尚未解析成功"],
+        "errors": [] if _row_get(row, "parse_status") == "success" else ["文档尚未解析成功"],
         "generated_at": _now(),
     }
     # 落库（doc_validation_reports）+ meta 回写质量分
@@ -523,8 +558,8 @@ async def build_completeness_report(db, *, doc_id: str, project_id: str,
     _rep_cur = await db.execute(
         "INSERT INTO doc_validation_reports (id, doc_id, project_id, kind,"
         " report_json, created_at) VALUES (?,?,?,?,?,?)",
-        (str(uuid.uuid4()), doc_id, project_id, "completeness",
-         _jdump(report), _now()))
+        (str(uuid.uuid4()), doc_id, project_id, "completeness", _jdump(report), _now()),
+    )
     if _rep_cur is None:
         logger.warning("完整性报告落库 doc_validation_reports 失败（db.execute 返回 None）：%s", doc_id)
     # ✅ BUG 修复（质量分永远为空的根因）：project_documents.quality_score 列
@@ -532,9 +567,7 @@ async def build_completeness_report(db, *, doc_id: str, project_id: str,
     #    从不回写该 DB 列。而 GET /documents/{id}/status 读的正是 DB 列 —— 于是
     #    即便已执行完整性校验，状态接口的 quality_score 恒为 -1（前端显示「未评估」），
     #    四层质量能力等于白做。现随报告一并回写 DB 列，打通「校验→状态」数据链。
-    _qs_cur = await db.execute(
-        "UPDATE project_documents SET quality_score=? WHERE id=?",
-        (quality, doc_id))
+    _qs_cur = await db.execute("UPDATE project_documents SET quality_score=? WHERE id=?", (quality, doc_id))
     if _qs_cur is None:
         logger.warning("完整性报告回写 quality_score 失败（db.execute 返回 None）：%s", doc_id)
     await db.commit()
@@ -563,15 +596,13 @@ def compute_freshness(meta: dict, *, current_md5: str = "") -> dict:
     if (meta.get("parse_status") or "") != "success":
         status = "not_parsed"
         reasons.append("文档尚未成功解析")
-    if current_md5 and meta.get("file_hash_md5") and \
-            current_md5 != meta["file_hash_md5"]:
+    if current_md5 and meta.get("file_hash_md5") and current_md5 != meta["file_hash_md5"]:
         status = "file_changed"
         reasons.append("源文件指纹与解析时不一致，需要重新解析")
     expires = (meta.get("expires_at") or "").strip()
     if status == "valid" and expires:
         try:
-            exp_dt = datetime.strptime(expires, "%Y-%m-%dT%H:%M:%SZ").replace(
-                tzinfo=timezone.utc)
+            exp_dt = datetime.strptime(expires, "%Y-%m-%dT%H:%M:%SZ").replace(tzinfo=timezone.utc)
             if exp_dt < datetime.now(timezone.utc):
                 status = "expired"
                 reasons.append(f"解析结果已于 {expires} 过期")
@@ -594,6 +625,7 @@ def compute_freshness(meta: dict, *, current_md5: str = "") -> dict:
 # 阶段4/7：提取层物化（把 AI 提取结果按标准格式落盘 + 入 doc_extractions）
 # ---------------------------------------------------------------------------
 
+
 async def sync_extract_layer(db, *, doc_id: str, project_id: str) -> dict:
     """把平台既有的 AI 提取产物（bid_analysis_items + global_facts）按规范
     §2.3 的提取层格式物化：写 extracted/*.json + 入 doc_extractions 表 +
@@ -602,12 +634,17 @@ async def sync_extract_layer(db, *, doc_id: str, project_id: str) -> dict:
     ⚠️ 下游消费边界（数据流审计 2026-09-23 文档化）：本函数是单向「归档物化」，
     目录/正文生成的实时源仍为 bid_analysis_items 与 global_facts 两张活跃表，不读取
     本层（doc_extractions / extracted/*.json）产物；本层仅供完整性报告、交叉校验与未来回溯。
+
+    ⚠️ R180（2026-11-05 · 避免误判）：本层只归档 ``status='success'`` 的 AI 产物，
+    因此 **doc_extractions=0 行是合法状态**（AI 未产出成功项，如 provider 429/熔断），
+    不代表文档解析失败 —— 解析结果在 project_documents/doc_chunks，诊断时请以两者为准。
     """
     # 1) 项目级 AI 解析项 → 按 doc 归档（现阶段项目资料的 AI 结构化提取统一来源）
     cur = await db.execute(
         "SELECT item_id, label, output_type, content, status, updated_at "
         "FROM bid_analysis_items WHERE project_id=? AND status='success'",
-        (project_id,))
+        (project_id,),
+    )
     # ✅ R13 补全（2026-10-06）：读路径降级为空列表。
     if cur is None:
         logger.warning("提取层物化查询解析项失败（db.execute 返回 None），按空集处理：%s", project_id)
@@ -626,9 +663,9 @@ async def sync_extract_layer(db, *, doc_id: str, project_id: str) -> dict:
     except Exception:  # pragma: no cover - 导入失败时退化为不过滤（旧行为）
         is_missing_result = None
     if is_missing_result is not None:
-        items = [it for it in items
-                 if not is_missing_result(it.get("content") or "",
-                                          it.get("output_type") or "markdown")]
+        items = [
+            it for it in items if not is_missing_result(it.get("content") or "", it.get("output_type") or "markdown")
+        ]
     by_type: dict[str, list[dict]] = {}
     for it in items:
         for t in _ITEM_TO_EXTRACT_TYPE.get(it["item_id"], ()):
@@ -638,7 +675,9 @@ async def sync_extract_layer(db, *, doc_id: str, project_id: str) -> dict:
     cur = await db.execute(
         "SELECT group_id, group_title, title, content, category, source_ref,"
         " confidence, is_simulated, is_resolved, has_conflict "
-        "FROM global_facts WHERE project_id=?", (project_id,))
+        "FROM global_facts WHERE project_id=?",
+        (project_id,),
+    )
     # ✅ R13 补全（2026-10-06）：读路径降级为空列表。
     if cur is None:
         logger.warning("提取层物化查询全局事实失败（db.execute 返回 None），按空集处理：%s", project_id)
@@ -659,7 +698,8 @@ async def sync_extract_layer(db, *, doc_id: str, project_id: str) -> dict:
                 "is_resolved": bool(f.get("is_resolved")),
                 "has_conflict": bool(f.get("has_conflict")),
                 "source": f.get("source_ref") or "",
-            } for f in fact_rows
+            }
+            for f in fact_rows
         ],
     }
 
@@ -684,8 +724,8 @@ async def sync_extract_layer(db, *, doc_id: str, project_id: str) -> dict:
                 "extract_schema_version": EXTRACT_SCHEMA_VERSION,
                 ext_type: _merge_item_contents(ext_type, src_items),
                 "source_items": [
-                    {"item_id": i["item_id"], "label": i["label"],
-                     "output_type": i["output_type"]} for i in src_items],
+                    {"item_id": i["item_id"], "label": i["label"], "output_type": i["output_type"]} for i in src_items
+                ],
             }
         await _safe_io(store.write_extraction, project_id, doc_id, ext_type, payload)
         # 入 doc_extractions（INSERT OR REPLACE 以 (doc_id, extract_type) 唯一）
@@ -703,13 +743,24 @@ async def sync_extract_layer(db, *, doc_id: str, project_id: str) -> dict:
             " extract_time=excluded.extract_time,"
             " extract_engine=excluded.extract_engine,"
             " status=excluded.status",
-            (str(uuid.uuid4()), doc_id, project_id, ext_type,
-             _jdump(payload), conf,
-             _jdump(_collect_source_refs(payload)), now,
-             "ai-extractor-v1", "success", now))
+            (
+                str(uuid.uuid4()),
+                doc_id,
+                project_id,
+                ext_type,
+                _jdump(payload),
+                conf,
+                _jdump(_collect_source_refs(payload)),
+                now,
+                "ai-extractor-v1",
+                "success",
+                now,
+            ),
+        )
         if _ecur is None:
-            logger.warning("提取层物化落库 doc_extractions 失败（db.execute 返回 None，R13）：type=%s doc=%s",
-                           ext_type, doc_id)
+            logger.warning(
+                "提取层物化落库 doc_extractions 失败（db.execute 返回 None，R13）：type=%s doc=%s", ext_type, doc_id
+            )
         written_types.append(ext_type)
     await db.commit()
 
@@ -722,10 +773,7 @@ async def sync_extract_layer(db, *, doc_id: str, project_id: str) -> dict:
     #    自相矛盾。现对本轮未写入的非预留类别做陈旧化标记：保留 extract_data 便于
     #    回溯（彻底删除仍由 purge_document 负责），但 status 明确不再是 'success'，
     #    各消费方据此可判定「该类别已无有效提取结果」。
-    stale_types = [
-        t for t in store.EXTRACT_TYPES
-        if t not in store.RESERVED_EXTRACT_TYPES and t not in written_types
-    ]
+    stale_types = [t for t in store.EXTRACT_TYPES if t not in store.RESERVED_EXTRACT_TYPES and t not in written_types]
     if stale_types:
         ph = ",".join("?" * len(stale_types))
         try:
@@ -737,16 +785,16 @@ async def sync_extract_layer(db, *, doc_id: str, project_id: str) -> dict:
                 f"UPDATE doc_extractions SET status='stale', extract_time=? "
                 f"WHERE doc_id=? AND extract_type IN ({ph}) "
                 f"AND COALESCE(status,'') != 'stale'",
-                (now, doc_id, *stale_types))
+                (now, doc_id, *stale_types),
+            )
             if _scur is None:
-                logger.warning("标记陈旧提取层失败（db.execute 返回 None，R13）：doc=%s types=%s",
-                               doc_id, stale_types)
+                logger.warning("标记陈旧提取层失败（db.execute 返回 None，R13）：doc=%s types=%s", doc_id, stale_types)
             await db.commit()
         except Exception as e:  # noqa: BLE001 - 陈旧化失败不应阻断物化主流程
-            logger.warning("标记陈旧提取层失败（doc=%s，不影响物化结果）: %s",
-                           doc_id, e)
+            logger.warning("标记陈旧提取层失败（doc=%s，不影响物化结果）: %s", doc_id, e)
 
     extract_status = "success" if written_types else "pending"
+
     # ✅ 清理（2026-09-20）：此处曾有一条 SELECT doc_category 的查询但结果从未
     #    被使用（纯死查询，每次物化白跑一次 DB）。删除。
     # meta 回写（extract 时间/状态 —— 时效性元数据）
@@ -754,8 +802,7 @@ async def sync_extract_layer(db, *, doc_id: str, project_id: str) -> dict:
         m = dict(meta_obj or {})
         if not m:
             return
-        m.update({"extract_status": extract_status, "extract_time": now,
-                  "extracted_types": written_types})
+        m.update({"extract_status": extract_status, "extract_time": now, "extracted_types": written_types})
         store.write_meta(project_id, doc_id, m)
         store.update_index(project_id, _index_entry(m))
 
@@ -765,15 +812,18 @@ async def sync_extract_layer(db, *, doc_id: str, project_id: str) -> dict:
     #    GET /documents/{id}/freshness 的状态漂移自愈会把两者拉回一致，
     #    但「本次物化成功」与列值短暂不一致期间，运维与前端看到的是旧值。
     _pcur = await db.execute(
-        "UPDATE project_documents SET extract_status=?, extract_time=? WHERE id=?",
-        (extract_status, now, doc_id))
+        "UPDATE project_documents SET extract_status=?, extract_time=? WHERE id=?", (extract_status, now, doc_id)
+    )
     if _pcur is None:
-        logger.warning("回写 project_documents.extract_status 失败（db.execute 返回 None，R13）：doc=%s",
-                       doc_id)
+        logger.warning("回写 project_documents.extract_status 失败（db.execute 返回 None，R13）：doc=%s", doc_id)
     await db.commit()
-    return {"doc_id": doc_id, "extract_status": extract_status,
-            "written_types": written_types,
-            "fact_count": len(fact_rows), "item_count": len(items)}
+    return {
+        "doc_id": doc_id,
+        "extract_status": extract_status,
+        "written_types": written_types,
+        "fact_count": len(fact_rows),
+        "item_count": len(items),
+    }
 
 
 def _merge_item_contents(ext_type: str, src_items: list[dict]) -> dict:
@@ -788,8 +838,7 @@ def _merge_item_contents(ext_type: str, src_items: list[dict]) -> dict:
             except ValueError:
                 parsed = None
         if isinstance(parsed, dict):
-            body = parsed.get(ext_type) if isinstance(parsed.get(ext_type), dict) \
-                else parsed
+            body = parsed.get(ext_type) if isinstance(parsed.get(ext_type), dict) else parsed
             for k, v in body.items():
                 if k in merged and isinstance(merged[k], dict) and isinstance(v, dict):
                     merged[k].update(v)
@@ -805,8 +854,7 @@ def _merge_item_contents(ext_type: str, src_items: list[dict]) -> dict:
     if ext_type == "project_info":
         for k, v in list(merged.items()):
             if isinstance(v, str):
-                merged[k] = {"value": v, "confidence": _UNASSESSED_CONFIDENCE,
-                             "source": ""}
+                merged[k] = {"value": v, "confidence": _UNASSESSED_CONFIDENCE, "source": ""}
     return merged
 
 
@@ -821,15 +869,22 @@ _UNASSESSED_CONFIDENCE = 0.0
 
 def _avg_confidence(payload: dict) -> float:
     try:
-        body = next((v for k, v in payload.items()
-                     if k not in ("doc_id", "extract_time", "extract_schema_version",
-                                  "source_items") and isinstance(v, (dict, list))), None)
+        body = next(
+            (
+                v
+                for k, v in payload.items()
+                if k not in ("doc_id", "extract_time", "extract_schema_version", "source_items")
+                and isinstance(v, (dict, list))
+            ),
+            None,
+        )
         if isinstance(body, list):
             confs = [float(i.get("confidence") or 0) for i in body if isinstance(i, dict)]
             return round(sum(confs) / len(confs), 3) if confs else _UNASSESSED_CONFIDENCE
         if isinstance(body, dict):
-            confs = [float(v.get("confidence") or 0) for v in body.values()
-                     if isinstance(v, dict) and "confidence" in v]
+            confs = [
+                float(v.get("confidence") or 0) for v in body.values() if isinstance(v, dict) and "confidence" in v
+            ]
             return round(sum(confs) / len(confs), 3) if confs else _UNASSESSED_CONFIDENCE
     except Exception as e:
         logger.debug("平均置信度计算失败（按未评估处理）: %s", e)
@@ -858,6 +913,7 @@ def _collect_source_refs(payload: dict) -> list[str]:
 # 阶段5：交叉校验（多文档冲突 + 数值一致性，复用 facts_cross_validators）
 # ---------------------------------------------------------------------------
 
+
 def _norm_fact_name(name: str) -> str:
     """归一化事实名用于跨源比对（去空白/小写/去常见标点）。"""
     if not name:
@@ -869,7 +925,9 @@ def _norm_fact_name(name: str) -> str:
 
 
 async def detect_cross_source_conflicts(
-    db, *, project_id: str,
+    db,
+    *,
+    project_id: str,
 ) -> tuple[list[dict], set[str], set[str]]:
     """P2（2026-09-23）：比对「AI 解析项目」(bid_analysis_items) 与「全局事实」
     (global_facts) 两套真值源，找出同名但取值冲突的事实。
@@ -885,8 +943,8 @@ async def detect_cross_source_conflicts(
     from app.services.facts_extractor import extract_value_from_markdown_line
 
     cur = await db.execute(
-        "SELECT id, label, content FROM bid_analysis_items "
-        "WHERE project_id=? AND status='success'", (project_id,))
+        "SELECT id, label, content FROM bid_analysis_items " "WHERE project_id=? AND status='success'", (project_id,)
+    )
     # ✅ R13 补全（2026-10-06）：读路径降级为空列表。
     if cur is None:
         logger.warning("跨源冲突检测查询解析项失败（db.execute 返回 None）：%s", project_id)
@@ -894,8 +952,7 @@ async def detect_cross_source_conflicts(
     else:
         bid_rows = [dict(r) for r in await cur.fetchall()]
 
-    cur = await db.execute(
-        "SELECT id, title, content FROM global_facts WHERE project_id=?", (project_id,))
+    cur = await db.execute("SELECT id, title, content FROM global_facts WHERE project_id=?", (project_id,))
     # ✅ R13 补全（2026-10-06）：读路径降级为空列表。
     if cur is None:
         logger.warning("跨源冲突检测查询全局事实失败（db.execute 返回 None）：%s", project_id)
@@ -913,7 +970,7 @@ async def detect_cross_source_conflicts(
              → 凭空产出一条「跨来源取值冲突」；
           ② `lstrip("- ")` 把值开头的负号吃掉（`-5℃` → `5℃`）。
         """
-        c = (content or "")
+        c = content or ""
         if ":" in c or "：" in c:
             return extract_value_from_markdown_line(c)[1]
         return c.strip()
@@ -923,14 +980,12 @@ async def detect_cross_source_conflicts(
     for r in bid_rows:
         nm = _norm_fact_name(r.get("label") or "")
         if nm:
-            by_name.setdefault(nm, []).append(
-                ("bid_analysis", r.get("label") or "", _value(r.get("content")), None))
+            by_name.setdefault(nm, []).append(("bid_analysis", r.get("label") or "", _value(r.get("content")), None))
     for r in gf_rows:
         nm = _norm_fact_name(r.get("title") or "")
         if not nm:
             continue
-        by_name.setdefault(nm, []).append(
-            ("global_facts", r.get("title") or "", _value(r.get("content")), r["id"]))
+        by_name.setdefault(nm, []).append(("global_facts", r.get("title") or "", _value(r.get("content")), r["id"]))
 
     conflicts: list[dict] = []
     flagged: set[str] = set()
@@ -943,17 +998,17 @@ async def detect_cross_source_conflicts(
         bid_val = next(iter(bid_vals))
         for ge in gf_entries:
             if any(bv != ge[2] for bv in bid_vals):
-                conflicts.append({
-                    "rule_id": "XV-SRC-DUP",
-                    "severity": "medium",
-                    "conflict_type": "cross_source_value_mismatch",
-                    "source_a": {"source": "bid_analysis",
-                                 "name": ge[1], "value": bid_val},
-                    "source_b": {"source": "global_facts",
-                                 "name": ge[1], "value": ge[2]},
-                    "resolution_hint": "AI 解析项目与全局事实同名取值不一致，需确认权威来源",
-                    "auto_resolvable": False,
-                })
+                conflicts.append(
+                    {
+                        "rule_id": "XV-SRC-DUP",
+                        "severity": "medium",
+                        "conflict_type": "cross_source_value_mismatch",
+                        "source_a": {"source": "bid_analysis", "name": ge[1], "value": bid_val},
+                        "source_b": {"source": "global_facts", "name": ge[1], "value": ge[2]},
+                        "resolution_hint": "AI 解析项目与全局事实同名取值不一致，需确认权威来源",
+                        "auto_resolvable": False,
+                    }
+                )
                 flagged.add(ge[3])
             elif all(bv == ge[2] for bv in bid_vals):
                 # 全部解析项取值与该事实一致 → 若此前由双源冲突置位，现可消解。
@@ -979,7 +1034,9 @@ async def run_cross_check(db, *, project_id: str, doc_id: str = "") -> dict:
     cur = await db.execute(
         "SELECT id, group_id, title, content, category, fact_key, source_ref,"
         " confidence, is_simulated, is_stale, has_conflict, conflict_keys "
-        "FROM global_facts WHERE project_id=?", (project_id,))
+        "FROM global_facts WHERE project_id=?",
+        (project_id,),
+    )
     # ✅ R13 补全（2026-10-06）：读路径降级为空列表 —— 无事实则无冲突可检。
     if cur is None:
         logger.warning("交叉校验查询全局事实失败（db.execute 返回 None），按空集处理：%s", project_id)
@@ -1004,7 +1061,7 @@ async def run_cross_check(db, *, project_id: str, doc_id: str = "") -> dict:
             self.key = row.get("fact_key") or ""
             self.name = row.get("title") or ""
             self.category = row.get("category") or ""
-            c = (row.get("content") or "")
+            c = row.get("content") or ""
             _, self.value = extract_value_from_markdown_line(c)
             self.source = row.get("source_ref") or ""
             # ✅ 修复（P7，2026-09-23）：旧 _Item 缺 confidence 属性，而
@@ -1044,12 +1101,14 @@ async def run_cross_check(db, *, project_id: str, doc_id: str = "") -> dict:
     #    二次映射 —— 旧按名映射依赖 side.name 与 DB title 全文相等，会漏标。
 
     # ✅ P2：双源交叉校验
-    cross_src_conflicts, cross_src_flagged, cross_src_resolved = \
-        await detect_cross_source_conflicts(db, project_id=project_id)
+    cross_src_conflicts, cross_src_flagged, cross_src_resolved = await detect_cross_source_conflicts(
+        db, project_id=project_id
+    )
 
     # 计算「全局事实内部同名取值分歧」的名称集合：这些名称即便解析项与其中
     # 一个取值一致，gf 内部仍有真实冲突，双源一致不构成消解（安全侧保守）。
     from app.services.facts_cross_validators import _norm_text_value
+
     name_vals: dict[str, set] = {}
     for it in merged:
         nm = (it.name or "").strip()
@@ -1061,8 +1120,7 @@ async def run_cross_check(db, *, project_id: str, doc_id: str = "") -> dict:
 
     def _cross_resolvable(it) -> bool:
         # 双源一致且 gf 内部无分歧，才允许据此消解标记。
-        return (it.id in cross_src_resolved
-                and (it.name or "").strip() not in gf_disputed_names)
+        return it.id in cross_src_resolved and (it.name or "").strip() not in gf_disputed_names
 
     # 最终保留集合按 fail-closed（安全侧保守）口径逐行判定：
     # ① 有候选且经 XV 判定仍冲突：保留（盲区候选 XV 不处理，标记天然在）；
@@ -1096,22 +1154,15 @@ async def run_cross_check(db, *, project_id: str, doc_id: str = "") -> dict:
     #    （报告 INSERT 在后面，不应被前面的 UPDATE 失败拖累）。
     if final_keep:
         ph = ",".join("?" * len(final_keep))
-        _kcur = await db.execute(
-            f"UPDATE global_facts SET has_conflict=1 "
-            f"WHERE id IN ({ph})", list(final_keep))
+        _kcur = await db.execute(f"UPDATE global_facts SET has_conflict=1 " f"WHERE id IN ({ph})", list(final_keep))
         if _kcur is None:
-            logger.warning("交叉校验置位 has_conflict=1 失败（db.execute 返回 None，R13）：%s",
-                           project_id)
+            logger.warning("交叉校验置位 has_conflict=1 失败（db.execute 返回 None，R13）：%s", project_id)
 
     if reset_ids:
         ph = ",".join("?" * len(reset_ids))
-        _rcur = await db.execute(
-            f"UPDATE global_facts SET has_conflict=0 "
-            f"WHERE id IN ({ph})", list(reset_ids))
+        _rcur = await db.execute(f"UPDATE global_facts SET has_conflict=0 " f"WHERE id IN ({ph})", list(reset_ids))
         if _rcur is None:
-            logger.warning("交叉校验消解 has_conflict=0 失败（db.execute 返回 None，R13）：%s",
-                           project_id)
-
+            logger.warning("交叉校验消解 has_conflict=0 失败（db.execute 返回 None，R13）：%s", project_id)
 
     report = {
         "project_id": project_id,
@@ -1126,11 +1177,10 @@ async def run_cross_check(db, *, project_id: str, doc_id: str = "") -> dict:
     _rcur2 = await db.execute(
         "INSERT INTO doc_validation_reports (id, doc_id, project_id, kind,"
         " report_json, created_at) VALUES (?,?,?,?,?,?)",
-        (str(uuid.uuid4()), doc_id, project_id, "cross_check", _jdump(report),
-         _now()))
+        (str(uuid.uuid4()), doc_id, project_id, "cross_check", _jdump(report), _now()),
+    )
     if _rcur2 is None:
-        logger.warning("交叉校验报告落库 doc_validation_reports 失败（db.execute 返回 None，R13）：%s",
-                       project_id)
+        logger.warning("交叉校验报告落库 doc_validation_reports 失败（db.execute 返回 None，R13）：%s", project_id)
     await db.commit()
     return report
 
@@ -1138,6 +1188,7 @@ async def run_cross_check(db, *, project_id: str, doc_id: str = "") -> dict:
 # ---------------------------------------------------------------------------
 # 文档删除：四层目录 + 关联 DB 行清理
 # ---------------------------------------------------------------------------
+
 
 async def purge_document(db, *, doc_id: str, project_id: str) -> None:
     # ✅ R13 补全（2026-10-06）：删除是清理操作，失败时告警但不中断后续删除
@@ -1150,8 +1201,7 @@ async def purge_document(db, *, doc_id: str, project_id: str) -> None:
     for idx, sql in enumerate(delete_sqls):
         _cur = await db.execute(sql, (doc_id,))
         if _cur is None:
-            logger.warning("文档清理 DELETE#%d 未生效（db.execute 返回 None，R13）：%s",
-                           idx, doc_id)
+            logger.warning("文档清理 DELETE#%d 未生效（db.execute 返回 None，R13）：%s", idx, doc_id)
     await db.commit()
     await _safe_io(store.remove_from_index, project_id, doc_id)
     await _safe_io(store.delete_doc_tree, project_id, doc_id)
@@ -1161,24 +1211,40 @@ async def purge_document(db, *, doc_id: str, project_id: str) -> None:
 # 存量回填：为没有指纹/版本的旧文档补写 meta（一次性，幂等）
 # ---------------------------------------------------------------------------
 
-async def backfill_document(db, *, doc_id: str, project_id: str,
-                            file_path: str, file_name: str, file_type: str,
-                            doc_category: str = "",
-                            parsed_markdown: str = "") -> dict:
+
+async def backfill_document(
+    db,
+    *,
+    doc_id: str,
+    project_id: str,
+    file_path: str,
+    file_name: str,
+    file_type: str,
+    doc_category: str = "",
+    parsed_markdown: str = "",
+) -> dict:
     """旧库升级：补指纹 + 解析层产物（若已有 parsed_markdown）。"""
     meta = await _safe_io(store.read_meta, project_id, doc_id)
     if not meta or not meta.get("file_hash_md5"):
         p = Path(file_path)
         if p.exists():
-            meta = await ingest_upload(
-                doc_id=doc_id, project_id=project_id, file_name=file_name,
-                file_type=file_type, saved_path=p, size=p.stat().st_size,
-                doc_category=doc_category) or meta or {}
+            meta = (
+                await ingest_upload(
+                    doc_id=doc_id,
+                    project_id=project_id,
+                    file_name=file_name,
+                    file_type=file_type,
+                    saved_path=p,
+                    size=p.stat().st_size,
+                    doc_category=doc_category,
+                )
+                or meta
+                or {}
+            )
         else:
             return {"ok": False, "reason": "原始文件缺失，无法计算指纹"}
     result: dict = {"ok": True, "doc_id": doc_id}
-    cur = await db.execute(
-        "SELECT COUNT(*) AS n FROM doc_chunks WHERE doc_id=?", (doc_id,))
+    cur = await db.execute("SELECT COUNT(*) AS n FROM doc_chunks WHERE doc_id=?", (doc_id,))
     # ✅ R13 补全（2026-10-06）：读路径降级为「无分块」→ 若有 parsed_markdown 则回填。
     if cur is None:
         logger.warning("回填查询分块计数失败（db.execute 返回 None），按无分块处理：%s", doc_id)
@@ -1187,8 +1253,14 @@ async def backfill_document(db, *, doc_id: str, project_id: str,
         has_chunks = int(((await cur.fetchone()) or ["0"])[0] or 0) > 0
     if parsed_markdown and not has_chunks:
         info = await ingest_parse_result(
-            db, doc_id=doc_id, project_id=project_id, file_name=file_name,
-            markdown=parsed_markdown, page_count=1, parse_duration_s=0.0,
-            parse_engine="backfill")
+            db,
+            doc_id=doc_id,
+            project_id=project_id,
+            file_name=file_name,
+            markdown=parsed_markdown,
+            page_count=1,
+            parse_duration_s=0.0,
+            parse_engine="backfill",
+        )
         result["backfilled"] = info
     return result

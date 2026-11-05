@@ -16,6 +16,7 @@
 
 本文件只覆盖上述两处（PARSE-1/2/5/6/7 滚递或登记不修）。
 """
+
 from __future__ import annotations
 
 import io
@@ -57,8 +58,7 @@ class TestParseTruncatedDiagnosis:
         """原文 >5000 字：响应必须回传 raw_text_truncated=True + warning 文案。"""
         text = _long_text(6000)
         assert len(text) > 5000
-        res = await uo.parse_outline(file=_upload("long.txt", text),
-                                     db=db_conn, scheme_name="", reorganize=False)
+        res = await uo.parse_outline(file=_upload("long.txt", text), db=db_conn, scheme_name="", reorganize=False)
         assert res.get("raw_text_truncated") is True
         assert "raw_text_truncated" in res
         assert "warning" in res
@@ -68,10 +68,8 @@ class TestParseTruncatedDiagnosis:
         """原文 >5000 字：落库 raw_text 必须是[:5000] 切片（非全文）。"""
         text = _long_text(6000)
         assert len(text) > 5000
-        res = await uo.parse_outline(file=_upload("long.txt", text),
-                                     db=db_conn, scheme_name="", reorganize=False)
-        cur = await db_conn.execute(
-            "SELECT raw_text FROM uploaded_outlines WHERE id=?", (res["id"],))
+        res = await uo.parse_outline(file=_upload("long.txt", text), db=db_conn, scheme_name="", reorganize=False)
+        cur = await db_conn.execute("SELECT raw_text FROM uploaded_outlines WHERE id=?", (res["id"],))
         row = await cur.fetchone()
         assert row is not None
         stored = row["raw_text"]
@@ -83,62 +81,64 @@ class TestParseTruncatedDiagnosis:
         """原文 ≤5000 字：响应不得出现 raw_text_truncated 键。"""
         text = "第一章 工程概况\n第二章 施工部署\n"
         assert len(text) <= 5000
-        res = await uo.parse_outline(file=_upload("small.txt", text),
-                                     db=db_conn, scheme_name="", reorganize=False)
+        res = await uo.parse_outline(file=_upload("small.txt", text), db=db_conn, scheme_name="", reorganize=False)
         assert "raw_text_truncated" not in res
         assert res.get("raw_text_truncated") is None
 
     async def test_parse_truncated_flag_only_when_diag_truncated(self, db_conn, monkeypatch):
         """diag['truncated']=True 时回传 parse_truncated=True；否则不回传。"""
+
         # 用 monkeypatch 伪造 diag.truncated=True
         def _fake_parse(content, fname):
             return ("第一章 工程概况\n", {"truncated": True, "warnings": ["PDF 截页"]})
+
         monkeypatch.setattr(uo, "parse_file_content_ex", _fake_parse)
         text = b"fake content"
-        res = await uo.parse_outline(file=_upload("doc.txt", text),
-                                     db=db_conn, scheme_name="", reorganize=False)
+        res = await uo.parse_outline(file=_upload("doc.txt", text), db=db_conn, scheme_name="", reorganize=False)
         assert res.get("parse_truncated") is True
         assert "parse_truncated" in res
         assert res.get("parse_warnings") == ["PDF 截页"]
 
     async def test_parse_truncated_not_set_when_diag_not_truncated(self, db_conn, monkeypatch):
         """diag['truncated'] 非 True 时不得回传 parse_truncated 键。"""
+
         def _fake_parse(content, fname):
             return ("第一章 工程概况\n", {"truncated": False, "warnings": []})
+
         monkeypatch.setattr(uo, "parse_file_content_ex", _fake_parse)
         text = b"fake content"
-        res = await uo.parse_outline(file=_upload("doc.txt", text),
-                                     db=db_conn, scheme_name="", reorganize=False)
+        res = await uo.parse_outline(file=_upload("doc.txt", text), db=db_conn, scheme_name="", reorganize=False)
         assert "parse_truncated" not in res
         assert res.get("parse_truncated") is None
 
     async def test_empty_parse_warnings_not_returned(self, db_conn, monkeypatch):
         """parse_warnings 为空列表时响应不得带该键。"""
+
         def _fake_parse(content, fname):
             return ("第一章 工程概况\n", {"truncated": False, "warnings": []})
+
         monkeypatch.setattr(uo, "parse_file_content_ex", _fake_parse)
         text = b"fake content"
-        res = await uo.parse_outline(file=_upload("doc.txt", text),
-                                     db=db_conn, scheme_name="", reorganize=False)
+        res = await uo.parse_outline(file=_upload("doc.txt", text), db=db_conn, scheme_name="", reorganize=False)
         assert "parse_warnings" not in res
         assert res.get("parse_warnings") is None
 
     async def test_nonempty_parse_warnings_returned(self, db_conn, monkeypatch):
         """parse_warnings 非空时必须随响应回传。"""
+
         def _fake_parse(content, fname):
             return ("第一章 工程概况\n", {"truncated": False, "warnings": ["OCR 兜底"]})
+
         monkeypatch.setattr(uo, "parse_file_content_ex", _fake_parse)
         text = b"fake content"
-        res = await uo.parse_outline(file=_upload("doc.txt", text),
-                                     db=db_conn, scheme_name="", reorganize=False)
+        res = await uo.parse_outline(file=_upload("doc.txt", text), db=db_conn, scheme_name="", reorganize=False)
         assert res.get("parse_warnings") == ["OCR 兜底"]
         assert "parse_warnings" in res
 
     async def test_warning_content_mentions_5000(self, db_conn):
         """raw_text_truncated=True 时 warning 文案必须提到 5000 字。"""
         text = _long_text(6000)
-        res = await uo.parse_outline(file=_upload("long.txt", text),
-                                     db=db_conn, scheme_name="", reorganize=False)
+        res = await uo.parse_outline(file=_upload("long.txt", text), db=db_conn, scheme_name="", reorganize=False)
         assert "5000" in res.get("warning", "")
 
 
@@ -239,16 +239,16 @@ class TestRegression:
 
     async def test_empty_text_returns_empty_text_flag(self, db_conn):
         """空白原文：响应回传 empty_text=True + warning（非 400）。"""
-        res = await uo.parse_outline(file=_upload("ws.txt", b"   \n  \n"),
-                                     db=db_conn, scheme_name="", reorganize=False)
+        res = await uo.parse_outline(file=_upload("ws.txt", b"   \n  \n"), db=db_conn, scheme_name="", reorganize=False)
         assert res.get("empty_text") is True
         assert "warning" in res
 
     async def test_normal_text_no_warning(self, db_conn):
         """正常原文（≤5000 字且非空白）：无 raw_text_truncated / empty_text / warning。"""
         text = "第一章 工程概况\n第二章 施工部署\n"
-        res = await uo.parse_outline(file=_upload("normal.txt", text.encode("utf-8")),
-                                     db=db_conn, scheme_name="", reorganize=False)
+        res = await uo.parse_outline(
+            file=_upload("normal.txt", text.encode("utf-8")), db=db_conn, scheme_name="", reorganize=False
+        )
         assert "raw_text_truncated" not in res
         assert "empty_text" not in res
         assert "warning" not in res

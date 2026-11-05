@@ -15,6 +15,7 @@
 
 ⚠️ 只在本端点被显式调用时才产生 AI 调用（默认零成本、零行为变化）。
 """
+
 from __future__ import annotations
 
 import logging
@@ -28,16 +29,13 @@ logger = logging.getLogger(__name__)
 _LINE_PREFIX_WIDTH = 6
 
 #: 「第X标段」归一化正则（与参考实现 normalizeSectionTitle 等价）
-_SECTION_TITLE_PREFIX_RE = re.compile(
-    r"^第([一二三四五六七八九十壹贰叁肆伍\d]+)(标段|标包|分包|包)$")
+_SECTION_TITLE_PREFIX_RE = re.compile(r"^第([一二三四五六七八九十壹贰叁肆伍\d]+)(标段|标包|分包|包)$")
 
 
 def number_markdown_lines(markdown: str) -> str:
     """给正文逐行加行号前缀（`L000001 | 原文`），供模型回填 include_ranges。"""
     lines = str(markdown or "").split("\n")
-    return "\n".join(
-        f"L{str(i + 1).zfill(_LINE_PREFIX_WIDTH)} | {line}"
-        for i, line in enumerate(lines))
+    return "\n".join(f"L{str(i + 1).zfill(_LINE_PREFIX_WIDTH)} | {line}" for i, line in enumerate(lines))
 
 
 def normalize_section_title(value: str) -> str:
@@ -91,7 +89,7 @@ def merge_ranges(ranges: list) -> list[dict]:
 
 def _first_range_start(section: dict) -> int:
     ranges = merge_ranges(section.get("include_ranges") or [])
-    return ranges[0]["start_line"] if ranges else 2 ** 31
+    return ranges[0]["start_line"] if ranges else 2**31
 
 
 def normalize_section(raw, index: int, total_lines: int) -> dict | None:
@@ -108,10 +106,8 @@ def normalize_section(raw, index: int, total_lines: int) -> dict | None:
     if sec_index <= 0:
         sec_index = index + 1
     raw_ranges = raw.get("include_ranges") or raw.get("includeRanges") or []
-    include_ranges = [r for r in (
-        normalize_line_range(x, total_lines) for x in raw_ranges) if r]
-    evidence = [str(e).strip() for e in (raw.get("evidence") or [])
-                if str(e).strip()]
+    include_ranges = [r for r in (normalize_line_range(x, total_lines) for x in raw_ranges) if r]
+    evidence = [str(e).strip() for e in (raw.get("evidence") or []) if str(e).strip()]
     return {
         "id": str(raw.get("id") or f"section-{sec_index}").strip(),
         "index": sec_index,
@@ -135,10 +131,8 @@ def dedupe_sections(sections: list[dict]) -> list[dict]:
         if cur is None:
             merged[key] = dict(sec)
             continue
-        cur["include_ranges"] = merge_ranges(
-            [*(cur.get("include_ranges") or []), *(sec.get("include_ranges") or [])])
-        cur["evidence"] = list(dict.fromkeys(
-            [*(cur.get("evidence") or []), *(sec.get("evidence") or [])]))
+        cur["include_ranges"] = merge_ranges([*(cur.get("include_ranges") or []), *(sec.get("include_ranges") or [])])
+        cur["evidence"] = list(dict.fromkeys([*(cur.get("evidence") or []), *(sec.get("evidence") or [])]))
         if not cur.get("head_line") and sec.get("head_line"):
             cur["head_line"] = sec["head_line"]
         if not cur.get("description") and sec.get("description"):
@@ -178,20 +172,40 @@ def validate_sections_response(value: dict) -> None:
 
 # ---------------------------------------------------------------------------
 # 提示词（与参考实现同语义，中文口径一致）
+# ✅ R175（2026-11-03 · BUG-3 收编）：system 提示词已迁至注册表
+#    （key=``bid_section_extract_system`` / ``bid_section_merge_system``），
+#    本模块不再保留字面量副本（消除「注册 + 硬编码」双源）。
+#    调用时取（不模块级缓存），保证编辑器改模板后本进程即时生效。
 # ---------------------------------------------------------------------------
 
-_SYSTEM_EXTRACT = (
-    "你是严谨的招标文件多标段识别专家。"
-    "你只能基于用户提供的带行号文本识别标段、标包、分包、采购包、包件或标的。"
-)
+
+def _system_extract() -> str:
+    from app.services.ai.prompts import get_prompt
+
+    return get_prompt("bid_section_extract_system")
 
 
-def build_extract_messages(segment: str, segment_index: int,
-                           total_segments: int) -> list[dict]:
-    """分段提取提示词（带行号文本 → 结构化标段候选）。"""
+def _system_merge() -> str:
+    from app.services.ai.prompts import get_prompt
+
+    return get_prompt("bid_section_merge_system")
+
+
+def build_extract_messages(segment: str, segment_index: int, total_segments: int) -> list[dict]:
+    """分段提取提示词（带行号文本 → 结构化标段候选）。
+
+    ✅ R175（2026-11-03 · BUG-1/治理覆盖面）：招标文件分段是外部不可信原文，
+    统一走 ``prompt_material_guard.govern_blob``（围栏 → 凭据脱敏 → 预算）。
+    三个开关默认关闭，未开启时与修复前逐字节一致。
+    """
+    from app.services.prompt_material_guard import govern_blob
+
+    segment = govern_blob(segment, "招标文件分段")
     return [
-        {"role": "system", "content": _SYSTEM_EXTRACT},
-        {"role": "user", "content": f"""当前是招标文件第 {segment_index}/{total_segments} 段。每行格式为“L000001 | 原文”。
+        {"role": "system", "content": _system_extract()},
+        {
+            "role": "user",
+            "content": f"""当前是招标文件第 {segment_index}/{total_segments} 段。每行格式为“L000001 | 原文”。
 
 任务：识别本段中明确属于某个标段/标包/分包/采购包/包件/标的的内容，并返回结构化 JSON。
 
@@ -222,20 +236,27 @@ def build_extract_messages(segment: str, segment_index: int,
 }}
 
 带行号文本：
-{segment}"""},
+{segment}""",
+        },
     ]
 
 
-_SYSTEM_MERGE = ("你是严谨的招标文件多标段识别结果合并专家。"
-                 "你只能合并用户提供的分段识别结果，不得编造新标段或新行号。")
-
-
 def build_merge_messages(segment_results: list[dict]) -> list[dict]:
-    """候选合并提示词（多分段结果 → 单一标段清单）。"""
+    """候选合并提示词（多分段结果 → 单一标段清单）。
+
+    ✅ R175：分段结果同样可能携带原文片段（evidence/description），
+    合并前统一治理（围栏 → 凭据脱敏 → 预算），默认关闭时逐字不变。
+    """
     import json as _json
+
+    from app.services.prompt_material_guard import govern_blob
+
+    payload = govern_blob(_json.dumps(segment_results, ensure_ascii=False, indent=2), "招标文件分段识别结果")
     return [
-        {"role": "system", "content": _SYSTEM_MERGE},
-        {"role": "user", "content": f"""以下是同一份招标文件各分段识别出的标段候选。请合并重复标段，保留所有明确属于各标段的 include_ranges 和 evidence。
+        {"role": "system", "content": _system_merge()},
+        {
+            "role": "user",
+            "content": f"""以下是同一份招标文件各分段识别出的标段候选。请合并重复标段，保留所有明确属于各标段的 include_ranges 和 evidence。
 
 要求：
 1. 同一标段跨多个分段出现时合并为一个 sections 项。
@@ -245,7 +266,8 @@ def build_merge_messages(segment_results: list[dict]) -> list[dict]:
 5. 只返回 JSON，不要输出 Markdown、代码块、解释或额外文字。
 
 分段结果：
-{_json.dumps(segment_results, ensure_ascii=False, indent=2)}"""},
+{payload}""",
+        },
     ]
 
 
@@ -258,9 +280,9 @@ def _validate_has_sections(obj) -> list[str]:
     return []
 
 
-async def extract_bid_sections(ai_collect=None, markdown: str = "",
-                               chunk_size: int | None = None,
-                               chunk_overlap: int | None = None) -> dict:
+async def extract_bid_sections(
+    ai_collect=None, markdown: str = "", chunk_size: int | None = None, chunk_overlap: int | None = None
+) -> dict:
     """AI 识别招标文件标段清单（分段提取 → 合并 → 去重）。
 
     Args:
@@ -295,8 +317,7 @@ async def extract_bid_sections(ai_collect=None, markdown: str = "",
     segments = split_for_analysis(numbered, **split_kwargs)
     segments = segments or [numbered]
 
-    logger.info("多标段 AI 识别：原文 %d 字 / %d 行，切分为 %d 段",
-                len(clean), total_lines, len(segments))
+    logger.info("多标段 AI 识别：原文 %d 字 / %d 行，切分为 %d 段", len(clean), total_lines, len(segments))
 
     segment_results: list[dict] = []
     for index, segment in enumerate(segments):

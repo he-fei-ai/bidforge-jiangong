@@ -15,6 +15,7 @@ R13 读写判空等缺陷。本轮在解析层结构化抽取中确认并修复 
   E2 /system/activity 缺文档解析成败监控——补 documents 统计段
      （加法式字段，旧消费方不受影响）。
 """
+
 from __future__ import annotations
 
 import os
@@ -101,8 +102,7 @@ class TestTableTitleCleanup:
 
     def test_earlier_real_candidate_is_kept(self):
         """纯标记行不覆盖此前真实文本候选。"""
-        md = ("真实标题\n<!-- page:9 -->\n| A | B |\n"
-              "| --- | --- |\n| 1 | 2 |")
+        md = "真实标题\n<!-- page:9 -->\n| A | B |\n" "| --- | --- |\n| 1 | 2 |"
         assert parse_markdown_structured(md)["tables"][0]["title"] == "真实标题"
 
     def test_normal_title_unchanged(self):
@@ -116,7 +116,7 @@ class TestTableTitleCleanup:
 class TestBlockFormulaExtraction:
     def test_multiline_formula_extracted(self):
         """修复前：跨行公式 formula_count=0。"""
-        md = ("<!-- page:1 -->\n正文\n$$\n\\sigma = \\frac{N}{A}\n$$\n后文")
+        md = "<!-- page:1 -->\n正文\n$$\n\\sigma = \\frac{N}{A}\n$$\n后文"
         out = parse_markdown_structured(md, doc_id="D1")
         assert out["formula_count"] == 1
         f = out["formulas"][0]
@@ -150,11 +150,7 @@ class TestBlockFormulaExtraction:
         预扫公式 span 前，旧扫描会把闭合 ``$$`` 记为 last_plain，表格 title
         被写成 ``$$``。修复后标题保留公式之前的真实正文行。
         """
-        md = (
-            "材料用量按下列控制。\n"
-            "$$\nM = qL^2/8\n$$\n"
-            "| 材料 |\n| - |\n| 钢筋 |\n"
-        )
+        md = "材料用量按下列控制。\n" "$$\nM = qL^2/8\n$$\n" "| 材料 |\n| - |\n| 钢筋 |\n"
         out = parse_markdown_structured(md)
         title = out["tables"][0]["title"]
         assert title != "$$"
@@ -185,8 +181,7 @@ async def test_activity_documents_empty_state(db_conn, monkeypatch):
 
     data = await activity(limit=5)
     docs = data["documents"]
-    assert set(docs.keys()) == {
-        "total", "parsed", "failed", "pending", "last_upload_at", "failure_rate"}
+    assert set(docs.keys()) == {"total", "parsed", "failed", "pending", "last_upload_at", "failure_rate"}
     assert docs["total"] == 0
     assert docs["failure_rate"] is None
 
@@ -195,17 +190,16 @@ async def test_activity_documents_empty_state(db_conn, monkeypatch):
 async def test_activity_documents_counts(db_conn, monkeypatch):
     """有文档：按 parse_status 计数并派生失败率。"""
     await _patch_read_conn(db_conn, monkeypatch)
-    await db_conn.execute(
-        "INSERT INTO projects (id, name) VALUES ('p1', '项目1')")
-    for doc_id, status in [("d1", "success"), ("d2", "success"),
-                           ("d3", "failed"), ("d4", "pending")]:
+    await db_conn.execute("INSERT INTO projects (id, name) VALUES ('p1', '项目1')")
+    for doc_id, status in [("d1", "success"), ("d2", "success"), ("d3", "failed"), ("d4", "pending")]:
         await db_conn.execute(
-            "INSERT INTO project_documents (id, project_id, file_name, parse_status)"
-            " VALUES (?, 'p1', ?, ?)",
-            (doc_id, f"{doc_id}.pdf", status))
+            "INSERT INTO project_documents (id, project_id, file_name, parse_status)" " VALUES (?, 'p1', ?, ?)",
+            (doc_id, f"{doc_id}.pdf", status),
+        )
     await db_conn.commit()
 
     from app.routers.system import activity
+
     docs = (await activity(limit=5))["documents"]
     assert docs["total"] == 4
     assert docs["parsed"] == 2

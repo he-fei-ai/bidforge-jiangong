@@ -13,6 +13,7 @@ XLSX、RapidOCR 跑真实推理）从未被保护 —— 回归只能靠人肉�
 与桩测试的分工：桩测试钉「分支语义 / 错误契约」，本文件钉「真实链路能跑通
 且产物语义正确」，二者互补、互不替代。
 """
+
 import shutil
 from pathlib import Path
 
@@ -32,10 +33,10 @@ def _import_or_none(name: str):
         return None
 
 
-fitz = _import_or_none("fitz")                      # PyMuPDF（PDF 生成 + 解析）
-docx_lib = _import_or_none("docx")                  # python-docx（DOCX 生成）
-openpyxl = _import_or_none("openpyxl")              # XLSX 生成
-PIL = _import_or_none("PIL")                        # 图片生成（OCR 输入）
+fitz = _import_or_none("fitz")  # PyMuPDF（PDF 生成 + 解析）
+docx_lib = _import_or_none("docx")  # python-docx（DOCX 生成）
+openpyxl = _import_or_none("openpyxl")  # XLSX 生成
+PIL = _import_or_none("PIL")  # 图片生成（OCR 输入）
 
 SOFFICE = shutil.which("soffice") or shutil.which("soffice.exe")
 TESSERACT = shutil.which("tesseract") or shutil.which("tesseract.exe")
@@ -53,9 +54,11 @@ def _diag_has_no_fatal_warnings(diag: dict) -> None:
 # PDF：PyMuPDF 真实创建 → 真实解析
 # ---------------------------------------------------------------------------
 
+
 @pytest.mark.skipif(fitz is None, reason="PyMuPDF 未安装")
 def test_pdf_roundtrip_real_pymupdf():
     import fitz
+
     doc = fitz.open()
     page = doc.new_page()
     page.insert_text((72, 100), "基坑深度 12.5 米", fontname="china-s", fontsize=16)
@@ -76,6 +79,7 @@ def test_pdf_roundtrip_real_pymupdf():
 def test_pdf_multipage_page_marks_real():
     """多页 PDF：页标记数量与真实页数一致（可追溯性锚点）。"""
     import fitz
+
     doc = fitz.open()
     for i in range(3):
         page = doc.new_page()
@@ -91,9 +95,11 @@ def test_pdf_multipage_page_marks_real():
 # DOCX：python-docx 真实创建 → 真实解析（docx2python / fallback 链）
 # ---------------------------------------------------------------------------
 
+
 @pytest.mark.skipif(docx_lib is None, reason="python-docx 未安装")
 def test_docx_roundtrip_real():
     import docx as docx_mod
+
     d = docx_mod.Document()
     d.add_heading("工程概况", level=1)
     d.add_paragraph("本工程基坑深度为 12.5 米。")
@@ -114,9 +120,11 @@ def test_docx_roundtrip_real():
 # XLSX：openpyxl 真实创建 → 真实解析（表格 → Markdown，下游高权重区依赖）
 # ---------------------------------------------------------------------------
 
+
 @pytest.mark.skipif(openpyxl is None, reason="openpyxl 未安装")
 def test_xlsx_roundtrip_real():
     from openpyxl import Workbook
+
     wb = Workbook()
     ws = wb.active
     ws.title = "机械统计"
@@ -138,10 +146,11 @@ def test_xlsx_roundtrip_real():
 # OCR：RapidOCR 真实推理（渲染文字图片 → 识别）
 # ---------------------------------------------------------------------------
 
-@pytest.mark.skipif(not (PIL and RAPIDOCR_AVAILABLE),
-                    reason="Pillow / rapidocr 未安装")
+
+@pytest.mark.skipif(not (PIL and RAPIDOCR_AVAILABLE), reason="Pillow / rapidocr 未安装")
 def test_ocr_roundtrip_real_rapidocr():
     from PIL import Image, ImageDraw
+
     img = Image.new("RGB", (360, 120), "white")
     draw = ImageDraw.Draw(img)
     # 默认字体渲染 ASCII（中文渲染依赖系统字体，跨机器不稳定，不进断言）
@@ -168,6 +177,7 @@ def test_image_parse_through_ocr_chain():
     现按「引擎是否存在」分流断言，两种环境下都只钉真实契约。
     """
     from PIL import Image, ImageDraw
+
     img = Image.new("RGB", (320, 100), "white")
     ImageDraw.Draw(img).text((20, 35), "PLAN 2026", fill="black")
     buf = __import__("io").BytesIO()
@@ -195,6 +205,7 @@ def test_image_parse_through_ocr_chain():
 # 旧版 Office：LibreOffice / tesseract 本机未装 → skipif 守卫（装了自动生效）
 # ---------------------------------------------------------------------------
 
+
 @pytest.mark.skipif(not SOFFICE, reason="LibreOffice (soffice) 未安装")
 def test_legacy_doc_roundtrip_real_libreoffice():
     """真实 .doc → docx 转换：需本机可构造 .doc（此处用最简 OLE 占位并断言
@@ -205,6 +216,7 @@ def test_legacy_doc_roundtrip_real_libreoffice():
 @pytest.mark.skipif(not TESSERACT, reason="tesseract 未安装")
 def test_ocr_tesseract_engine_real():
     from PIL import Image, ImageDraw
+
     img = Image.new("RGB", (320, 100), "white")
     ImageDraw.Draw(img).text((20, 35), "HELLO 123", fill="black")
     buf = __import__("io").BytesIO()
@@ -217,6 +229,7 @@ def test_ocr_tesseract_engine_real():
 # ---------------------------------------------------------------------------
 # 解析临时文件卫生：真实解析后不留临时产物（回归 2026-09 事故类问题）
 # ---------------------------------------------------------------------------
+
 
 @pytest.mark.skipif(docx_lib is None, reason="python-docx 未安装")
 def test_docx_parse_leaves_no_temp_files(tmp_path, monkeypatch):
@@ -243,5 +256,4 @@ def test_docx_parse_leaves_no_temp_files(tmp_path, monkeypatch):
     text, _diag = parse_file_content_ex(buf.getvalue(), "卫生检查.docx")
     assert "临时文件卫生" in text
     for p in created_dirs:
-        assert not p.exists() or not any(p.iterdir()), \
-            f"解析临时目录未清理: {p}"
+        assert not p.exists() or not any(p.iterdir()), f"解析临时目录未清理: {p}"

@@ -17,7 +17,9 @@ import { describe, it, expect } from "vitest";
 const RAW: Record<string, string> = Object.fromEntries(
   Object.entries(
     import.meta.glob("../**/*.{ts,tsx}", {
-      query: "?raw", import: "default", eager: true,
+      query: "?raw",
+      import: "default",
+      eager: true,
     }) as Record<string, string>,
   ).map(([k, v]) => [k.replace(/^\.\.\//, "").replace(/^\.\//, "tests/"), v]),
 );

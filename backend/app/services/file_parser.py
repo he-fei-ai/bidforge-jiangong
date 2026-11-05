@@ -3,6 +3,7 @@
 支持格式：DOCX、PDF、MD、TXT、XLSX、XLS、CSV、图片（OCR）。
 所有临时文件使用 try/finally 确保异常时清理。
 """
+
 from __future__ import annotations
 
 import csv
@@ -16,14 +17,29 @@ import tempfile
 logger = logging.getLogger(__name__)
 
 SUPPORTED_EXTENSIONS = {
-    "docx", "pdf", "md", "txt", "xlsx", "xls", "csv",
-    "png", "jpg", "jpeg", "bmp", "tiff",
+    "docx",
+    "pdf",
+    "md",
+    "txt",
+    "xlsx",
+    "xls",
+    "csv",
+    "png",
+    "jpg",
+    "jpeg",
+    "bmp",
+    "tiff",
+    # ✅ R179 补齐：TIFF 的另一种常见扩展名（扫描仪/相机直出多为 .tif），
+    #    旧实现只登记 tiff，用户上传 .tif 会被「不支持的文件格式」400 拒绝，
+    #    与已支持的 tiff 解析能力（多帧 OCR）完全等价，属于纯白名单缺口。
+    "tif",
     # ✅ 2026-09-22 新增（对齐 OpenBidKit 招标文件解析模块）：旧版 Word 二进制格式。
     #    招投标场景仍有大量招标文件是 .doc/.wps，旧实现直接以「不支持的文件格式」
     #    400 拒绝，用户必须自己另存为 .docx；现由 services/legacy_office.py
     #    调用本地 LibreOffice/Word/WPS 转换为 .docx 后复用同一套 OOXML 解析。
     #    未安装任何转换组件时给出「可操作」提示（含下载地址），而非泛化失败。
-    "doc", "wps",
+    "doc",
+    "wps",
 }
 
 #: OLE 复合文档文件头（旧版 Word / Excel 的容器格式）
@@ -50,6 +66,7 @@ def _ole_content_kind(content: bytes) -> str:
         return "doc"
     return ""  # 双标记/无标记：交回调用方按原逻辑兜底
 
+
 # ✅ 公共文件头签名：仅对**二进制格式**做轻量校验（文本类不做限制）。
 #    提取到解析模块统一维护，供两条上传链路（global-facts 资料上传、
 #    upload-outline 目录识别）复用 —— 旧实现只在资料上传处校验，目录识别
@@ -69,6 +86,7 @@ _BINARY_SIGNATURES: dict[str, tuple[bytes, ...]] = {
     "jpeg": (b"\xff\xd8\xff",),
     "bmp": (b"BM",),
     "tiff": (b"II*\x00", b"MM\x00*"),
+    "tif": (b"II*\x00", b"MM\x00*"),
 }
 
 
@@ -156,7 +174,8 @@ def _reject_binary_text_ext(content: bytes) -> None:
             return
     raise ParseError(
         "文件内容疑似二进制（扩展名与真实内容不符）：请确认源文件类型，"
-        "保留原始扩展名（.txt/.md/.csv 等文本）后重新上传")
+        "保留原始扩展名（.txt/.md/.csv 等文本）后重新上传"
+    )
 
 
 def _resolve_pdf_max_pages(default: int = 50) -> int:
@@ -175,6 +194,7 @@ def _resolve_pdf_max_pages(default: int = 50) -> int:
     """
     try:
         from app.config import settings
+
         raw = getattr(settings, "pdf_text_max_pages", default)
     except Exception:  # pragma: no cover - 配置不可用时保持旧行为
         return default
@@ -200,6 +220,7 @@ def _resolve_upload_max_bytes(default: int = 30 * 1024 * 1024) -> int:
     """
     try:
         from app.config import settings
+
         raw = getattr(settings, "upload_max_bytes", default)
     except Exception:  # pragma: no cover - 配置不可用时保持旧行为
         return default
@@ -232,6 +253,7 @@ MAX_PDF_PAGES = _resolve_pdf_max_pages()
 MAX_CSV_ROWS = 1000
 MAX_EXCEL_ROWS = 1000
 
+
 # ---------- ✅ 资源防护（压缩炸弹 / 解压膨胀 / 条目数） ----------
 # DOCX/XLSX 本质是 ZIP 容器：30MB 的上传上限不等于解压后的体积上限，
 # 精心构造的归档可以做到 1:1000 以上的膨胀比，在解压阶段直接打满内存/CPU。
@@ -246,10 +268,14 @@ def _env_int(name: str, default: int) -> int:
         return default
 
 
-MAX_ARCHIVE_ENTRIES = _env_int("BIDFORGE_MAX_ARCHIVE_ENTRIES", 2000)                      # 单归档最大条目数
-MAX_ARCHIVE_UNCOMPRESSED_BYTES = _env_int("BIDFORGE_MAX_ARCHIVE_UNCOMPRESSED_BYTES", 400 * 1024 * 1024)   # 单归档最大解压总量（400MB）
-MAX_COMPRESSION_RATIO = _env_int("BIDFORGE_MAX_COMPRESSION_RATIO", 200)                     # 最大允许压缩比（解压总量 / 压缩总量）
-MAX_ARCHIVE_ENTRY_BYTES = _env_int("BIDFORGE_MAX_ARCHIVE_ENTRY_BYTES", 64 * 1024 * 1024)      # 单条目「实际读出」上限（防中央目录谎报大小）
+MAX_ARCHIVE_ENTRIES = _env_int("BIDFORGE_MAX_ARCHIVE_ENTRIES", 2000)  # 单归档最大条目数
+MAX_ARCHIVE_UNCOMPRESSED_BYTES = _env_int(
+    "BIDFORGE_MAX_ARCHIVE_UNCOMPRESSED_BYTES", 400 * 1024 * 1024
+)  # 单归档最大解压总量（400MB）
+MAX_COMPRESSION_RATIO = _env_int("BIDFORGE_MAX_COMPRESSION_RATIO", 200)  # 最大允许压缩比（解压总量 / 压缩总量）
+MAX_ARCHIVE_ENTRY_BYTES = _env_int(
+    "BIDFORGE_MAX_ARCHIVE_ENTRY_BYTES", 64 * 1024 * 1024
+)  # 单条目「实际读出」上限（防中央目录谎报大小）
 
 
 class ParseError(RuntimeError):
@@ -288,8 +314,7 @@ def parse_file_content_ex(content: bytes, fname: str) -> tuple[str, dict]:
             压缩炸弹嫌疑）。
     """
     ftype = fname.rsplit(".", 1)[-1].lower() if "." in fname else ""
-    diag: dict = {"file_type": ftype, "text_len": 0, "truncated": False,
-                  "warnings": []}
+    diag: dict = {"file_type": ftype, "text_len": 0, "truncated": False, "warnings": []}
     if not content:
         return "", diag
 
@@ -304,8 +329,8 @@ def parse_file_content_ex(content: bytes, fname: str) -> tuple[str, dict]:
             ftype = _sniffed
         elif _looks_binary(content):
             raise ParseError(
-                "无法识别文件类型：请保留原始扩展名（.pdf/.docx/.xlsx/.txt/.md/"
-                ".csv 或常见图片）后重新上传")
+                "无法识别文件类型：请保留原始扩展名（.pdf/.docx/.xlsx/.txt/.md/" ".csv 或常见图片）后重新上传"
+            )
         else:
             ftype = "txt"
     # ✅ 增强（2026-09-22，对齐易标 convert.mjs 的文件头路由）：
@@ -315,20 +340,17 @@ def parse_file_content_ex(content: bytes, fname: str) -> tuple[str, dict]:
     #    「文件无法识别或已损坏」；现按真实类型改走旧版 Word 转换通道。
     if ftype == "docx" and content[:8] in OLE_COMPOUND_HEADERS:
         ftype = "doc"
-        _note_info(diag, "文件实际为旧版 Word（OLE 复合文档）格式，"
-                         "已按 .doc 通道转换解析")
+        _note_info(diag, "文件实际为旧版 Word（OLE 复合文档）格式，" "已按 .doc 通道转换解析")
     # ✅ 修复（2026-09-25）：扩展名与 OLE 真实类型双向纠错 ——
     #    改名的旧版 .xls（声称 .doc/.wps）不再走 LibreOffice→docx 次优转换，
     #    改走 xlrd 专用解析；反之声称 .xls 的旧版 Word 也不再误入 xlrd。
     #    仅在流名标记无歧义时纠错（双标记/无标记维持原路由，行为不变）。
     if ftype in ("doc", "wps") and _ole_content_kind(content) == "xls":
         ftype = "xls"
-        _note_info(diag, "文件实际为旧版 Excel（OLE 复合文档，含 Workbook 流），"
-                         "已按 .xls 通道解析")
+        _note_info(diag, "文件实际为旧版 Excel（OLE 复合文档，含 Workbook 流），" "已按 .xls 通道解析")
     elif ftype == "xls" and _ole_content_kind(content) == "doc":
         ftype = "doc"
-        _note_info(diag, "文件实际为旧版 Word（OLE 复合文档，含 WordDocument 流），"
-                         "已按 .doc 通道转换解析")
+        _note_info(diag, "文件实际为旧版 Word（OLE 复合文档，含 WordDocument 流），" "已按 .doc 通道转换解析")
 
     # 嗅探/兜底可能改写了 ftype，同步到诊断字典
     diag["file_type"] = ftype
@@ -351,7 +373,7 @@ def parse_file_content_ex(content: bytes, fname: str) -> tuple[str, dict]:
         #    改名成 .xlsx」「sheet XML 损坏」都会命中），违反本函数文档契约
         #    「不可恢复的解析失败只抛 ParseError」：调用方按契约只接 ParseError
         #    时这些文件会冒成 500；两个既有路由靠各自的泛化 except 兜底，用户
-        #    只看到无差别的「文件无法识别或已损坏」。现统一收敛 —— 库异常 → 
+        #    只看到无差别的「文件无法识别或已损坏」。现统一收敛 —— 库异常 →
         #    ParseError（可读文案），ParseError 原样透传（压缩炸弹/加密/缺依赖
         #    等既有语义与文案一字不改）。
         if ftype == "docx":
@@ -365,7 +387,7 @@ def parse_file_content_ex(content: bytes, fname: str) -> tuple[str, dict]:
             raw_text = _parse_csv(content, diag)
         elif ftype in ("xlsx", "xls"):
             raw_text = _parse_excel(content, ftype, diag)
-        elif ftype in ("png", "jpg", "jpeg", "bmp", "tiff"):
+        elif ftype in ("png", "jpg", "jpeg", "bmp", "tiff", "tif"):
             raw_text = _parse_image_ocr(content, ftype, diag)
         elif ftype in ("doc", "wps"):
             raw_text = _parse_legacy_word(content, fname, diag)
@@ -381,11 +403,9 @@ def parse_file_content_ex(content: bytes, fname: str) -> tuple[str, dict]:
         #    不带 exc_info：坏文件是常规输入而非隐伏缺陷，堆栈只会刷日志；
         #    原因串已含库错误信息（如 xlrd「Expected ... marker」）足够定位，
         #    真需要完整堆栈时由路由层泛化 except 再打。
-        logger.warning("解析文件 %r（类型 %s）失败: %s",
-                       fname, (ftype or "").upper() or "未知", _e)
+        logger.warning("解析文件 %r（类型 %s）失败: %s", fname, (ftype or "").upper() or "未知", _e)
         label = (ftype or "").upper() or "文件"
-        raise ParseError(
-            f"{label} 文件已损坏或不是有效的文件，请确认真实格式后重新上传") from _e
+        raise ParseError(f"{label} 文件已损坏或不是有效的文件，请确认真实格式后重新上传") from _e
 
     text = raw_text or ""
     diag["text_len"] = len(text)
@@ -471,8 +491,7 @@ def dump_parse_warnings(warnings) -> str:
     """
     items = [str(w).strip() for w in (warnings or [])]
     items = [w for w in items if w][:MAX_PARSE_WARNINGS]
-    items = [w if len(w) <= MAX_PARSE_WARNING_CHARS
-             else w[:MAX_PARSE_WARNING_CHARS - 1] + "…" for w in items]
+    items = [w if len(w) <= MAX_PARSE_WARNING_CHARS else w[: MAX_PARSE_WARNING_CHARS - 1] + "…" for w in items]
     return json.dumps(items, ensure_ascii=False)
 
 
@@ -498,16 +517,15 @@ def _guard_zip_archive(content: bytes, ftype: str) -> None:
         return
 
     if len(infos) > MAX_ARCHIVE_ENTRIES:
-        raise ParseError(
-            f"文件内部条目过多（{len(infos)} > {MAX_ARCHIVE_ENTRIES}），"
-            "疑似异常归档，已拒绝解析")
+        raise ParseError(f"文件内部条目过多（{len(infos)} > {MAX_ARCHIVE_ENTRIES}），" "疑似异常归档，已拒绝解析")
 
     total_uncompressed = sum(max(i.file_size, 0) for i in infos)
     total_compressed = sum(max(i.compress_size, 1) for i in infos)
     if total_uncompressed > MAX_ARCHIVE_UNCOMPRESSED_BYTES:
         raise ParseError(
             f"文件解压后体积过大（{total_uncompressed // (1024 * 1024)}MB > "
-            f"{MAX_ARCHIVE_UNCOMPRESSED_BYTES // (1024 * 1024)}MB），已拒绝解析")
+            f"{MAX_ARCHIVE_UNCOMPRESSED_BYTES // (1024 * 1024)}MB），已拒绝解析"
+        )
 
     # ✅ 必须**逐条**判定，不能只算汇总：汇总压缩比可以被稀释 —— 攻击者在归档里
     #    塞一个体积大、几乎不可压缩的填充条目（比如 74KB 随机数据），就能把
@@ -521,23 +539,22 @@ def _guard_zip_archive(content: bytes, ftype: str) -> None:
             raise ParseError(
                 f"文件内部存在超大条目「{info.filename}」"
                 f"（解压后 {declared // (1024 * 1024)}MB > "
-                f"{MAX_ARCHIVE_ENTRY_BYTES // (1024 * 1024)}MB），已拒绝解析")
+                f"{MAX_ARCHIVE_ENTRY_BYTES // (1024 * 1024)}MB），已拒绝解析"
+            )
         entry_ratio = declared / packed
         if entry_ratio > MAX_COMPRESSION_RATIO:
             raise ParseError(
                 f"文件内部条目「{info.filename}」压缩比异常"
                 f"（{entry_ratio:.0f}:1 > {MAX_COMPRESSION_RATIO}:1），"
-                "疑似压缩炸弹，已拒绝解析")
+                "疑似压缩炸弹，已拒绝解析"
+            )
 
     ratio = total_uncompressed / total_compressed if total_compressed else 0
     if ratio > MAX_COMPRESSION_RATIO:
-        raise ParseError(
-            f"文件压缩比异常（{ratio:.0f}:1 > {MAX_COMPRESSION_RATIO}:1），"
-            "疑似压缩炸弹，已拒绝解析")
+        raise ParseError(f"文件压缩比异常（{ratio:.0f}:1 > {MAX_COMPRESSION_RATIO}:1），" "疑似压缩炸弹，已拒绝解析")
 
 
-def _read_zip_entry_limited(z, name: str,
-                            limit: int | None = None) -> bytes:
+def _read_zip_entry_limited(z, name: str, limit: int | None = None) -> bytes:
     """有界读取归档内单个条目，防「中央目录谎报大小」绕过 `_guard_zip_archive`。
 
     为什么需要：`_guard_zip_archive` 只能读**中央目录声明**的 size / ratio，
@@ -562,16 +579,56 @@ def _read_zip_entry_limited(z, name: str,
             total += len(chunk)
         # 已达上限却还有剩余 → 该条目实际内容超限，按压缩炸弹处理
         if total >= limit and fp.read(1):
-            raise ParseError(
-                f"文件内部条目过大（超过 {limit // (1024 * 1024)}MB），"
-                "疑似压缩炸弹，已拒绝解析")
+            raise ParseError(f"文件内部条目过大（超过 {limit // (1024 * 1024)}MB），" "疑似压缩炸弹，已拒绝解析")
     return b"".join(chunks)
+
+
+_UTF16_BOMS: tuple[tuple[bytes, str, str], ...] = (
+    (b"\xff\xfe", "utf-16-le", "UTF-16LE"),
+    (b"\xfe\xff", "utf-16-be", "UTF-16BE"),
+)
+
+
+def _detect_utf16(content: bytes) -> tuple[str, str] | None:
+    """探测 UTF-16，返回 ``(codec, 展示名)``；不匹配返回 ``None``。
+
+    ✅ 修复（R175 · BUG-2）：旧实现编码回退链只有 UTF-8/GBK/GB18030，
+    Windows 记事本「Unicode」保存的 UTF-16 文件会被 GBK **逐字节解成功**
+    （GBK 容错性极强），于是乱码正文入库、还只报一条「可能存在乱码」的低
+    信息量告警 —— 招投标场景大量 txt/csv 来自记事本，属高风险静默数据流。
+
+    两级判定：
+    1. **BOM 精确判定**：``\\xff\\xfe`` = UTF-16LE、``\\xfe\\xff`` = UTF-16BE
+       （记事本「Unicode」必带 BOM，这是最可靠的一级）；
+    2. **无 BOM 探测**：只认「ASCII 为主的 UTF-16」——ASCII 字符高字节为
+       0x00，LE 时落在奇数位、BE 时落在偶数位。要求「一侧 NUL 占比 ≥ 0.5
+       且另一侧 ≤ 0.1」双条件，且长度为偶数、≥ 8 字节。纯 CJK 无 BOM 的
+       UTF-16 两字节均非 0，无法与 GBK 可靠区分，**故意不猜测**，仍走原
+       回退链并保留告警（宁可告警也不误判）。
+    """
+    if not content:
+        return None
+    for bom, codec, name in _UTF16_BOMS:
+        if content.startswith(bom):
+            return codec, name
+    n = len(content)
+    if n < 8 or n % 2:
+        return None
+    pairs = n // 2
+    even_nul = sum(1 for i in range(0, n, 2) if content[i] == 0)
+    odd_nul = sum(1 for i in range(1, n, 2) if content[i] == 0)
+    if odd_nul / pairs >= 0.5 and even_nul / pairs <= 0.1:
+        return "utf-16-le", "UTF-16LE（无 BOM，按字节分布推测）"
+    if even_nul / pairs >= 0.5 and odd_nul / pairs <= 0.1:
+        return "utf-16-be", "UTF-16BE（无 BOM，按字节分布推测）"
+    return None
 
 
 def _decode_text_ex(content: bytes) -> tuple[str, list[str]]:
     """智能解码文本：返回 ``(文本, 告警列表)``。
 
-    编码回退顺序：``utf-8-sig``（剥离 BOM）→ ``gbk`` → ``gb18030`` →
+    编码回退顺序：``UTF-16``（BOM / 无 BOM 探测，R175 新增）→
+    ``utf-8-sig``（剥离 BOM）→ ``gbk`` → ``gb18030`` →
     ``utf-8(errors="ignore")``。
 
     ✅ 用 utf-8-sig 替代 utf-8：Excel 导出的 CSV 常带 BOM，旧实现首列表头
@@ -593,31 +650,58 @@ def _decode_text_ex(content: bytes) -> tuple[str, list[str]]:
     """
     warnings: list[str] = []
     text: str | None = None
-    try:
-        text = content.decode("utf-8-sig")
-    except UnicodeDecodeError:
-        text = None
+    _utf16 = _detect_utf16(content)
+    if _utf16 is not None:
+        _codec, _name = _utf16
+        try:
+            text = content.decode(_codec)
+        except UnicodeDecodeError:
+            # 探测到但解不出（如残缺代理对）：退回原回退链，由那里继续告警
+            text = None
+        if text is not None:
+            warnings.append(f"源文件为 {_name} 编码，已按 UTF-16 解码" "（若内容异常请另存为 UTF-8/GBK 后重新上传）")
+    if text is None:
+        try:
+            text = content.decode("utf-8-sig")
+        except UnicodeDecodeError:
+            text = None
     if text is None:
         for enc in ("gbk", "gb18030"):
             try:
                 text = content.decode(enc)
             except UnicodeDecodeError:
                 continue
-            warnings.append(
-                f"文本非 UTF-8，已按 {enc} 解码（可能存在乱码，建议确认源文件编码）")
+            warnings.append(f"文本非 UTF-8，已按 {enc} 解码（可能存在乱码，建议确认源文件编码）")
             break
         if text is None:
             # UTF-8 / GBK 均失败：以 UTF-8 容错解码，保证不崩、乱码可控（但需告警）
             warnings.append(
                 "源文件编码无法识别（非 UTF-8/GBK/GB18030），已按 UTF-8 容错解码，"
-                "可能存在乱码，建议确认源文件编码（如 Big5/Shift-JIS）")
+                "可能存在乱码，建议确认源文件编码（如 Big5/Shift-JIS）"
+            )
             text = content.decode("utf-8", errors="ignore")
+    # ✅ R175 · BUG-3（内容层修复 + 告警留痕）：孤立 CR（旧式 Mac 行尾）。
+    #    _normalize_invisible 会把 CR 一律丢弃：CRLF 仍剩 \n（正确），但**孤立
+    #    CR** 会把整篇折成一行（目录识别只剩首行、事实分段切不出章节）。
+    #    内容层：把「后面不是 \n 的 CR」还原为换行（先于归一执行，CRLF 不受
+    #    影响）；告警层：仅当孤立 CR 成规模（≥2 且多于 CRLF，零星 1 处多为
+    #    正文偶发字符）才提示，避免噪声告警。
+    _cr_total = text.count("\r")
+    _crlf = text.count("\r\n")
+    _lone_cr = _cr_total - _crlf
+    if _lone_cr:
+        text = re.sub(r"\r(?!\n)", "\n", text)
+    if _lone_cr >= 2 and _lone_cr > _crlf:
+        warnings.append(
+            f"源文件行尾以单独的 CR 分隔（{_lone_cr} 处，旧式 Mac 行尾），"
+            "已还原为换行以避免多行内容被折叠；建议另存为 LF/CRLF 后重新上传"
+        )
     # ✅ F5 修复（2026-09-26）：归一不可见字符，避免污染事实去重与比对。
     text, _inv_changed = _normalize_invisible(text)
     if _inv_changed:
         warnings.append(
-            "源文件含不可见控制字符 / 零宽字符 / 不间断空格，已自动归一"
-            "（删除或替换为空格），可能影响事实去重与比对")
+            "源文件含不可见控制字符 / 零宽字符 / 不间断空格，已自动归一" "（删除或替换为空格），可能影响事实去重与比对"
+        )
     return text, warnings
 
 
@@ -634,7 +718,8 @@ def _normalize_invisible(text: str) -> tuple[str, bool]:
     for ch in text:
         o = ord(ch)
         if ch == "\r":
-            # 归一为换行：\\r\\n → \\n，孤立 \\r 直接丢弃
+            # 归一为换行：\r\n → \n；孤立 \r 已由 _decode_text_ex 还原为 \n，
+            # 此处丢弃仅为兜底（直接调用 _normalize_invisible 的旧路径）
             changed = True
             continue
         if o == 0xFEFF:
@@ -664,15 +749,18 @@ def _decode_text(content: bytes) -> str:
 _W_NS = "http://schemas.openxmlformats.org/wordprocessingml/2006/main"
 
 
-def _docx_heading_level(p_el, ) -> int:
+def _docx_heading_level(
+    p_el,
+) -> int:
     """从段落的 pStyle 推断标题层级（0 = 非标题）。
     兼容 Heading1/heading 1/标题 1 等中英文样式名。"""
     import re as _re
+
     pstyle = p_el.find(f"{{{_W_NS}}}pPr/{{{_W_NS}}}pStyle")
     if pstyle is None:
         return 0
     val = (pstyle.get(f"{{{_W_NS}}}val") or "").strip()
-    m = _re.match(r'^(?:heading|标题)\s*(\d)$', val, _re.IGNORECASE)
+    m = _re.match(r"^(?:heading|标题)\s*(\d)$", val, _re.IGNORECASE)
     if m:
         return min(int(m.group(1)), 6)
     return 0
@@ -686,14 +774,12 @@ def _docx_bold_heading_level(p_el) -> int:
     严重下降。这里把短且加粗 / 含编号 / 含「章节篇部」的段落提升为标题，
     让分段器正确按章节切分。判定保守，避免把正文句子误判为标题。
     """
-    txt = "".join(
-        t.text or "" for t in p_el.iter(f"{{{_W_NS}}}t")).strip()
+    txt = "".join(t.text or "" for t in p_el.iter(f"{{{_W_NS}}}t")).strip()
     if not txt or len(txt) > 40:
         return 0
     # 编号标题（第X章 / 一、 / 1.1 等）
     if re.match(
-        r'^(第[一二三四五六七八九十百\d]+[章節篇部]|'
-        r'[一二三四五六七八九十]+[、.．]|[\d]+[.、)）])',
+        r"^(第[一二三四五六七八九十百\d]+[章節篇部]|" r"[一二三四五六七八九十]+[、.．]|[\d]+[.、)）])",
         txt,
     ):
         return 3
@@ -740,8 +826,7 @@ def _parse_docx(content: bytes) -> str:
         return _parse_docx_fallback(content)
 
     def para_text(p) -> str:
-        return "".join(
-            t.text or "" for t in p.iter(f"{{{_W_NS}}}t")).strip()
+        return "".join(t.text or "" for t in p.iter(f"{{{_W_NS}}}t")).strip()
 
     parts: list[str] = []
     for child in body:
@@ -757,9 +842,7 @@ def _parse_docx(content: bytes) -> str:
             for tr in child.findall(f"{{{_W_NS}}}tr"):
                 cells = []
                 for tc in tr.findall(f"{{{_W_NS}}}tc"):
-                    cell_txt = " ".join(
-                        t for t in (para_text(p) for p in tc.iter(
-                            f"{{{_W_NS}}}p")) if t)
+                    cell_txt = " ".join(t for t in (para_text(p) for p in tc.iter(f"{{{_W_NS}}}p")) if t)
                     cells.append(cell_txt)
                 row_cells.append(cells)
             if row_cells:
@@ -782,6 +865,7 @@ def _parse_docx(content: bytes) -> str:
 def _parse_docx_fallback(content: bytes) -> str:
     """DOCX 回退解析：docx2python（纯文本）"""
     from docx2python import docx2python
+
     tmp = tempfile.NamedTemporaryFile(delete=False, suffix=".docx")
     try:
         tmp.write(content)
@@ -793,8 +877,7 @@ def _parse_docx_fallback(content: bytes) -> str:
             os.unlink(tmp.name)
 
 
-def _parse_legacy_word(content: bytes, fname: str,
-                       diag: dict | None = None) -> str:
+def _parse_legacy_word(content: bytes, fname: str, diag: dict | None = None) -> str:
     """旧版 Word（.doc/.wps）解析：本地 Office 组件转 .docx → 复用 OOXML 解析。
 
     ✅ 新增（2026-09-22，对齐 OpenBidKit `doc2markdown::withLegacyWordDocxFile`
@@ -857,14 +940,12 @@ def _collapse_repeated_pdf_text(line: str) -> str:
     for size in range(2, 13):
         i = 0
         while i + 2 * size <= len(s):
-            a, b = s[i:i + size], s[i + size:i + 2 * size]
+            a, b = s[i : i + size], s[i + size : i + 2 * size]
             if a == b and re.search(r"[\u4e00-\u9fff]", a):
-                s = s[:i + size] + s[i + 2 * size:]
+                s = s[: i + size] + s[i + 2 * size :]
             else:
                 i += 1
-    s = re.sub(
-        r"([\u4e00-\u9fff][\u4e00-\u9fffA-Za-z0-9（）()：:、，,。.．\-]{1,29})\s+\1",
-        r"\1", s)
+    s = re.sub(r"([\u4e00-\u9fff][\u4e00-\u9fffA-Za-z0-9（）()：:、，,。.．\-]{1,29})\s+\1", r"\1", s)
     return s
 
 
@@ -873,17 +954,14 @@ def normalize_pdf_text(text: str) -> str:
     if not text:
         return ""
     text = text.replace("\f", "\n\n")
-    lines = [_collapse_repeated_pdf_text(_collapse_pdf_whitespace(ln))
-             for ln in text.split("\n")]
+    lines = [_collapse_repeated_pdf_text(_collapse_pdf_whitespace(ln)) for ln in text.split("\n")]
     out = re.sub(r"\n{3,}", "\n\n", "\n".join(lines))
     return out.strip()
 
 
 def _compact_dedup_probe(value: str) -> str:
     """去重指纹：删表格语法/标点/空白后转小写（只保留内容本身）。"""
-    return re.sub(
-        r"[|\s`*_#，。；：！？、,.!:;?%（）()\[\]{}《》<>\"'\-—]",
-        "", str(value or "")).lower()
+    return re.sub(r"[|\s`*_#，。；：！？、,.!:;?%（）()\[\]{}《》<>\"'\-—]", "", str(value or "")).lower()
 
 
 def _line_covered_by_tables(line_probe: str, table_probe: str) -> bool:
@@ -904,7 +982,7 @@ def _line_covered_by_tables(line_probe: str, table_probe: str) -> bool:
     chunk_size = min(12, max(6, len(line_probe) // 2))
     covered = total = 0
     for i in range(0, len(line_probe), chunk_size):
-        chunk = line_probe[i:i + chunk_size]
+        chunk = line_probe[i : i + chunk_size]
         if len(chunk) < 4:
             continue
         total += 1
@@ -940,7 +1018,7 @@ def _extract_pdf_page_tables(page) -> list[str]:
     out: list[str] = []
     try:
         finder = getattr(page, "find_tables", None)
-        if finder is None:      # 旧版 PyMuPDF 无此能力 → 引擎 B 静默缺席
+        if finder is None:  # 旧版 PyMuPDF 无此能力 → 引擎 B 静默缺席
             return out
         tables = finder().tables or []
         for t in tables:
@@ -950,9 +1028,7 @@ def _extract_pdf_page_tables(page) -> list[str]:
                 continue
             norm_rows: list[list[str]] = []
             for r in rows:
-                cells = ["" if c is None else
-                         str(c).replace("\r", " ").replace("\n", " ").strip()
-                         for c in r]
+                cells = ["" if c is None else str(c).replace("\r", " ").replace("\n", " ").strip() for c in r]
                 if any(cells):
                     norm_rows.append(cells)
             if len(norm_rows) < 2:
@@ -969,15 +1045,14 @@ def _extract_pdf_page_tables(page) -> list[str]:
 # 表头智能识别（CSV / Excel 共用，2026-09-17）
 # ---------------------------------------------------------------------------
 
-SPREADSHEET_HEADER_SCAN_ROWS = 20    # 表头在前 20 行内寻找
-SPREADSHEET_HEADER_MIN_SCORE = 2     # 不同值数 < 2 视为无表头
-SPREADSHEET_HEADER_MERGE_UP = 2      # 多行表头最多向上再吃 2 行
+SPREADSHEET_HEADER_SCAN_ROWS = 20  # 表头在前 20 行内寻找
+SPREADSHEET_HEADER_MIN_SCORE = 2  # 不同值数 < 2 视为无表头
+SPREADSHEET_HEADER_MERGE_UP = 2  # 多行表头最多向上再吃 2 行
 
 
 def _spreadsheet_header_score(row) -> int:
     """表头行打分：非空单元格的不同值个数（全部相同/单列 → 0 分）。"""
-    vals = [str(v).strip() for v in row
-            if v is not None and str(v).strip()]
+    vals = [str(v).strip() for v in row if v is not None and str(v).strip()]
     if len(vals) < 2:
         return 0
     return len(set(vals))
@@ -992,8 +1067,7 @@ def _is_header_like(row) -> bool:
     纯数字行（如数量/金额数据行）不能当表头——数据行的不同值数
     完全可能高于真正的表头行，不排除会把数据行误选为表头。
     """
-    vals = [str(v).strip() for v in row
-            if v is not None and str(v).strip()]
+    vals = [str(v).strip() for v in row if v is not None and str(v).strip()]
     if len(vals) < 2 or len(set(vals)) < 2:
         return False
     non_numeric = [v for v in vals if not _NUMERIC_CELL_RE.fullmatch(v)]
@@ -1024,14 +1098,12 @@ def find_table_header(rows: list) -> tuple[int, int, list[str]]:
     if start < 0:
         return -1, -1, []
     end = start
-    for j in range(start + 1, min(start + 1 + SPREADSHEET_HEADER_MERGE_UP,
-                                  len(scan))):
+    for j in range(start + 1, min(start + 1 + SPREADSHEET_HEADER_MERGE_UP, len(scan))):
         if not _is_header_like(scan[j]):
             break
         end = j
     if end == start:
-        return start, end, [
-            str(v).strip() if v is not None else "" for v in rows[start]]
+        return start, end, [str(v).strip() if v is not None else "" for v in rows[start]]
     cols = max(len(rows[r]) for r in range(start, end + 1))
     merged: list[str] = []
     for c in range(cols):
@@ -1058,8 +1130,7 @@ def render_table_with_header(rows: list) -> list[str]:
     lines = ["【表格】"]
     if header_start > 0:
         for r in rows[:header_start]:
-            vals = [str(v).strip() for v in r
-                    if v is not None and str(v).strip()]
+            vals = [str(v).strip() for v in r if v is not None and str(v).strip()]
             if vals:
                 lines.append("；".join(dict.fromkeys(vals)))
     if header_start < 0:
@@ -1067,15 +1138,14 @@ def render_table_with_header(rows: list) -> list[str]:
         header = [f"列{i + 1}" for i in range(cols)]
         data_rows = rows
     else:
-        data_rows = rows[header_end + 1:]
+        data_rows = rows[header_end + 1 :]
     lines.append(_md_cells(header))
     lines.append(_md_separator(header))
     lines.extend(_md_cells(r) for r in data_rows)
     return lines
 
 
-def _parse_pdf(content: bytes, diag: dict | None = None,
-               fname: str = "document.pdf") -> str:
+def _parse_pdf(content: bytes, diag: dict | None = None, fname: str = "document.pdf") -> str:
     """PDF 解析（增强版）：
     1. 主通道 PyMuPDF（比 pdfplumber 快数倍），逐页容错（单页损坏不中断整体）
     2. ✅ 双引擎表格（2026-09-17）：引擎 A = get_text 原生文本流；
@@ -1089,7 +1159,7 @@ def _parse_pdf(content: bytes, diag: dict | None = None,
     """
     text = ""
     n_pages = 0
-    table_blocks: list[str] = []   # 引擎 B 产出的表格 Markdown（逐页收集）
+    table_blocks: list[str] = []  # 引擎 B 产出的表格 Markdown（逐页收集）
     # MuPDF 连「打开」都失败 → 该 PDF 结构异常，不能再交给无闸门的回退通道
     fitz_open_failed = False
     # ✅ B-3 修复：记录「已加密且空密码认证失败」——这类 PDF 主通道提取必为空，
@@ -1119,17 +1189,14 @@ def _parse_pdf(content: bytes, diag: dict | None = None,
                 page_items: list[tuple[int, str]] = []
                 for page in doc.pages(0, MAX_PDF_PAGES):
                     try:
-                        page_text = normalize_pdf_text(
-                            page.get_text("text") or "")
+                        page_text = normalize_pdf_text(page.get_text("text") or "")
                     except Exception as pe:
-                        logger.warning("PDF 第 %d 页提取失败，跳过: %s",
-                                       page.number, pe)
+                        logger.warning("PDF 第 %d 页提取失败，跳过: %s", page.number, pe)
                         page_text = ""
                     # ✅ 引擎 B：几何表格重建 + 正文去重（单页失败安全跳过）
                     page_tables = _extract_pdf_page_tables(page)
                     if page_tables:
-                        page_text = remove_lines_covered_by_tables(
-                            page_text, page_tables)
+                        page_text = remove_lines_covered_by_tables(page_text, page_tables)
                         table_blocks.extend(page_tables)
                     page_items.append((page.number + 1, page_text))
                 text = _add_page_markers(page_items)
@@ -1151,8 +1218,8 @@ def _parse_pdf(content: bytes, diag: dict | None = None,
             #    无防护解析器。注意：仅在「MuPDF 打不开」时短路；MuPDF 能打开
             #    但提取不到文字（扫描件等）仍照常回退，不影响既有兼容性。
             raise ParseError(
-                "PDF 无法解析：文件结构异常或包含异常压缩数据。"
-                "请用 PDF 阅读器「另存为」标准 PDF 后重新上传")
+                "PDF 无法解析：文件结构异常或包含异常压缩数据。" "请用 PDF 阅读器「另存为」标准 PDF 后重新上传"
+            )
         text, n_pages = _parse_pdf_fallback(content)
 
     # ✅ 页数截断回报：只提取了前 MAX_PDF_PAGES 页，超出部分内容不会进入事实库
@@ -1160,19 +1227,31 @@ def _parse_pdf(content: bytes, diag: dict | None = None,
         _note_truncation(
             diag,
             f"PDF 共 {n_pages} 页，仅解析前 {MAX_PDF_PAGES} 页，"
-            f"其余 {n_pages - MAX_PDF_PAGES} 页内容未纳入（建议拆分文件后重新上传）")
+            f"其余 {n_pages - MAX_PDF_PAGES} 页内容未纳入（建议拆分文件后重新上传）",
+        )
 
     # 扫描件检测（双信号）：平均每页文本 < 阈值，或文字层缺失判定命中
     # → 疑似扫描件，尝试 OCR 兜底
     from app.config import settings
+
     threshold = getattr(settings, "ocr_min_chars_per_page", 30)
-    avg_chars = len(text.strip()) / max(n_pages, 1)
+    # ✅ R179 修复（长文档扫描件误判）：分母必须是「实际参与文本统计的页数」。
+    #    主通道与回退通道都只解析前 MAX_PDF_PAGES 页，而 n_pages 是文档总页数；
+    #    旧实现直接拿总页数做分母，页数越多平均值被稀释得越厉害。实测语义：
+    #    一份 800 页、前 500 页有正常文字层（每页约 40 字）的招标文件会算得
+    #    800 页分母下 25 字/页 < 30 → 被判成扫描件并触发整册 OCR（耗时数分钟），
+    #    且 OCR 文本还会叠加在已有正文之后造成内容重复。改用 min(总页数, 已解析
+    #    页数上限) 后，扫描件（文字层确实缺失）仍由 text_missing 分支命中，行为不变。
+    counted_pages = min(n_pages, MAX_PDF_PAGES) if n_pages else n_pages
+    avg_chars = len(text.strip()) / max(counted_pages, 1)
     text_missing = not has_informative_text(text)
     if avg_chars < threshold or text_missing:
         logger.info(
             "PDF 疑似扫描件（平均每页 %.0f 字符 < %d%s），尝试 OCR 兜底",
-            avg_chars, threshold,
-            "，且无可选文字层" if text_missing else "")
+            avg_chars,
+            threshold,
+            "，且无可选文字层" if text_missing else "",
+        )
         try:
             ocr_text = _pdf_ocr_fallback(content, diag=diag)
         except ParseError as e:
@@ -1187,16 +1266,17 @@ def _parse_pdf(content: bytes, diag: dict | None = None,
             # ✅ 增强：OCR 兜底是"内容获得方式"的重要信息（OCR 识别表格/编号
             #    精度低于原生文本提取），随 diag 返回并持久化，供用户判断
             #    提取结果可信度。
-            _note_info(diag, f"扫描件已通过 OCR 兜底识别（OCR 文本 {len(ocr_text)} 字），"
-                             "表格与编号精度可能低于原生文本")
+            _note_info(
+                diag, f"扫描件已通过 OCR 兜底识别（OCR 文本 {len(ocr_text)} 字），" "表格与编号精度可能低于原生文本"
+            )
 
     # ✅ MinerU 云端兜底（2026-09-17）：文字层缺失且 OCR 兜底未产出有效文本时，
     #    若配置了 MINERU_PROVIDER（agent / accurate），自动走云端解析。
     #    未配置时保持纯本地行为（与旧版一致），失败只告警不中断。
-    if not has_informative_text(text) and settings.mineru_enabled \
-            and (settings.mineru_provider or "").strip():
+    if not has_informative_text(text) and settings.mineru_enabled and (settings.mineru_provider or "").strip():
         try:
             from app.services.mineru_client import parse_with_mineru
+
             md = parse_with_mineru(content, fname)
         except Exception as e:
             logger.warning("MinerU 云端解析兜底失败: %s", e)
@@ -1204,10 +1284,7 @@ def _parse_pdf(content: bytes, diag: dict | None = None,
         else:
             if has_informative_text(md):
                 text = md if not text.strip() else f"{text}\n{md}"
-                _note_info(
-                    diag,
-                    f"已通过 MinerU 云端解析兜底（{len(md)} 字，"
-                    f"provider={settings.mineru_provider}）")
+                _note_info(diag, f"已通过 MinerU 云端解析兜底（{len(md)} 字，" f"provider={settings.mineru_provider}）")
 
     if table_blocks:
         n_tables = len(table_blocks)
@@ -1217,29 +1294,28 @@ def _parse_pdf(content: bytes, diag: dict | None = None,
     #    取出有效文字，应在末尾明确报出根因（文件已加密），避免上层返回泛化的
     #    「未解析到有效文本」误导用户以为是解析引擎问题。
     if not has_informative_text(text) and encrypted_unauth:
-        raise ParseError(
-            "PDF 已加密且无法通过空密码解密，无法提取文本。"
-            "请先解除密码/权限限制后再重新上传")
+        raise ParseError("PDF 已加密且无法通过空密码解密，无法提取文本。" "请先解除密码/权限限制后再重新上传")
     return text
 
 
 def _parse_pdf_fallback(content: bytes) -> tuple[str, int]:
     """PDF 回退通道：pdfplumber → pypdf，逐页容错。返回 (text, 页数)"""
     import tempfile
+
     tmp = tempfile.NamedTemporaryFile(delete=False, suffix=".pdf")
     try:
         tmp.write(content)
         tmp.close()
         try:
             import pdfplumber
+
             with pdfplumber.open(tmp.name) as pdf:
                 pages_text: list[tuple[int, str]] = []
                 for p in pdf.pages[:MAX_PDF_PAGES]:
                     try:
                         pages_text.append((p.page_number, p.extract_text() or ""))
                     except Exception as pe:
-                        logger.warning("pdfplumber 第 %d 页失败: %s",
-                                       p.page_number, pe)
+                        logger.warning("pdfplumber 第 %d 页失败: %s", p.page_number, pe)
                         pages_text.append((p.page_number, ""))
                 return _add_page_markers(pages_text), len(pdf.pages)
         except ImportError:
@@ -1248,6 +1324,7 @@ def _parse_pdf_fallback(content: bytes) -> tuple[str, int]:
             logger.warning("pdfplumber 解析失败，回退到 pypdf: %s", e)
         try:
             from pypdf import PdfReader
+
             reader = PdfReader(tmp.name)
             pages_text2: list[tuple[int, str]] = []
             for idx, p in enumerate(reader.pages[:MAX_PDF_PAGES]):
@@ -1265,8 +1342,7 @@ def _parse_pdf_fallback(content: bytes) -> tuple[str, int]:
             os.unlink(tmp.name)
 
 
-def _pdf_ocr_fallback(content: bytes, max_pages: int | None = None,
-                      diag: dict | None = None) -> str:
+def _pdf_ocr_fallback(content: bytes, max_pages: int | None = None, diag: dict | None = None) -> str:
     """扫描件 PDF 的 OCR 兜底：PyMuPDF 渲染页面 → ocr 模块（多引擎识别）。
 
     页数与 DPI 由配置控制（OCR_PDF_MAX_PAGES / OCR_PDF_DPI）。
@@ -1299,7 +1375,8 @@ def _pdf_ocr_fallback(content: bytes, max_pages: int | None = None,
                     diag,
                     f"扫描件 OCR 仅覆盖前 {max_pages} 页（共 {doc.page_count} 页），"
                     f"其余 {skipped_pages} 页内容未识别"
-                    "（可调大 OCR_PDF_MAX_PAGES 或拆分文件后重新上传）")
+                    "（可调大 OCR_PDF_MAX_PAGES 或拆分文件后重新上传）",
+                )
             for page in doc.pages(0, max_pages):
                 try:
                     png = page.get_pixmap(dpi=dpi).tobytes("png")
@@ -1317,8 +1394,7 @@ def _pdf_ocr_fallback(content: bytes, max_pages: int | None = None,
         logger.warning("PDF OCR 整体失败: %s", e)
     if skipped_pages and not ocr_parts:
         # 全部超限页都未产出内容：上面已记录截断告警，这里只补一条日志便于排查
-        logger.warning("PDF OCR 未产出任何文本（页数上限 %d，共跳过 %d 页）",
-                       max_pages, skipped_pages)
+        logger.warning("PDF OCR 未产出任何文本（页数上限 %d，共跳过 %d 页）", max_pages, skipped_pages)
     return _add_page_markers(ocr_parts)
 
 
@@ -1362,6 +1438,36 @@ def _md_separator(values_or_cols) -> str:
     return "| " + " | ".join(["---"] * max(cols, 1)) + " |"
 
 
+_CSV_DELIMITER_CANDIDATES = ",;\t|"
+
+
+def _sniff_csv_delimiter(text: str) -> str:
+    """嗅探 CSV 分隔符：逗号 / 分号 / 制表符 / 竖线。
+
+    ✅ R179 修复（列错位 / 内容塌缩）：旧实现 `csv.reader` 固定逗号，
+    分号分隔（欧洲区域设置、部分国产办公软件导出）或制表符分隔的 CSV 会被
+    整表解析成**单列** —— 每行所有字段挤进一个单元格，下游
+    ``split_into_chunks`` 的表格识别、表格完整性保护、机械统计表
+    （machinery_stat）高权重区分类全部失效（与 R72 修复的「表格语法缺失」
+    是同一条链路的两种失效方式）。
+
+    口径：优先 ``csv.Sniffer``，再做「前几行必须能切出 >1 列」的二次确认；
+    嗅探失败或不达标一律回退逗号（与旧行为逐字一致，零回归）。
+    """
+    sample = text[:8192]
+    try:
+        candidate = csv.Sniffer().sniff(sample, delimiters=_CSV_DELIMITER_CANDIDATES).delimiter
+    except csv.Error:
+        return ","
+    try:
+        probe = list(csv.reader(io.StringIO(sample), delimiter=candidate))
+    except csv.Error:
+        return ","
+    if len(probe) >= 2 and max((len(r) for r in probe), default=0) > 1:
+        return candidate
+    return ","
+
+
 def _parse_csv(content: bytes, diag: dict | None = None) -> str:
     """CSV 解析：输出 Markdown 表格（首行视为表头）。
 
@@ -1381,8 +1487,9 @@ def _parse_csv(content: bytes, diag: dict | None = None) -> str:
     #    一个 200MB 的 CSV 仍会完整展开成上百万元素的行列表。
     rows: list[list[str]] = []
     overflow = False
+    _csv_delim = _sniff_csv_delimiter(text)
     try:
-        for row in csv.reader(io.StringIO(text)):
+        for row in csv.reader(io.StringIO(text), delimiter=_csv_delim):
             if len(rows) >= MAX_CSV_ROWS:
                 overflow = True
                 break
@@ -1391,22 +1498,47 @@ def _parse_csv(content: bytes, diag: dict | None = None) -> str:
         # 旧实现让 _csv.Error 冒到路由的泛化 except，用户只看到「文件无法识别
         # 或已损坏」，真正原因（超长且未加引号的单元格）被吞掉。
         raise ParseError(
-            f"CSV 内容异常（{e}）：常见原因是存在超长且未加引号的单元格，"
-            "请检查该列是否包含分隔符或二进制内容") from e
+            f"CSV 内容异常（{e}）：常见原因是存在超长且未加引号的单元格，" "请检查该列是否包含分隔符或二进制内容"
+        ) from e
     if not rows:
         return ""
     # ✅ 修复：超限截断必须留痕——机械统计表（最高价值区）常超上限，
     #    静默截断会让用户无从得知"部分机械配置丢失"。
     if overflow:
-        _note_truncation(
-            diag,
-            f"CSV 行数超过上限 {MAX_CSV_ROWS} 行已截断"
-            "（建议拆分文件或转换格式后重新上传）")
+        _note_truncation(diag, f"CSV 行数超过上限 {MAX_CSV_ROWS} 行已截断" "（建议拆分文件或转换格式后重新上传）")
     # ✅ 增强：表头智能识别（2026-09-17）——首行不再无条件视为表头；
     #    前 20 行内按「不同值数」打分识别表头，支持多行表头纵向拼接，
     #    表头前的说明行保留为正文行（不静默丢弃），无表头时生成通用表头。
     lines = render_table_with_header(rows)
     return "\n".join(lines)
+
+
+def _xlrd_cell_text(cell, datemode: int) -> str:
+    """xlrd 单元格 → 文本：数值去无意义小数尾零、日期按 Excel 序列号还原。
+
+    ✅ R179 修复（内容失真）：xlrd 的 ``row_values`` 会把日期单元格返回为
+    Excel 序列号浮点（2024-01-15 → ``45234.0``）、整数返回为 ``2.0``。
+    机械统计表的数量列显示成 ``2.0``，日期列直接变成不可读数字，下游事实
+    提取（交工日期 / 工期起止 / 检验批日期）拿到的是序列号而非日期。
+    """
+    try:
+        import xlrd
+
+        if cell.ctype == xlrd.XL_CELL_DATE:
+            dt = xlrd.xldate_as_datetime(cell.value, datemode)
+            if (dt.hour, dt.minute, dt.second) == (0, 0, 0):
+                return dt.strftime("%Y-%m-%d")
+            return dt.strftime("%Y-%m-%d %H:%M:%S")
+        if cell.ctype == xlrd.XL_CELL_NUMBER:
+            v = float(cell.value)
+            return str(int(v)) if v.is_integer() else str(cell.value)
+        if cell.ctype == xlrd.XL_CELL_BOOLEAN:
+            return "TRUE" if cell.value else "FALSE"
+        return str(cell.value)
+    except Exception:
+        # 日期换算在极端工作簿（datemode 异常）上可能抛错：回退原值，
+        # 保证解析链路不因单个单元格失败而整体中断。
+        return str(getattr(cell, "value", ""))
 
 
 def _parse_excel(content: bytes, ftype: str, diag: dict | None = None) -> str:
@@ -1423,11 +1555,14 @@ def _parse_excel(content: bytes, ftype: str, diag: dict | None = None) -> str:
         if ftype == "xls":
             try:
                 import xlrd
+
                 book = xlrd.open_workbook(tmp.name)
                 parts = []
                 for sheet in book.sheets():
                     n_rows = min(sheet.nrows, MAX_EXCEL_ROWS)
-                    rows = [sheet.row_values(rx) for rx in range(n_rows)]
+                    # ✅ R179：逐单元格取文本，避免 xlrd 把日期/整数拍平成
+                    #    Excel 序列号浮点（见 _xlrd_cell_text）。
+                    rows = [[_xlrd_cell_text(cell, book.datemode) for cell in sheet.row(rx)] for rx in range(n_rows)]
                     if not rows:
                         continue
                     if sheet.nrows > MAX_EXCEL_ROWS:
@@ -1435,7 +1570,8 @@ def _parse_excel(content: bytes, ftype: str, diag: dict | None = None) -> str:
                             diag,
                             f"Excel 工作表「{sheet.name}」共 {sheet.nrows} 行，"
                             f"超过上限 {MAX_EXCEL_ROWS} 行已截断"
-                            "（建议拆分文件或转换格式后重新上传）")
+                            "（建议拆分文件或转换格式后重新上传）",
+                        )
                     parts.append(f"【工作表：{sheet.name}】")
                     # ✅ 增强：表头智能识别（与 CSV 同口径，2026-09-17）
                     parts.extend(render_table_with_header(rows))
@@ -1446,8 +1582,10 @@ def _parse_excel(content: bytes, ftype: str, diag: dict | None = None) -> str:
                 #    「【Excel .xls 解析失败：缺少 xlrd...】」当作正文返回并落库。
                 raise ParseError(
                     "无法解析 .xls 文件：缺少 xlrd 库。请执行 "
-                    "`pip install xlrd==1.2.0`，或将文件另存为 .xlsx 后重新上传")
+                    "`pip install xlrd==1.2.0`，或将文件另存为 .xlsx 后重新上传"
+                )
         from openpyxl import load_workbook
+
         # ✅ 增强：data_only=True 取公式单元格的缓存计算值，避免正文里出现
         #    "=SUM(...)" 这类公式原文（机械统计表的合计列常为公式）。
         wb = load_workbook(tmp.name, read_only=True, data_only=True)
@@ -1458,8 +1596,7 @@ def _parse_excel(content: bytes, ftype: str, diag: dict | None = None) -> str:
         try:
             parts: list[str] = []
             for ws in wb.worksheets:
-                rows = list(ws.iter_rows(max_row=MAX_EXCEL_ROWS,
-                                         values_only=True))
+                rows = list(ws.iter_rows(max_row=MAX_EXCEL_ROWS, values_only=True))
                 if not rows:
                     continue
                 parts.append(f"【工作表：{ws.title}】")
@@ -1473,7 +1610,8 @@ def _parse_excel(content: bytes, ftype: str, diag: dict | None = None) -> str:
                         diag,
                         f"Excel 工作表「{ws.title}」共 {ws.max_row} 行，"
                         f"超过上限 {MAX_EXCEL_ROWS} 行已截断"
-                        "（建议拆分文件或转换格式后重新上传）")
+                        "（建议拆分文件或转换格式后重新上传）",
+                    )
             return "\n".join(parts)
         finally:
             wb.close()
@@ -1526,8 +1664,7 @@ def _has_usable_image_text(text: str) -> bool:
     return len(re.sub(r"\s+", "", str(text or ""))) >= 5
 
 
-def _mineru_image_fallback(content: bytes, ftype: str,
-                           diag: dict | None = None) -> str:
+def _mineru_image_fallback(content: bytes, ftype: str, diag: dict | None = None) -> str:
     """图片的 MinerU 云端解析兜底（对齐 OpenBidKit：MinerU 支持 png/jpg 等）。
 
     ✅ 新增（2026-09-22）：旧实现只给 **PDF** 做 MinerU 兜底 —— 扫描件以图片
@@ -1537,6 +1674,7 @@ def _mineru_image_fallback(content: bytes, ftype: str,
     未配置时行为与旧版逐字一致（保持向后兼容）。
     """
     from app.config import settings
+
     if not (settings.mineru_enabled and (settings.mineru_provider or "").strip()):
         return ""
     # ✅ 增强（2026-09-23，审计报告 §4-4）：单图过大时跳过云端兜底，避免把超大图
@@ -1547,10 +1685,12 @@ def _mineru_image_fallback(content: bytes, ftype: str,
         _note_info(
             diag,
             f"扫描件图片 {len(content) // (1024 * 1024)}MB 超过云端单图上限"
-            f"（{cap // (1024 * 1024)}MB），已跳过 MinerU 云端兜底")
+            f"（{cap // (1024 * 1024)}MB），已跳过 MinerU 云端兜底",
+        )
         return ""
     try:
         from app.services.mineru_client import parse_with_mineru
+
         md = parse_with_mineru(content, f"scanned-image.{ftype or 'png'}")
     except Exception as e:
         logger.warning("图片 MinerU 云端解析兜底失败: %s", e)
@@ -1558,16 +1698,14 @@ def _mineru_image_fallback(content: bytes, ftype: str,
         return ""
     if _has_usable_image_text(md):
         _note_info(
-            diag,
-            f"扫描件图片已通过 MinerU 云端解析兜底（{len(md)} 字，"
-            f"provider={settings.mineru_provider}）")
+            diag, f"扫描件图片已通过 MinerU 云端解析兜底（{len(md)} 字，" f"provider={settings.mineru_provider}）"
+        )
         return md
     _note_info(diag, "MinerU 云端解析未返回有效内容")
     return ""
 
 
-def _parse_image_ocr(content: bytes, ftype: str,
-                     diag: dict | None = None) -> str:
+def _parse_image_ocr(content: bytes, ftype: str, diag: dict | None = None) -> str:
     """图片 OCR（多层引擎：tesseract / RapidOCR / 视觉大模型）。
 
     ✅ 修复：旧实现失败时返回「OCR 解析失败：...」字符串，会被上层当作正文
@@ -1580,7 +1718,7 @@ def _parse_image_ocr(content: bytes, ftype: str,
     """
     from app.services.ocr import OcrUnavailableError, ocr_bytes_sync
 
-    if ftype == "tiff":
+    if ftype in ("tiff", "tif"):
         frames = _split_tiff_frames(content)
         if len(frames) > 1:
             pages: list[tuple[int, str]] = []
@@ -1594,10 +1732,8 @@ def _parse_image_ocr(content: bytes, ftype: str,
                         if cloud:
                             return cloud
                         raise ParseError(str(e)) from e
-                    logger.warning("多页 TIFF 第 %d 帧OCR 不可用（保留已识别内容）: %s",
-                                   idx + 1, e)
-                    _note_info(diag, f"多页 TIFF 第 {idx + 1} 帧起 OCR 引擎不可用，"
-                                     "已保留前面帧的识别结果")
+                    logger.warning("多页 TIFF 第 %d 帧OCR 不可用（保留已识别内容）: %s", idx + 1, e)
+                    _note_info(diag, f"多页 TIFF 第 {idx + 1} 帧起 OCR 引擎不可用，" "已保留前面帧的识别结果")
                     break
                 except Exception as e:
                     logger.warning("多页 TIFF 第 %d 帧识别失败（跳过）: %s", idx + 1, e)
@@ -1614,8 +1750,7 @@ def _parse_image_ocr(content: bytes, ftype: str,
                     pages.append((idx + 1, res.text))
             got = len(pages)
             if got < len(frames):
-                _note_info(diag, f"多页 TIFF 共 {len(frames)} 帧，"
-                                 f"仅 {got} 帧识别出文本")
+                _note_info(diag, f"多页 TIFF 共 {len(frames)} 帧，" f"仅 {got} 帧识别出文本")
             if not pages:
                 cloud = _mineru_image_fallback(content, ftype, diag)
                 if cloud:
@@ -1653,8 +1788,7 @@ def _parse_image_ocr(content: bytes, ftype: str,
 _OUTLINE_CN_NUMS = "一二三四五六七八九十"
 _MD_HEADING_RE = re.compile(r"^(#{1,6})\s+(.*)")
 # 页码 / 分隔符行（"第 12 页"、"第12页/24"、"- 12 -"、"12 / 24"），需跳过
-_PAGE_MARKER_RE = re.compile(
-    r"^(第\s*\d+\s*页(\s*/\s*\d+)?|[-—]\s*\d+\s*[-—]|\d+\s*/\s*\d+)$")
+_PAGE_MARKER_RE = re.compile(r"^(第\s*\d+\s*页(\s*/\s*\d+)?|[-—]\s*\d+\s*[-—]|\d+\s*/\s*\d+)$")
 # 目录编号 pattern 列表： (固定层级 or None=按上下文推断, pattern)
 # ✅ OCR 鲁棒性增强：真实 OCR / 扫描件常在编号关键位置掺入空格
 #   （"第 1 章"、"1 . 1"、"（ 一 ）"、"一 、 工程概况"）。

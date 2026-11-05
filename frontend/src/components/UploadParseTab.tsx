@@ -12,7 +12,19 @@
  * 与组件各算一套而漂移。
  */
 import React from "react";
-import { Alert, App, Button, Card, Progress, Space, Spin, Tag, Tooltip, Typography, Upload } from "antd";
+import {
+  Alert,
+  App,
+  Button,
+  Card,
+  Progress,
+  Space,
+  Spin,
+  Tag,
+  Tooltip,
+  Typography,
+  Upload,
+} from "antd";
 import {
   AppstoreOutlined,
   ArrowRightOutlined,
@@ -26,11 +38,7 @@ import {
 import DocumentParseList, { type DocumentParseItem } from "./DocumentParseList";
 import ParseResultCategoryPanel, { type ParsePanelSharedState } from "./ParseResultCategoryPanel";
 import { computeDocStats, type WorkflowTabKey } from "../utils/workflowDerived";
-import {
-  MAX_UPLOAD_BYTES,
-  UPLOAD_FILE_ACCEPT,
-  partitionUploadFiles,
-} from "../utils/uploadAccept";
+import { MAX_UPLOAD_BYTES, UPLOAD_FILE_ACCEPT, partitionUploadFiles } from "../utils/uploadAccept";
 import type { BaGroup, BaStoredItem } from "../utils/bidAnalysis";
 
 const { Text } = Typography;
@@ -164,20 +172,31 @@ export default function UploadParseTab({
       : failedDocCount > 0
         ? `重试失败文档（${failedDocCount}）`
         : "解析全部待解析";
-  const busy =
-    generating || uploadingFacts || parsingDocs || !!parsingDocId;
+  const busy = generating || uploadingFacts || parsingDocs || !!parsingDocId;
   // 实际生效上限：非法（非正数）下发值回落兜底默认，避免误关闭守卫。
   const effectiveMaxBytes =
-    typeof maxUploadBytes === "number" && maxUploadBytes > 0
-      ? maxUploadBytes
-      : MAX_UPLOAD_BYTES;
+    typeof maxUploadBytes === "number" && maxUploadBytes > 0 ? maxUploadBytes : MAX_UPLOAD_BYTES;
   const maxMb = formatMb(effectiveMaxBytes);
 
   return (
-    <div className="scroll-area" style={{ flex: 1, minHeight: 0, overflowY: "auto", paddingRight: 4 }}>
-      {/* ===== 上传区 ===== */}
-      <Card size="small" style={{ marginBottom: 4 }} styles={{ body: { padding: 4 } }}>
-        <div style={{ display: "flex", alignItems: "center", gap: 12, flexWrap: "wrap" }}>
+    <div
+      className="scroll-area"
+      style={{ flex: 1, minHeight: 0, overflowY: "auto", paddingRight: 4 }}
+    >
+      {/* ===== 上传区（版式对齐「目录生成」的编制要求卡：浅灰底 + 图标标题 + 右侧主操作） ===== */}
+      <Card
+        size="small"
+        style={{ marginBottom: 12, background: "#fafafa" }}
+        styles={{ body: { padding: "8px 12px" } }}
+        title={
+          <Space size={8}>
+            <UploadOutlined style={{ color: "#1677ff" }} />
+            <Text strong style={{ fontSize: 13 }}>
+              上传项目资料（保存后可逐个或批量解析）
+            </Text>
+          </Space>
+        }
+        extra={
           <Upload
             multiple
             accept={UPLOAD_FILE_ACCEPT}
@@ -185,7 +204,9 @@ export default function UploadParseTab({
             disabled={busy}
             beforeUpload={(file, fileList) => {
               if (fileList[0] === file) {
-                const files = fileList.map((f) => (f as BeforeUploadFile).originFileObj || f) as File[];
+                const files = fileList.map(
+                  (f) => (f as BeforeUploadFile).originFileObj || f,
+                ) as File[];
                 // ✅ 硬校验：accept 只过滤文件选择框，拖拽可绕过，故这里再按
                 //    扩展名白名单 + 后端下发的大小上限剔除非法文件；合法文件照常
                 //    上传，避免「整批被后端拒绝」或「白等大文件上传」。
@@ -194,12 +215,12 @@ export default function UploadParseTab({
                 const sizeRejected = rejected.filter((r) => r.reason === "size");
                 if (typeRejected.length > 0) {
                   message.error(
-                    `不支持的文件类型，已忽略：${typeRejected.map((r) => r.file.name).join("、")}`
+                    `不支持的文件类型，已忽略：${typeRejected.map((r) => r.file.name).join("、")}`,
                   );
                 }
                 if (sizeRejected.length > 0) {
                   message.error(
-                    `单个文件不能超过 ${maxMb}MB，已忽略：${sizeRejected.map((r) => r.file.name).join("、")}`
+                    `单个文件不能超过 ${maxMb}MB，已忽略：${sizeRejected.map((r) => r.file.name).join("、")}`,
                   );
                 }
                 if (accepted.length > 0) {
@@ -211,6 +232,7 @@ export default function UploadParseTab({
           >
             <Button
               type="primary"
+              size="small"
               icon={<UploadOutlined />}
               disabled={busy}
               loading={uploadingFacts}
@@ -218,16 +240,17 @@ export default function UploadParseTab({
               上传文件保存
             </Button>
           </Upload>
-          <Text type="secondary" style={{ fontSize: 12, flex: 1, minWidth: 240 }}>
-            支持 Word / PDF / Markdown / 文本 / Excel / 图片（扫描件走 OCR），单个文件不超过 {maxMb}MB。
-            上传保存后在本页下方列表中<b>逐个或批量解析</b>为纯文本。
-          </Text>
-        </div>
+        }
+      >
+        <Text type="secondary" style={{ fontSize: 12 }}>
+          {`支持 Word / PDF / Markdown / 文本 / Excel / 图片（扫描件走 OCR），单个文件不超过 ${maxMb}MB。上传保存后在本页下方列表中`}
+          <b>逐个或批量解析</b>为纯文本。
+        </Text>
       </Card>
 
       {/* ===== 上传进度 ===== */}
       {uploadingFacts && (
-        <Card size="small" style={{ marginBottom: 4 }} styles={{ body: { padding: 4 } }}>
+        <Card size="small" style={{ marginBottom: 12 }} styles={{ body: { padding: "8px 12px" } }}>
           <div style={{ display: "flex", gap: 16, alignItems: "center" }}>
             <div style={{ flex: "0 0 320px" }}>
               {/* ✅ 修复：旧实现硬编码 percent={50}，与真实上传进度无关
@@ -240,7 +263,9 @@ export default function UploadParseTab({
               {uploadedFiles.length > 0 && (
                 <Space wrap style={{ marginTop: 4 }}>
                   {uploadedFiles.map((name, i) => (
-                    <Tag key={i} color="processing">{name}</Tag>
+                    <Tag key={i} color="processing">
+                      {name}
+                    </Tag>
                   ))}
                 </Space>
               )}
@@ -251,10 +276,14 @@ export default function UploadParseTab({
 
       {/* ===== 导入概览 ===== */}
       {docs.length > 0 && (
-        <Card size="small" style={{ marginBottom: 4 }} styles={{ body: { padding: "3px 5px" } }}>
+        <Card size="small" style={{ marginBottom: 12 }} styles={{ body: { padding: "8px 12px" } }}>
           <Space size={14} wrap>
-            <Text strong style={{ fontSize: 13 }}>📦 资料概览</Text>
-            <span>共 <Text strong>{docs.length}</Text> 个文件</span>
+            <Text strong style={{ fontSize: 13 }}>
+              📦 资料概览
+            </Text>
+            <span>
+              共 <Text strong>{docs.length}</Text> 个文件
+            </span>
             <Tag color="green">✓ 已解析 {parsedDocCount}</Tag>
             {pendingDocCount > 0 && <Tag color="orange">⏳ 待解析 {pendingDocCount}</Tag>}
             {failedDocCount > 0 && (
@@ -273,7 +302,7 @@ export default function UploadParseTab({
 
       {/* ===== 解析进行中 ===== */}
       {parsingDocs && (
-        <Card size="small" style={{ marginBottom: 4 }} styles={{ body: { padding: 4 } }}>
+        <Card size="small" style={{ marginBottom: 12 }} styles={{ body: { padding: "8px 12px" } }}>
           <Space>
             <Spin size="small" />
             <Text strong>正在解析文档，扫描件 OCR 较慢，请勿关闭页面...</Text>
@@ -289,7 +318,7 @@ export default function UploadParseTab({
           type="info"
           banner
           showIcon
-          style={{ marginBottom: 4 }}
+          style={{ marginBottom: 12 }}
           message={`${docs.length} 个文件已保存，点击下方「解析全部待解析」开始（扫描件自动走 OCR）`}
         />
       )}
@@ -300,24 +329,67 @@ export default function UploadParseTab({
           type="success"
           banner
           showIcon
-          style={{ marginBottom: 4 }}
+          style={{ marginBottom: 12 }}
           message={`全部 ${docs.length} 个文档已解析完成，可进入目录生成或提取全局事实`}
           action={
             <Space size={4}>
-              <Button size="small" onClick={() => onNavigate("outline")}>去目录生成</Button>
-              <Button size="small" type="primary" onClick={() => onNavigate("facts")}>提取事实</Button>
+              <Button size="small" onClick={() => onNavigate("outline")}>
+                去目录生成
+              </Button>
+              <Button size="small" type="primary" onClick={() => onNavigate("facts")}>
+                提取事实
+              </Button>
             </Space>
           }
         />
       )}
 
+      {/* ===== 顶部操作区（对齐「目录生成」：批量按钮独立一行，不塞在卡片头里）===== */}
+      <Space style={{ marginBottom: 12 }} wrap>
+        <Button
+          type="primary"
+          icon={<FileSearchOutlined />}
+          onClick={() => onParseAll()}
+          disabled={busy || actionableDocCount === 0}
+          loading={parsingDocs}
+        >
+          {parseAllLabel}
+        </Button>
+        <Tooltip title="对所有文档（含已解析）重新解析，用于补齐旧版截断内容或在启用 OCR 后重扫扫描件">
+          <Button
+            icon={<ReloadOutlined />}
+            disabled={busy || docs.length === 0}
+            onClick={() => {
+              modal.confirm({
+                title: "重新解析全部文档",
+                content: `将对 ${docs.length} 个文档重新解析（含已解析的）。解析完成后需在「全局事实」页重新执行「AI 提取事实」才能更新事实变量。`,
+                okText: "开始重解析",
+                cancelText: "取消",
+                onOk: () => onReparseAll(),
+              });
+            }}
+          >
+            全部重解析
+          </Button>
+        </Tooltip>
+        {/* ✅ 修复（2026-09-23）：与同组件「上传 / 全部解析 / 全部重解析」同口径用
+            busy —— 旧条件遗漏 parsingDocId 与 uploadingFacts，单份文档解析中
+            （OCR 可能数分钟）或上传中仍可点刷新，loadDocuments 覆盖进行中的
+            列表，前端状态与后端瞬时不一致。 */}
+        <Button type="text" icon={<ReloadOutlined />} onClick={() => onRefresh()} disabled={busy}>
+          刷新
+        </Button>
+      </Space>
+
       {/* ===== 资料与解析（上传 / 解析 / 增删 一体化）===== */}
       <Card
         size="small"
         title={
-          <Space>
-            <FolderOpenOutlined />
-            <Text strong>资料与解析</Text>
+          <Space size={8}>
+            <FolderOpenOutlined style={{ color: "#1677ff" }} />
+            <Text strong style={{ fontSize: 13 }}>
+              资料与解析
+            </Text>
             <Tag color="blue">{docs.length} 个文件</Tag>
             <Tag color="green">✓ 已解析 {parsedDocCount}</Tag>
             {pendingDocCount > 0 && <Tag color="orange">⏳ 待解析 {pendingDocCount}</Tag>}
@@ -333,46 +405,25 @@ export default function UploadParseTab({
             )}
           </Space>
         }
+        // 版式对齐「目录生成」的目录结构卡：卡片头右侧只放「下一步」入口
         extra={
-          <Space size={4}>
-            <Button
-              type="primary"
-              size="small"
-              icon={<FileSearchOutlined />}
-              onClick={() => onParseAll()}
-              disabled={busy || actionableDocCount === 0}
-              loading={parsingDocs}
-            >
-              {parseAllLabel}
-            </Button>
-            <Tooltip title="对所有文档（含已解析）重新解析，用于补齐旧版截断内容或在启用 OCR 后重扫扫描件">
-              <Button
-                size="small"
-                icon={<ReloadOutlined />}
-                disabled={busy || docs.length === 0}
-                onClick={() => {
-                  modal.confirm({
-                    title: "重新解析全部文档",
-                    content: `将对 ${docs.length} 个文档重新解析（含已解析的）。解析完成后需在「全局事实」页重新执行「AI 提取事实」才能更新事实变量。`,
-                    okText: "开始重解析",
-                    cancelText: "取消",
-                    onOk: () => onReparseAll(),
-                  });
-                }}
-              >
-                全部重解析
-              </Button>
-            </Tooltip>
-            {/* ✅ 修复（2026-09-23）：与同组件「上传 / 全部解析 / 全部重解析」同口径用
-                busy —— 旧条件遗漏 parsingDocId 与 uploadingFacts，单份文档解析中
-                （OCR 可能数分钟）或上传中仍可点刷新，loadDocuments 覆盖进行中的
-                列表，前端状态与后端瞬时不一致。 */}
-            <Button size="small" type="text" onClick={() => onRefresh()} disabled={busy}>
-              <ReloadOutlined /> 刷新
-            </Button>
-          </Space>
+          <Button
+            type="link"
+            size="small"
+            icon={<ArrowRightOutlined />}
+            disabled={parsedDocCount === 0}
+            // 2026-09-23 合并：优先切换到同 Tab 的「项目提取」子页（若宿主已接入内嵌子 Tab）；
+            // 否则回退到 outline 顶层 Tab（旧调用链 / 单测保留行为）。
+            onClick={() => {
+              if (onSwitchToExtract) onSwitchToExtract();
+              else onNavigate("outline");
+            }}
+          >
+            {baNextLabel}
+          </Button>
         }
-        style={{ marginBottom: 4 }}
+        style={{ marginBottom: 12 }}
+        styles={{ body: { padding: "8px 12px" } }}
       >
         <DocumentParseList
           docs={docs}
@@ -401,13 +452,16 @@ export default function UploadParseTab({
         <Card
           size="small"
           title={
-            <Space>
-              <AppstoreOutlined />
-              <Text strong>信息显示窗口</Text>
+            <Space size={8}>
+              <AppstoreOutlined style={{ color: "#1677ff" }} />
+              <Text strong style={{ fontSize: 13 }}>
+                信息显示窗口
+              </Text>
               <Tag color="blue">{(parseGroups || []).length} 个分类</Tag>
             </Space>
           }
-          style={{ marginBottom: 4 }}
+          style={{ marginBottom: 12 }}
+          styles={{ body: { padding: 0 } }}
         >
           <ParseResultCategoryPanel
             variant="detail-only"
@@ -426,25 +480,20 @@ export default function UploadParseTab({
         </Card>
       )}
 
-      {/* ===== 下一步 ===== */}
-      <Space wrap>
+      {/* ===== 底部快捷入口（「下一步」已上移到资料与解析卡片头）===== */}
+      <Space wrap style={{ marginBottom: 12 }}>
         <Button
-          type="primary"
-          icon={<ArrowRightOutlined />}
+          icon={<ExportOutlined />}
           disabled={parsedDocCount === 0}
-          // 2026-09-23 合并：优先切换到同 Tab 的「项目提取」子页（若宿主已接入内嵌子 Tab）；
-          // 否则回退到 outline 顶层 Tab（旧调用链 / 单测保留行为）。
-          onClick={() => {
-            if (onSwitchToExtract) onSwitchToExtract();
-            else onNavigate("outline");
-          }}
+          onClick={() => onNavigate("outline")}
         >
-          {baNextLabel}
-        </Button>
-        <Button icon={<ExportOutlined />} disabled={parsedDocCount === 0} onClick={() => onNavigate("outline")}>
           直接去目录生成
         </Button>
-        <Button icon={<GlobalOutlined />} disabled={parsedDocCount === 0} onClick={() => onNavigate("facts")}>
+        <Button
+          icon={<GlobalOutlined />}
+          disabled={parsedDocCount === 0}
+          onClick={() => onNavigate("facts")}
+        >
           提取全局事实
         </Button>
         {parsedDocCount === 0 && (

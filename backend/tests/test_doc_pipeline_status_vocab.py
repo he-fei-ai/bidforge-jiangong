@@ -12,6 +12,7 @@
 本文件把这两个**实际生效的取值**钉死，任何把 `failed` 误改回 `error`、
 或把 `not_parsed` 取值挪作他用的改动都会在此失败，防止注释漂移再演变为真实 BUG。
 """
+
 import uuid
 
 import app.routers.global_facts as gf
@@ -26,9 +27,7 @@ async def ctx(db_conn, tmp_path, monkeypatch):
     docs_root = tmp_path / "projects"
     monkeypatch.setattr(gf, "FACT_UPLOADS_DIR", uploads)
     monkeypatch.setattr(
-        __import__(
-            "app.services.doc_pipeline.doc_storage", fromlist=["DOCS_ROOT"]
-        ),
+        __import__("app.services.doc_pipeline.doc_storage", fromlist=["DOCS_ROOT"]),
         "DOCS_ROOT",
         docs_root,
     )
@@ -43,8 +42,7 @@ async def test_mark_parse_failed_writes_failed_vocabulary(ctx):
     db, pid, _docs_root, _uploads = ctx
     doc_id = uuid.uuid4().hex
     await db.execute(
-        "INSERT INTO project_documents(id, project_id, file_name, parse_status)"
-        " VALUES(?,?,?, 'pending')",
+        "INSERT INTO project_documents(id, project_id, file_name, parse_status)" " VALUES(?,?,?, 'pending')",
         (doc_id, pid, "a.docx"),
     )
     await db.commit()
@@ -71,7 +69,5 @@ async def test_compute_freshness_not_parsed_vocabulary():
         assert "文档尚未成功解析" in fresh["reasons"]
 
     # 已成功解析且指纹一致 → 回到 valid（验证 not_parsed 不是无条件返回）
-    fresh_ok = pipeline.compute_freshness(
-        {"parse_status": "success", "file_hash_md5": "abc"}
-    )
+    fresh_ok = pipeline.compute_freshness({"parse_status": "success", "file_hash_md5": "abc"})
     assert fresh_ok["status"] == "valid"

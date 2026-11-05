@@ -31,6 +31,7 @@
 测试直接调用路由函数（与既有 test_global_facts_routes.py 风格一致），
 避免 TestClient 跨事件循环持有 aiosqlite 连接导致的偶发失败。
 """
+
 import asyncio
 import inspect
 import json
@@ -62,17 +63,13 @@ def _def(item_id: str) -> dict:
 
 async def _seed_scheme(db) -> tuple[str, str]:
     pid, sid = uuid.uuid4().hex, uuid.uuid4().hex
-    await db.execute(
-        "INSERT INTO projects(id,name) VALUES(?,?)", (pid, "p"))
-    await db.execute(
-        "INSERT INTO schemes(id,project_id,name) VALUES(?,?,?)",
-        (sid, pid, "s"))
+    await db.execute("INSERT INTO projects(id,name) VALUES(?,?)", (pid, "p"))
+    await db.execute("INSERT INTO schemes(id,project_id,name) VALUES(?,?,?)", (sid, pid, "s"))
     await db.commit()
     return pid, sid
 
 
-async def _put_item(db, pid: str, item_id: str, *,
-                    status: str, content: str, error: str = "") -> None:
+async def _put_item(db, pid: str, item_id: str, *, status: str, content: str, error: str = "") -> None:
     """直接写一条 bid_analysis_items 行（绕过 _update_item_status 的 upsert）。"""
     def_ = _def(item_id) or {}
     pk = f"{pid}_{item_id}"
@@ -81,9 +78,20 @@ async def _put_item(db, pid: str, item_id: str, *,
         "(id, project_id, scheme_id, item_id, label, output_type, required, "
         " status, content, error, sort_order) "
         "VALUES (?,?,?,?,?,?,?,?,?,?,?)",
-        (pk, pid, "", item_id, def_.get("label", item_id),
-         def_.get("output_type", "markdown"), def_.get("required", 0),
-         status, content, error, def_.get("sort_order", 0)))
+        (
+            pk,
+            pid,
+            "",
+            item_id,
+            def_.get("label", item_id),
+            def_.get("output_type", "markdown"),
+            def_.get("required", 0),
+            status,
+            content,
+            error,
+            def_.get("sort_order", 0),
+        ),
+    )
     await db.commit()
 
 
@@ -91,19 +99,18 @@ async def _put_item(db, pid: str, item_id: str, *,
 # 不变量 1：/results 汇总必须把 content="未提取到" 的必选项计为缺失
 # ---------------------------------------------------------------------------
 
+
 @pytest.mark.asyncio
 async def test_results_flags_required_item_with_missing_marker(db_conn):
     db = db_conn
     pid, sid = await _seed_scheme(db)
     # 必选项 schemeBasicInfo（markdown）跑完但整体无结果
-    await _put_item(db, pid, "schemeBasicInfo",
-                    status="success", content=MARKDOWN_MISSING_RESULT)
+    await _put_item(db, pid, "schemeBasicInfo", status="success", content=MARKDOWN_MISSING_RESULT)
 
     res = await ba.list_analysis_results(scheme_id=sid, project_id="", db=db)
     summary = res["summary"]
     label = _def("schemeBasicInfo")["label"]
-    assert label in summary["missing_required"], (
-        "必选项 content='未提取到' 必须计为缺失，而非当作已完成")
+    assert label in summary["missing_required"], "必选项 content='未提取到' 必须计为缺失，而非当作已完成"
     assert summary["all_required_done"] is False
 
 
@@ -111,21 +118,18 @@ async def test_results_flags_required_item_with_missing_marker(db_conn):
 async def test_results_required_item_with_real_content_not_missing(db_conn):
     db = db_conn
     pid, sid = await _seed_scheme(db)
-    await _put_item(db, pid, "schemeBasicInfo",
-                    status="success", content="## 方案级信息\n深基坑支护方案。")
+    await _put_item(db, pid, "schemeBasicInfo", status="success", content="## 方案级信息\n深基坑支护方案。")
 
     res = await ba.list_analysis_results(scheme_id=sid, project_id="", db=db)
     label = _def("schemeBasicInfo")["label"]
-    assert label not in res["summary"]["missing_required"], (
-        "有真实内容的必选项不应被计为缺失")
+    assert label not in res["summary"]["missing_required"], "有真实内容的必选项不应被计为缺失"
 
 
 @pytest.mark.asyncio
 async def test_results_required_item_error_status_is_missing(db_conn):
     db = db_conn
     pid, sid = await _seed_scheme(db)
-    await _put_item(db, pid, "schemeBasicInfo",
-                    status="error", content="", error="超时")
+    await _put_item(db, pid, "schemeBasicInfo", status="error", content="", error="超时")
 
     res = await ba.list_analysis_results(scheme_id=sid, project_id="", db=db)
     label = _def("schemeBasicInfo")["label"]
@@ -136,6 +140,7 @@ async def test_results_required_item_error_status_is_missing(db_conn):
 # 不变量 2：_get_missing_required 的 DB 回退分支同样要识别「未提取到」
 # ---------------------------------------------------------------------------
 
+
 @pytest.mark.asyncio
 async def test_get_missing_required_db_branch_flags_missing_marker(db_conn):
     """results 字典里没有该必选项 → 走 DB 回退分支。
@@ -145,15 +150,12 @@ async def test_get_missing_required_db_branch_flags_missing_marker(db_conn):
     """
     db = db_conn
     pid, _sid = await _seed_scheme(db)
-    await _put_item(db, pid, "schemeBasicInfo",
-                    status="success", content=MARKDOWN_MISSING_RESULT)
+    await _put_item(db, pid, "schemeBasicInfo", status="success", content=MARKDOWN_MISSING_RESULT)
 
     # results 为空 → 必选项走 DB 回退分支
     missing = await ba._get_missing_required(db, pid, {})
     label = _def("schemeBasicInfo")["label"]
-    assert label in missing, (
-        "DB 回退分支也必须用 is_missing_result 判定，"
-        "content='未提取到' 不能当作已完成")
+    assert label in missing, "DB 回退分支也必须用 is_missing_result 判定，" "content='未提取到' 不能当作已完成"
 
 
 @pytest.mark.asyncio
@@ -177,11 +179,12 @@ async def test_get_missing_required_results_branch_flags_missing_marker(db_conn)
 # 不变量 3【P0】：收尾 finish_task 不得传 progress 参数
 # ---------------------------------------------------------------------------
 
+
 def _finish_task_call_args(source: str) -> list[str]:
     """提取源码中所有 `finish_task(...)` 调用的括号内文本（跨行 + 嵌套括号）。"""
     calls: list[str] = []
     for m in re.finditer(r"finish_task\s*\(", source):
-        i = m.end()          # 指向 '(' 之后
+        i = m.end()  # 指向 '(' 之后
         start = i
         depth = 1
         while i < len(source) and depth:
@@ -191,7 +194,7 @@ def _finish_task_call_args(source: str) -> list[str]:
             elif ch == ")":
                 depth -= 1
             i += 1
-        calls.append(source[start:i - 1])
+        calls.append(source[start : i - 1])
     return calls
 
 
@@ -202,8 +205,8 @@ def test_finish_task_signature_has_no_progress_param():
     曾经 bid_analysis 单方面假设存在该参数，导致收尾 100% 抛 TypeError。
     """
     from app.services.ai.task_registry import finish_task
-    assert list(inspect.signature(finish_task).parameters) == [
-        "task_id", "status", "message"]
+
+    assert list(inspect.signature(finish_task).parameters) == ["task_id", "status", "message"]
 
 
 def test_no_finish_task_call_passes_progress_kwarg():
@@ -263,15 +266,13 @@ async def test_run_with_progress_reaches_success_terminal_state(db_conn, monkeyp
     async def _cb(*_a, **_k):
         return None
 
-    result = await ba._run_bid_analysis_with_progress(
-        db, pid, sid, cfg, "项目名称：测试项目。", _cb, task_id)
+    result = await ba._run_bid_analysis_with_progress(db, pid, sid, cfg, "项目名称：测试项目。", _cb, task_id)
 
     assert result["ok"] is True, result
     assert result["missing_required"] == []
     assert result["completed"] == result["total"] == len(REQUIRED_ITEM_IDS)
 
-    cur = await db.execute(
-        "SELECT status, progress FROM task_registry WHERE id=?", (task_id,))
+    cur = await db.execute("SELECT status, progress FROM task_registry WHERE id=?", (task_id,))
     row = await cur.fetchone()
     # 任务终态必须是全库统一的 completed（而非旧实现的 success），
     # 否则前端 pollTaskUntilTerminal / TaskStatusBar 永远认不出终态
@@ -282,6 +283,7 @@ async def test_run_with_progress_reaches_success_terminal_state(db_conn, monkeyp
 # ---------------------------------------------------------------------------
 # 不变量 4：中断遗留的 running 解析项必须被收口
 # ---------------------------------------------------------------------------
+
 
 @pytest.mark.asyncio
 async def test_clear_interrupted_items_marks_only_running_as_error(db_conn):
@@ -295,8 +297,8 @@ async def test_clear_interrupted_items_marks_only_running_as_error(db_conn):
     assert n == 1
 
     cur = await db.execute(
-        "SELECT item_id, status, error FROM bid_analysis_items "
-        "WHERE project_id=? ORDER BY item_id", (pid,))
+        "SELECT item_id, status, error FROM bid_analysis_items " "WHERE project_id=? ORDER BY item_id", (pid,)
+    )
     rows = {r["item_id"]: dict(r) for r in await cur.fetchall()}
 
     assert rows["siteConditions"]["status"] == "error"
@@ -318,8 +320,7 @@ async def test_clear_interrupted_items_scoped_to_project(db_conn):
 
     assert await ba.clear_interrupted_items(db, pid_a) == 1
 
-    cur = await db.execute(
-        "SELECT project_id, status FROM bid_analysis_items WHERE item_id='siteConditions'")
+    cur = await db.execute("SELECT project_id, status FROM bid_analysis_items WHERE item_id='siteConditions'")
     got = {r["project_id"]: r["status"] for r in await cur.fetchall()}
     assert got[pid_a] == "error"
     assert got[pid_b] == "running", "未指定项目不得被清理"
@@ -336,8 +337,7 @@ async def test_clear_interrupted_items_all_projects_when_no_project_id(db_conn):
 
     assert await ba.clear_interrupted_items(db) == 2
 
-    cur = await db.execute(
-        "SELECT COUNT(*) n FROM bid_analysis_items WHERE status='running'")
+    cur = await db.execute("SELECT COUNT(*) n FROM bid_analysis_items WHERE status='running'")
     assert (await cur.fetchone())["n"] == 0
 
 
@@ -350,10 +350,9 @@ async def test_start_sse_missing_params_raises_400_not_500(db_conn):
 
     with pytest.raises(HTTPException) as ei:
         await ba.start_bid_analysis_sse(
-            scheme_id="", project_id="", mode="key",
-            selected_item_ids="", force_rerun=False, db=db_conn)
-    assert ei.value.status_code == 400, (
-        f"缺参应返回 400，实测 {ei.value.status_code}：500 吞 400 复发")
+            scheme_id="", project_id="", mode="key", selected_item_ids="", force_rerun=False, db=db_conn
+        )
+    assert ei.value.status_code == 400, f"缺参应返回 400，实测 {ei.value.status_code}：500 吞 400 复发"
 
 
 @pytest.mark.asyncio
@@ -364,14 +363,15 @@ async def test_start_sse_unknown_scheme_never_becomes_500(db_conn):
 
     with pytest.raises(HTTPException) as ei:
         await ba.start_bid_analysis_sse(
-            scheme_id=uuid.uuid4().hex, project_id="", mode="key",
-            selected_item_ids="", force_rerun=False, db=db_conn)
+            scheme_id=uuid.uuid4().hex, project_id="", mode="key", selected_item_ids="", force_rerun=False, db=db_conn
+        )
     assert ei.value.status_code == 404
 
 
 # ---------------------------------------------------------------------------
 # 不变量 5【JSON 口径】：整体「没有提及」的 json 必选项必须计为缺失
 # ---------------------------------------------------------------------------
+
 
 def test_is_missing_result_json_all_empty():
     """json 项「整体无有效信息」的判定口径。
@@ -401,13 +401,15 @@ def test_is_missing_result_json_all_empty():
 async def test_results_flags_json_required_item_all_no_mention(db_conn):
     db = db_conn
     pid, sid = await _seed_scheme(db)
-    await _put_item(db, pid, "projectBasicInfo", status="success",
-                    content='{"project_name":"没有提及","contractor":"没有提及"}')
+    await _put_item(
+        db, pid, "projectBasicInfo", status="success", content='{"project_name":"没有提及","contractor":"没有提及"}'
+    )
 
     res = await ba.list_analysis_results(scheme_id=sid, project_id="", db=db)
     label = _def("projectBasicInfo")["label"]
-    assert label in res["summary"]["missing_required"], (
-        "全「没有提及」的 json 必选项必须计为缺失，否则 all_required_done 误报 true")
+    assert (
+        label in res["summary"]["missing_required"]
+    ), "全「没有提及」的 json 必选项必须计为缺失，否则 all_required_done 误报 true"
     assert res["summary"]["all_required_done"] is False
 
 
@@ -416,8 +418,7 @@ async def test_get_missing_required_json_db_branch(db_conn):
     """results 字典缺该项时的 DB 回退分支同样要识别 json 整体空。"""
     db = db_conn
     pid, _sid = await _seed_scheme(db)
-    await _put_item(db, pid, "projectBasicInfo", status="success",
-                    content='{"project_name":"没有提及"}')
+    await _put_item(db, pid, "projectBasicInfo", status="success", content='{"project_name":"没有提及"}')
 
     missing = await ba._get_missing_required(db, pid, {})
     assert _def("projectBasicInfo")["label"] in missing
@@ -427,22 +428,30 @@ def test_format_downstream_context_skips_empty_json_section():
     """下游摘要不得下发「只有标题、没有任何信息」的空小节。"""
     from app.services.bid_analysis_service import format_downstream_context
 
-    empty = format_downstream_context({
-        "projectBasicInfo": {
-            "item_id": "projectBasicInfo", "label": "项目级基本信息",
-            "output_type": "json", "status": "success",
-            "content": '{"project_name":"没有提及"}',
-        },
-    })
+    empty = format_downstream_context(
+        {
+            "projectBasicInfo": {
+                "item_id": "projectBasicInfo",
+                "label": "项目级基本信息",
+                "output_type": "json",
+                "status": "success",
+                "content": '{"project_name":"没有提及"}',
+            },
+        }
+    )
     assert "项目级基本信息" not in empty
 
-    filled = format_downstream_context({
-        "projectBasicInfo": {
-            "item_id": "projectBasicInfo", "label": "项目级基本信息",
-            "output_type": "json", "status": "success",
-            "content": '{"project_name":"没有提及","contractor":"某某公司"}',
-        },
-    })
+    filled = format_downstream_context(
+        {
+            "projectBasicInfo": {
+                "item_id": "projectBasicInfo",
+                "label": "项目级基本信息",
+                "output_type": "json",
+                "status": "success",
+                "content": '{"project_name":"没有提及","contractor":"某某公司"}',
+            },
+        }
+    )
     assert "项目级基本信息" in filled
     assert "某某公司" in filled
 
@@ -450,6 +459,7 @@ def test_format_downstream_context_skips_empty_json_section():
 # ---------------------------------------------------------------------------
 # 不变量 6【数据丢失/成本】：force_rerun 只重置本次要跑的项；mode=item 不补全必选项
 # ---------------------------------------------------------------------------
+
 
 @pytest.mark.asyncio
 async def test_reset_items_for_rerun_scoped_to_given_items(db_conn):
@@ -460,15 +470,12 @@ async def test_reset_items_for_rerun_scoped_to_given_items(db_conn):
     """
     db = db_conn
     pid, _sid = await _seed_scheme(db)
-    await _put_item(db, pid, "projectBasicInfo", status="success",
-                    content='{"project_name":"A"}')
+    await _put_item(db, pid, "projectBasicInfo", status="success", content='{"project_name":"A"}')
     await _put_item(db, pid, "schemeBasicInfo", status="success", content="存量方案级信息")
 
     await ba._reset_items_for_rerun(db, pid, ["schemeBasicInfo"])
 
-    cur = await db.execute(
-        "SELECT item_id, status, content FROM bid_analysis_items WHERE project_id=?",
-        (pid,))
+    cur = await db.execute("SELECT item_id, status, content FROM bid_analysis_items WHERE project_id=?", (pid,))
     rows = {r["item_id"]: dict(r) for r in await cur.fetchall()}
     assert rows["schemeBasicInfo"]["status"] == "idle"
     assert rows["schemeBasicInfo"]["content"] == ""
@@ -486,9 +493,7 @@ async def test_reset_items_for_rerun_without_ids_resets_all(db_conn):
 
     await ba._reset_items_for_rerun(db, pid)
 
-    cur = await db.execute(
-        "SELECT item_id, status, content FROM bid_analysis_items WHERE project_id=?",
-        (pid,))
+    cur = await db.execute("SELECT item_id, status, content FROM bid_analysis_items WHERE project_id=?", (pid,))
     rows = {r["item_id"]: dict(r) for r in await cur.fetchall()}
     assert rows["projectBasicInfo"]["status"] == "idle"
     assert rows["schemeBasicInfo"]["status"] == "idle"
@@ -502,18 +507,15 @@ def test_item_mode_does_not_force_include_required_items():
     custom 模式会强制补全全部必选项；若单项重跑沿用 custom，前端的「重新提取该项」
     实际会跑 17 项（AI 调用 ×17），且配合 force_rerun 会清空其余 17 项结果。
     """
-    cfg = ba.AnalysisConfig(mode="item",
-                            selected_item_ids=["schemeBasicInfo"]).normalize()
+    cfg = ba.AnalysisConfig(mode="item", selected_item_ids=["schemeBasicInfo"]).normalize()
     assert [it["item_id"] for it in cfg.get_task_items()] == ["schemeBasicInfo"]
 
     # 非法 id 被过滤（防止 SQL/UI 出现幽灵项）
-    cfg2 = ba.AnalysisConfig(mode="item",
-                             selected_item_ids=["not_exist"]).normalize()
+    cfg2 = ba.AnalysisConfig(mode="item", selected_item_ids=["not_exist"]).normalize()
     assert cfg2.get_task_items() == []
 
     # custom 语义不变：仍强制补全必选项
-    cfg3 = ba.AnalysisConfig(mode="custom",
-                             selected_item_ids=["schemeBasicInfo"]).normalize()
+    cfg3 = ba.AnalysisConfig(mode="custom", selected_item_ids=["schemeBasicInfo"]).normalize()
     ids = {it["item_id"] for it in cfg3.get_task_items()}
     assert ids == set(REQUIRED_ITEM_IDS)
 
@@ -524,23 +526,24 @@ async def _seed_parsed_doc(db, pid: str) -> None:
         "INSERT INTO project_documents "
         "(id, project_id, file_name, file_type, parsed_markdown, doc_category) "
         "VALUES (?,?,?,?,?,?)",
-        (uuid.uuid4().hex, pid, "招标文件.docx", "docx",
-         "# 招标文件\n项目名称：测试项目。", "招标文件"))
+        (uuid.uuid4().hex, pid, "招标文件.docx", "docx", "# 招标文件\n项目名称：测试项目。", "招标文件"),
+    )
     await db.commit()
 
 
 async def _drop_tasks_of_project(pid: str) -> None:
     """清理本用例注册的内存任务，避免污染同进程后续用例。"""
     from app.services.ai import task_registry as _tr
+
     for tid, state in list(_tr._tasks.items()):
         if state.get("project_id") == pid:
             await finish_task(tid, "stopped", "test cleanup")
 
 
-
 # ---------------------------------------------------------------------------
 # 不变量 8【2026-09-20】：/items 必须暴露口径明细，避免前端硬编码「18 项/17 必选」
 # ---------------------------------------------------------------------------
+
 
 @pytest.mark.asyncio
 async def test_items_endpoint_exposes_breakdown_counts():
@@ -558,10 +561,8 @@ async def test_items_endpoint_exposes_breakdown_counts():
     assert res["total"] == total == 18
     assert res["required_count"] == len(REQUIRED_ITEM_IDS) == 17
     assert res["optional_count"] == total - len(REQUIRED_ITEM_IDS) == 1
-    assert res["markdown_count"] == sum(
-        1 for it in ANALYSIS_ITEMS if it.get("output_type") != "json") == 17
-    assert res["json_count"] == sum(
-        1 for it in ANALYSIS_ITEMS if it.get("output_type") == "json") == 1
+    assert res["markdown_count"] == sum(1 for it in ANALYSIS_ITEMS if it.get("output_type") != "json") == 17
+    assert res["json_count"] == sum(1 for it in ANALYSIS_ITEMS if it.get("output_type") == "json") == 1
     assert res["group_count"] == len(ba.get_groups()) == 13
     # 自洽校验：必填 + 可选 = 总数，markdown + json = 总数
     assert res["required_count"] + res["optional_count"] == res["total"]
@@ -572,6 +573,7 @@ async def test_items_endpoint_exposes_breakdown_counts():
 # 不变量 9【2026-09-20】：summary 必须区分「完成」与「完成且有有效内容」
 # ---------------------------------------------------------------------------
 
+
 @pytest.mark.asyncio
 async def test_summary_success_valid_excludes_missing_marker(db_conn):
     """前端「下一步：目录生成」放行条件必须用 success_valid，不能用 success。
@@ -581,17 +583,13 @@ async def test_summary_success_valid_excludes_missing_marker(db_conn):
     """
     db = db_conn
     pid, _sid = await _seed_scheme(db)
-    await _put_item(db, pid, "schemeBasicInfo",
-                    status="success", content=MARKDOWN_MISSING_RESULT)
-    await _put_item(db, pid, "siteConditions",
-                    status="success", content="## 施工条件\n场地平整，无管线。")
-    await _put_item(db, pid, "resourceAllocation",
-                    status="error", content="", error="超时")
+    await _put_item(db, pid, "schemeBasicInfo", status="success", content=MARKDOWN_MISSING_RESULT)
+    await _put_item(db, pid, "siteConditions", status="success", content="## 施工条件\n场地平整，无管线。")
+    await _put_item(db, pid, "resourceAllocation", status="error", content="", error="超时")
 
     summary = ba._compute_results_summary(await ba._load_results_rows(db, pid))
     assert summary["success"] == 2
-    assert summary["success_valid"] == 1, (
-        "content='未提取到' 的完成项不得计入 success_valid")
+    assert summary["success_valid"] == 1, "content='未提取到' 的完成项不得计入 success_valid"
     assert summary["errors"] == 1
     assert summary["manual_count"] == 0
 
@@ -601,10 +599,10 @@ async def test_summary_success_valid_accepts_json_with_real_values(db_conn):
     """json 项只要有任一真实值即算有效（与 is_missing_result 同口径）。"""
     db = db_conn
     pid, _sid = await _seed_scheme(db)
-    await _put_item(db, pid, "projectBasicInfo",
-                    status="success", content='{"project_name": "某某项目"}')
+    await _put_item(db, pid, "projectBasicInfo", status="success", content='{"project_name": "某某项目"}')
     summary = ba._compute_results_summary(await ba._load_results_rows(db, pid))
     assert summary["success_valid"] == 1
+
 
 @pytest.mark.asyncio
 async def test_start_sse_item_mode_keeps_other_results(db_conn):
@@ -612,20 +610,21 @@ async def test_start_sse_item_mode_keeps_other_results(db_conn):
     db = db_conn
     pid, sid = await _seed_scheme(db)
     await _seed_parsed_doc(db, pid)
-    await _put_item(db, pid, "projectBasicInfo", status="success",
-                    content='{"project_name":"A"}')
+    await _put_item(db, pid, "projectBasicInfo", status="success", content='{"project_name":"A"}')
     await _put_item(db, pid, "schemeBasicInfo", status="success", content="存量")
 
     resp = await ba.start_bid_analysis_sse(
-        scheme_id=sid, project_id="", mode="item",
+        scheme_id=sid,
+        project_id="",
+        mode="item",
         selected_item_ids=json.dumps(["schemeBasicInfo"]),
-        force_rerun=True, db=db)
+        force_rerun=True,
+        db=db,
+    )
     assert resp is not None
     await _drop_tasks_of_project(pid)
 
-    cur = await db.execute(
-        "SELECT item_id, status, content FROM bid_analysis_items WHERE project_id=?",
-        (pid,))
+    cur = await db.execute("SELECT item_id, status, content FROM bid_analysis_items WHERE project_id=?", (pid,))
     rows = {r["item_id"]: dict(r) for r in await cur.fetchall()}
     assert rows["schemeBasicInfo"]["status"] == "idle"
     assert rows["projectBasicInfo"]["status"] == "success"
@@ -643,9 +642,13 @@ async def test_start_sse_item_mode_with_no_valid_items_returns_400(db_conn):
 
     with pytest.raises(HTTPException) as ei:
         await ba.start_bid_analysis_sse(
-            scheme_id=sid, project_id="", mode="item",
+            scheme_id=sid,
+            project_id="",
+            mode="item",
             selected_item_ids=json.dumps(["not_exist"]),
-            force_rerun=False, db=db)
+            force_rerun=False,
+            db=db,
+        )
     assert ei.value.status_code == 400
     await _drop_tasks_of_project(pid)
 
@@ -653,6 +656,7 @@ async def test_start_sse_item_mode_with_no_valid_items_returns_400(db_conn):
 # ---------------------------------------------------------------------------
 # 不变量 7【并发语义】：暂停闸门必须排在获取并发信号量之前
 # ---------------------------------------------------------------------------
+
 
 @pytest.mark.asyncio
 async def test_update_item_status_clears_stale_error_on_success(db_conn):
@@ -664,8 +668,9 @@ async def test_update_item_status_clears_stale_error_on_success(db_conn):
     await ba._update_item_status(db, pid, "schemeBasicInfo", "success", "新内容", "")
 
     cur = await db.execute(
-        "SELECT status, content, error FROM bid_analysis_items "
-        "WHERE project_id=? AND item_id='schemeBasicInfo'", (pid,))
+        "SELECT status, content, error FROM bid_analysis_items " "WHERE project_id=? AND item_id='schemeBasicInfo'",
+        (pid,),
+    )
     row = dict(await cur.fetchone())
     assert row["status"] == "success"
     assert row["content"] == "新内容"
@@ -682,8 +687,9 @@ async def test_update_item_status_running_keeps_previous_content(db_conn):
     await ba._update_item_status(db, pid, "schemeBasicInfo", "running", "", "")
 
     cur = await db.execute(
-        "SELECT status, content, error FROM bid_analysis_items "
-        "WHERE project_id=? AND item_id='schemeBasicInfo'", (pid,))
+        "SELECT status, content, error FROM bid_analysis_items " "WHERE project_id=? AND item_id='schemeBasicInfo'",
+        (pid,),
+    )
     row = dict(await cur.fetchone())
     assert row["status"] == "running"
     assert row["content"] == "旧内容"
@@ -743,10 +749,10 @@ async def test_pause_gate_skips_stopped_task(db_conn):
     await finish_task(task_id, "stopped", "done")
 
 
-
 # ---------------------------------------------------------------------------
 # 不变量 10【2026-09-20】：人工校正是提取结果错误的唯一可靠出口
 # ---------------------------------------------------------------------------
+
 
 @pytest.mark.asyncio
 async def test_manual_edit_writes_content_and_marks_source_manual(db_conn):
@@ -757,12 +763,11 @@ async def test_manual_edit_writes_content_and_marks_source_manual(db_conn):
     """
     db = db_conn
     pid, sid = await _seed_scheme(db)
-    await _put_item(db, pid, "schemeBasicInfo",
-                    status="success", content="## AI 抽出来的错误内容")
+    await _put_item(db, pid, "schemeBasicInfo", status="success", content="## AI 抽出来的错误内容")
 
     res = await ba.update_single_result(
-        "schemeBasicInfo", {"content": "## 人工修正：基坑支护方案"},
-        scheme_id=sid, project_id="", db=db)
+        "schemeBasicInfo", {"content": "## 人工修正：基坑支护方案"}, scheme_id=sid, project_id="", db=db
+    )
 
     item = res["item"]
     assert item["content"] == "## 人工修正：基坑支护方案"
@@ -779,11 +784,10 @@ async def test_manual_edit_clears_previous_error(db_conn):
     """上一轮的 error 不允许挂在人工校正后的结果上。"""
     db = db_conn
     pid, sid = await _seed_scheme(db)
-    await _put_item(db, pid, "schemeBasicInfo",
-                    status="error", content="", error="AI 调用超时")
+    await _put_item(db, pid, "schemeBasicInfo", status="error", content="", error="AI 调用超时")
     res = await ba.update_single_result(
-        "schemeBasicInfo", {"content": "人工兜底内容"},
-        scheme_id=sid, project_id="", db=db)
+        "schemeBasicInfo", {"content": "人工兜底内容"}, scheme_id=sid, project_id="", db=db
+    )
     assert res["item"]["error"] == ""
     assert res["item"]["status"] == "success"
 
@@ -793,25 +797,23 @@ async def test_manual_edit_rejects_invalid_json_for_json_item(db_conn):
     """json 解析项必须提交合法 JSON 对象/数组，否则下游会拿到坏数据。"""
     db = db_conn
     pid, sid = await _seed_scheme(db)
-    await _put_item(db, pid, "projectBasicInfo",
-                    status="success", content='{"project_name": "x"}')
+    await _put_item(db, pid, "projectBasicInfo", status="success", content='{"project_name": "x"}')
 
     with pytest.raises(ba.HTTPException) as ei:
         await ba.update_single_result(
-            "projectBasicInfo", {"content": "这不是 JSON"},
-            scheme_id=sid, project_id="", db=db)
+            "projectBasicInfo", {"content": "这不是 JSON"}, scheme_id=sid, project_id="", db=db
+        )
     assert ei.value.status_code == 422
 
     # 裸字符串虽是合法 JSON 但不是对象/数组，同样拒绝
     with pytest.raises(ba.HTTPException) as ei2:
         await ba.update_single_result(
-            "projectBasicInfo", {"content": '"只是字符串"'},
-            scheme_id=sid, project_id="", db=db)
+            "projectBasicInfo", {"content": '"只是字符串"'}, scheme_id=sid, project_id="", db=db
+        )
     assert ei2.value.status_code == 422
 
     # 未通过校验的请求不得污染已提取的结果
-    cur = await db.execute(
-        "SELECT content, source FROM bid_analysis_items WHERE project_id=?", (pid,))
+    cur = await db.execute("SELECT content, source FROM bid_analysis_items WHERE project_id=?", (pid,))
     row = dict(await cur.fetchone())
     assert row["content"] == '{"project_name": "x"}'
     assert row["source"] != "manual"
@@ -822,12 +824,9 @@ async def test_manual_edit_rejects_empty_content(db_conn):
     """空内容请走 DELETE，不允许用 PUT 静默清空（会造成「看起来成功了却是空」）。"""
     db = db_conn
     pid, sid = await _seed_scheme(db)
-    await _put_item(db, pid, "schemeBasicInfo",
-                    status="success", content="原有内容")
+    await _put_item(db, pid, "schemeBasicInfo", status="success", content="原有内容")
     with pytest.raises(ba.HTTPException) as ei:
-        await ba.update_single_result(
-            "schemeBasicInfo", {"content": "   "},
-            scheme_id=sid, project_id="", db=db)
+        await ba.update_single_result("schemeBasicInfo", {"content": "   "}, scheme_id=sid, project_id="", db=db)
     assert ei.value.status_code == 422
 
 
@@ -837,11 +836,8 @@ async def test_manual_edit_unknown_item_returns_404(db_conn):
     db = db_conn
     _pid, sid = await _seed_scheme(db)
     with pytest.raises(ba.HTTPException) as ei:
-        await ba.update_single_result(
-            "nonexistentItem", {"content": "x"},
-            scheme_id=sid, project_id="", db=db)
+        await ba.update_single_result("nonexistentItem", {"content": "x"}, scheme_id=sid, project_id="", db=db)
     assert ei.value.status_code == 404
-
 
 
 @pytest.mark.asyncio
@@ -853,18 +849,15 @@ async def test_clear_single_result_resets_to_idle_and_ai_source(db_conn):
     """
     db = db_conn
     pid, sid = await _seed_scheme(db)
-    await _put_item(db, pid, "schemeBasicInfo",
-                    status="success", content="待清空")
+    await _put_item(db, pid, "schemeBasicInfo", status="success", content="待清空")
 
-    res = await ba.clear_single_result(
-        "schemeBasicInfo", scheme_id=sid, project_id="", db=db)
+    res = await ba.clear_single_result("schemeBasicInfo", scheme_id=sid, project_id="", db=db)
     item = res["item"]
     assert item["content"] == ""
     assert item["status"] == "idle"
     assert item["error"] == ""
     assert item["source"] == "ai"
-    cur = await db.execute(
-        "SELECT id FROM bid_analysis_items WHERE project_id=?", (pid,))
+    cur = await db.execute("SELECT id FROM bid_analysis_items WHERE project_id=?", (pid,))
     assert (await cur.fetchone()) is not None
     # 清空后该项回到缺失
     assert _def("schemeBasicInfo")["label"] in res["summary"]["missing_required"]
@@ -880,29 +873,23 @@ async def test_ai_rerun_resets_manual_source_back_to_ai(db_conn):
     """
     db = db_conn
     pid, _sid = await _seed_scheme(db)
-    await _put_item(db, pid, "schemeBasicInfo",
-                    status="success", content="人工校正内容")
-    await db.execute(
-        "UPDATE bid_analysis_items SET source='manual' WHERE project_id=?", (pid,))
+    await _put_item(db, pid, "schemeBasicInfo", status="success", content="人工校正内容")
+    await db.execute("UPDATE bid_analysis_items SET source='manual' WHERE project_id=?", (pid,))
     await db.commit()
 
-    await ba._update_item_status(db, pid, "schemeBasicInfo", "success",
-                                 "AI 重跑内容", "")
-    cur = await db.execute(
-        "SELECT source, content FROM bid_analysis_items WHERE project_id=?", (pid,))
+    await ba._update_item_status(db, pid, "schemeBasicInfo", "success", "AI 重跑内容", "")
+    cur = await db.execute("SELECT source, content FROM bid_analysis_items WHERE project_id=?", (pid,))
     row = dict(await cur.fetchone())
     assert row["source"] == "ai"
     assert row["content"] == "AI 重跑内容"
 
     # force_rerun 的 idle 重置同样复位
     await ba._reset_items_for_rerun(db, pid, ["schemeBasicInfo"])
-    cur = await db.execute(
-        "SELECT source, status, content FROM bid_analysis_items WHERE project_id=?", (pid,))
+    cur = await db.execute("SELECT source, status, content FROM bid_analysis_items WHERE project_id=?", (pid,))
     row = dict(await cur.fetchone())
     assert row["source"] == "ai"
     assert row["status"] == "idle"
     assert row["content"] == ""
-
 
 
 async def _seed_doc(db, pid: str, text: str = "项目名称：某某项目。") -> None:
@@ -911,13 +898,15 @@ async def _seed_doc(db, pid: str, text: str = "项目名称：某某项目。") 
         "INSERT INTO project_documents "
         "(id, project_id, file_name, file_type, parsed_markdown, doc_category, file_size) "
         "VALUES (?,?,?,?,?,?,?)",
-        (f"doc_{uuid.uuid4().hex[:8]}", pid, "招标文件.docx", "docx", text, "招标文件", len(text)))
+        (f"doc_{uuid.uuid4().hex[:8]}", pid, "招标文件.docx", "docx", text, "招标文件", len(text)),
+    )
     await db.commit()
 
 
 # ---------------------------------------------------------------------------
 # 不变量 11【2026-09-20】：用户「停止」不得被报告成「失败」
 # ---------------------------------------------------------------------------
+
 
 @pytest.mark.asyncio
 async def test_stop_is_reported_as_stopped_not_failed(db_conn, monkeypatch):
@@ -940,8 +929,7 @@ async def test_stop_is_reported_as_stopped_not_failed(db_conn, monkeypatch):
     async def _noop_cb(*_a, **_k):
         return None
 
-    result = await ba._run_bid_analysis_with_progress(
-        db, pid, sid, cfg, "项目名称：某某项目。", _noop_cb, task_id)
+    result = await ba._run_bid_analysis_with_progress(db, pid, sid, cfg, "项目名称：某某项目。", _noop_cb, task_id)
 
     assert result["stopped"] is True
     assert result["ok"] is False
@@ -949,8 +937,7 @@ async def test_stop_is_reported_as_stopped_not_failed(db_conn, monkeypatch):
     assert result["total"] == 1
     assert result["missing_required"], "停止后未跑的必选项仍应如实上报为缺失"
 
-    cur = await db.execute(
-        "SELECT status, progress, message FROM task_registry WHERE id=?", (task_id,))
+    cur = await db.execute("SELECT status, progress, message FROM task_registry WHERE id=?", (task_id,))
     row = dict(await cur.fetchone())
     assert row["status"] == "stopped", "用户主动停止不得被上报为 failed"
     assert float(row["progress"]) == 1.0
@@ -973,13 +960,11 @@ async def test_missing_required_without_stop_still_reports_failed(db_conn, monke
     async def _noop_cb(*_a, **_k):
         return None
 
-    result = await ba._run_bid_analysis_with_progress(
-        db, pid, sid, cfg, "项目名称：某某项目。", _noop_cb, task_id)
+    result = await ba._run_bid_analysis_with_progress(db, pid, sid, cfg, "项目名称：某某项目。", _noop_cb, task_id)
 
     assert result["stopped"] is False
     assert result["ok"] is False
-    cur = await db.execute(
-        "SELECT status, message FROM task_registry WHERE id=?", (task_id,))
+    cur = await db.execute("SELECT status, message FROM task_registry WHERE id=?", (task_id,))
     row = dict(await cur.fetchone())
     assert row["status"] == "failed"
     assert "必填解析项未完成" in row["message"]
@@ -1012,8 +997,7 @@ async def test_stats_callback_reports_extraction_scale(db_conn, monkeypatch):
 
     monkeypatch.setattr(ba, "chat_with_fallback", fake_chat)
 
-    await ba._run_bid_analysis_with_progress(
-        db, pid, sid, cfg, "x" * 40000, _noop_cb, task_id, stats_callback=_stats)
+    await ba._run_bid_analysis_with_progress(db, pid, sid, cfg, "x" * 40000, _noop_cb, task_id, stats_callback=_stats)
 
     assert len(seen) == 1, "切段完成后必须且仅推送一次提取规模"
     s = seen[0]
@@ -1031,6 +1015,7 @@ async def test_stats_callback_reports_extraction_scale(db_conn, monkeypatch):
 # ---------------------------------------------------------------------------
 def _svc():
     from app.services import bid_analysis_service as svc
+
     return svc
 
 
@@ -1038,7 +1023,7 @@ def test_split_never_cuts_inside_code_fence():
     """跨越理想断点的代码围栏不得被切断：每个 ``` / ~~~ 必须完整落在某一段内。"""
     svc = _svc()
     # 构造：正文 + 一段很长的、跨过 chunk 边界的代码围栏 + 尾部正文
-    prose = ("正文句子。" * 4000)                      # 约 16000 字，把围栏顶到切分点附近
+    prose = "正文句子。" * 4000  # 约 16000 字，把围栏顶到切分点附近
     fence = "\n```python\n" + ("print('x')\n" * 800) + "```\n"  # 一个完整的大代码块
     tail = "结论" * 2000
     text = prose + fence + tail
@@ -1055,7 +1040,7 @@ def test_split_falls_back_to_sentence_boundary_without_newlines():
     """整段无换行的超长文本：应在句末标点处断开，而非从句中硬切。"""
     svc = _svc()
     sentence = "这是一段没有换行的连续中文说明文字用于测试边界回退。"  # 以句号结尾
-    text = sentence * 600                              # 无换行、只有句末标点
+    text = sentence * 600  # 无换行、只有句末标点
     segments = svc.split_for_analysis(text, chunk_size=2000, overlap=0)
     assert len(segments) > 1
     # 除最后一段外，每段都应以句末标点收尾（说明按句子边界断开，未截断句子）
@@ -1070,7 +1055,7 @@ def test_split_preserves_overlap_and_termination_contract():
     segs = svc.split_for_analysis("甲" * 200, 40, 500)  # 旧实现会死循环的入参
     assert len(segs) > 1 and all(segs)
     # overlap>0 时相邻段应有重叠（普通自然文本）
-    body = ("段落内容。\n" * 3000)
+    body = "段落内容。\n" * 3000
     with_ov = svc.split_for_analysis(body, chunk_size=1000, overlap=300)
     no_ov = svc.split_for_analysis(body, chunk_size=1000, overlap=0)
     assert len(with_ov) >= len(no_ov), "保留重叠不会减少段数"
@@ -1091,10 +1076,10 @@ def test_collect_fence_ranges_basics():
     assert svc._collect_fence_ranges("普通正文，无围栏。") == []
 
 
-
 # ---------------------------------------------------------------------------
 # 不变量 12【2026-09-20】：force_rerun 的「清空」不得先于「注册任务」
 # ---------------------------------------------------------------------------
+
 
 @pytest.mark.asyncio
 async def test_force_rerun_register_failure_keeps_existing_results(db_conn, monkeypatch):
@@ -1108,8 +1093,7 @@ async def test_force_rerun_register_failure_keeps_existing_results(db_conn, monk
     db = db_conn
     pid, sid = await _seed_scheme(db)
     await _seed_doc(db, pid)
-    await _put_item(db, pid, "schemeBasicInfo",
-                    status="success", content="宝贵成果，不可丢失")
+    await _put_item(db, pid, "schemeBasicInfo", status="success", content="宝贵成果，不可丢失")
 
     async def boom(*_a, **_k):
         raise RuntimeError("DB 只读")
@@ -1119,12 +1103,9 @@ async def test_force_rerun_register_failure_keeps_existing_results(db_conn, monk
     with pytest.raises(RuntimeError):
         await ba._start_sse_inner(db, sid, "", "key", "", True)
 
-    cur = await db.execute(
-        "SELECT content, status, source FROM bid_analysis_items WHERE project_id=?",
-        (pid,))
+    cur = await db.execute("SELECT content, status, source FROM bid_analysis_items WHERE project_id=?", (pid,))
     row = dict(await cur.fetchone())
-    assert row["content"] == "宝贵成果，不可丢失", (
-        "register_task 失败不得清空已提取结果")
+    assert row["content"] == "宝贵成果，不可丢失", "register_task 失败不得清空已提取结果"
     assert row["status"] == "success"
 
 
@@ -1136,14 +1117,133 @@ async def test_sse_entry_wires_stats_callback_and_text_stats_event(db_conn):
     源码扫描风格（见 _finish_task_call_args）锁定接线不回归。
     """
     src = _BID_ANALYSIS_SRC.read_text(encoding="utf-8")
-    assert "type\": \"text_stats\"" in src, "缺少 text_stats 事件类型"
+    assert 'type": "text_stats"' in src, "缺少 text_stats 事件类型"
     assert "async def stats_callback(stats" in src, "缺少 stats_callback 定义"
     # 定位 run_inner 里的调用点（第一个匹配是 _start_sse_inner 内的 run_inner）
     m = re.search(
-        r"result = await _run_bid_analysis_with_progress\((.*?)\)\s*\n\s*"
-        r'await queue\.put\(\{"type": "completed"', src, re.S)
+        r"result = await _run_bid_analysis_with_progress\((.*?)\)\s*\n\s*" r'await queue\.put\(\{"type": "completed"',
+        src,
+        re.S,
+    )
     assert m, "未找到 run_inner 中的 _run_bid_analysis_with_progress 调用（用例失配，请同步）"
     call = m.group(1)
-    assert "stats_callback=stats_callback" in call, (
-        "SSE 入口未把 stats_callback 透传给执行体 —— 提取规模将不再推送")
+    assert "stats_callback=stats_callback" in call, "SSE 入口未把 stats_callback 透传给执行体 —— 提取规模将不再推送"
 
+
+# ---------------------------------------------------------------------------
+# 2026-11-04 回归：AI 链路故障 ≠ 资料缺失
+#
+# 线上故障：agnes 429 + provider 全熔断快速失败，17 个必选项在 36s 内全部
+# 「完成」，内容全是「未提取到」→ 任务按「必填解析项未完成」失败，用户完全
+# 无法判断是「文档缺内容」还是「AI 调用失败」。以下用例锁定修复口径：
+#   - 全部分段调用失败 → 必须抛错（该项落 error + 原因），不得伪装 success
+#   - 部分分段失败但有有效结果 → 仍 success（部分成功不拖垮整项）
+#   - Provider 全熔断 → 立即终止重试，不白烧 5s/10s 退避
+#   - 任务终态文案必须带上首个失败原因
+# ---------------------------------------------------------------------------
+
+
+@pytest.mark.asyncio
+async def test_all_segments_fail_raises_instead_of_sentinel(monkeypatch):
+    async def fake_single_call(item, text, output_type, **kwargs):
+        raise RuntimeError("所有候选 Provider 均处于熔断/配额冷却中，请稍后重试")
+
+    monkeypatch.setattr(ba, "_run_single_call", fake_single_call)
+    item = {"item_id": "siteConditions", "label": "施工条件与环境", "output_type": "markdown"}
+
+    with pytest.raises(RuntimeError) as exc:
+        await ba._run_single_item(None, "pid", "sid", item, "x" * 200, ["seg1", "seg2", "seg3"])
+
+    msg = str(exc.value)
+    assert "siteConditions" in msg and "3/3" in msg, (
+        "全部段调用失败必须抛错并带上项 id/失败段数，" "否则会被 _do_item 当成 success+缺失哨兵"
+    )
+
+
+@pytest.mark.asyncio
+async def test_partial_segment_failure_still_returns_success(monkeypatch):
+    calls = {"n": 0}
+
+    async def fake_single_call(item, text, output_type, **kwargs):
+        calls["n"] += 1
+        if calls["n"] == 1:
+            raise HTTPError429()
+        return "## 有效内容"
+
+    monkeypatch.setattr(ba, "_run_single_call", fake_single_call)
+    item = {"item_id": "siteConditions", "label": "施工条件与环境", "output_type": "markdown"}
+
+    res = await ba._run_single_item(None, "pid", "sid", item, "x" * 200, ["seg1", "seg2"])
+
+    assert res["status"] == "success"
+    assert res["content"] == "## 有效内容", "单段失败不得让整项失败，也不得把异常对象当正文落库"
+
+
+@pytest.mark.asyncio
+async def test_json_single_call_still_falls_back_but_item_path_is_strict(monkeypatch):
+    """默认调用方保留「永不抛 + {} 哨兵」契约，单项提取路径改为显式上抛。"""
+
+    async def boom(*_a, **_k):
+        raise ValueError("JSON 生成与修复全部失败")
+
+    monkeypatch.setattr(ba, "_collect_json_str", boom)
+    item = {"item_id": "projectBasicInfo", "label": "项目级基本信息", "output_type": "json"}
+
+    # 直接调用（测试/脚本/兼容路径）：保持旧契约
+    assert await ba._run_single_call(item, "资料", "json") == "{}"
+
+    # 单项提取路径：必须抛错，供 _do_item 落 error
+    with pytest.raises(ValueError):
+        await ba._run_single_item(None, "pid", "sid", item, "项目资料", ["seg1"])
+
+
+@pytest.mark.asyncio
+async def test_provider_outage_message_includes_first_error(db_conn, monkeypatch):
+    """部分项失败不拖垮整任务；终态文案必须给出首个失败原因。"""
+    db = db_conn
+    pid, sid = await _seed_scheme(db)
+    monkeypatch.setattr(ba, "PROMPT_CACHE_WARMUP_DELAY_MS", 0)
+
+    async def fake_single_call(item, text, output_type, **kwargs):
+        if item["item_id"] == "projectBasicInfo":
+            raise RuntimeError("所有候选 Provider 均处于熔断/配额冷却中，请稍后重试")
+        return "## 方案级信息\n深基坑支护方案。"
+
+    monkeypatch.setattr(ba, "_run_single_call", fake_single_call)
+    # custom 会补全必选项（17 项），全部走 fake，可验证「1 项失败、其余照常完成」
+    cfg = ba.AnalysisConfig(mode="custom", selected_item_ids=[])
+    task_id = await register_task("bid_analysis", project_id=pid, scheme_id=sid)
+
+    async def _cb(*_a, **_k):
+        return None
+
+    result = await ba._run_bid_analysis_with_progress(db, pid, sid, cfg, "项目名称：测试项目。", _cb, task_id)
+
+    assert result["stopped"] is False
+    assert result["ok"] is False
+    assert (
+        result["completed"] == result["total"] == len(REQUIRED_ITEM_IDS)
+    ), "单项失败不得中断整任务，其余必选项仍应完成"
+    assert result["missing_required"] == [_def("projectBasicInfo")["label"]]
+
+    cur = await db.execute(
+        "SELECT status, content, error FROM bid_analysis_items WHERE id=?", (f"{pid}_projectBasicInfo",)
+    )
+    row = dict(await cur.fetchone())
+    assert row["status"] == "error", "AI 调用失败必须落 error（不是 success+哨兵）"
+    assert "熔断" in row["error"]
+
+    cur = await db.execute("SELECT status FROM bid_analysis_items WHERE id=?", (f"{pid}_schemeBasicInfo",))
+    assert dict(await cur.fetchone())["status"] == "success"
+
+    cur = await db.execute("SELECT status, message FROM task_registry WHERE id=?", (task_id,))
+    task = dict(await cur.fetchone())
+    assert task["status"] == "failed"
+    assert "必填解析项未完成" in task["message"]
+    assert (
+        "首个失败原因" in task["message"] and "熔断" in task["message"]
+    ), "终态文案必须区分「AI 调用失败」与「资料缺失」"
+
+
+class HTTPError429(Exception):
+    pass

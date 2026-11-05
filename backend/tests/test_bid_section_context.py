@@ -14,6 +14,7 @@
 6. /select-section 与 /bid-sections 端点契约（写入、读回、清除、needs_selection）；
 7. 提取结果变化 → 下游导出缓存失效（force_rerun / 人工校正 / 清空单项）。
 """
+
 import uuid
 
 import app.routers.bid_analysis as ba
@@ -29,12 +30,11 @@ from app.services.bid_analysis_service import (
 # 公共夹具
 # ---------------------------------------------------------------------------
 
+
 async def _seed_scheme(db) -> tuple[str, str]:
     pid, sid = uuid.uuid4().hex, uuid.uuid4().hex
     await db.execute("INSERT INTO projects(id,name) VALUES(?,?)", (pid, "p"))
-    await db.execute(
-        "INSERT INTO schemes(id,project_id,name) VALUES(?,?,?)",
-        (sid, pid, "s"))
+    await db.execute("INSERT INTO schemes(id,project_id,name) VALUES(?,?,?)", (sid, pid, "s"))
     await db.commit()
     return pid, sid
 
@@ -45,13 +45,15 @@ async def _seed_multi_sections(db, pid: str, sid: str) -> None:
         "INSERT OR REPLACE INTO bid_sections "
         "(id, project_id, scheme_id, is_multi, total_declared, detected_sections) "
         "VALUES (?,?,?,?,?,?)",
-        (f"{pid}_default", pid, sid, 1, 2, '["标段:1","标段:2"]'))
+        (f"{pid}_default", pid, sid, 1, 2, '["标段:1","标段:2"]'),
+    )
     await db.commit()
 
 
 # ---------------------------------------------------------------------------
 # 1. 提示构建纯函数
 # ---------------------------------------------------------------------------
+
 
 def test_hint_empty_when_nothing_selected():
     assert bsc.build_bid_section_context_hint({}) == ""
@@ -65,30 +67,30 @@ def test_hint_fallback_when_selected_but_no_detail():
 
 
 def test_hint_contains_all_detail_fields():
-    hint = bsc.build_bid_section_context_hint({
-        "id": "section-2",
-        "title": "  二标段 ",
-        "headLine": "二标段： 设备采购及安装",
-        "description": "设备采购、安装、调试",
-        "evidence": ["二标段采购清单", "  "],
-    })
+    hint = bsc.build_bid_section_context_hint(
+        {
+            "id": "section-2",
+            "title": "  二标段 ",
+            "headLine": "二标段： 设备采购及安装",
+            "description": "设备采购、安装、调试",
+            "evidence": ["二标段采购清单", "  "],
+        }
+    )
     assert hint.startswith(bsc._BASE_HINT)
-    assert "当前选择标段：二标段" in hint          # 空白被归一化
+    assert "当前选择标段：二标段" in hint  # 空白被归一化
     assert "AI 识别标题行：二标段： 设备采购及安装" in hint
     assert "AI 识别描述：设备采购、安装、调试" in hint
-    assert "AI 识别依据：二标段采购清单" in hint   # 空字符串条目被剔除
+    assert "AI 识别依据：二标段采购清单" in hint  # 空字符串条目被剔除
 
 
 def test_hint_evidence_capped_at_six():
-    hint = bsc.build_bid_section_context_hint(
-        {"title": "一标段", "evidence": [f"依据{i}" for i in range(10)]})
+    hint = bsc.build_bid_section_context_hint({"title": "一标段", "evidence": [f"依据{i}" for i in range(10)]})
     assert "依据5" in hint
     assert "依据6" not in hint, "evidence 必须截断为 6 条（避免 system 消息膨胀）"
 
 
 def test_hint_accepts_snake_case_head_line():
-    hint = bsc.build_bid_section_context_hint(
-        {"title": "一标段", "head_line": "一标段：土建"})
+    hint = bsc.build_bid_section_context_hint({"title": "一标段", "head_line": "一标段：土建"})
     assert "AI 识别标题行：一标段：土建" in hint
 
 
@@ -102,6 +104,7 @@ def test_parse_selected_section_json_tolerant():
 # ---------------------------------------------------------------------------
 # 2. 向后兼容锚点
 # ---------------------------------------------------------------------------
+
 
 def test_system_prompt_unchanged_without_hint():
     """未选择投标范围时，system 消息必须与旧版逐字一致。"""
@@ -118,6 +121,7 @@ def test_system_prompt_appends_hint_when_present():
 # ---------------------------------------------------------------------------
 # 3. 单项调用注入
 # ---------------------------------------------------------------------------
+
 
 @pytest.mark.asyncio
 async def test_run_single_call_injects_section_hint(monkeypatch):
@@ -140,8 +144,9 @@ async def test_run_single_call_injects_section_hint(monkeypatch):
     #    只承载标段上下文的 system 消息」——后者才真正锁住参考实现的口径。
     systems = [m for m in captured[0] if m["role"] == "system"]
     assert systems, "必须存在 system 消息"
-    assert systems[0]["content"] == STABLE_SYSTEM_PROMPT, \
-        "第一条 system 必须是原样的通用提示词（标段上下文不得再拼进去）"
+    assert (
+        systems[0]["content"] == STABLE_SYSTEM_PROMPT
+    ), "第一条 system 必须是原样的通用提示词（标段上下文不得再拼进去）"
     assert len(systems) == 2, "标段上下文必须是独立的第二条 system 消息"
     assert hint in systems[1]["content"]
     users = [m for m in captured[0] if m["role"] == "user"]
@@ -166,6 +171,7 @@ async def test_run_single_call_without_hint_keeps_legacy_prompt(monkeypatch):
 # 4. 分段合并：标段提示 + 原始任务要求
 # ---------------------------------------------------------------------------
 
+
 @pytest.mark.asyncio
 async def test_segment_merge_carries_section_hint_and_task_schema(monkeypatch):
     """合并调用必须同时携带标段提示与原始任务要求（JSON 字段清单）。
@@ -177,10 +183,8 @@ async def test_segment_merge_carries_section_hint_and_task_schema(monkeypatch):
     #    并记录入参以锁定「逐段调用 + 合并调用」三处透传契约。
     seg_calls: list[dict] = []
 
-    async def fake_single_call(item, text, output_type, section_hint="",
-                               classification_hint=""):
-        seg_calls.append({"text": text, "section_hint": section_hint,
-                          "classification_hint": classification_hint})
+    async def fake_single_call(item, text, output_type, section_hint="", classification_hint="", **kwargs):
+        seg_calls.append({"text": text, "section_hint": section_hint, "classification_hint": classification_hint})
         return '{"project_name":"某项目","project_number":"ZB-001"}'
 
     merge_calls: list[list[dict]] = []
@@ -195,8 +199,9 @@ async def test_segment_merge_carries_section_hint_and_task_schema(monkeypatch):
     item = get_item_def("projectBasicInfo")
     hint = "当前选择标段：二标段"
     class_hint = "危大级别：超过一定规模；重点核查基坑支护参数"
-    await ba._run_single_item(None, "pid", "sid", item, "全文", ["段1", "段2"],
-                              section_hint=hint, classification_hint=class_hint)
+    await ba._run_single_item(
+        None, "pid", "sid", item, "全文", ["段1", "段2"], section_hint=hint, classification_hint=class_hint
+    )
 
     assert merge_calls, "多段必须触发一次合并调用"
     # 逐段调用必须同时透传两个 hint（防 _run_single_call 形参漂移回归）
@@ -211,8 +216,7 @@ async def test_segment_merge_carries_section_hint_and_task_schema(monkeypatch):
     assert hint in systems[1]["content"], "合并调用同样要注入标段上下文"
     assert class_hint in systems[0]["content"], "合并调用同样要注入危大分类结论"
     user = [m for m in merge_calls[0] if m["role"] == "user"][0]
-    assert "project_number" in user["content"], (
-        "合并消息必须包含原始任务的 JSON 字段清单，否则合并丢字段")
+    assert "project_number" in user["content"], "合并消息必须包含原始任务的 JSON 字段清单，否则合并丢字段"
     assert "原始任务要求" in user["content"]
     assert "分段 1" in user["content"] and "分段 2" in user["content"]
 
@@ -223,10 +227,8 @@ async def test_single_segment_skips_merge(monkeypatch):
     calls: list[str] = []
     single_calls: list[dict] = []
 
-    async def fake_single_call(item, text, output_type, section_hint="",
-                               classification_hint=""):
-        single_calls.append({"section_hint": section_hint,
-                             "classification_hint": classification_hint})
+    async def fake_single_call(item, text, output_type, section_hint="", classification_hint="", **kwargs):
+        single_calls.append({"section_hint": section_hint, "classification_hint": classification_hint})
         return "## 单段结果"
 
     async def fake_chat(messages, **kwargs):  # pragma: no cover
@@ -237,10 +239,9 @@ async def test_single_segment_skips_merge(monkeypatch):
     monkeypatch.setattr(ba, "chat_with_fallback", fake_chat)
 
     class_hint = "危大级别：危大工程"
-    res = await ba._run_single_item(None, "pid", "sid",
-                                    get_item_def("overviewParams"),
-                                    "全文", ["唯一段"],
-                                    classification_hint=class_hint)
+    res = await ba._run_single_item(
+        None, "pid", "sid", get_item_def("overviewParams"), "全文", ["唯一段"], classification_hint=class_hint
+    )
     assert res["content"] == "## 单段结果"
     assert not calls
     # 单段路径同样必须把 classification_hint 透传给唯一一次 AI 调用
@@ -253,6 +254,7 @@ async def test_single_segment_skips_merge(monkeypatch):
 # 5. 库读取链路
 # ---------------------------------------------------------------------------
 
+
 @pytest.mark.asyncio
 async def test_resolve_section_hint_without_row_returns_empty(db_conn):
     pid, sid = await _seed_scheme(db_conn)
@@ -264,10 +266,16 @@ async def test_resolve_section_hint_without_row_returns_empty(db_conn):
 async def test_resolve_section_hint_reads_detail_json(db_conn):
     pid, sid = await _seed_scheme(db_conn)
     await _seed_multi_sections(db_conn, pid, sid)
-    await ba.select_bid_section({
-        "scheme_id": sid, "section_id": "section-2", "section_title": "二标段",
-        "description": "设备采购及安装", "evidence": ["二标段清单"],
-    }, db=db_conn)
+    await ba.select_bid_section(
+        {
+            "scheme_id": sid,
+            "section_id": "section-2",
+            "section_title": "二标段",
+            "description": "设备采购及安装",
+            "evidence": ["二标段清单"],
+        },
+        db=db_conn,
+    )
 
     hint, section = await bsc.resolve_section_hint(db_conn, pid, sid)
     assert section["id"] == "section-2" and section["title"] == "二标段"
@@ -283,7 +291,8 @@ async def test_resolve_section_hint_supports_legacy_title_only(db_conn):
         "INSERT INTO bid_sections "
         "(id, project_id, scheme_id, is_multi, selected_section_id, "
         " selected_section_title) VALUES (?,?,?,?,?,?)",
-        ("legacy", pid, sid, 1, "section-1", "一标段"))
+        ("legacy", pid, sid, 1, "section-1", "一标段"),
+    )
     await db_conn.commit()
 
     hint, section = await bsc.resolve_section_hint(db_conn, pid, sid)
@@ -295,17 +304,23 @@ async def test_resolve_section_hint_supports_legacy_title_only(db_conn):
 # 6. 端点契约
 # ---------------------------------------------------------------------------
 
+
 @pytest.mark.asyncio
 async def test_select_section_roundtrip_and_clear(db_conn):
     pid, sid = await _seed_scheme(db_conn)
     await _seed_multi_sections(db_conn, pid, sid)
 
-    res = await ba.select_bid_section({
-        "scheme_id": sid, "section_id": "section-2",
-        "section_title": "二标段", "head_line": "二标段：设备采购",
-        "description": "设备采购、安装、调试",
-        "evidence": ["二标段：设备采购"],
-    }, db=db_conn)
+    res = await ba.select_bid_section(
+        {
+            "scheme_id": sid,
+            "section_id": "section-2",
+            "section_title": "二标段",
+            "head_line": "二标段：设备采购",
+            "description": "设备采购、安装、调试",
+            "evidence": ["二标段：设备采购"],
+        },
+        db=db_conn,
+    )
     assert res["ok"] is True and res["cleared"] is False
     assert res["context_hint"]
 
@@ -317,8 +332,7 @@ async def test_select_section_roundtrip_and_clear(db_conn):
     assert "当前选择标段：二标段" in got["context_hint"]
 
     # 清除选择 → 恢复旧行为（不注入任何上下文）
-    cleared = await ba.select_bid_section(
-        {"scheme_id": sid, "section_id": ""}, db=db_conn)
+    cleared = await ba.select_bid_section({"scheme_id": sid, "section_id": ""}, db=db_conn)
     assert cleared["cleared"] is True and cleared["context_hint"] == ""
 
     got2 = await ba.get_bid_sections(scheme_id=sid, project_id="", db=db_conn)
@@ -348,10 +362,11 @@ async def test_select_section_requires_scope(db_conn):
 # 7. 下游缓存失效
 # ---------------------------------------------------------------------------
 
+
 async def _seed_export_cache(db, sid: str) -> None:
     await db.execute(
-        "INSERT INTO export_cache (id, scheme_id, result_path) VALUES (?,?,?)",
-        (uuid.uuid4().hex, sid, ""))
+        "INSERT INTO export_cache (id, scheme_id, result_path) VALUES (?,?,?)", (uuid.uuid4().hex, sid, "")
+    )
     await db.commit()
 
 
@@ -362,8 +377,7 @@ async def test_invalidate_downstream_cache_clears_export_cache(db_conn):
 
     n = await ba._invalidate_downstream_cache(db_conn, pid)
     assert n == 1
-    cur = await db_conn.execute(
-        "SELECT COUNT(*) c FROM export_cache WHERE scheme_id=?", (sid,))
+    cur = await db_conn.execute("SELECT COUNT(*) c FROM export_cache WHERE scheme_id=?", (sid,))
     assert (await cur.fetchone())["c"] == 0, "提取结果变化后导出缓存必须失效"
 
 
@@ -375,8 +389,7 @@ async def test_reset_items_for_rerun_invalidates_downstream(db_conn):
 
     await ba._reset_items_for_rerun(db_conn, pid, ["schemeBasicInfo"])
 
-    cur = await db_conn.execute(
-        "SELECT COUNT(*) c FROM export_cache WHERE scheme_id=?", (sid,))
+    cur = await db_conn.execute("SELECT COUNT(*) c FROM export_cache WHERE scheme_id=?", (sid,))
     assert (await cur.fetchone())["c"] == 0
 
 
@@ -387,11 +400,10 @@ async def test_update_single_result_invalidates_downstream(db_conn):
     await _seed_export_cache(db_conn, sid)
 
     await ba.update_single_result(
-        "schemeBasicInfo", {"content": "## 人工校正内容"},
-        scheme_id=sid, project_id="", db=db_conn)
+        "schemeBasicInfo", {"content": "## 人工校正内容"}, scheme_id=sid, project_id="", db=db_conn
+    )
 
-    cur = await db_conn.execute(
-        "SELECT COUNT(*) c FROM export_cache WHERE scheme_id=?", (sid,))
+    cur = await db_conn.execute("SELECT COUNT(*) c FROM export_cache WHERE scheme_id=?", (sid,))
     assert (await cur.fetchone())["c"] == 0
 
 
@@ -400,9 +412,7 @@ async def test_clear_single_result_invalidates_downstream(db_conn):
     pid, sid = await _seed_scheme(db_conn)
     await _seed_export_cache(db_conn, sid)
 
-    await ba.clear_single_result(
-        "schemeBasicInfo", scheme_id=sid, project_id="", db=db_conn)
+    await ba.clear_single_result("schemeBasicInfo", scheme_id=sid, project_id="", db=db_conn)
 
-    cur = await db_conn.execute(
-        "SELECT COUNT(*) c FROM export_cache WHERE scheme_id=?", (sid,))
+    cur = await db_conn.execute("SELECT COUNT(*) c FROM export_cache WHERE scheme_id=?", (sid,))
     assert (await cur.fetchone())["c"] == 0

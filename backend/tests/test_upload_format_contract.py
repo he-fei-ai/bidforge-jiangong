@@ -17,6 +17,7 @@
 
 本文件把四层用集合运算钉在一起，任一侧增删格式都会在这里失败。
 """
+
 from __future__ import annotations
 
 import re
@@ -42,18 +43,18 @@ def test_supported_and_dispatch_lists_are_identical():
     declared = {e.lower() for e in fp.SUPPORTED_EXTENSIONS}
     dispatch = {e.lower() for e in fp._SUPPORTED_EXTENSIONS}
     assert declared == dispatch, (
-        f"对外声明与解析分派清单漂移："
-        f"仅声明={sorted(declared - dispatch)}，仅分派={sorted(dispatch - declared)}")
+        f"对外声明与解析分派清单漂移：" f"仅声明={sorted(declared - dispatch)}，仅分派={sorted(dispatch - declared)}"
+    )
 
 
 def test_binary_extensions_all_have_signatures():
     """每个二进制格式都必须有文件头签名，否则扩展名伪造防护对该格式失效。"""
     binary = {e.lower() for e in fp.SUPPORTED_EXTENSIONS} - _TEXT_EXTENSIONS
     signed = {e.lower() for e in fp._BINARY_SIGNATURES}
-    assert binary <= signed, (
-        f"以下二进制格式缺少文件头签名（.exe 改名即可绕过）：{sorted(binary - signed)}")
-    assert not (signed & _TEXT_EXTENSIONS), (
-        f"文本类格式不应有文件头签名（会误拒合法文本）：{sorted(signed & _TEXT_EXTENSIONS)}")
+    assert binary <= signed, f"以下二进制格式缺少文件头签名（.exe 改名即可绕过）：{sorted(binary - signed)}"
+    assert not (
+        signed & _TEXT_EXTENSIONS
+    ), f"文本类格式不应有文件头签名（会误拒合法文本）：{sorted(signed & _TEXT_EXTENSIONS)}"
 
 
 def test_binary_signature_tables_are_populated():
@@ -72,8 +73,7 @@ def test_text_extensions_rejected_when_binary_content():
         with pytest.raises(fp.ParseError):
             fp.parse_file_content_ex(b"\x00" * 64, f"恶意.{ext}")
         # 正常 UTF-8 文本必须放行（防误拒）
-        text, diag = fp.parse_file_content_ex("正常文本内容".encode("utf-8"),
-                                              f"正常.{ext}")
+        text, diag = fp.parse_file_content_ex("正常文本内容".encode("utf-8"), f"正常.{ext}")
         assert text.strip()
         assert diag["file_type"] == ext
 
@@ -108,20 +108,18 @@ def test_front_end_accept_matches_backend_supported_extensions():
     前端 `uploadAccept.test.ts` 只有一份额外硬编码镜像，镜像本身漂移时它自己
     测不出来（自证循环）；本测试直接读源文件，任一侧改动都会失败。
     """
-    assert _UPLOAD_ACCEPT_TS.exists(), (
-        f"缺少前端白名单源文件：{_UPLOAD_ACCEPT_TS}（本护栏依赖它）")
+    assert _UPLOAD_ACCEPT_TS.exists(), f"缺少前端白名单源文件：{_UPLOAD_ACCEPT_TS}（本护栏依赖它）"
     src = _UPLOAD_ACCEPT_TS.read_text(encoding="utf-8")
 
-    m = re.search(r"UPLOAD_FILE_EXTENSIONS\s*:\s*string\[\]\s*=\s*\[(.*?)\];",
-                  src, re.S)
+    m = re.search(r"UPLOAD_FILE_EXTENSIONS\s*:\s*string\[\]\s*=\s*\[(.*?)\];", src, re.S)
     assert m, "无法在 uploadAccept.ts 中定位 UPLOAD_FILE_EXTENSIONS 定义"
-    front = {e.strip().lower() for e in re.findall(r"[\"']([A-Za-z0-9]+)[\"']",
-                                                   m.group(1))}
+    front = {e.strip().lower() for e in re.findall(r"[\"']([A-Za-z0-9]+)[\"']", m.group(1))}
     back = {e.lower() for e in fp.SUPPORTED_EXTENSIONS}
     assert front == back, (
         f"前后端上传格式白名单不一致 → 会出现「前端可选但后端 400」或"
         f"「后端支持但前端选不到」：仅前端={sorted(front - back)}，"
-        f"仅后端={sorted(back - front)}")
+        f"仅后端={sorted(back - front)}"
+    )
 
 
 def test_accept_string_is_well_formed():

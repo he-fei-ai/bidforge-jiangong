@@ -8,18 +8,28 @@
  *    改动格式只需改这一处 + 同步后端 SUPPORTED_EXTENSIONS。
  *
  * ⚠️ 必须与后端 `file_parser.SUPPORTED_EXTENSIONS` 保持一致：
- *    docx / pdf / md / txt / xlsx / xls / csv / png / jpg / jpeg / bmp / tiff / doc / wps
+ *    docx / pdf / md / txt / xlsx / xls / csv / png / jpg / jpeg / bmp / tiff / tif / doc / wps
  */
 export const UPLOAD_FILE_EXTENSIONS: string[] = [
-  "docx", "pdf", "md", "txt", "xlsx", "xls", "csv",
-  "png", "jpg", "jpeg", "bmp", "tiff",
-  "doc", "wps", // 旧版 Word（需本地 Office 组件转换，见后端 legacy_office.py）
+  "docx",
+  "pdf",
+  "md",
+  "txt",
+  "xlsx",
+  "xls",
+  "csv",
+  "png",
+  "jpg",
+  "jpeg",
+  "bmp",
+  "tiff",
+  "tif", // ✅ R179 补齐：扫描仪/相机直出的 TIFF 常见后缀（后端同步支持）
+  "doc",
+  "wps", // 旧版 Word（需本地 Office 组件转换，见后端 legacy_office.py）
 ];
 
 /** 供 antd Upload 的 accept 属性使用（".ext" 逗号分隔） */
-export const UPLOAD_FILE_ACCEPT: string = UPLOAD_FILE_EXTENSIONS
-  .map((ext) => `.${ext}`)
-  .join(",");
+export const UPLOAD_FILE_ACCEPT: string = UPLOAD_FILE_EXTENSIONS.map((ext) => `.${ext}`).join(",");
 
 /**
  * 单文件大小上限（30MB）。
@@ -128,9 +138,8 @@ export function splitByUploadFileCount(
   maxFiles: number = MAX_UPLOAD_FILES_FALLBACK,
 ): SplitByTotalQuota {
   const parsed = Number(maxFiles);
-  const limit = Number.isFinite(parsed) && parsed > 0
-    ? Math.floor(parsed)
-    : MAX_UPLOAD_FILES_FALLBACK;
+  const limit =
+    Number.isFinite(parsed) && parsed > 0 ? Math.floor(parsed) : MAX_UPLOAD_FILES_FALLBACK;
   const accepted: File[] = [];
   const held: File[] = [];
   (files || []).forEach((file, index) => {
@@ -160,8 +169,7 @@ export function splitByUploadTotalQuota(
   files: File[],
   maxTotalBytes: number = MAX_UPLOAD_TOTAL_FALLBACK,
 ): SplitByTotalQuota {
-  const limit =
-    Number(maxTotalBytes) > 0 ? Number(maxTotalBytes) : MAX_UPLOAD_TOTAL_FALLBACK;
+  const limit = Number(maxTotalBytes) > 0 ? Number(maxTotalBytes) : MAX_UPLOAD_TOTAL_FALLBACK;
   const accepted: File[] = [];
   const held: File[] = [];
   let used = 0;

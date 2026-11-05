@@ -14,6 +14,7 @@
   6. 每项完成 → checkpoint（写 bid_analysis_items + 进度）
   7. 结束判定（必选项全部 success → 整体 success，否则 error）
 """
+
 from __future__ import annotations
 
 import asyncio
@@ -128,10 +129,10 @@ async def _execute(db, sql: str, params=()):
     """
     cur = await db.execute(sql, params)
     if cur is None:
-        logger.warning("db.execute 返回 None（R13）：%s",
-                       sql.strip().split("\n")[0][:80])
+        logger.warning("db.execute 返回 None（R13）：%s", sql.strip().split("\n")[0][:80])
         raise HTTPException(503, "数据库暂时不可用，请稍后重试")
     return cur
+
 
 # 提示词缓存预热等待（OpenBidKit 设为 5000ms）
 PROMPT_CACHE_WARMUP_DELAY_MS = 5000
@@ -148,8 +149,7 @@ def _split_tender_text(tender_text: str) -> list[str]:
     """按配置选择分段策略（唯一出口）。"""
     limit = _cfg_int("bid_analysis_segment_context_limit", 0)
     if _cfg_int("bid_analysis_segment_even", 0) and limit > 0:
-        return split_for_analysis(tender_text, even=True,
-                                  context_length_limit=limit)
+        return split_for_analysis(tender_text, even=True, context_length_limit=limit)
     return split_for_analysis(tender_text)
 
 
@@ -171,13 +171,20 @@ def _cfg_int(name: str, default: int) -> int:
 
 
 def _item_concurrency() -> int:
-    """提取项级并发上限（默认 2，与既有硬编码一致；下限 1 —— 0 会死锁）。"""
-    return max(1, _cfg_int("bid_analysis_item_concurrency", 2))
+    """提取项级并发上限（兜底 1，与 `settings.bid_analysis_item_concurrency`
+    默认一致；下限 1 —— 0 会死锁）。
+
+    兜底仅在「属性不存在 / 值为 None」（极旧配置对象或测试替身）时生效；
+    显式配置（含 .env / 环境变量）始终优先，不受兜底值影响。
+    """
+    return max(1, _cfg_int("bid_analysis_item_concurrency", 1))
 
 
 def _segment_concurrency() -> int:
-    """单解析项内分段并发上限（默认 3，与既有硬编码一致；下限 1）。"""
-    return max(1, _cfg_int("bid_analysis_segment_concurrency", 3))
+    """单解析项内分段并发上限（兜底 2，与 `settings.bid_analysis_segment_concurrency`
+    默认一致；下限 1）。兜底语义同上：显式配置优先。
+    """
+    return max(1, _cfg_int("bid_analysis_segment_concurrency", 2))
 
 
 def _item_retries() -> int:
@@ -185,27 +192,38 @@ def _item_retries() -> int:
     return max(0, _cfg_int("bid_analysis_item_retries", 2))
 
 
+#: Provider 全不可用（熔断/配额冷却）时的异常文案标记。
+#: 命中后重试必然再次快速失败（且会白烧退避时间），与 ``is_non_retryable_error``
+#: 一并作为「立即终止重试」的判据。判据只认 provider_factory 既有文案，
+#: 不修改 AI 层。
+_PROVIDER_OUTAGE_MARKERS = ("均处于熔断", "配额冷却中", "全熔断快速失败")
+
+
+def _is_provider_unavailable_error(err) -> bool:
+    """是否属于「所有 Provider 均不可用」的瞬时全挂（熔断/配额冷却）。
+
+    这类错误在冷却窗口（默认 120s）内重试 100% 失败，应直接标记该项 error
+    并交由用户/后续重试，而不是在任务内白等退避。
+    """
+    s = str(err or "")
+    return any(m in s for m in _PROVIDER_OUTAGE_MARKERS)
+
+
 # 分段结果合并 Prompt
 # ✅ 2026-09-22 增强（对齐 OpenBidKit utils/segmentedAiResultMerger.cjs）：
 #    合并调用必须同时携带【原始任务要求】（含 JSON 字段结构）。旧实现只给
 #    「请输出形态一致」的口头约束、不给字段清单，实测 JSON 项（projectBasicInfo
 #    有 37 个字段）在合并阶段会丢字段 —— 模型无从知道该保留哪些 key。
-SEGMENT_MERGE_PROMPT = """以下是同一份项目资料不同分段对同一解析项的提取结果。每段结果只代表该片段内的信息，不代表整份文件的完整结论。
+# ✅ R175（2026-11-03 · BUG-3 收编）：正文已迁至提示词注册表
+#    （key=``bid_segment_merge_system``），本处不再保留副本字面量，
+#    消除「注册 + 硬编码」双源；编辑器可改、变更可审计。
+#    注意：必须**调用时**取，不能模块级缓存 —— 否则用户改模板后
+#    本进程仍用旧文本（注册表是 DB 优先 + 缓存失效机制）。
+def segment_merge_prompt() -> str:
+    """取分段合并提示词（来自注册表，支持编辑器定制）。"""
+    from app.services.ai.prompts import get_prompt
 
-当前合并任务：__TASK_LABEL__
-
-合并要求：
-1. 如果某段写「没有提及」「原文未提及」「本段未提及」或整段只有「未提取到」，只表示该片段没有相关信息；如果其他片段提供了有效信息，应以有效信息为准。
-2. 删除重复、空泛、冲突的片段性表述，保留更完整、更具体的信息。
-3. 不要新增分段结果中没有的信息，不要自行编造。
-4. 如果所有分段都没有有效信息，遵守原始任务中的整体无结果规则（Markdown 项输出「未提取到」，JSON 项各字段输出「没有提及」）。
-5. 输出形态必须与原始任务要求完全一致：Markdown 项只输出整理后的 Markdown；JSON 项只输出一个 JSON 对象，**必须保留原始任务中列出的全部 key**，不得增删或改名。
-
-原始任务要求：
-__TASK_PROMPT__
-
-分段解析结果：
-__SEGMENTS__"""
+    return get_prompt("bid_segment_merge_system")
 
 
 # =========================================================================
@@ -227,7 +245,7 @@ __SEGMENTS__"""
 _BID_RESPONSE_RETIRED_MSG = (
     "提取域 {domain} 已下线：本软件定位为「建筑工程专项施工方案编写软件」，"
     "招标响应分析（评标方法 / 商务条款 / 废标项等）不在服务范围内。"
-    "请改用 domain=\"scheme\"（专项方案编制域）。"
+    '请改用 domain="scheme"（专项方案编制域）。'
 )
 
 
@@ -268,10 +286,17 @@ async def list_analysis_items(domain: str = "scheme"):
     items = get_items_by_domain(domain)
     if not items:
         return {
-            "items": [], "groups": [], "required_item_ids": [],
-            "total": 0, "required_count": 0, "optional_count": 0,
-            "markdown_count": 0, "json_count": 0, "group_count": 0,
-            "domain": domain, "domain_unknown": True,
+            "items": [],
+            "groups": [],
+            "required_item_ids": [],
+            "total": 0,
+            "required_count": 0,
+            "optional_count": 0,
+            "markdown_count": 0,
+            "json_count": 0,
+            "group_count": 0,
+            "domain": domain,
+            "domain_unknown": True,
         }
     # ⚠️ scheme 域沿用 get_groups() / REQUIRED_ITEM_IDS / get_all_items()，
     #    保证既有调用点与测试看到的返回结构与旧版逐字一致。
@@ -289,10 +314,8 @@ async def list_analysis_items(domain: str = "scheme"):
         "total": len(items_list),
         "required_count": len(required_ids),
         "optional_count": len(items_list) - len(required_ids),
-        "markdown_count": sum(1 for it in items_list
-                              if it.get("output_type") != "json"),
-        "json_count": sum(1 for it in items_list
-                          if it.get("output_type") == "json"),
+        "markdown_count": sum(1 for it in items_list if it.get("output_type") != "json"),
+        "json_count": sum(1 for it in items_list if it.get("output_type") == "json"),
         "group_count": len(groups_list),
         "domain_unknown": False,
     }
@@ -318,8 +341,7 @@ async def get_analysis_item(item_id: str, domain: str = ""):
     # 显式传 domain 时同样走统一门禁（与 /items 同口径，不各写一份判据）。
     _assert_domain_available(domain)
     if domain and domain != item_domain:
-        raise HTTPException(404, "解析项 %s 属于 %s 域，不在 %s 域" % (
-            item_id, item_domain, domain))
+        raise HTTPException(404, "解析项 %s 属于 %s 域，不在 %s 域" % (item_id, item_domain, domain))
     result = dict(item)
     result["domain"] = item_domain
     result["fields"] = get_item_fields(item_id)
@@ -337,19 +359,20 @@ async def list_extraction_domains():
     """
     domains = []
     for name in EXTRACTION_DOMAINS:
-        retired = (name != "scheme")
-        enabled = (name == "scheme")
+        retired = name != "scheme"
+        enabled = name == "scheme"
         items = get_items_by_domain(name)
-        domains.append({
-            "domain": name,
-            "enabled": enabled,
-            "retired": retired,
-            "retired_reason": _BID_RESPONSE_RETIRED_MSG.format(domain=name)
-            if retired else "",
-            "total": len(items),
-            "required_count": sum(1 for it in items if it["required"]),
-            "label": "专项方案编制域" if name == "scheme" else "招标响应域（已下线）",
-        })
+        domains.append(
+            {
+                "domain": name,
+                "enabled": enabled,
+                "retired": retired,
+                "retired_reason": _BID_RESPONSE_RETIRED_MSG.format(domain=name) if retired else "",
+                "total": len(items),
+                "required_count": sum(1 for it in items if it["required"]),
+                "label": "专项方案编制域" if name == "scheme" else "招标响应域（已下线）",
+            }
+        )
     return {"domains": domains}
 
 
@@ -374,15 +397,13 @@ async def check_bid_sections(
     # 读取该项目下所有已解析文档的合并文本（优先招标文件，其次合同/设计/地勘）
     docs = await _list_parsed_documents(db, real_pid)
     if not docs:
-        return {"ok": True, "has_multiple": False, "source": "no_documents",
-                **_combine_doc_texts_report([])[1]}
+        return {"ok": True, "has_multiple": False, "source": "no_documents", **_combine_doc_texts_report([])[1]}
 
     # 把所有已解析文档拼接，同时产出「提取依据完整性」报告
     # （✅ 2026-09-26：报告透传给前端，让用户看到检测是否基于完整资料）
     combined_text, source_report = _combine_doc_texts_report(docs)
     if not combined_text.strip():
-        return {"ok": True, "has_multiple": False, "source": "empty_text",
-                **source_report}
+        return {"ok": True, "has_multiple": False, "source": "empty_text", **source_report}
 
     # 规则检测
     result = detect_bid_sections(combined_text)
@@ -404,20 +425,27 @@ async def check_bid_sections(
     try:
         row = await load_bid_section_row(db, real_pid, scheme_id)
         sec_id = row.get("id") or f"{real_pid}_default"
-        await _execute(db, 
+        await _execute(
+            db,
             "INSERT OR REPLACE INTO bid_sections "
             "(id, project_id, scheme_id, is_multi, total_declared, detected_sections, "
             " selected_section_id, selected_section_title, selected_section_json, "
             " status, error, updated_at) "
             "VALUES (?,?,?,?,?,?,?,?,?,?,?,datetime('now','localtime'))",
-            (sec_id, real_pid, scheme_id or row.get("scheme_id") or "",
-             1 if result.get("has_multiple") else 0,
-             result.get("total_declared") or 0,
-             json.dumps(result.get("sections") or [], ensure_ascii=False),
-             row.get("selected_section_id") or "",
-             row.get("selected_section_title") or "",
-             row.get("selected_section_json") or "",
-             row.get("status") or "idle", row.get("error") or ""))
+            (
+                sec_id,
+                real_pid,
+                scheme_id or row.get("scheme_id") or "",
+                1 if result.get("has_multiple") else 0,
+                result.get("total_declared") or 0,
+                json.dumps(result.get("sections") or [], ensure_ascii=False),
+                row.get("selected_section_id") or "",
+                row.get("selected_section_title") or "",
+                row.get("selected_section_json") or "",
+                row.get("status") or "idle",
+                row.get("error") or "",
+            ),
+        )
         await db.commit()
     except Exception as e:
         logger.warning("多标段检测结果持久化失败: %s", e)
@@ -484,10 +512,7 @@ async def get_bid_sections(
 
 
 @router.post("/select-section")
-async def select_bid_section(body: dict,
-                             scheme_id: str = Query(""),
-                             project_id: str = Query(""),
-                             db=Depends(get_db)):
+async def select_bid_section(body: dict, scheme_id: str = Query(""), project_id: str = Query(""), db=Depends(get_db)):
     """选择 / 清除本次投标范围（多标段项目的必需前置步骤）。
 
     ✅ 新增（2026-09-22，对齐 OpenBidKit `technicalPlanStore.tenderFile.selectedSectionId`）：
@@ -536,35 +561,47 @@ async def select_bid_section(body: dict,
             "title": str(body.get("section_title") or body.get("title") or "").strip(),
             "headLine": str(body.get("head_line") or body.get("headLine") or "").strip(),
             "description": str(body.get("description") or "").strip(),
-            "evidence": [str(e).strip() for e in (body.get("evidence") or [])
-                         if str(e).strip()][:6] if isinstance(body.get("evidence"), list)
-                        else [],
+            "evidence": [str(e).strip() for e in (body.get("evidence") or []) if str(e).strip()][:6]
+            if isinstance(body.get("evidence"), list)
+            else [],
         }
 
     row = await load_bid_section_row(db, real_pid, scheme_id)
     sec_pk = row.get("id") or f"{real_pid}_default"
     try:
-        await _execute(db, 
+        await _execute(
+            db,
             "INSERT OR REPLACE INTO bid_sections "
             "(id, project_id, scheme_id, is_multi, total_declared, detected_sections, "
             " selected_section_id, selected_section_title, selected_section_json, "
             " status, error, updated_at) "
             "VALUES (?,?,?,?,?,?,?,?,?,?,?,datetime('now','localtime'))",
-            (sec_pk, real_pid, scheme_id or row.get("scheme_id") or "",
-             int(row.get("is_multi") or 0), int(row.get("total_declared") or 0),
-             row.get("detected_sections") or "[]",
-             section.get("id", ""), section.get("title", ""),
-             json.dumps(section, ensure_ascii=False) if section else "",
-             row.get("status") or "idle", row.get("error") or ""))
+            (
+                sec_pk,
+                real_pid,
+                scheme_id or row.get("scheme_id") or "",
+                int(row.get("is_multi") or 0),
+                int(row.get("total_declared") or 0),
+                row.get("detected_sections") or "[]",
+                section.get("id", ""),
+                section.get("title", ""),
+                json.dumps(section, ensure_ascii=False) if section else "",
+                row.get("status") or "idle",
+                row.get("error") or "",
+            ),
+        )
         await db.commit()
     except Exception as e:
         logger.exception("保存施工范围选择失败")
         raise HTTPException(500, f"保存施工范围失败：{e}")
 
     hint = build_bid_section_context_hint(section, has_selected_section=bool(section))
-    logger.info("项目 %s 施工范围更新为：%s（提示注入：%s）",
-                real_pid, section.get("title") or "<未选择>",
-                "是" if hint else "否")
+    logger.info(
+        "项目 %s 施工范围更新为：%s（提示注入：%s）",
+        real_pid,
+        section.get("title") or "<未选择>",
+        "是" if hint else "否",
+    )
     return {
         "ok": True,
         "selected_section_id": section.get("id", ""),
@@ -606,6 +643,7 @@ async def extract_bid_sections_api(
         raise HTTPException(400, "已解析文档未包含有效文本内容")
 
     from app.services.bid_section_extraction import extract_bid_sections
+
     try:
         result = await extract_bid_sections(markdown=text)
     except ValueError as e:
@@ -620,26 +658,37 @@ async def extract_bid_sections_api(
     row = await load_bid_section_row(db, real_pid, scheme_id)
     sec_pk = row.get("id") or f"{real_pid}_default"
     try:
-        await _execute(db, 
+        await _execute(
+            db,
             "INSERT OR REPLACE INTO bid_sections "
             "(id, project_id, scheme_id, is_multi, total_declared, detected_sections, "
             " selected_section_id, selected_section_title, selected_section_json, "
             " status, error, updated_at) "
             "VALUES (?,?,?,?,?,?,?,?,?,?,?,datetime('now','localtime'))",
-            (sec_pk, real_pid, scheme_id or row.get("scheme_id") or "", 1,
-             len(sections), json.dumps(sections, ensure_ascii=False),
-             row.get("selected_section_id") or "",
-             row.get("selected_section_title") or "",
-             row.get("selected_section_json") or "",
-             "success", ""))
+            (
+                sec_pk,
+                real_pid,
+                scheme_id or row.get("scheme_id") or "",
+                1,
+                len(sections),
+                json.dumps(sections, ensure_ascii=False),
+                row.get("selected_section_id") or "",
+                row.get("selected_section_title") or "",
+                row.get("selected_section_json") or "",
+                "success",
+                "",
+            ),
+        )
         await db.commit()
     except Exception as e:
         # 落库失败不影响本次识别结果的使用（前端仍可展示并选择）
         logger.warning("标段识别结果落库失败: %s", e)
 
     selected = selected_section_from_row(row)
-    msg = (f"已识别 {len(sections)} 个标段（{result['segment_count']} 段，"
-           f"约 {result['estimated_calls']} 次模型调用），请确认本次施工范围")
+    msg = (
+        f"已识别 {len(sections)} 个标段（{result['segment_count']} 段，"
+        f"约 {result['estimated_calls']} 次模型调用），请确认本次施工范围"
+    )
     logger.info("项目 %s AI 标段识别完成：%d 个标段", real_pid, len(sections))
     return {
         "ok": True,
@@ -649,8 +698,7 @@ async def extract_bid_sections_api(
         "estimated_calls": result["estimated_calls"],
         "selected_section_id": selected.get("id", ""),
         "selected_section_title": selected.get("title", ""),
-        "context_hint": build_bid_section_context_hint(
-            selected, has_selected_section=bool(selected)),
+        "context_hint": build_bid_section_context_hint(selected, has_selected_section=bool(selected)),
         "message": msg,
         # ✅ 2026-09-26：AI 标段识别同样建立在合并文本之上，透传依据完整性
         **source_report,
@@ -677,9 +725,7 @@ async def list_analysis_results(
     # ✅ 用 SELECT * 而非显式列清单：bid_analysis_items 的 source 列由
     #    db._migrate 增量补列，若某环境迁移失败（权限/只读库），显式列会直接
     #    抛 "no such column: source" 让整个结果查询 500；SELECT * 对缺列免疫。
-    cur = await _execute(db, 
-        "SELECT * FROM bid_analysis_items WHERE project_id=? ORDER BY sort_order",
-        (real_pid,))
+    cur = await _execute(db, "SELECT * FROM bid_analysis_items WHERE project_id=? ORDER BY sort_order", (real_pid,))
     known_ids = {it["item_id"] for it in ANALYSIS_ITEMS}
     rows = [dict(r) for r in await cur.fetchall() if r["item_id"] in known_ids]
     # ✅ 关联项目展示：逐行附来源方案名（发起提取的方案；结果本体项目级共享）
@@ -707,9 +753,7 @@ async def get_single_result(
     if not real_pid:
         raise HTTPException(400, "需要 scheme_id 或 project_id")
 
-    cur = await _execute(db, 
-        "SELECT * FROM bid_analysis_items WHERE project_id=? AND item_id=?",
-        (real_pid, item_id))
+    cur = await _execute(db, "SELECT * FROM bid_analysis_items WHERE project_id=? AND item_id=?", (real_pid, item_id))
     row = await cur.fetchone()
     if not row:
         # 未生成过：返回 item_id 对应的定义 + idle 状态
@@ -741,11 +785,14 @@ def _compute_results_summary(rows: list[dict]) -> dict:
     for rid in REQUIRED_ITEM_IDS:
         def_ = get_item_def(rid) or {}
         matched = next((r for r in rows if r["item_id"] == rid), None)
-        if (not matched or matched["status"] != "success"
-                or not matched.get("content")
-                or is_missing_result(matched.get("content", ""),
-                                     matched.get("output_type",
-                                                  def_.get("output_type", "markdown")))):
+        if (
+            not matched
+            or matched["status"] != "success"
+            or not matched.get("content")
+            or is_missing_result(
+                matched.get("content", ""), matched.get("output_type", def_.get("output_type", "markdown"))
+            )
+        ):
             missing_required.append(def_.get("label", rid))
 
     # 「有有效内容的完成项」数：status=success 且 is_missing_result 为假。
@@ -755,8 +802,7 @@ def _compute_results_summary(rows: list[dict]) -> dict:
         if r["status"] != "success" or not r.get("content"):
             continue
         def_ = get_item_def(r["item_id"]) or {}
-        if is_missing_result(r["content"],
-                             r.get("output_type") or def_.get("output_type", "markdown")):
+        if is_missing_result(r["content"], r.get("output_type") or def_.get("output_type", "markdown")):
             continue
         success_valid += 1
 
@@ -780,9 +826,7 @@ def _compute_results_summary(rows: list[dict]) -> dict:
 
 async def _load_results_rows(db, project_id: str) -> list[dict]:
     """按 project_id 读取 bid_analysis_items（仅保留已知解析项），供查询/校验端点复用。"""
-    cur = await _execute(db, 
-        "SELECT * FROM bid_analysis_items WHERE project_id=? ORDER BY sort_order",
-        (project_id,))
+    cur = await _execute(db, "SELECT * FROM bid_analysis_items WHERE project_id=? ORDER BY sort_order", (project_id,))
     known_ids = {it["item_id"] for it in ANALYSIS_ITEMS}
     return [dict(r) for r in await cur.fetchall() if r["item_id"] in known_ids]
 
@@ -799,9 +843,7 @@ async def _attach_scheme_names(db, rows: list[dict]) -> None:
         return
     try:
         placeholders = ",".join("?" for _ in sids)
-        cur = await _execute(db, 
-            f"SELECT id, name FROM schemes WHERE id IN ({placeholders})",
-            tuple(sids))
+        cur = await _execute(db, f"SELECT id, name FROM schemes WHERE id IN ({placeholders})", tuple(sids))
         names = {str(r["id"]): (r["name"] or "") for r in await cur.fetchall()}
         for r in rows:
             r["scheme_name"] = names.get(str(r.get("scheme_id") or ""), "")
@@ -867,13 +909,14 @@ async def update_single_result(
     real_pid = require_project_id(real_pid)
     try:
         if scheme_id:
-            await _execute(db, 
-                "UPDATE schemes SET project_id=? WHERE id=?", (real_pid, scheme_id))
-        cur = await _execute(db, 
+            await _execute(db, "UPDATE schemes SET project_id=? WHERE id=?", (real_pid, scheme_id))
+        cur = await _execute(
+            db,
             "UPDATE bid_analysis_items SET content=?, status='success', error='', "
             "source='manual', evidence='', "
             "updated_at=datetime('now','localtime') WHERE id=?",
-            (content, pk))
+            (content, pk),
+        )
         changed = safe_rowcount(cur, what="人工校正 UPDATE bid_analysis_items")
         if not changed:
             # ✅ BUG 修复（静默丢失）：从未提取过的项在库中没有行（行由首次
@@ -883,29 +926,60 @@ async def update_single_result(
             #    _update_item_status 的兼容旧库缺 domain 列同口径降级）。
             cur_cols = await _bid_analysis_item_cols(db)
             if "domain" in cur_cols:
-                await _execute(db, 
+                await _execute(
+                    db,
                     "INSERT INTO bid_analysis_items "
                     "(id, project_id, scheme_id, item_id, label, output_type, required, "
                     "status, content, error, sort_order, source, evidence, domain) "
                     "VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?)",
-                    (pk, real_pid, scheme_id or "", item_id, def_.get("label", item_id),
-                     def_.get("output_type", "markdown"), def_.get("required", 0),
-                     "success", content, "", def_.get("sort_order", 0),
-                     "manual", "", resolved_domain))
+                    (
+                        pk,
+                        real_pid,
+                        scheme_id or "",
+                        item_id,
+                        def_.get("label", item_id),
+                        def_.get("output_type", "markdown"),
+                        def_.get("required", 0),
+                        "success",
+                        content,
+                        "",
+                        def_.get("sort_order", 0),
+                        "manual",
+                        "",
+                        resolved_domain,
+                    ),
+                )
             else:
-                await _execute(db, 
+                await _execute(
+                    db,
                     "INSERT INTO bid_analysis_items "
                     "(id, project_id, scheme_id, item_id, label, output_type, required, "
                     "status, content, error, sort_order, source, evidence) "
                     "VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?)",
-                    (pk, real_pid, scheme_id or "", item_id, def_.get("label", item_id),
-                     def_.get("output_type", "markdown"), def_.get("required", 0),
-                     "success", content, "", def_.get("sort_order", 0),
-                     "manual", ""))
+                    (
+                        pk,
+                        real_pid,
+                        scheme_id or "",
+                        item_id,
+                        def_.get("label", item_id),
+                        def_.get("output_type", "markdown"),
+                        def_.get("required", 0),
+                        "success",
+                        content,
+                        "",
+                        def_.get("sort_order", 0),
+                        "manual",
+                        "",
+                    ),
+                )
         await db.commit()
-        logger.info("人工校正解析项 %s.%s（%d 字符，%s）",
-                    real_pid, item_id, len(content),
-                    "更新既有行" if changed else "补齐缺失行")
+        logger.info(
+            "人工校正解析项 %s.%s（%d 字符，%s）",
+            real_pid,
+            item_id,
+            len(content),
+            "更新既有行" if changed else "补齐缺失行",
+        )
     except Exception as e:
         logger.error("人工校正解析项失败: %s", e)
         raise HTTPException(500, f"更新失败: {e}")
@@ -938,11 +1012,13 @@ async def clear_single_result(
 
     # ✅ 主键唯一出口（与 update_single_result 同口径，scheme 域字节不变）
     pk = build_item_pk(real_pid, item_id, get_item_domain(item_id) or "scheme")
-    await _execute(db, 
+    await _execute(
+        db,
         "UPDATE bid_analysis_items SET content='', error='', status='idle', "
         "source='ai', evidence='', "
         "updated_at=datetime('now','localtime') WHERE id=?",
-        (pk,))
+        (pk,),
+    )
     await db.commit()
     rows = await _load_results_rows(db, real_pid)
     updated = next((r for r in rows if r["item_id"] == item_id), None)
@@ -978,9 +1054,9 @@ async def start_bid_analysis(
     if not real_pid:
         raise HTTPException(400, "需要 scheme_id 或 project_id")
 
-    config = AnalysisConfig(mode=mode, selected_item_ids=selected_item_ids,
-                            force_rerun=force_rerun, domain=domain,
-                            skip_done=skip_done).normalize()
+    config = AnalysisConfig(
+        mode=mode, selected_item_ids=selected_item_ids, force_rerun=force_rerun, domain=domain, skip_done=skip_done
+    ).normalize()
     if not await config.get_task_items_async(db, real_pid):
         raise HTTPException(400, "未选择任何解析项")
 
@@ -1003,8 +1079,8 @@ async def start_bid_analysis(
     # 直接执行（同步等待）
     try:
         result = await _run_bid_analysis_sync(
-            db, real_pid, scheme_id or real_pid, config, tender_text,
-            section_hint=section_hint)
+            db, real_pid, scheme_id or real_pid, config, tender_text, section_hint=section_hint
+        )
         # ✅ 2026-09-26：非 SSE 入口同样回传提取依据完整性（截断文档清单等）
         result.update(source_report)
         return result
@@ -1034,9 +1110,9 @@ async def start_bid_analysis_sse(
     ``skip_done``（默认 False，与旧版一致）。
     """
     try:
-        return await _start_sse_inner(db, scheme_id, project_id, mode,
-                                       selected_item_ids, force_rerun,
-                                       domain=domain, skip_done=skip_done)
+        return await _start_sse_inner(
+            db, scheme_id, project_id, mode, selected_item_ids, force_rerun, domain=domain, skip_done=skip_done
+        )
     except HTTPException:
         # ✅ BUG 修复：同上——_start_sse_inner 的 400 参数校验错误不得降级成 500
         raise
@@ -1045,9 +1121,9 @@ async def start_bid_analysis_sse(
         raise HTTPException(500, detail=str(e))
 
 
-async def _start_sse_inner(db, scheme_id, project_id, mode,
-                           selected_item_ids, force_rerun,
-                           domain: str = "scheme", skip_done: bool = False):
+async def _start_sse_inner(
+    db, scheme_id, project_id, mode, selected_item_ids, force_rerun, domain: str = "scheme", skip_done: bool = False
+):
     # ⚠️ 2026-10-01：招标响应域已下线，硬门禁拒绝（与 /items、/start 同口径）。
     # 放在最前面：门禁用例不需要真的传文档就能验证，也避免门禁之后才做校验。
     _assert_domain_available(domain)
@@ -1074,9 +1150,9 @@ async def _start_sse_inner(db, scheme_id, project_id, mode,
         except (json.JSONDecodeError, TypeError):
             sel_ids = []
 
-    config = AnalysisConfig(mode=mode, selected_item_ids=sel_ids,
-                            force_rerun=force_rerun, domain=domain,
-                            skip_done=skip_done).normalize()
+    config = AnalysisConfig(
+        mode=mode, selected_item_ids=sel_ids, force_rerun=force_rerun, domain=domain, skip_done=skip_done
+    ).normalize()
 
     # ✅ 防呆：归一化后没有任何可执行项（如 mode=item 但未选/选了非法 id）时，
     #    直接 400。否则会跑出「0/0 完成」的假成功，前端任务栏与必选校验口径全乱。
@@ -1105,22 +1181,19 @@ async def _start_sse_inner(db, scheme_id, project_id, mode,
 
     # 最后清空**本次要跑的项**（不牵连用户未选中的项）
     if force_rerun:
-        await _reset_items_for_rerun(
-            db, real_pid, [it["item_id"] for it in config.get_task_items()])
+        await _reset_items_for_rerun(db, real_pid, [it["item_id"] for it in config.get_task_items()])
 
     # ✅ 多标段：读取当前投标范围并生成上下文提示（未选择 → 空串，行为不变）
     section_hint, selected_section = await resolve_section_hint(db, real_pid, scheme_id)
     _sec_row = await load_bid_section_row(db, real_pid, scheme_id)
     if _sec_row.get("is_multi") and not selected_section:
         # 多标段但未选择：不注入提示（保持旧行为），但必须让用户知道
-        logger.warning("项目 %s 为多标段但尚未选择投标范围，本次提取未注入标段上下文",
-                       real_pid)
+        logger.warning("项目 %s 为多标段但尚未选择投标范围，本次提取未注入标段上下文", real_pid)
 
     async def event_generator():
         queue: asyncio.Queue = asyncio.Queue()
 
-        async def progress_callback(item_id: str, status: str, content: str = "",
-                                    error: str = "", progress: float = 0):
+        async def progress_callback(item_id: str, status: str, content: str = "", error: str = "", progress: float = 0):
             evt = {
                 "type": "item_update",
                 "item_id": item_id,
@@ -1148,27 +1221,47 @@ async def _start_sse_inner(db, scheme_id, project_id, mode,
             ✅ 2026-09-26：附带提取依据完整性（source_truncated / truncated_docs /
             dropped_doc_count），让前端在提取开始时就提示「资料不完整」。
             """
-            await queue.put({
-                "type": "text_stats", **stats, **source_report,
-                "section_title": selected_section.get("title", ""),
-                "section_hint_applied": bool(section_hint),
-                "multi_section_unselected": bool(_sec_row.get("is_multi")) and not selected_section,
-            })
+            await queue.put(
+                {
+                    "type": "text_stats",
+                    **stats,
+                    **source_report,
+                    "section_title": selected_section.get("title", ""),
+                    "section_hint_applied": bool(section_hint),
+                    "multi_section_unselected": bool(_sec_row.get("is_multi")) and not selected_section,
+                }
+            )
 
         async def run_inner():
             try:
                 result = await _run_bid_analysis_with_progress(
-                    db, real_pid, scheme_id or real_pid, config, tender_text,
-                    progress_callback, task_id, stats_callback=stats_callback,
-                    section_hint=section_hint)
-                await queue.put({"type": "completed", "result": result,
-                                 **source_report})
+                    db,
+                    real_pid,
+                    scheme_id or real_pid,
+                    config,
+                    tender_text,
+                    progress_callback,
+                    task_id,
+                    stats_callback=stats_callback,
+                    section_hint=section_hint,
+                )
+                await queue.put({"type": "completed", "result": result, **source_report})
             except asyncio.CancelledError:
                 # ✅ 取消（客户端断开 / event_generator 的 finally 会 task.cancel()）：
                 #    CancelledError 属 BaseException，**不会**走下面的 except Exception，
                 #    本轮在途项会永久停在 running —— 这里显式收口。
                 with contextlib.suppress(Exception):
                     await clear_interrupted_items(db, real_pid)
+                # ✅ BUG 修复（2026-11-04 · 运行库证据）：取消/异常同样必须失效下游缓存。
+                #    收尾的 `_safe_invalidate_downstream` 位于 `_run_bid_analysis_with_progress`
+                #    末尾（normal 路径），取消会从 `asyncio.gather` / `_get_missing_required`
+                #    处直接抛 CancelledError，**永远走不到那一行**。而本轮已完成的解析项
+                #    早已写进 `bid_analysis_items`（2026-11-04 15:40 实测：16/17 项 success
+                #    已落库），此后若命中 15:11 之前生成的 export_cache，导出内容就是旧结果。
+                #    文档意图（见 `_safe_invalidate_downstream` 注释「停止场景同样生效」）
+                #    与实现不一致，此处补齐；fail-soft 包装保证不改变任务终态。
+                with contextlib.suppress(Exception):
+                    await _safe_invalidate_downstream(db, real_pid, scheme_id or real_pid)
                 await queue.put({"type": "cancelled", "message": "任务已取消"})
             except Exception as e:
                 logger.exception("结构化解析异常")
@@ -1176,6 +1269,8 @@ async def _start_sse_inner(db, scheme_id, project_id, mode,
                 #    TypeError 正是在此被捕获，然后留下一批「运行中」的解析项）
                 with contextlib.suppress(Exception):
                     await clear_interrupted_items(db, real_pid)
+                with contextlib.suppress(Exception):
+                    await _safe_invalidate_downstream(db, real_pid, scheme_id or real_pid)
                 await queue.put({"type": "error", "error": str(e)})
             finally:
                 await queue.put({"type": "__done__"})
@@ -1183,6 +1278,7 @@ async def _start_sse_inner(db, scheme_id, project_id, mode,
         task = asyncio.create_task(run_inner())
 
         try:
+
             async def _pump():
                 while True:
                     try:
@@ -1196,12 +1292,12 @@ async def _start_sse_inner(db, scheme_id, project_id, mode,
                         #    现直接读内存任务态。
                         try:
                             from app.services.ai import task_registry as _tr
+
                             t = _tr._tasks.get(task_id)
                             if t:
                                 yield f"data: {json.dumps({'type': 'heartbeat', 'progress': t.get('progress', 0), 'message': t.get('message', '')}, ensure_ascii=False)}\n\n"
                         except Exception as e:
-                            logger.debug("bid_analysis 心跳任务状态读取失败（跳过本次心跳，task=%s）: %s",
-                                         task_id, e)
+                            logger.debug("bid_analysis 心跳任务状态读取失败（跳过本次心跳，task=%s）: %s", task_id, e)
                         continue
                     if evt.get("type") == "__done__":
                         break
@@ -1229,11 +1325,9 @@ async def _start_sse_inner(db, scheme_id, project_id, mode,
                 try:
                     await asyncio.wait({task}, timeout=5)
                 except asyncio.CancelledError:
-                    logger.info("bid_analysis 收尾等待 run_inner 取消时被取消（task=%s）",
-                                task_id)
+                    logger.info("bid_analysis 收尾等待 run_inner 取消时被取消（task=%s）", task_id)
                 except Exception:
-                    logger.warning("bid_analysis 等待 run_inner 取消失败（task=%s）", task_id,
-                                   exc_info=True)
+                    logger.warning("bid_analysis 等待 run_inner 取消失败（task=%s）", task_id, exc_info=True)
             # ✅ P0 断连修复（2026-09-23）：收敛全局共享连接上的悬挂写事务，
             #    否则全站写 500 database is locked。shield 保证回滚后台完成。
             try:
@@ -1241,8 +1335,7 @@ async def _start_sse_inner(db, scheme_id, project_id, mode,
             except asyncio.CancelledError:
                 logger.info("bid_analysis 收尾事务收敛已 shield（task=%s）", task_id)
             except Exception:
-                logger.warning("bid_analysis 收尾事务收敛失败（task=%s）", task_id,
-                               exc_info=True)
+                logger.warning("bid_analysis 收尾事务收敛失败（task=%s）", task_id, exc_info=True)
             # ✅ 断开兜底（2026-09-17 新增）：客户端断开时生成器被 aclose，
             #    GeneratorExit 直接落在 yield 处（不经过任何 except），
             #    run_inner 可能还没来得及调 finish_task —— 任务永远停在 running。
@@ -1254,14 +1347,14 @@ async def _start_sse_inner(db, scheme_id, project_id, mode,
                 if has_active_task(task_id):
                     logger.warning(
                         "bid_analysis: SSE 生成器退出但任务 %s 仍在内存（run_inner 可能未正常完成），"
-                        "兜底标记为 stopped", task_id)
+                        "兜底标记为 stopped",
+                        task_id,
+                    )
                     try:
                         # ✅ P0 断连修复（2026-09-23）：shield 保证终态落库不被取消打断
-                        await asyncio.shield(finish_task(
-                            task_id, "stopped", "客户端断开，任务已终止"))
+                        await asyncio.shield(finish_task(task_id, "stopped", "客户端断开，任务已终止"))
                     except asyncio.CancelledError:
-                        logger.info("bid_analysis 断线兜底 finish_task 已 shield（task=%s）",
-                                    task_id)
+                        logger.info("bid_analysis 断线兜底 finish_task 已 shield（task=%s）", task_id)
             except Exception:
                 logger.exception("bid_analysis: 兜底 finish_task 失败（task=%s）", task_id)
 
@@ -1280,10 +1373,16 @@ async def _start_sse_inner(db, scheme_id, project_id, mode,
 # 5. 核心执行逻辑
 # =========================================================================
 
-async def _run_bid_analysis_sync(db, project_id: str, scheme_id: str,
-                                  config: AnalysisConfig, tender_text: str,
-                                  task_id: str = "",
-                                  section_hint: str = "") -> dict:
+
+async def _run_bid_analysis_sync(
+    db,
+    project_id: str,
+    scheme_id: str,
+    config: AnalysisConfig,
+    tender_text: str,
+    task_id: str = "",
+    section_hint: str = "",
+) -> dict:
     """同步执行版本（供 /start 非 SSE 入口使用）。
 
     task_id 为空字符串时跳过 task_registry（无暂停/停止/进度推送能力）。
@@ -1298,13 +1397,11 @@ async def _run_bid_analysis_sync(db, project_id: str, scheme_id: str,
     total = len(task_items)
 
     if config.force_rerun:
-        await _reset_items_for_rerun(
-            db, project_id, [it["item_id"] for it in task_items])
+        await _reset_items_for_rerun(db, project_id, [it["item_id"] for it in task_items])
 
     # 预切分
     segments = _split_tender_text(tender_text)  # 单一出口：按配置选分段策略
-    logger.info("结构化解析：共 %d 项待执行，原文 %d 字，切分为 %d 段",
-                total, len(tender_text), len(segments))
+    logger.info("结构化解析：共 %d 项待执行，原文 %d 字，切分为 %d 段", total, len(tender_text), len(segments))
 
     results = {}
     completed = 0
@@ -1321,20 +1418,22 @@ async def _run_bid_analysis_sync(db, project_id: str, scheme_id: str,
 
     if first_item:
         try:
-            res = await _run_single_item(db, project_id, scheme_id,
-                                          first_item, tender_text, segments,
-                                          section_hint=section_hint)
+            res = await _run_single_item(
+                db, project_id, scheme_id, first_item, tender_text, segments, section_hint=section_hint
+            )
             results[first_item["item_id"]] = res
             completed += 1
-            await _update_item_status(db, project_id, first_item["item_id"],
-                                       "success", res.get("content", ""), "",
-                                       evidence=_safe_evidence(
-                                           res.get("content", ""),
-                                           first_item.get("output_type", "markdown"),
-                                           tender_text))
+            await _update_item_status(
+                db,
+                project_id,
+                first_item["item_id"],
+                "success",
+                res.get("content", ""),
+                "",
+                evidence=_safe_evidence(res.get("content", ""), first_item.get("output_type", "markdown"), tender_text),
+            )
             if task_id:
-                await update_progress(task_id, completed / total,
-                                      message=f"已完成 {completed}/{total}（预热项）")
+                await update_progress(task_id, completed / total, message=f"已完成 {completed}/{total}（预热项）")
         except Exception as e:
             logger.exception("预热项执行失败")
             # ✅ BUG 修复（2026-09-23，假成功）：必须同步回写 results —— 当
@@ -1346,8 +1445,7 @@ async def _run_bid_analysis_sync(db, project_id: str, scheme_id: str,
             #    results 与 DB 状态一致。先写 results 再写 DB：即便这次 DB
             #    写入再次失败，本批结果也已如实反映失败，不会假成功。
             results[first_item["item_id"]] = {"status": "error", "error": str(e)}
-            await _update_item_status(db, project_id, first_item["item_id"],
-                                       "error", "", str(e))
+            await _update_item_status(db, project_id, first_item["item_id"], "error", "", str(e))
             completed += 1
             if task_id:
                 await update_progress(task_id, completed / total)
@@ -1357,38 +1455,45 @@ async def _run_bid_analysis_sync(db, project_id: str, scheme_id: str,
         if remaining:
             await asyncio.sleep(PROMPT_CACHE_WARMUP_DELAY_MS / 1000)
 
-    semaphore = asyncio.Semaphore(_item_concurrency())  # 外层项并发（可配，默认 2）
+    semaphore = asyncio.Semaphore(_item_concurrency())  # 外层项并发（可配，默认 1）
 
     async def _run_item(item: dict):
         """执行单个解析项（暂停闸门与并发许可由 run_with_pause_gate 负责）。"""
         nonlocal completed
         await _update_item_status(db, project_id, item["item_id"], "running", "", "")
         try:
-            res = await _run_single_item(db, project_id, scheme_id,
-                                         item, tender_text, segments,
-                                         section_hint=section_hint,
-                                         classification_hint=classification_hint)
+            res = await _run_single_item(
+                db,
+                project_id,
+                scheme_id,
+                item,
+                tender_text,
+                segments,
+                section_hint=section_hint,
+                classification_hint=classification_hint,
+            )
             results[item["item_id"]] = res
-            await _update_item_status(db, project_id, item["item_id"],
-                                       "success", res.get("content", ""), "",
-                                       evidence=_safe_evidence(
-                                           res.get("content", ""),
-                                           item.get("output_type", "markdown"),
-                                           tender_text))
+            await _update_item_status(
+                db,
+                project_id,
+                item["item_id"],
+                "success",
+                res.get("content", ""),
+                "",
+                evidence=_safe_evidence(res.get("content", ""), item.get("output_type", "markdown"), tender_text),
+            )
         except Exception as e:
             logger.exception("解析项 %s 执行失败", item["item_id"])
             results[item["item_id"]] = {"status": "error", "error": str(e)}
-            await _update_item_status(db, project_id, item["item_id"],
-                                       "error", "", str(e))
+            await _update_item_status(db, project_id, item["item_id"], "error", "", str(e))
         finally:
             completed += 1
             if task_id:
                 await update_progress(task_id, completed / total)
 
-    await asyncio.gather(*[
-        run_with_pause_gate(task_id, semaphore, functools.partial(_run_item, it))
-        for it in remaining
-    ])
+    await asyncio.gather(
+        *[run_with_pause_gate(task_id, semaphore, functools.partial(_run_item, it)) for it in remaining]
+    )
 
     # 必选项校验
     missing = await _get_missing_required(db, project_id, results)
@@ -1416,16 +1521,12 @@ async def _run_bid_analysis_sync(db, project_id: str, scheme_id: str,
         #    注意：这里改的是**任务**终态；bid_analysis_items 的
         #    「解析项」状态仍用 success/error/idle/running（正确，勿改）。
         if missing:
-            await finish_task(task_id, status="failed",
-                              message=f"必填解析项未完成：{'、'.join(missing)}")
+            await finish_task(task_id, status="failed", message=_missing_required_message(missing, results))
         else:
             # 成功即 100%：显式落一次终态进度（force 绕过节流），
             # 供前端任务栏与启动恢复的「progress 已满」判定使用。
-            await update_progress(task_id, 1.0,
-                                  message=f"解析完成：{completed}/{total} 项",
-                                  force=True)
-            await finish_task(task_id, status="completed",
-                              message=f"解析完成：{completed}/{total} 项")
+            await update_progress(task_id, 1.0, message=f"解析完成：{completed}/{total} 项", force=True)
+            await finish_task(task_id, status="completed", message=f"解析完成：{completed}/{total} 项")
 
     return {
         "ok": len(missing) == 0,
@@ -1435,11 +1536,17 @@ async def _run_bid_analysis_sync(db, project_id: str, scheme_id: str,
     }
 
 
-async def _run_bid_analysis_with_progress(db, project_id: str, scheme_id: str,
-                                           config: AnalysisConfig, tender_text: str,
-                                           progress_callback, task_id: str,
-                                           stats_callback=None,
-                                           section_hint: str = "") -> dict:
+async def _run_bid_analysis_with_progress(
+    db,
+    project_id: str,
+    scheme_id: str,
+    config: AnalysisConfig,
+    tender_text: str,
+    progress_callback,
+    task_id: str,
+    stats_callback=None,
+    section_hint: str = "",
+) -> dict:
     """带回调进度的版本（供 SSE 入口使用）。
 
     stats_callback(stats: dict) 可选：切段完成后立即回调一次「提取规模」，
@@ -1458,8 +1565,7 @@ async def _run_bid_analysis_with_progress(db, project_id: str, scheme_id: str,
     total = len(task_items)
 
     segments = _split_tender_text(tender_text)  # 单一出口：按配置选分段策略
-    logger.info("结构化解析（SSE）：共 %d 项待执行，原文 %d 字，切分为 %d 段",
-                total, len(tender_text), len(segments))
+    logger.info("结构化解析（SSE）：共 %d 项待执行，原文 %d 字，切分为 %d 段", total, len(tender_text), len(segments))
 
     if stats_callback:
         stats = {
@@ -1498,30 +1604,45 @@ async def _run_bid_analysis_with_progress(db, project_id: str, scheme_id: str,
         try:
             for attempt in range(max_retries + 1):
                 try:
-                    res = await _run_single_item(db, project_id, scheme_id,
-                                                  item, tender_text, segments,
-                                                  section_hint=section_hint,
-                                                  classification_hint=classification_hint)
+                    res = await _run_single_item(
+                        db,
+                        project_id,
+                        scheme_id,
+                        item,
+                        tender_text,
+                        segments,
+                        section_hint=section_hint,
+                        classification_hint=classification_hint,
+                    )
                     results[item["item_id"]] = res
                     content = res.get("content", "")
-                    await _update_item_status(db, project_id, item["item_id"],
-                                               "success", content, "",
-                                               evidence=_safe_evidence(
-                                                   content,
-                                                   item.get("output_type", "markdown"),
-                                                   tender_text))
-                    await progress_callback(item["item_id"], "success", content=content,
-                                            progress=(completed + 1) / total)
+                    await _update_item_status(
+                        db,
+                        project_id,
+                        item["item_id"],
+                        "success",
+                        content,
+                        "",
+                        evidence=_safe_evidence(content, item.get("output_type", "markdown"), tender_text),
+                    )
+                    await progress_callback(
+                        item["item_id"], "success", content=content, progress=(completed + 1) / total
+                    )
                     last_error = None
                     break
                 except Exception as e:
                     last_error = e
-                    logger.warning("解析项 %s 第 %d 次尝试失败: %s",
-                                   item["item_id"], attempt + 1, str(e)[:200])
+                    logger.warning("解析项 %s 第 %d 次尝试失败: %s", item["item_id"], attempt + 1, str(e)[:200])
                     # ✅ R169：永久错误（配额/认证/模型不存在，401/402/403/404）
                     #    重试必败 → 立即终止，不再白烧退避等待。与事实链
                     #    （R111 P2-7）同判据单一出口 is_non_retryable_error；
                     #    429 限流不在永久错误集，保留退避路径不变。
+                    # ✅ 2026-11-04：Provider 全部熔断/配额冷却时同样立即终止 ——
+                    #    冷却窗口内每次重试都是快速失败，退避 5s/10s 只增加用户
+                    #    等待，不会提高成功率。该项直接标记 error，原因写库，
+                    #    用户可稍后单项重试。
+                    if _is_provider_unavailable_error(e):
+                        break
                     if is_non_retryable_error(e):
                         break
                     # 如果是最后一次尝试，跳出循环写 error
@@ -1534,14 +1655,13 @@ async def _run_bid_analysis_with_progress(db, project_id: str, scheme_id: str,
             if last_error is not None:
                 logger.exception("解析项 %s 执行失败（已重试 %d 次）", item["item_id"], max_retries)
                 results[item["item_id"]] = {"status": "error", "error": str(last_error)}
-                await _update_item_status(db, project_id, item["item_id"],
-                                           "error", "", str(last_error))
-                await progress_callback(item["item_id"], "error", error=str(last_error),
-                                        progress=(completed + 1) / total)
+                await _update_item_status(db, project_id, item["item_id"], "error", "", str(last_error))
+                await progress_callback(
+                    item["item_id"], "error", error=str(last_error), progress=(completed + 1) / total
+                )
         finally:
             completed += 1
-            await update_progress(task_id, completed / total,
-                                  message=f"已完成 {completed}/{total}")
+            await update_progress(task_id, completed / total, message=f"已完成 {completed}/{total}")
 
     remaining = [it for it in task_items if it["item_id"] != (first_item or {}).get("item_id")]
 
@@ -1551,11 +1671,10 @@ async def _run_bid_analysis_with_progress(db, project_id: str, scheme_id: str,
         if remaining:
             await asyncio.sleep(PROMPT_CACHE_WARMUP_DELAY_MS / 1000)
 
-    semaphore = asyncio.Semaphore(_item_concurrency())  # SSE 版项并发（可配，默认 2）
-    await asyncio.gather(*[
-        run_with_pause_gate(task_id, semaphore, functools.partial(_do_item, it))
-        for it in remaining
-    ])
+    semaphore = asyncio.Semaphore(_item_concurrency())  # SSE 版项并发（可配，默认 1）
+    await asyncio.gather(
+        *[run_with_pause_gate(task_id, semaphore, functools.partial(_do_item, it)) for it in remaining]
+    )
 
     missing = await _get_missing_required(db, project_id, results)
 
@@ -1581,26 +1700,22 @@ async def _run_bid_analysis_with_progress(db, project_id: str, scheme_id: str,
         # 若仍按「缺失即 failed」收尾，用户看到的是「必填解析项未完成：项目级
         # 基本信息、方案级基本信息…」+ 前端弹「提取完成，但必选项未全部完成」，
         # 任务栏显示 failed —— 用户的一次主动停止被报告成失败。
-        await update_progress(
-            task_id, 1.0,
-            message=f"任务已停止：已完成 {completed}/{total} 项",
-            force=True)
-        await finish_task(
-            task_id, status="stopped",
-            message=f"任务已停止：已完成 {completed}/{total} 项")
+        await update_progress(task_id, 1.0, message=f"任务已停止：已完成 {completed}/{total} 项", force=True)
+        await finish_task(task_id, status="stopped", message=f"任务已停止：已完成 {completed}/{total} 项")
     elif missing:
-        await finish_task(task_id, status="failed",
-                          message=f"必填解析项未完成：{'、'.join(missing)}")
+        # ✅ 2026-11-04：文案带上首个失败原因（AI 全挂 vs 资料缺失需区分处置）。
+        await finish_task(task_id, status="failed", message=_missing_required_message(missing, results))
     else:
-        await update_progress(task_id, 1.0,
-                              message=f"解析完成：{completed}/{total} 项",
-                              force=True)
-        await finish_task(task_id, status="completed",
-                          message=f"解析完成：{completed}/{total} 项")
+        await update_progress(task_id, 1.0, message=f"解析完成：{completed}/{total} 项", force=True)
+        await finish_task(task_id, status="completed", message=f"解析完成：{completed}/{total} 项")
 
-    return {"ok": len(missing) == 0 and not stopped, "stopped": stopped,
-            "completed": completed, "total": total,
-            "missing_required": missing}
+    return {
+        "ok": len(missing) == 0 and not stopped,
+        "stopped": stopped,
+        "completed": completed,
+        "total": total,
+        "missing_required": missing,
+    }
 
 
 async def run_with_pause_gate(task_id: str, semaphore, run_fn):
@@ -1628,10 +1743,16 @@ async def run_with_pause_gate(task_id: str, semaphore, run_fn):
         await run_fn()
 
 
-async def _run_single_item(db, project_id: str, scheme_id: str,
-                            item: dict, tender_text: str, segments: list[str],
-                            section_hint: str = "",
-                            classification_hint: str = "") -> dict:
+async def _run_single_item(
+    db,
+    project_id: str,
+    scheme_id: str,
+    item: dict,
+    tender_text: str,
+    segments: list[str],
+    section_hint: str = "",
+    classification_hint: str = "",
+) -> dict:
     """执行单个解析项。
 
     分段策略：
@@ -1647,19 +1768,39 @@ async def _run_single_item(db, project_id: str, scheme_id: str,
     """
     item_id = item["item_id"]
     output_type = item.get("output_type", "markdown")
+    # 分段合并调用（JSON 项）的异常暂存：先按既有契约兜底 "{}"，再统一上抛。
+    merge_error: Exception | None = None
 
+    # ✅ 2026-11-04：AI 调用故障（provider 全挂/超时/JSON 通道失败）必须显式抛给
+    #    上层，由 _do_item 写「该项 error + 原因」，而不是把「调用失败」伪装成
+    #    「该段没有内容」的 success+缺失哨兵。两种情况的用户动作完全不同：
+    #    前者应稍后单项重试，后者是资料确实缺失（重试也无意义）。
+    #    raise_on_error 只影响异常路径；模型正常返回「未提取到」仍是 success
+    #    哨兵，缺失判定口径不变。
     if len(segments) <= 1:
-        result_text = await _run_single_call(item, tender_text, output_type,
-                                             section_hint=section_hint,
-                                             classification_hint=classification_hint)
+        result_text = await _run_single_call(
+            item,
+            tender_text,
+            output_type,
+            section_hint=section_hint,
+            classification_hint=classification_hint,
+            raise_on_error=True,
+        )
     else:
         # 多段并发提取 —— ✅ 加信号量限制（之前直接 gather 所有段，27 段就同时飞 27 个 AI 调用）
-        _seg_sem = asyncio.Semaphore(_segment_concurrency())  # 分段并发（可配，默认 3）
+        _seg_sem = asyncio.Semaphore(_segment_concurrency())  # 分段并发（可配，默认 2）
+
         async def _seg_run(seg):
             async with _seg_sem:
-                return await _run_single_call(item, seg, output_type,
-                                              section_hint=section_hint,
-                                              classification_hint=classification_hint)
+                return await _run_single_call(
+                    item,
+                    seg,
+                    output_type,
+                    section_hint=section_hint,
+                    classification_hint=classification_hint,
+                    raise_on_error=True,
+                )
+
         partial_results = await asyncio.gather(
             *[_seg_run(seg) for seg in segments],
             return_exceptions=True,
@@ -1672,16 +1813,24 @@ async def _run_single_item(db, project_id: str, scheme_id: str,
         #    整个解析项报错；即便不是异常，也会把「第 1 段的空结果」顶掉
         #    「其它分段的有效结果」。
         valid_raw: list[str] = []
+        seg_errors: list[Exception] = []
         for i, pr in enumerate(partial_results):
             if isinstance(pr, Exception):
                 # ✅ A-9（2026-10-01）：分段提取是 18 项链路**最高频**的失败点，
                 #    旧实现只用 %s 打印异常 message，堆栈全丢，线上无法定位根因
                 #    （provider 超时 / 限流 / JSON 解析失败表现完全不同）。
                 logger.warning("分段 %d 提取异常: %s", i, pr, exc_info=pr)
+                seg_errors.append(pr)
                 continue
             if pr and not is_missing_result(pr, output_type):
                 seg_contents.append(f"--- 分段 {i + 1} ---\n{pr}")
                 valid_raw.append(pr)
+
+        # 全部段都调用失败且没有任何有效内容 → 这是链路故障，不是「资料缺失」。
+        if not valid_raw and seg_errors:
+            raise RuntimeError(
+                f"解析项 {item_id} 的 {len(seg_errors)}/{len(segments)} 个分段" f"调用失败且无有效结果：{seg_errors[0]}"
+            ) from seg_errors[0]
 
         if not seg_contents:
             # 全部分段都无有效结果
@@ -1692,14 +1841,12 @@ async def _run_single_item(db, project_id: str, scheme_id: str,
                 import re
 
                 from app.services.bid_analysis_service import _ITEM_PROMPTS
-                result_text = re.search(
-                    r"```json\s*(\{[^}]+\})",
-                    _ITEM_PROMPTS.get(item_id, "{}"), re.DOTALL)
+
+                result_text = re.search(r"```json\s*(\{[^}]+\})", _ITEM_PROMPTS.get(item_id, "{}"), re.DOTALL)
                 if result_text:
                     try:
                         obj = json.loads(result_text.group(1))
-                        result_text = json.dumps(
-                            {k: "没有提及" for k in obj}, ensure_ascii=False, indent=2)
+                        result_text = json.dumps({k: "没有提及" for k in obj}, ensure_ascii=False, indent=2)
                     except Exception:
                         result_text = "{}"
                 else:
@@ -1713,11 +1860,14 @@ async def _run_single_item(db, project_id: str, scheme_id: str,
             #    合并消息必须携带原始任务要求（尤其 JSON 项的字段清单），
             #    否则模型不知道要保留哪些 key，合并后字段丢失。
             task_prompt = (get_item_prompt(item_id) or "").replace(
-                "__CONTEXT__", "（项目资料已按分段给出，见下方分段解析结果）")
-            merge_user = (SEGMENT_MERGE_PROMPT
-                          .replace("__TASK_LABEL__", item.get("label", item_id))
-                          .replace("__TASK_PROMPT__", task_prompt)
-                          .replace("__SEGMENTS__", "\n\n".join(seg_contents)))
+                "__CONTEXT__", "（项目资料已按分段给出，见下方分段解析结果）"
+            )
+            merge_user = (
+                segment_merge_prompt()
+                .replace("__TASK_LABEL__", item.get("label", item_id))
+                .replace("__TASK_PROMPT__", task_prompt)
+                .replace("__SEGMENTS__", "\n\n".join(seg_contents))
+            )
             messages = build_system_messages(section_hint, classification_hint) + [
                 {"role": "user", "content": merge_user},
             ]
@@ -1728,16 +1878,21 @@ async def _run_single_item(db, project_id: str, scheme_id: str,
                 #    ⚠️ 失败兜底必须是 "{}" —— 这是 _json_all_empty /
                 #    is_missing_result 共同依赖的**失败哨兵**契约，绝不能兜底成
                 #    空串或「未提取到」（那样会被判成「有内容」而假绿）。
+                # ✅ 2026-11-04：兜底后仍把异常抛给上层（_do_item 据此写该项
+                #    error + 原因），避免「合并调用全挂」被当成「模型什么都没
+                #    提取到」的 success。哨兵保留以维持既有判定契约与护栏。
                 try:
-                    result_text = await _collect_json_str(
-                        messages, scene="bid_analysis_merge", timeout=120)
-                except Exception as e:  # noqa: BLE001 - 保持「永不抛」契约
-                    logger.warning(
-                        "[bid] 合并项 JSON 生成/修复失败，回落空对象哨兵：%s", e)
+                    result_text = await _collect_json_str(messages, scene="bid_analysis_merge", timeout=120)
+                except Exception as e:  # noqa: BLE001 - 哨兵兜底后再上抛
+                    logger.warning("[bid] 合并项 JSON 生成/修复失败，回落空对象哨兵：%s", e)
                     result_text = "{}"
+                    merge_error = e
             else:
-                result_text = await chat_with_fallback(
-                    messages, timeout=120, scene="bid_analysis_merge")
+                result_text = await chat_with_fallback(messages, timeout=120, scene="bid_analysis_merge")
+
+    # ✅ 2026-11-04：合并调用失败属于链路故障 → 显式抛给上层标记 error。
+    if merge_error is not None:
+        raise merge_error
 
     # Markdown 项整体空结果 → 完整重跑一次
     if output_type == "markdown" and is_missing_result(result_text, "markdown"):
@@ -1748,21 +1903,28 @@ async def _run_single_item(db, project_id: str, scheme_id: str,
         #    超预算时保留缺失哨兵并留痕，不整卷重跑（单项级分段重试已在前序覆盖）。
         if len(tender_text) <= _MARKDOWN_RERUN_MAX_CHARS:
             logger.info("解析项 %s 首次返回空结果，重跑一次", item_id)
-            result_text = await _run_single_call(item, tender_text, "markdown",
-                                                 section_hint=section_hint,
-                                                 classification_hint=classification_hint)
+            result_text = await _run_single_call(
+                item, tender_text, "markdown", section_hint=section_hint, classification_hint=classification_hint
+            )
         else:
             logger.warning(
-                "解析项 %s 全部分段返回空结果且输入 %d 字符超重跑预算 %d，"
-                "保留缺失哨兵不整卷重跑",
-                item_id, len(tender_text), _MARKDOWN_RERUN_MAX_CHARS)
+                "解析项 %s 全部分段返回空结果且输入 %d 字符超重跑预算 %d，" "保留缺失哨兵不整卷重跑",
+                item_id,
+                len(tender_text),
+                _MARKDOWN_RERUN_MAX_CHARS,
+            )
 
     return {"status": "success", "content": result_text, "item_id": item_id}
 
 
-async def _run_single_call(item: dict, text: str, output_type: str,
-                           section_hint: str = "",
-                           classification_hint: str = "") -> str:
+async def _run_single_call(
+    item: dict,
+    text: str,
+    output_type: str,
+    section_hint: str = "",
+    classification_hint: str = "",
+    raise_on_error: bool = False,
+) -> str:
     """单次 AI 调用：system + user（prompt 模板 + 上下文）。
 
     section_hint 由 `services/bid_section_context.build_bid_section_context_hint`
@@ -1771,6 +1933,11 @@ async def _run_single_call(item: dict, text: str, output_type: str,
 
     ✅ 标段上下文按易标口径作为**独立的第二条 system 消息**下发
     （``buildTenderContextMessages``），不再与通用纪律拼在同一条。
+
+    raise_on_error（2026-11-04）：仅 `_run_single_item` 传 True —— 让 JSON 通道
+    的失败显式上抛，由上层把该项写成 error（原因写库、可单项重试），而不是
+    伪装成 success + 空对象哨兵。默认 False 保持既有对外语义（永不抛、兜底
+    "{}"），直接调用本函数的测试/脚本行为不变。
     """
     system_msgs = build_system_messages(section_hint, classification_hint)
     user_msg = {"role": "user", "content": build_item(text, item)}
@@ -1784,16 +1951,17 @@ async def _run_single_call(item: dict, text: str, output_type: str,
         #    首轮参数与旧实现逐一对齐（temperature=0.2 / json_mode=True /
         #    timeout=180 / scene="bid_analysis"）。
         try:
-            return await _collect_json_str(
-                [*system_msgs, user_msg], scene="bid_analysis", timeout=180,
-                temperature=0.2)
-        except Exception as e:  # noqa: BLE001 - 保持「永不抛」语义
-            logger.warning(
-                "[bid] 单项 JSON 生成/修复失败，回落空对象哨兵：%s", e)
+            return await _collect_json_str([*system_msgs, user_msg], scene="bid_analysis", timeout=180, temperature=0.2)
+        except Exception as e:  # noqa: BLE001 - 默认保持「永不抛」语义
+            logger.warning("[bid] 单项 JSON 生成/修复失败：%s（raise_on_error=%s）", e, raise_on_error)
             # ⚠️ 必须在此处兜底 "{}"，不能向上抛 ValueError：上层只捕
             #    json.JSONDecodeError，抛出去会被 SSE 版放大成「整项重试」
             #    （_item_retries 默认 2、指数退避 5s/10s），把一次解析失败
             #    变成整项 3 次重跑。
+            # ✅ 2026-11-04：仅当调用方显式要求（_run_single_item，需把链路
+            #    故障与「资料缺失」区分开）才上抛；默认仍返回哨兵。
+            if raise_on_error:
+                raise
             return "{}"
     else:
         # Markdown 项
@@ -1823,8 +1991,7 @@ def _validate_json_object(obj) -> list:
     return ["顶层必须是 JSON 对象"]
 
 
-async def _collect_json_str(messages: list, *, scene: str, timeout: int,
-                            temperature: float | None = None) -> str:
+async def _collect_json_str(messages: list, *, scene: str, timeout: int, temperature: float | None = None) -> str:
     """JSON 项的统一收集出口：生成 → 解析 → 校验 → 定向修复 → 有界重试。
 
     ✅ R58（2026-10-10）：取代本模块自建的劣化版 `_repair_json`。旧实现的缺口：
@@ -1845,22 +2012,27 @@ async def _collect_json_str(messages: list, *, scene: str, timeout: int,
     Raises:
         ValueError: 生成与修复全部失败 —— 由调用点兜底为 ``"{}"``。
     """
+
     async def _chat(_msgs: list, **kwargs) -> str:
         return await chat_with_fallback(_msgs, **kwargs)
 
     _obj, raw = await collect_json_response_with_chat(
-        _chat, messages,
+        _chat,
+        messages,
         validate_fn=_validate_json_object,
         max_retries=BID_JSON_REPAIR_RETRIES,
-        temperature=temperature, json_mode=True, timeout=timeout,
+        temperature=temperature,
+        json_mode=True,
+        timeout=timeout,
         # 提取族（非目录族）→ 走通用修复提示词。**禁止**传 OUTLINE_REPAIR_KEY
         # （AST 护栏 tests/test_json_repair_key_parity_20261006.py 会判非法）。
-        repair_key=GENERIC_REPAIR_KEY, scene=scene)
+        repair_key=GENERIC_REPAIR_KEY,
+        scene=scene,
+    )
     return raw or json.dumps(_obj, ensure_ascii=False)
 
 
-async def _repair_json(bad_json: str, original_messages: list,
-                       scene: str = "bid_analysis_merge") -> str:
+async def _repair_json(bad_json: str, original_messages: list, scene: str = "bid_analysis_merge") -> str:
     """定向修复非法 JSON —— **兼容薄壳**，本体已下沉到统一通道。
 
     ✅ R58（2026-10-10）：保留同名函数是因为既有测试直接调用它
@@ -1877,12 +2049,13 @@ async def _repair_json(bad_json: str, original_messages: list,
     """
     try:
         return await _collect_json_str(
-            [*original_messages, {"role": "assistant", "content": bad_json}],
-            scene=scene, timeout=60)
+            [*original_messages, {"role": "assistant", "content": bad_json}], scene=scene, timeout=60
+        )
     except Exception as e:  # noqa: BLE001 - 保持「永不抛」契约
         logger.warning("[bid] JSON 修复失败（scene=%s）：%s", scene, e)
     # 确定性下界：不依赖 AI，尽力从原字符串里抠出 JSON
     import re as _re
+
     m = _re.search(r"\{[\s\S]*\}", bad_json)
     if m:
         try:
@@ -1897,6 +2070,7 @@ async def _repair_json(bad_json: str, original_messages: list,
 # 6. 数据库辅助函数
 # =========================================================================
 
+
 async def _resolve_pid(db, scheme_id: str = "", project_id: str = "") -> str:
     """反查 project_id（与 global_facts._resolve_project_id 对齐）。
 
@@ -1909,8 +2083,7 @@ async def _resolve_pid(db, scheme_id: str = "", project_id: str = "") -> str:
     pid = project_id.strip() if isinstance(project_id, str) else ""
     if pid:
         if sid:
-            cur = await _execute(db, 
-                SCHEME_PROJECT_ID_SQL, (sid,))
+            cur = await _execute(db, SCHEME_PROJECT_ID_SQL, (sid,))
             row = await cur.fetchone()
             if not row or not row[0]:
                 raise HTTPException(404, "方案不存在")
@@ -2000,11 +2173,12 @@ async def _list_parsed_documents(db, project_id: str) -> list[dict]:
     前端「项目提取」子页永远看不到"源文档不完整"的告警。两列按
     :func:`_project_document_cols` 的实际列集合动态拼装，缺列只降级该列。
     """
-    base = ("SELECT id, file_name, file_type, parsed_markdown, doc_category, "
-            "file_size, parse_time")
-    where = ("FROM project_documents WHERE project_id=? "
-             "AND parsed_markdown IS NOT NULL AND parsed_markdown != '' "
-             "ORDER BY created_at, id")
+    base = "SELECT id, file_name, file_type, parsed_markdown, doc_category, " "file_size, parse_time"
+    where = (
+        "FROM project_documents WHERE project_id=? "
+        "AND parsed_markdown IS NOT NULL AND parsed_markdown != '' "
+        "ORDER BY created_at, id"
+    )
     cols = await _project_document_cols(db)
     diag_cols = [c for c in ("parse_warnings", "parse_truncated") if c in cols]
     sql = base + ((", " + ", ".join(diag_cols)) if diag_cols else "") + " " + where
@@ -2075,6 +2249,7 @@ def _doc_is_truncated(d: dict) -> bool:
     if text_len > 0:
         # 惰性导入：避免路由模块间的循环导入（global_facts 不反向依赖本模块）
         from app.routers import global_facts as _gf
+
         if _gf._is_truncated(text_len):
             return True
     # ④ 告警文本兜底（中英都认，兼容历史/外部写入的告警文本）
@@ -2101,8 +2276,7 @@ def _combine_doc_texts(docs: list[dict], report_truncation: bool = False):
         默认 False 保持旧调用方的字符串返回，向后兼容。
     """
     if not docs:
-        return {"text": "", "total_chars": 0, "truncated": False, "details": []} \
-            if report_truncation else ""
+        return {"text": "", "total_chars": 0, "truncated": False, "details": []} if report_truncation else ""
 
     def _sort_key(d: dict):
         return extract_priority(d.get("doc_category"))
@@ -2123,16 +2297,17 @@ def _combine_doc_texts(docs: list[dict], report_truncation: bool = False):
             break
         piece = md if len(md) <= headroom else md[:headroom]
         total_chars += len(piece)
-        parts.append({
-            "name": d.get("file_name", ""),
-            "category": cat,
-            "text": piece,
-            "chars": len(piece),
-            "truncated": is_truncated,
-        })
+        parts.append(
+            {
+                "name": d.get("file_name", ""),
+                "category": cat,
+                "text": piece,
+                "chars": len(piece),
+                "truncated": is_truncated,
+            }
+        )
 
-    joined = "\n\n---\n\n".join(
-        f"# 文档：{p['name']}（分类：{p['category']}）\n\n{p['text']}" for p in parts)
+    joined = "\n\n---\n\n".join(f"# 文档：{p['name']}（分类：{p['category']}）\n\n{p['text']}" for p in parts)
     if not report_truncation:
         return joined
     return {
@@ -2141,11 +2316,12 @@ def _combine_doc_texts(docs: list[dict], report_truncation: bool = False):
         # 任一参与提取的文档入库时已被截断，或本函数把某份文档整份跳过，
         # 都意味着"18 项提取看到的不是一份完整资料"，必须显式标记出来。
         "truncated": any(p["truncated"] for p in parts)
-        or sum(len(d.get("parsed_markdown") or "")
-               for d in docs if (d.get("parsed_markdown") or "").strip()) > total_chars,
-        "details": [{"name": p["name"], "category": p["category"],
-                     "chars": p["chars"], "truncated": p["truncated"]}
-                    for p in parts],
+        or sum(len(d.get("parsed_markdown") or "") for d in docs if (d.get("parsed_markdown") or "").strip())
+        > total_chars,
+        "details": [
+            {"name": p["name"], "category": p["category"], "chars": p["chars"], "truncated": p["truncated"]}
+            for p in parts
+        ],
     }
 
 
@@ -2182,9 +2358,11 @@ def _combine_doc_texts_report(docs: list[dict]) -> tuple[str, dict]:
         # （目录/正文/导出）都无法从失败日志里察觉。
         logger.warning(
             "结构化提取依据不完整：纳入 %d/%d 份文档，被截断 %s，合并文本 %d 字",
-            len(details), len(docs),
+            len(details),
+            len(docs),
             "、".join(d.get("name", "?") for d in truncated) or "无",
-            int(report.get("total_chars") or 0))
+            int(report.get("total_chars") or 0),
+        )
     return report["text"], {
         "source_truncated": bool(report.get("truncated")),
         "truncated_docs": truncated,
@@ -2195,10 +2373,16 @@ def _combine_doc_texts_report(docs: list[dict]) -> tuple[str, dict]:
     }
 
 
-async def _update_item_status(db, project_id: str, item_id: str, status: str,
-                              content: str = "", error: str = "",
-                              evidence: str | None = None,
-                              domain: str = ""):
+async def _update_item_status(
+    db,
+    project_id: str,
+    item_id: str,
+    status: str,
+    content: str = "",
+    error: str = "",
+    evidence: str | None = None,
+    domain: str = "",
+):
     """更新单个解析项的状态/内容（upsert）。
 
     ✅ source 契约：本函数是**AI 写路径**，任何写入都会把 source 复位为 'ai'。
@@ -2221,8 +2405,7 @@ async def _update_item_status(db, project_id: str, item_id: str, status: str,
     pk = build_item_pk(project_id, item_id, resolved_domain)
     existing = False
     try:
-        cur = await _execute(db, 
-            "SELECT 1 FROM bid_analysis_items WHERE id=?", (pk,))
+        cur = await _execute(db, "SELECT 1 FROM bid_analysis_items WHERE id=?", (pk,))
         existing = await cur.fetchone() is not None
     except Exception:
         existing = False
@@ -2246,34 +2429,56 @@ async def _update_item_status(db, project_id: str, item_id: str, status: str,
             fields.append("error=?")
             params.append("")
         params.append(pk)
-        await _execute(db, 
-            f"UPDATE bid_analysis_items SET {', '.join(fields)} WHERE id=?",
-            tuple(params))
+        await _execute(db, f"UPDATE bid_analysis_items SET {', '.join(fields)} WHERE id=?", tuple(params))
     else:
         cur_cols = await _bid_analysis_item_cols(db)
         if "domain" in cur_cols:
-            await _execute(db, 
+            await _execute(
+                db,
                 "INSERT INTO bid_analysis_items "
                 "(id, project_id, item_id, label, output_type, required, status, content, error, sort_order, source, evidence, domain) "
                 "VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?)",
-                (pk, project_id, item_id, def_.get("label", item_id),
-                 def_.get("output_type", "markdown"),
-                 def_.get("required", 0), status, content, error,
-                 def_.get("sort_order", 0), "ai", evidence or "", resolved_domain))
+                (
+                    pk,
+                    project_id,
+                    item_id,
+                    def_.get("label", item_id),
+                    def_.get("output_type", "markdown"),
+                    def_.get("required", 0),
+                    status,
+                    content,
+                    error,
+                    def_.get("sort_order", 0),
+                    "ai",
+                    evidence or "",
+                    resolved_domain,
+                ),
+            )
         else:
-            await _execute(db, 
+            await _execute(
+                db,
                 "INSERT INTO bid_analysis_items "
                 "(id, project_id, item_id, label, output_type, required, status, content, error, sort_order, source, evidence) "
                 "VALUES (?,?,?,?,?,?,?,?,?,?,?,?)",
-                (pk, project_id, item_id, def_.get("label", item_id),
-                 def_.get("output_type", "markdown"),
-                 def_.get("required", 0), status, content, error,
-                 def_.get("sort_order", 0), "ai", evidence or ""))
+                (
+                    pk,
+                    project_id,
+                    item_id,
+                    def_.get("label", item_id),
+                    def_.get("output_type", "markdown"),
+                    def_.get("required", 0),
+                    status,
+                    content,
+                    error,
+                    def_.get("sort_order", 0),
+                    "ai",
+                    evidence or "",
+                ),
+            )
     await db.commit()
 
 
-async def _invalidate_downstream_cache(db, project_id: str,
-                                       scheme_id: str = "") -> int:
+async def _invalidate_downstream_cache(db, project_id: str, scheme_id: str = "") -> int:
     """提取结果变化后失效下游缓存（导出缓存）。
 
     ✅ 新增（2026-09-22，对齐 OpenBidKit `bidAnalysisTask` 重跑时把
@@ -2293,8 +2498,7 @@ async def _invalidate_downstream_cache(db, project_id: str,
         sids.append(scheme_id)
     elif project_id:
         try:
-            cur = await _execute(db, 
-                "SELECT id FROM schemes WHERE project_id=?", (project_id,))
+            cur = await _execute(db, "SELECT id FROM schemes WHERE project_id=?", (project_id,))
             sids = [str(r[0]) for r in await cur.fetchall() if r[0]]
         except Exception as e:
             logger.warning("查询项目方案失败（跳过缓存失效）: %s", e)
@@ -2340,10 +2544,13 @@ async def _invalidate_extraction_derived(db, project_id: str, sids: list[str]) -
     #    产生一条误导性 WARNING。级联现已对空 sids 也执行（见调用点），故显式跳过。
     if sids:
         try:
-            cur = await _execute(db, 
-                "DELETE FROM consistency_scan_cache WHERE scheme_id IN "
-                f"({','.join('?' * len(sids))})", tuple(sids))
+            cur = await _execute(
+                db,
+                "DELETE FROM consistency_scan_cache WHERE scheme_id IN " f"({','.join('?' * len(sids))})",
+                tuple(sids),
+            )
             from app.db import safe_rowcount
+
             n = safe_rowcount(cur, what="consistency_scan_cache")
             if n:
                 logger.info("提取结果变化：已清 %d 条一致性扫描缓存", n)
@@ -2352,10 +2559,14 @@ async def _invalidate_extraction_derived(db, project_id: str, sids: list[str]) -
     # ② 方案级事实时间戳（目录树据此派生「事实已变更」标记）
     if sids:
         try:
-            cur = await _execute(db, 
+            cur = await _execute(
+                db,
                 "UPDATE schemes SET facts_updated_at=datetime('now','localtime') "
-                f"WHERE id IN ({','.join('?' * len(sids))})", tuple(sids))
+                f"WHERE id IN ({','.join('?' * len(sids))})",
+                tuple(sids),
+            )
             from app.db import safe_rowcount
+
             n = safe_rowcount(cur, what="schemes.facts_updated_at")
             if n:
                 logger.info("提取结果变化：已推进 %d 个方案的事实时间戳", n)
@@ -2366,10 +2577,9 @@ async def _invalidate_extraction_derived(db, project_id: str, sids: list[str]) -
     #    （见 schema_sql.py 的建表语句），带上会整条 SQL 报错、连带这一轮失效全废。
     #    'stale' 正是 §4.11.5 已确立的「物化陈旧」状态值，口径一致。
     try:
-        cur = await _execute(db, 
-            "UPDATE doc_extractions SET status='stale' WHERE project_id=?",
-            (project_id,))
+        cur = await _execute(db, "UPDATE doc_extractions SET status='stale' WHERE project_id=?", (project_id,))
         from app.db import safe_rowcount
+
         n = safe_rowcount(cur, what="doc_extractions")
         if n:
             logger.info("提取结果变化：已把 %d 条提取层快照标记为 stale", n)
@@ -2405,8 +2615,7 @@ async def _safe_invalidate_downstream(db, project_id: str, scheme_id: str = "") 
         logger.warning("提取收尾：下游缓存失效失败（不影响提取结果）: %s", e)
 
 
-async def _reset_items_for_rerun(db, project_id: str,
-                                 item_ids: list[str] | None = None):
+async def _reset_items_for_rerun(db, project_id: str, item_ids: list[str] | None = None):
     """force_rerun 时把「本次将执行」的解析项重置为 idle（并在库中补齐记录）。
 
     ✅ 语义收敛（修复数据丢失）：旧实现无条件重置该项目**全部**解析项，
@@ -2416,6 +2625,7 @@ async def _reset_items_for_rerun(db, project_id: str,
     """
     try:
         from app.services.bid_analysis_service import ANALYSIS_ITEMS
+
         if item_ids:
             defs = [d for d in (get_item_def(i) for i in item_ids) if d]
         else:
@@ -2437,16 +2647,24 @@ async def _reset_items_for_rerun(db, project_id: str,
             iid = def_["item_id"]
             pk = build_item_pk(project_id, iid, get_item_domain(iid))
             try:
-                cur = await _execute(
-                    db, "SELECT 1 FROM bid_analysis_items WHERE id=?", (pk,))
+                cur = await _execute(db, "SELECT 1 FROM bid_analysis_items WHERE id=?", (pk,))
                 exists = await cur.fetchone() is not None
             except Exception:
                 exists = False
             if not exists:
-                base = (pk, project_id, iid, def_.get("label", iid),
-                        def_.get("output_type", "markdown"),
-                        def_.get("required", 0), "idle", "", "",
-                        def_.get("sort_order", 0), "ai")
+                base = (
+                    pk,
+                    project_id,
+                    iid,
+                    def_.get("label", iid),
+                    def_.get("output_type", "markdown"),
+                    def_.get("required", 0),
+                    "idle",
+                    "",
+                    "",
+                    def_.get("sort_order", 0),
+                    "ai",
+                )
                 if _has_domain:
                     await _execute(
                         db,
@@ -2454,7 +2672,8 @@ async def _reset_items_for_rerun(db, project_id: str,
                         "(id, project_id, item_id, label, output_type, required,"
                         " status, content, error, sort_order, source, domain) "
                         "VALUES (?,?,?,?,?,?,?,?,?,?,?,?)",
-                        base + (get_item_domain(iid) or "",))
+                        base + (get_item_domain(iid) or "",),
+                    )
                 else:
                     await _execute(
                         db,
@@ -2462,19 +2681,21 @@ async def _reset_items_for_rerun(db, project_id: str,
                         "(id, project_id, item_id, label, output_type, required,"
                         " status, content, error, sort_order, source) "
                         "VALUES (?,?,?,?,?,?,?,?,?,?,?)",
-                        base)
+                        base,
+                    )
 
         # 2) 重置为 idle（仅本次要执行的项）；source 一并复位为 'ai'
         ids = [d["item_id"] for d in defs]
         placeholders = ",".join("?" for _ in ids)
-        await _execute(db, 
+        await _execute(
+            db,
             f"UPDATE bid_analysis_items SET status='idle', content='', error='', "
             f"source='ai', evidence='' "
             f"WHERE project_id=? AND item_id IN ({placeholders})",
-            (project_id, *ids))
+            (project_id, *ids),
+        )
         await db.commit()
-        logger.info("重置项目 %s 的 %d 个解析项为空（force_rerun）",
-                    project_id, len(ids))
+        logger.info("重置项目 %s 的 %d 个解析项为空（force_rerun）", project_id, len(ids))
         # ✅ 提取结果已作废 → 下游（导出缓存）必须同步失效，否则导出内容与
         #    最新提取结果不一致（见 _invalidate_downstream_cache 说明）。
         await _invalidate_downstream_cache(db, project_id)
@@ -2507,10 +2728,13 @@ async def clear_interrupted_items(db, project_id: str = "") -> int:
         if project_id:
             where = "project_id=? AND status='running'"
             params = (project_id,)
-        cur = await _execute(db, 
+        cur = await _execute(
+            db,
             "UPDATE bid_analysis_items SET status='error', "
             "error='上次执行被中断（进程重启或任务取消），请重新提取', "
-            f"updated_at=datetime('now','localtime') WHERE {where}", params)
+            f"updated_at=datetime('now','localtime') WHERE {where}",
+            params,
+        )
         # ✅ P1 修复（2026-09-29 · R13 漏改点）：AGENTS.md §5.5 —— 全局单写连接 +
         #    aiosqlite 下 execute() **可能返回 None**，旧实现 `cur.rowcount` 直接
         #    AttributeError，又被下方 `except Exception` 吞掉 → 中断遗留的 running
@@ -2520,15 +2744,31 @@ async def clear_interrupted_items(db, project_id: str = "") -> int:
         await db.commit()
         n = safe_rowcount(cur, what="中断遗留 running 解析项置 error")
         if n:
-            logger.warning("清理了 %d 个中断遗留的 running 解析项（project=%s）",
-                           n, project_id or "<全部>")
+            logger.warning("清理了 %d 个中断遗留的 running 解析项（project=%s）", n, project_id or "<全部>")
         return n
     except Exception as e:
         # exc_info=True：这是启动恢复/任务收尾的关键路径，失败原因必须能定位，
         # 只打 %s 会丢失堆栈（连接损坏 vs SQL 语法错误 vs 锁竞争，处置完全不同）。
-        logger.warning("清理中断解析项失败（中断项可能残留为 running，"
-                       "需重试提取或重启后端）: %s", e, exc_info=True)
+        logger.warning("清理中断解析项失败（中断项可能残留为 running，" "需重试提取或重启后端）: %s", e, exc_info=True)
         return 0
+
+
+def _missing_required_message(missing: list[str], results: dict) -> str:
+    """必填缺失项的任务终态文案（含首个失败原因）。
+
+    ✅ 2026-11-04：旧文案只列 17 个中文标签，用户无法判断「资料确实没有」
+    还是「AI 调用失败」。现在把本次任务中首个 error 的原始原因拼进去，
+    「请在 AI 服务/网络恢复后对失败项单项重试」这类处置才有依据。
+    """
+    msg = f"必填解析项未完成：{'、'.join(missing)}"
+    errors = [
+        str(r.get("error") or "").strip()
+        for r in (results or {}).values()
+        if isinstance(r, dict) and r.get("status") == "error" and str(r.get("error") or "").strip()
+    ]
+    if errors:
+        msg += f"（首个失败原因：{errors[0][:200]}）"
+    return msg
 
 
 async def _get_missing_required(db, project_id: str, results: dict) -> list[str]:
@@ -2550,15 +2790,18 @@ async def _get_missing_required(db, project_id: str, results: dict) -> list[str]
         else:
             # 检查数据库中是否有
             try:
-                cur = await _execute(db, 
-                    "SELECT status, content FROM bid_analysis_items "
-                    "WHERE project_id=? AND item_id=?",
-                    (project_id, rid))
+                cur = await _execute(
+                    db,
+                    "SELECT status, content FROM bid_analysis_items " "WHERE project_id=? AND item_id=?",
+                    (project_id, rid),
+                )
                 row = await cur.fetchone()
-                if (not row or row["status"] != "success"
-                        or not row["content"]
-                        or is_missing_result(row["content"],
-                                             def_.get("output_type", "markdown"))):
+                if (
+                    not row
+                    or row["status"] != "success"
+                    or not row["content"]
+                    or is_missing_result(row["content"], def_.get("output_type", "markdown"))
+                ):
                     missing.append(item_label)
             except Exception:
                 missing.append(item_label)
@@ -2576,16 +2819,20 @@ async def _load_extraction_map(db, project_id: str, scheme_id: str) -> dict:
     """
     rows: list[dict] = []
     if scheme_id:
-        cur = await _execute(db, 
+        cur = await _execute(
+            db,
             "SELECT item_id, content, status, output_type FROM bid_analysis_items "
             "WHERE project_id=? AND scheme_id=?",
-            (project_id, scheme_id))
+            (project_id, scheme_id),
+        )
         rows = [dict(r) for r in await cur.fetchall()]
     if not rows:
-        cur = await _execute(db, 
+        cur = await _execute(
+            db,
             "SELECT item_id, content, status, output_type FROM bid_analysis_items "
             "WHERE " + FACT_SCOPE_SHARED_FRAGMENT + "",
-            (project_id,))
+            (project_id,),
+        )
         rows = [dict(r) for r in await cur.fetchall()]
     out: dict = {}
     for r in rows:
@@ -2620,8 +2867,7 @@ async def _resolve_classification_hint(db, scheme_id: str) -> str:
     if not settings.scheme_auto_classify or not scheme_id:
         return ""
     try:
-        cur = await _execute(db, 
-            "SELECT name, scheme_classification_json FROM schemes WHERE id=?", (scheme_id,))
+        cur = await _execute(db, "SELECT name, scheme_classification_json FROM schemes WHERE id=?", (scheme_id,))
         row = await cur.fetchone()
         if not row:
             return ""
@@ -2631,8 +2877,7 @@ async def _resolve_classification_hint(db, scheme_id: str) -> str:
                 data = json.loads(stored)
                 return sc.format_classification_hint(sc.SchemeClassification(**data))
             except Exception as e:
-                logger.debug("方案 %s 分类 JSON 解析失败（降级用方案名生成提示）: %s",
-                             str(scheme_id)[:8], e)
+                logger.debug("方案 %s 分类 JSON 解析失败（降级用方案名生成提示）: %s", str(scheme_id)[:8], e)
         if name:
             return sc.build_classification_hint(name)
     except Exception as e:  # 列缺失/解析失败都不阻断提取
@@ -2663,15 +2908,13 @@ async def classify_scheme_api(
        为 False 时返回 disabled（与「新增能力默认可关闭」一致）。
     """
     if not settings.scheme_auto_classify:
-        return {"ok": False, "disabled": True,
-                "reason": "scheme_auto_classify 已关闭，未执行分类"}
+        return {"ok": False, "disabled": True, "reason": "scheme_auto_classify 已关闭，未执行分类"}
 
     real_pid = await _resolve_pid(db, scheme_id, project_id)
     if not real_pid:
         raise HTTPException(400, "需要 scheme_id 或 project_id")
 
-    scheme_name = (body.get("scheme_name") or "").strip() \
-        or await _fetch_scheme_name(db, scheme_id)
+    scheme_name = (body.get("scheme_name") or "").strip() or await _fetch_scheme_name(db, scheme_id)
     params = body.get("params") or {}
     if not isinstance(params, dict):
         params = {}
@@ -2689,16 +2932,20 @@ async def classify_scheme_api(
             cur = await _execute(db, "PRAGMA table_info(schemes)")
             cols = {r[1] for r in await cur.fetchall()}
             if "scheme_classification_json" in cols:
-                await _execute(db, 
+                await _execute(
+                    db,
                     "UPDATE schemes SET hazard_category=?, hazard_subcategory=?, "
                     "is_hazardous=?, is_oversize=?, scheme_classification_json=?, "
                     "updated_at=datetime('now','localtime') WHERE id=?",
-                    (",".join(classification.category_ids),
-                     ",".join(classification.sub_ids),
-                     1 if classification.is_hazardous else 0,
-                     1 if classification.is_oversize else 0,
-                     json.dumps(classification.to_dict(), ensure_ascii=False),
-                     scheme_id))
+                    (
+                        ",".join(classification.category_ids),
+                        ",".join(classification.sub_ids),
+                        1 if classification.is_hazardous else 0,
+                        1 if classification.is_oversize else 0,
+                        json.dumps(classification.to_dict(), ensure_ascii=False),
+                        scheme_id,
+                    ),
+                )
                 await db.commit()
         except Exception as e:  # 写库失败不阻断分类结果返回
             logger.warning("写入方案分类失败（不影响返回）: %s", e)

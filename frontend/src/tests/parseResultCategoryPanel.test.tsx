@@ -83,7 +83,12 @@ const GROUPS: BaGroup[] = [
     label: "方案级基本信息",
     items: [
       { item_id: "schemeBasicInfo", label: "方案级基本信息", required: 1, output_type: "markdown" },
-      { item_id: "overviewParams", label: "工程概况与设计参数", required: 1, output_type: "markdown" },
+      {
+        item_id: "overviewParams",
+        label: "工程概况与设计参数",
+        required: 1,
+        output_type: "markdown",
+      },
     ],
   },
 ];
@@ -127,8 +132,16 @@ describe("ParseResultCategoryPanel · 分类栏与数量角标", () => {
     // project_info：1 项已 success → 1/1；scheme_info：0 项 success → 0/2
     expect(txt).toContain("1/1");
     expect(txt).toContain("0/2");
-    // 默认收起：解析项行不渲染
-    expect(container.querySelectorAll('.parse-cat-items .parse-cat-item-row').length).toBe(0);
+    // 2026-11-04：不大于 1 项的分类取消折叠、直接显示标题；
+    // project_info 仅 1 项 → 自动展开；scheme_info 2 项 → 仍默认收起。
+    const rows = container.querySelectorAll(".parse-cat-items .parse-cat-item-row");
+    expect(rows.length).toBe(1);
+    expect(
+      container.querySelector('.parse-cat-item-row[data-item-id="projectBasicInfo"]'),
+    ).not.toBeNull();
+    expect(
+      container.querySelector('.parse-cat-item-row[data-item-id="schemeBasicInfo"]'),
+    ).toBeNull();
   });
 
   it("点击分类头展开/收起：展开后出现该分类解析项", () => {
@@ -139,13 +152,15 @@ describe("ParseResultCategoryPanel · 分类栏与数量角标", () => {
 
     fireEvent.click(header);
     expect(header.getAttribute("aria-expanded")).toBe("true");
-    const rows = container.querySelectorAll('.parse-cat-items .parse-cat-item-row');
-    expect(rows.length).toBe(2);
+    // 多于此 1 项的分类展开后渲染其 2 条解析项（单（或零）项分类常显，不参与折叠）
+    const rows = container.querySelectorAll(".parse-cat-items .parse-cat-item-row");
+    expect(rows.length).toBe(3);
     expect(container.textContent || "").toContain("工程概况与设计参数");
 
     fireEvent.click(header);
     expect(header.getAttribute("aria-expanded")).toBe("false");
-    expect(container.querySelectorAll('.parse-cat-items .parse-cat-item-row').length).toBe(0);
+    // 仅剩自动展开的单（或零）项分类的行
+    expect(container.querySelectorAll(".parse-cat-items .parse-cat-item-row").length).toBe(1);
   });
 
   it("点击解析项：上抛 onSelectItem，且携带「定义 + 结果」合并对象", () => {
@@ -169,7 +184,7 @@ describe("ParseResultCategoryPanel · 分类栏与数量角标", () => {
     fireEvent.click(container.querySelector('.parse-cat-header[data-group-key="scheme_info"]')!);
     // 主区标题 + 该分类下两项（主区列表同样使用 parse-cat-item-row）
     expect(container.textContent || "").toContain("方案级基本信息（2 项，点击查看详情）");
-    const contentRows = container.querySelectorAll('.parse-cat-content .parse-cat-item-row');
+    const contentRows = container.querySelectorAll(".parse-cat-content .parse-cat-item-row");
     expect(contentRows.length).toBe(2);
   });
 });
@@ -246,7 +261,7 @@ describe("ParseResultCategoryPanel · 选中详情与操作", () => {
     const { container } = setup({ selectedItem: selected });
     fireEvent.click(btn(container, "复制")!);
     await waitFor(() => {
-      expect((navigator.clipboard.writeText as any)).toHaveBeenCalledWith(selected.content);
+      expect(navigator.clipboard.writeText as any).toHaveBeenCalledWith(selected.content);
     });
     await waitFor(() => {
       expect(document.body.textContent || "").toContain("已复制到剪贴板");
@@ -257,7 +272,9 @@ describe("ParseResultCategoryPanel · 选中详情与操作", () => {
     const { container } = setup({ selectedItem: selected });
     const header = container.querySelector('.parse-cat-header[data-group-key="project_info"]')!;
     expect(header.getAttribute("aria-expanded")).toBe("true");
-    const row = container.querySelector('.parse-cat-items .parse-cat-item-row[data-item-id="projectBasicInfo"]')!;
+    const row = container.querySelector(
+      '.parse-cat-items .parse-cat-item-row[data-item-id="projectBasicInfo"]',
+    )!;
     expect(row).not.toBeNull();
   });
 });
@@ -315,13 +332,39 @@ describe("ParseResultCategoryPanel · 纯函数", () => {
   });
 
   it("baStatusTag：success/pending/error/manual/无内容 口径", () => {
-    expect((baStatusTag({ item_id: "x", status: "success", content: "abc" }, { output_type: "markdown" }) as any).props.color).toBe("green");
-    expect((baStatusTag({ item_id: "x", status: "success", content: "未提取到" }, { output_type: "markdown" }) as any).props.color).toBe("volcano");
-    expect((baStatusTag({ item_id: "x", status: "success", content: "abc", source: "manual" }, { output_type: "markdown" }) as any).props.color).toBe("purple");
+    expect(
+      (
+        baStatusTag(
+          { item_id: "x", status: "success", content: "abc" },
+          { output_type: "markdown" },
+        ) as any
+      ).props.color,
+    ).toBe("green");
+    expect(
+      (
+        baStatusTag(
+          { item_id: "x", status: "success", content: "未提取到" },
+          { output_type: "markdown" },
+        ) as any
+      ).props.color,
+    ).toBe("volcano");
+    expect(
+      (
+        baStatusTag(
+          { item_id: "x", status: "success", content: "abc", source: "manual" },
+          { output_type: "markdown" },
+        ) as any
+      ).props.color,
+    ).toBe("purple");
     // error 态外层包裹 Tooltip（展示失败原因），红 Tag 在其 children 上
-    const errEl = baStatusTag({ item_id: "x", status: "error" }, { output_type: "markdown" }) as any;
+    const errEl = baStatusTag(
+      { item_id: "x", status: "error" },
+      { output_type: "markdown" },
+    ) as any;
     expect(errEl.props.children.props.color).toBe("red");
-    expect((baStatusTag(undefined, { output_type: "markdown" }) as any).props.color).toBe("default");
+    expect((baStatusTag(undefined, { output_type: "markdown" }) as any).props.color).toBe(
+      "default",
+    );
   });
 
   it("copyTextToClipboard：无 clipboard API 时降级 execCommand", async () => {
@@ -341,7 +384,10 @@ describe("ParseResultCategoryPanel · 纯函数", () => {
 describe("ParseResultCategoryPanel · list-only/detail-only 联动（sharedState）", () => {
   it("左栏 list-only 点击分类 → 右栏 detail-only 经 sharedState 同步展示该分类解析项", async () => {
     const onSelectItem = vi.fn();
-    const sharedState = { expanded: {} as Record<string, boolean>, activeKey: null as string | null };
+    const sharedState = {
+      expanded: {} as Record<string, boolean>,
+      activeKey: null as string | null,
+    };
     const utils = render(
       <AntdApp>
         <div data-testid="list">

@@ -8,6 +8,7 @@
 5. 完整性报告 / 时效性判定（指纹变更、过期）/ 增量跳过
 6. 既有上传/解析链路的挂钩（失败不影响主链路）
 """
+
 import io
 import json
 import uuid
@@ -46,6 +47,7 @@ async def ctx(db_conn, tmp_path, monkeypatch):
 # 1. 原文层：指纹 / meta / 索引 / 原子写
 # ---------------------------------------------------------------------------
 
+
 def test_fingerprints_and_atomic_io(tmp_path):
     data = "深度 12.5m".encode("utf-8")
     fp = store.file_fingerprints(data)
@@ -69,8 +71,8 @@ async def test_ingest_upload_writes_raw_layer(ctx):
 
     # DB 指纹列已写入（时效性）
     cur = await db.execute(
-        "SELECT file_hash_md5, file_hash_sha256, parse_status"
-        " FROM project_documents WHERE id=?", (doc_id,))
+        "SELECT file_hash_md5, file_hash_sha256, parse_status" " FROM project_documents WHERE id=?", (doc_id,)
+    )
     row = dict(await cur.fetchone())
     assert len(row["file_hash_md5"]) == 32 and len(row["file_hash_sha256"]) == 64
     assert row["parse_status"] == "pending"
@@ -126,9 +128,7 @@ def test_parse_markdown_structured_pages_tables():
 
 
 def test_chunker_section_table_semantic():
-    chunks = chunk_document(MD_SAMPLE, doc_id="dX",
-                            structured=parse_markdown_structured(
-                                MD_SAMPLE, doc_id="dX"))
+    chunks = chunk_document(MD_SAMPLE, doc_id="dX", structured=parse_markdown_structured(MD_SAMPLE, doc_id="dX"))
     types = {c["chunk_type"] for c in chunks}
     assert "table" in types and "section" in types
     for c in chunks:
@@ -150,6 +150,7 @@ def test_chunker_section_table_semantic():
 # 3. 解析入库（阶段2+3 落盘 + 增量 diff）
 # ---------------------------------------------------------------------------
 
+
 async def _upload_and_parse(ctx, content: bytes = None):
     db, pid, docs_root, uploads = ctx
     content = content or "# 第一章 工程概况\n\n基坑深度 12.5m。\n".encode("utf-8")
@@ -168,7 +169,9 @@ async def test_parse_populates_four_layers(ctx):
     # DB 时效列
     cur = await db.execute(
         "SELECT parse_status, parse_version, file_hash_md5, page_count,"
-        " completeness_json, parsed_at FROM project_documents WHERE id=?", (doc_id,))
+        " completeness_json, parsed_at FROM project_documents WHERE id=?",
+        (doc_id,),
+    )
     row = dict(await cur.fetchone())
     assert row["parse_status"] == "success"
     assert row["parse_version"] == "v1"
@@ -178,28 +181,26 @@ async def test_parse_populates_four_layers(ctx):
 
     # 解析层磁盘产物齐全
     pdir = store.layer_dir(pid, doc_id, store.LAYER_PARSED)
-    for suffix in ("_parsed.md", "_pages.json", "_tables.json",
-                   "_images.json", "_meta.json"):
+    for suffix in ("_parsed.md", "_pages.json", "_tables.json", "_images.json", "_meta.json"):
         assert (pdir / f"{doc_id}{suffix}").exists(), f"缺解析层产物 {suffix}"
     md = (pdir / f"{doc_id}_parsed.md").read_text(encoding="utf-8")
     assert md.startswith("---\ndoc_id:"), "解析层 Markdown 需 front-matter"
 
     # 语义层索引
-    sem = store.read_json(
-        store.layer_dir(pid, doc_id, store.LAYER_SEMANTIC) / f"{doc_id}_semantic.json")
+    sem = store.read_json(store.layer_dir(pid, doc_id, store.LAYER_SEMANTIC) / f"{doc_id}_semantic.json")
     assert sem["status"] == "index_ready" and sem["chunk_count"] >= 1
 
     # doc_chunks 溯源
     cur = await db.execute(
-        "SELECT COUNT(*) n, SUM(CASE WHEN source_ref LIKE ? THEN 1 ELSE 0 END) t"
-        " FROM doc_chunks WHERE doc_id=?", (f"{doc_id}#page:%", doc_id))
+        "SELECT COUNT(*) n, SUM(CASE WHEN source_ref LIKE ? THEN 1 ELSE 0 END) t" " FROM doc_chunks WHERE doc_id=?",
+        (f"{doc_id}#page:%", doc_id),
+    )
     r = dict(await cur.fetchone())
     assert r["n"] >= 1 and r["n"] == r["t"], "每块都要有 source_ref"
 
     # 重复解析：版本递增到 v2（时效性）
     await gf.parse_document(doc_id, force=True, db=db)
-    cur = await db.execute(
-        "SELECT parse_version FROM project_documents WHERE id=?", (doc_id,))
+    cur = await db.execute("SELECT parse_version FROM project_documents WHERE id=?", (doc_id,))
     assert (await cur.fetchone())["parse_version"] == "v2"
 
 
@@ -233,15 +234,14 @@ async def test_single_column_table_and_block_math_e2e(ctx):
     assert table["title"] != "$$"
 
     # 完整性快照：跨行公式计入 total_formulas（旧实现为 0）
-    cur = await db.execute(
-        "SELECT completeness_json FROM project_documents WHERE id=?", (doc_id,))
+    cur = await db.execute("SELECT completeness_json FROM project_documents WHERE id=?", (doc_id,))
     snap = json.loads((await cur.fetchone())["completeness_json"])
     assert snap["total_formulas"] == 1
 
     # 分块层：存在 table 型语义块，文本含单列表内容
     cur = await db.execute(
-        "SELECT text, source_ref FROM doc_chunks "
-        "WHERE doc_id=? AND chunk_type='table'", (doc_id,))
+        "SELECT text, source_ref FROM doc_chunks " "WHERE doc_id=? AND chunk_type='table'", (doc_id,)
+    )
     rows = [dict(r) for r in await cur.fetchall()]
     assert rows and any("钢筋" in r["text"] for r in rows)
     assert all(r["source_ref"].startswith(f"{doc_id}#page:") for r in rows)
@@ -255,20 +255,19 @@ async def test_incremental_reparse_skips_unchanged(ctx):
     assert res["ok"] and res["skipped"] is True
 
     # 源文件变更 → 指纹不一致，触发重解析
-    fpath = uploads / pid / [p.name for p in (uploads / pid).iterdir()
-                             if p.name.startswith(doc_id[:8])][0]
+    fpath = uploads / pid / [p.name for p in (uploads / pid).iterdir() if p.name.startswith(doc_id[:8])][0]
     fpath.write_bytes("# 第二章 新内容\n\n支模高度 8.5m。\n".encode("utf-8"))
     res2 = await dp_api.reparse_document(doc_id, body={"mode": "incremental"}, db=db)
     assert res2.get("skipped") in (False, None)
     assert res2["file_changed_detected"] is True
-    cur = await db.execute(
-        "SELECT parse_version FROM project_documents WHERE id=?", (doc_id,))
+    cur = await db.execute("SELECT parse_version FROM project_documents WHERE id=?", (doc_id,))
     assert (await cur.fetchone())["parse_version"] == "v2"
 
 
 # ---------------------------------------------------------------------------
 # 4. 提取层物化（阶段4 产物 → 标准格式，阶段7 入库索引）
 # ---------------------------------------------------------------------------
+
 
 async def test_sync_extract_layer(ctx):
     db, pid, docs_root, uploads = ctx
@@ -278,18 +277,38 @@ async def test_sync_extract_layer(ctx):
         "INSERT INTO bid_analysis_items (id, project_id, item_id, label,"
         " output_type, required, status, content, sort_order)"
         " VALUES (?,?,?,?,'json',1,'success',?,1)",
-        (f"{pid}_projectBasicInfo", pid, "projectBasicInfo", "项目级基本信息",
-         json.dumps({"project_info": {
-             "project_name": {"value": "某某工程", "confidence": 0.98,
-                              "source": f"{doc_id}#page:1#para:3"},
-             "location": {"value": "上海市嘉定区"}}}, ensure_ascii=False)))
+        (
+            f"{pid}_projectBasicInfo",
+            pid,
+            "projectBasicInfo",
+            "项目级基本信息",
+            json.dumps(
+                {
+                    "project_info": {
+                        "project_name": {"value": "某某工程", "confidence": 0.98, "source": f"{doc_id}#page:1#para:3"},
+                        "location": {"value": "上海市嘉定区"},
+                    }
+                },
+                ensure_ascii=False,
+            ),
+        ),
+    )
     await db.execute(
         "INSERT INTO global_facts (id, project_id, group_id, group_title, title,"
         " content, category, source_ref, confidence, is_resolved)"
         " VALUES (?,?,?,?,?,?,?,?,?,1)",
-        (uuid.uuid4().hex, pid, "project_team", "项目角色变量", "项目经理",
-         "- **项目经理**: 张伟", "personnel",
-         json.dumps([{"file": "设计说明.txt", "quote": "page:8#para:3"}]), 0.9))
+        (
+            uuid.uuid4().hex,
+            pid,
+            "project_team",
+            "项目角色变量",
+            "项目经理",
+            "- **项目经理**: 张伟",
+            "personnel",
+            json.dumps([{"file": "设计说明.txt", "quote": "page:8#para:3"}]),
+            0.9,
+        ),
+    )
     await db.commit()
 
     res = await dp_api.sync_extractions(doc_id, db=db)
@@ -301,8 +320,9 @@ async def test_sync_extract_layer(ctx):
     payload = store.read_extraction(pid, doc_id, "project_info")
     assert payload["project_info"]["project_name"]["value"] == "某某工程"
     cur = await db.execute(
-        "SELECT extract_type, source_refs, confidence FROM doc_extractions"
-        " WHERE doc_id=? ORDER BY extract_type", (doc_id,))
+        "SELECT extract_type, source_refs, confidence FROM doc_extractions" " WHERE doc_id=? ORDER BY extract_type",
+        (doc_id,),
+    )
     rows = [dict(r) for r in await cur.fetchall()]
     assert {r["extract_type"] for r in rows} >= {"project_info", "global_facts"}
     refs = json.loads(rows[0]["source_refs"])
@@ -319,6 +339,7 @@ async def test_sync_extract_layer(ctx):
 # 5. 完整性 / 时效性 / 交叉校验
 # ---------------------------------------------------------------------------
 
+
 async def test_completeness_report(ctx):
     db, pid, docs_root, uploads = ctx
     doc_id = await _upload_and_parse(ctx)
@@ -329,8 +350,8 @@ async def test_completeness_report(ctx):
     assert 0 <= rep["quality_score"] <= 1
     # 报告已归档（可追溯）
     cur = await db.execute(
-        "SELECT COUNT(*) n FROM doc_validation_reports WHERE doc_id=? AND kind"
-        "='completeness'", (doc_id,))
+        "SELECT COUNT(*) n FROM doc_validation_reports WHERE doc_id=? AND kind" "='completeness'", (doc_id,)
+    )
     assert ((await cur.fetchone())["n"]) >= 1
 
 
@@ -341,20 +362,17 @@ async def test_freshness_states(ctx):
     assert fresh["status"] == "valid"
 
     # 篡改源文件 → file_changed
-    fpath = uploads / pid / [p.name for p in (uploads / pid).iterdir()
-                             if p.name.startswith(doc_id[:8])][0]
+    fpath = uploads / pid / [p.name for p in (uploads / pid).iterdir() if p.name.startswith(doc_id[:8])][0]
     fpath.write_bytes("改过的内容，完全不同。".encode("utf-8"))
     fresh2 = await dp_api.document_freshness(doc_id, db=db)
     assert fresh2["status"] == "file_changed"
 
     # 过期 → expired
     meta = store.read_meta(pid, doc_id)
-    meta["expires_at"] = (datetime.now(timezone.utc) - timedelta(days=1)
-                          ).strftime("%Y-%m-%dT%H:%M:%SZ")
+    meta["expires_at"] = (datetime.now(timezone.utc) - timedelta(days=1)).strftime("%Y-%m-%dT%H:%M:%SZ")
     meta["file_hash_md5"] = fresh["file_hash_md5"]  # 排除变更干扰，只验过期
     store.write_meta(pid, doc_id, meta)
-    cur = await db.execute("SELECT file_hash_md5 FROM project_documents WHERE id=?",
-                           (doc_id,))
+    cur = await db.execute("SELECT file_hash_md5 FROM project_documents WHERE id=?", (doc_id,))
     unchanged_md5 = meta["file_hash_md5"]
     fresh3 = pipeline.compute_freshness(meta, current_md5=unchanged_md5)
     assert fresh3["status"] == "expired"
@@ -366,20 +384,20 @@ async def test_cross_check_persists(ctx):
     await db.execute(
         "INSERT INTO global_facts (id, project_id, title, content, category,"
         " fact_key, has_conflict) VALUES (?,?,?,?,?,?,1)",
-        (uuid.uuid4().hex, pid, "总工期", "- **总工期**: 450天", "schedule",
-         "total_duration"))
+        (uuid.uuid4().hex, pid, "总工期", "- **总工期**: 450天", "schedule", "total_duration"),
+    )
     await db.commit()
     rep = await dp_api.cross_check(doc_id, db=db)
     assert rep["fact_count"] == 1
     assert rep["stored_conflicts"] == 1
-    cur = await db.execute(
-        "SELECT COUNT(*) n FROM doc_validation_reports WHERE kind='cross_check'")
+    cur = await db.execute("SELECT COUNT(*) n FROM doc_validation_reports WHERE kind='cross_check'")
     assert ((await cur.fetchone())["n"]) == 1
 
 
 # ---------------------------------------------------------------------------
 # 6. 状态查询 / 删除清理 / 失败降级
 # ---------------------------------------------------------------------------
+
 
 async def test_status_and_index_endpoints(ctx):
     db, pid, docs_root, uploads = ctx
@@ -398,8 +416,7 @@ async def test_delete_purges_layers(ctx):
     assert store.doc_dir(pid, doc_id).exists()
     await gf.delete_document(doc_id, db=db)
     assert not store.doc_dir(pid, doc_id).exists(), "四层目录须随文档删除清理"
-    cur = await db.execute("SELECT COUNT(*) n FROM doc_chunks WHERE doc_id=?",
-                           (doc_id,))
+    cur = await db.execute("SELECT COUNT(*) n FROM doc_chunks WHERE doc_id=?", (doc_id,))
     assert ((await cur.fetchone())["n"]) == 0
 
 
@@ -413,25 +430,23 @@ async def test_layer_failure_does_not_break_parse(ctx, monkeypatch):
 
     def _boom(*a, **k):
         raise OSError("disk full")
-    for fn in ("write_parsed_layer", "write_meta", "write_semantic_index",
-               "write_extraction", "update_index"):
+
+    for fn in ("write_parsed_layer", "write_meta", "write_semantic_index", "write_extraction", "update_index"):
         monkeypatch.setattr(store, fn, _boom)
 
     doc_id = await _upload_and_parse(ctx)
-    cur = await db.execute(
-        "SELECT parse_status, parsed_markdown FROM project_documents WHERE id=?",
-        (doc_id,))
+    cur = await db.execute("SELECT parse_status, parsed_markdown FROM project_documents WHERE id=?", (doc_id,))
     row = dict(await cur.fetchone())
     assert row["parse_status"] == "success" and row["parsed_markdown"]
     # 块仍然入库（DB 层不受磁盘故障影响）
-    cur = await db.execute("SELECT COUNT(*) n FROM doc_chunks WHERE doc_id=?",
-                           (doc_id,))
+    cur = await db.execute("SELECT COUNT(*) n FROM doc_chunks WHERE doc_id=?", (doc_id,))
     assert ((await cur.fetchone())["n"]) >= 1
 
 
 # ---------------------------------------------------------------------------
 # 7. 2026-09-20 审计回归：同名替换泄漏 / 解析代次回退 / 分类三侧口径
 # ---------------------------------------------------------------------------
+
 
 async def test_same_name_reupload_purges_old_layers(ctx):
     """同名替换上传：旧文档的 doc_chunks 行与四层磁盘产物必须同步清理。
@@ -442,8 +457,7 @@ async def test_same_name_reupload_purges_old_layers(ctx):
     db, pid, docs_root, uploads = ctx
     first = await _upload_and_parse(ctx)
     assert store.doc_dir(pid, first).exists()
-    cur = await db.execute(
-        "SELECT COUNT(*) n FROM doc_chunks WHERE doc_id=?", (first,))
+    cur = await db.execute("SELECT COUNT(*) n FROM doc_chunks WHERE doc_id=?", (first,))
     assert ((await cur.fetchone())["n"]) >= 1
 
     # 同名再传（内容不同→指纹/原件都会替换）
@@ -453,8 +467,7 @@ async def test_same_name_reupload_purges_old_layers(ctx):
     new_id = res["saved"][0]["id"]
     assert new_id != first
 
-    cur = await db.execute("SELECT COUNT(*) n FROM doc_chunks WHERE doc_id=?",
-                           (first,))
+    cur = await db.execute("SELECT COUNT(*) n FROM doc_chunks WHERE doc_id=?", (first,))
     assert ((await cur.fetchone())["n"]) == 0, "旧文档分块必须随替换清理"
     assert not store.doc_dir(pid, first).exists(), "旧文档四层目录必须随替换清理"
     # 新文档尚未解析：不应残留上一代的目录
@@ -465,26 +478,24 @@ async def test_reparse_legacy_empty_version_bumps_to_v2(ctx):
     db, pid, docs_root, uploads = ctx
     doc_id = await _upload_and_parse(ctx)
     # 模拟四层存储上线前解析的存量文档：有内容、无版本记录
-    await db.execute("UPDATE project_documents SET parse_version='' WHERE id=?",
-                     (doc_id,))
+    await db.execute("UPDATE project_documents SET parse_version='' WHERE id=?", (doc_id,))
     await db.commit()
     parsed = await gf.parse_document(doc_id, force=True, db=db)
     assert parsed["ok"]
-    cur = await db.execute(
-        "SELECT parse_version FROM project_documents WHERE id=?", (doc_id,))
+    cur = await db.execute("SELECT parse_version FROM project_documents WHERE id=?", (doc_id,))
     assert (await cur.fetchone())["parse_version"] == "v2"
 
 
 async def test_category_update_rejects_unknown_value(ctx):
     """分类改判只接受登记过的合法值（三侧口径：提取优先级/Tag 颜色都依赖它）。"""
     import fastapi
+
     db, pid, docs_root, uploads = ctx
     doc_id = await _upload_and_parse(ctx)
     with pytest.raises(fastapi.HTTPException) as ei:
         await gf.update_document_category(doc_id, {"doc_category": "随便写的"}, db=db)
     assert ei.value.status_code == 400
-    cur = await db.execute(
-        "SELECT doc_category FROM project_documents WHERE id=?", (doc_id,))
+    cur = await db.execute("SELECT doc_category FROM project_documents WHERE id=?", (doc_id,))
     assert (await cur.fetchone())["doc_category"] != "随便写的"
     # 合法值仍可通过
     ok = await gf.update_document_category(doc_id, {"doc_category": "地勘报告"}, db=db)
@@ -499,14 +510,14 @@ async def test_empty_reason_buckets_contract(ctx):
     res = await gf.upload_documents(scheme_id="", project_id=pid, files=[f], db=db)
     assert res["saved_count"] == 0
     assert res.get("unsupported") == ["report.exe"]
-    cur = await db.execute(
-        "SELECT COUNT(*) n FROM project_documents WHERE project_id=?", (pid,))
+    cur = await db.execute("SELECT COUNT(*) n FROM project_documents WHERE project_id=?", (pid,))
     assert ((await cur.fetchone())["n"]) == 0
 
 
 # ---------------------------------------------------------------------------
 # 8. 2026-09-21 上传解析模块专项审计：质量分回写 / 状态 0 分 / 分块分页过滤
 # ---------------------------------------------------------------------------
+
 
 async def test_completeness_persists_quality_to_db_column(ctx):
     """完整性校验必须把质量分回写 project_documents.quality_score（status 读该列）。
@@ -517,14 +528,12 @@ async def test_completeness_persists_quality_to_db_column(ctx):
     db, pid, docs_root, uploads = ctx
     doc_id = await _upload_and_parse(ctx)
     # 初始：列仍为默认哨兵（-1，未评估）
-    cur = await db.execute(
-        "SELECT quality_score FROM project_documents WHERE id=?", (doc_id,))
+    cur = await db.execute("SELECT quality_score FROM project_documents WHERE id=?", (doc_id,))
     assert float((await cur.fetchone())["quality_score"]) < 0
 
     rep = await dp_api.document_completeness(doc_id, refresh=True, db=db)
     q = rep["quality_score"]
-    cur = await db.execute(
-        "SELECT quality_score FROM project_documents WHERE id=?", (doc_id,))
+    cur = await db.execute("SELECT quality_score FROM project_documents WHERE id=?", (doc_id,))
     assert float((await cur.fetchone())["quality_score"]) == pytest.approx(q)
     # 状态接口现在能读出真实质量分（不再恒 null）
     st = await dp_api.document_status(doc_id, db=db)
@@ -535,14 +544,12 @@ async def test_status_quality_score_zero_not_swallowed(ctx):
     """质量分恰为 0 不得被 `or -1` 短路吞成 null；仅 -1 哨兵 / None 才归一 null。"""
     db, pid, docs_root, uploads = ctx
     doc_id = await _upload_and_parse(ctx)
-    await db.execute(
-        "UPDATE project_documents SET quality_score=0 WHERE id=?", (doc_id,))
+    await db.execute("UPDATE project_documents SET quality_score=0 WHERE id=?", (doc_id,))
     await db.commit()
     st = await dp_api.document_status(doc_id, db=db)
     assert st["quality_score"] == 0
     # -1 哨兵（未评估）仍应为 null
-    await db.execute(
-        "UPDATE project_documents SET quality_score=-1 WHERE id=?", (doc_id,))
+    await db.execute("UPDATE project_documents SET quality_score=-1 WHERE id=?", (doc_id,))
     await db.commit()
     st2 = await dp_api.document_status(doc_id, db=db)
     assert st2["quality_score"] is None
@@ -556,10 +563,8 @@ async def test_chunks_total_respects_type_filter(ctx):
         "工程规模表\n【表格】\n| 项目 | 数值 |\n| --- | --- |\n| 深度 | 12.5 |\n"
     ).encode("utf-8")
     doc_id = await _upload_and_parse(ctx, content=content)
-    all_res = await dp_api.get_chunks(
-        doc_id, chunk_type="", page_num=0, limit=500, offset=0, db=db)
-    tbl_res = await dp_api.get_chunks(
-        doc_id, chunk_type="table", page_num=0, limit=500, offset=0, db=db)
+    all_res = await dp_api.get_chunks(doc_id, chunk_type="", page_num=0, limit=500, offset=0, db=db)
+    tbl_res = await dp_api.get_chunks(doc_id, chunk_type="table", page_num=0, limit=500, offset=0, db=db)
     assert tbl_res["total"] >= 1
     assert all_res["total"] > tbl_res["total"], "全量 total 应大于按类型过滤后"
     assert tbl_res["total"] == len(tbl_res["items"]), "total 必须等于过滤后命中数"
@@ -569,6 +574,7 @@ async def test_chunks_total_respects_type_filter(ctx):
 # 2026-09-25 技术债修复回归：created_at 继承 / 提取类别覆盖护栏 /
 # completeness 响应结构 / 置信度未评估哨兵
 # ---------------------------------------------------------------------------
+
 
 class TestExtractTypeCoverage:
     """提取类别 ↔ 解析项映射的漂移护栏（boq 预留契约的机器可校验形式）。"""
@@ -581,8 +587,7 @@ class TestExtractTypeCoverage:
         for types in pipeline._ITEM_TO_EXTRACT_TYPE.values():
             mapped.update(types)
         special_sources = {"global_facts"}
-        active = [t for t in store.EXTRACT_TYPES
-                  if t not in store.RESERVED_EXTRACT_TYPES and t not in special_sources]
+        active = [t for t in store.EXTRACT_TYPES if t not in store.RESERVED_EXTRACT_TYPES and t not in special_sources]
         missing = [t for t in active if t not in mapped]
         assert not missing, f"非预留提取类别缺少解析项映射: {missing}"
 
@@ -605,10 +610,9 @@ async def test_reparse_preserves_created_at_of_unchanged_chunks(ctx, monkeypatch
 
     async def _chunk_times():
         cur = await db.execute(
-            "SELECT chunk_id, hash, created_at FROM doc_chunks WHERE doc_id=?"
-            " ORDER BY chunk_id", (doc_id,))
-        return {r["chunk_id"]: (r["hash"], r["created_at"])
-                for r in await cur.fetchall()}
+            "SELECT chunk_id, hash, created_at FROM doc_chunks WHERE doc_id=?" " ORDER BY chunk_id", (doc_id,)
+        )
+        return {r["chunk_id"]: (r["hash"], r["created_at"]) for r in await cur.fetchall()}
 
     first = await _chunk_times()
     assert first, "首次解析必须产出分块"
@@ -624,14 +628,12 @@ async def test_reparse_preserves_created_at_of_unchanged_chunks(ctx, monkeypatch
     # 内容变更：固定重解析时刻 → 变更块的 created_at 必须等于该时刻
     FROZEN = "2099-01-01T00:00:00Z"
     monkeypatch.setattr(pipeline, "_now", lambda: FROZEN)
-    fpath = uploads / pid / [p.name for p in (uploads / pid).iterdir()
-                             if p.name.startswith(doc_id[:8])][0]
+    fpath = uploads / pid / [p.name for p in (uploads / pid).iterdir() if p.name.startswith(doc_id[:8])][0]
     fpath.write_bytes("# 第一章 工程概况\n\n基坑深度 15.0m，地质稳定。\n".encode("utf-8"))
     await dp_api.reparse_document(doc_id, body={"mode": "incremental"}, db=db)
     monkeypatch.undo()
     third = await _chunk_times()
-    refreshed = [cid for cid, (h, t) in third.items()
-                 if cid in first and t == FROZEN and h != first[cid][0]]
+    refreshed = [cid for cid, (h, t) in third.items() if cid in first and t == FROZEN and h != first[cid][0]]
     assert refreshed, "内容变更后至少一个块的 created_at 应刷新为重解析时刻"
 
 
@@ -653,19 +655,24 @@ async def test_completeness_response_shape_consistent(ctx):
 
 def test_avg_confidence_unassessed_sentinel():
     """无置信度字段时返回 0.0（未评估），不再伪装成 0.9 高确信。"""
-    payload_md = {"doc_id": "d", "extract_time": "", "extract_schema_version": "v",
-                  "engineering": {"overviewParams_markdown": "正文"},
-                  "source_items": []}
+    payload_md = {
+        "doc_id": "d",
+        "extract_time": "",
+        "extract_schema_version": "v",
+        "engineering": {"overviewParams_markdown": "正文"},
+        "source_items": [],
+    }
     assert pipeline._avg_confidence(payload_md) == 0.0
-    payload_json = {"doc_id": "d", "extract_time": "", "extract_schema_version": "v",
-                    "project_info": {
-                        "project_name": {"value": "x", "confidence": 0.98,
-                                         "source": "s"}}}
+    payload_json = {
+        "doc_id": "d",
+        "extract_time": "",
+        "extract_schema_version": "v",
+        "project_info": {"project_name": {"value": "x", "confidence": 0.98, "source": "s"}},
+    }
     assert pipeline._avg_confidence(payload_json) == 0.98
     # Markdown 来源的 project_info 字段：三要素 confidence 为未评估哨兵
     merged = pipeline._merge_item_contents(
-        "project_info", [{"item_id": "projectBasicInfo", "output_type": "markdown",
-                          "content": "项目名称：某工程"}])
+        "project_info", [{"item_id": "projectBasicInfo", "output_type": "markdown", "content": "项目名称：某工程"}]
+    )
     field = merged["projectBasicInfo_markdown"]
     assert field["confidence"] == 0.0 and field["value"] == "项目名称：某工程"
-

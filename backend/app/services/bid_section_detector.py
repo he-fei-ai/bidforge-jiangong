@@ -14,6 +14,7 @@
 现依据字节码（常量表 + 反汇编）逐函数重建，并用「编译后逐函数 dis 比对」
 验证与原始实现完全等价（见 _diagnostics/_bsd_verify.py）。
 """
+
 from __future__ import annotations
 
 import re
@@ -21,9 +22,21 @@ from typing import Optional
 
 # 中文数字 → 阿拉伯数字（小写 1–10 + 大写壹–伍）
 CHINESE_SMALL_MAP = {
-    "一": 1, "二": 2, "三": 3, "四": 4, "五": 5,
-    "六": 6, "七": 7, "八": 8, "九": 9, "十": 10,
-    "壹": 1, "贰": 2, "叁": 3, "肆": 4, "伍": 5,
+    "一": 1,
+    "二": 2,
+    "三": 3,
+    "四": 4,
+    "五": 5,
+    "六": 6,
+    "七": 7,
+    "八": 8,
+    "九": 9,
+    "十": 10,
+    "壹": 1,
+    "贰": 2,
+    "叁": 3,
+    "肆": 4,
+    "伍": 5,
 }
 
 # 含"零"占位，使 index() 结果与数值对齐（"一"→1 … "十"→10；"零"→0 视为无效）
@@ -32,8 +45,15 @@ _CHINESE_DIGITS = ("零", "一", "二", "三", "四", "五", "六", "七", "八"
 # ✅ 增强（2026-09-25）：大写数字组合位（贰拾/拾贰 等金额式写法，正式招标文件常见）。
 # CHINESE_SMALL_MAP 只有单字壹–伍，组合位需要完整的 壹–玖 取值表。
 _CHINESE_UPPER_DIGITS = {
-    "壹": 1, "贰": 2, "叁": 3, "肆": 4, "伍": 5,
-    "陆": 6, "柒": 7, "捌": 8, "玖": 9,
+    "壹": 1,
+    "贰": 2,
+    "叁": 3,
+    "肆": 4,
+    "伍": 5,
+    "陆": 6,
+    "柒": 7,
+    "捌": 8,
+    "玖": 9,
 }
 # 「十」的小写/大写写法在组合位等价（二十 / 贰拾）
 _TEN_CHARS = ("十", "拾")
@@ -204,9 +224,7 @@ def count_bracket_sections(text: str):
     for m in _BRACKET_PATTERN.finditer(text):
         parent = int(m.group(1))
         child = int(m.group(2)) if m.group(2) else None
-        if not parent or parent < 1 or _is_document_number_line(
-            _get_line_at(text, m.start())
-        ):
+        if not parent or parent < 1 or _is_document_number_line(_get_line_at(text, m.start())):
             continue
         if child:
             children.add(f"【{parent}-{child}】")

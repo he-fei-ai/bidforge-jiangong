@@ -5,6 +5,7 @@
 /bid-analysis/check-sections 与前端「多标段」提示，历史上无任何单测覆盖
 （全仓 grep 0 命中），属高风险盲区，现补齐回归基线。
 """
+
 import pytest
 from app.services.bid_section_detector import (
     count_bracket_sections,
@@ -18,20 +19,24 @@ from app.services.bid_section_detector import (
 # 中文数字归一
 # ---------------------------------------------------------------------------
 
+
 class TestNormalizeChineseNumber:
-    @pytest.mark.parametrize("s,expect", [
-        ("3", 3),
-        ("12", 12),
-        ("99", 99),
-        ("一", 1),
-        ("九", 9),
-        ("十", 10),
-        ("十一", 11),
-        ("二十", 20),
-        ("二十三", 23),
-        ("壹", 1),
-        ("伍", 5),
-    ])
+    @pytest.mark.parametrize(
+        "s,expect",
+        [
+            ("3", 3),
+            ("12", 12),
+            ("99", 99),
+            ("一", 1),
+            ("九", 9),
+            ("十", 10),
+            ("十一", 11),
+            ("二十", 20),
+            ("二十三", 23),
+            ("壹", 1),
+            ("伍", 5),
+        ],
+    )
     def test_valid(self, s, expect):
         assert normalize_chinese_number(s) == expect
 
@@ -43,6 +48,7 @@ class TestNormalizeChineseNumber:
 # ---------------------------------------------------------------------------
 # 显式总数声明
 # ---------------------------------------------------------------------------
+
 
 class TestDetectTotalSectionCount:
     def test_explicit_section(self):
@@ -75,6 +81,7 @@ class TestDetectTotalSectionCount:
 # 定义模式
 # ---------------------------------------------------------------------------
 
+
 class TestCountDefinitionSections:
     def test_chinese_section(self):
         cnt, tags = count_definition_sections("一标段：\n二标段：\n三标段：")
@@ -106,6 +113,7 @@ class TestCountDefinitionSections:
 # 括号编号
 # ---------------------------------------------------------------------------
 
+
 class TestCountBracketSections:
     def test_simple_brackets(self):
         cnt, tags = count_bracket_sections("【1】第一章\n【2】第二章")
@@ -127,6 +135,7 @@ class TestCountBracketSections:
 # ---------------------------------------------------------------------------
 # detect_bid_sections 端到端
 # ---------------------------------------------------------------------------
+
 
 class TestDetectBidSections:
     def test_empty(self):

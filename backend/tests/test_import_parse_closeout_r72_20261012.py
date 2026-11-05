@@ -23,6 +23,7 @@ D. **【P2 假成功】写路径 rowcount 校验缺口**
 
 T-A. **【技术债】扩展名集合双份字面量** —— 收敛为对象身份同一的单一事实源。
 """
+
 from __future__ import annotations
 
 import inspect
@@ -62,8 +63,7 @@ class TestContentTruncationNotice:
     def test_passes_truncated_out(self):
         """正文链 load_parsed_texts 必须传 truncated_out 采集清单。"""
         src = inspect.getsource(sh.generate_content)
-        assert "truncated_out=_content_trunc_docs" in src, (
-            "正文生成链未采集截断清单（与目录链不对称）")
+        assert "truncated_out=_content_trunc_docs" in src, "正文生成链未采集截断清单（与目录链不对称）"
 
     def test_warning_event_emitted(self):
         """采集到的清单必须以 warning 事件进事件流。"""
@@ -95,5 +95,6 @@ class TestWritePathRowcountGuard:
 class TestExtensionSingleSource:
     def test_dispatch_is_declared(self):
         """_SUPPORTED_EXTENSIONS 必须是 SUPPORTED_EXTENSIONS 同一对象（alias）。"""
-        assert fp._SUPPORTED_EXTENSIONS is fp.SUPPORTED_EXTENSIONS, (
-            "解析分派清单未收敛为对外声明的别名 → 仍是手抄两份，可能漂移")
+        assert (
+            fp._SUPPORTED_EXTENSIONS is fp.SUPPORTED_EXTENSIONS
+        ), "解析分派清单未收敛为对外声明的别名 → 仍是手抄两份，可能漂移"

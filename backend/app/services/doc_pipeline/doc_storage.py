@@ -34,6 +34,7 @@
 写入安全：一律 tempfile + os.replace 原子写入，进程中断不会留下半截文件。
 本模块所有 IO 均为同步实现，调用方用 asyncio.to_thread 包裹。
 """
+
 from __future__ import annotations
 
 import hashlib
@@ -61,13 +62,13 @@ ALL_LAYERS = (LAYER_RAW, LAYER_PARSED, LAYER_EXTRACTED, LAYER_SEMANTIC)
 
 #: 提取层标准类别（规范 §2.3 / §3.1 阶段4 的七类提取）
 EXTRACT_TYPES = (
-    "project_info",       # 项目基本信息
-    "engineering",        # 工程概况
-    "design_params",      # 设计参数
-    "geology",            # 地勘参数
-    "standards",          # 规范标准
-    "boq",                # 工程量清单（⚠️ 预留，见 RESERVED_EXTRACT_TYPES）
-    "global_facts",       # 全局事实变量
+    "project_info",  # 项目基本信息
+    "engineering",  # 工程概况
+    "design_params",  # 设计参数
+    "geology",  # 地勘参数
+    "standards",  # 规范标准
+    "boq",  # 工程量清单（⚠️ 预留，见 RESERVED_EXTRACT_TYPES）
+    "global_facts",  # 全局事实变量
 )
 
 #: ✅ 显式化（2026-09-25）：当前**没有任何解析项映射**到这些提取类别
@@ -90,6 +91,7 @@ def _utcnow() -> str:
 # ---------------------------------------------------------------------------
 # 目录布局
 # ---------------------------------------------------------------------------
+
 
 def _safe_id(raw: str) -> str:
     """project_id / doc_id 参与路径拼接前的清洗（防目录穿越）。"""
@@ -118,6 +120,7 @@ def parsed_md_path(project_id: str, doc_id: str) -> Path:
 # 原子写入 / 读取
 # ---------------------------------------------------------------------------
 
+
 def atomic_write_bytes(dest: Path, data: bytes) -> Path:
     """tempfile + os.replace 原子写入，防半截文件。"""
     dest.parent.mkdir(parents=True, exist_ok=True)
@@ -136,8 +139,7 @@ def atomic_write_bytes(dest: Path, data: bytes) -> Path:
 
 
 def atomic_write_json(dest: Path, payload: Any) -> Path:
-    return atomic_write_bytes(
-        dest, json.dumps(payload, ensure_ascii=False, indent=2).encode("utf-8"))
+    return atomic_write_bytes(dest, json.dumps(payload, ensure_ascii=False, indent=2).encode("utf-8"))
 
 
 def read_json(path: Path) -> dict | list | None:
@@ -152,6 +154,7 @@ def read_json(path: Path) -> dict | list | None:
 # ---------------------------------------------------------------------------
 # 文件指纹（时效性：变更检测）
 # ---------------------------------------------------------------------------
+
 
 def file_fingerprints(content: bytes) -> dict[str, str]:
     """一次遍历同时得到 MD5 / SHA256。"""
@@ -172,21 +175,35 @@ def hashes_differ(a: dict | None, b: dict | None) -> bool:
 # 元数据（{doc_id}_meta.json）
 # ---------------------------------------------------------------------------
 
-def build_meta(*, doc_id: str, project_id: str, file_name: str, file_type: str,
-               file_size: int, md5: str, sha256: str,
-               doc_type: str = "", doc_category: str = "",
-               page_count: int = 0, tags: list[str] | None = None,
-               parse_status: str = "pending", parse_version: str = "v1",
-               parse_time: str = "", parse_duration_ms: int = 0,
-               parse_engine: str = "", parse_warnings: list[str] | None = None,
-               extract_status: str = "pending", quality_score: float | None = None,
-               supersedes: str | None = None,
-               related_docs: list[str] | None = None) -> dict:
+
+def build_meta(
+    *,
+    doc_id: str,
+    project_id: str,
+    file_name: str,
+    file_type: str,
+    file_size: int,
+    md5: str,
+    sha256: str,
+    doc_type: str = "",
+    doc_category: str = "",
+    page_count: int = 0,
+    tags: list[str] | None = None,
+    parse_status: str = "pending",
+    parse_version: str = "v1",
+    parse_time: str = "",
+    parse_duration_ms: int = 0,
+    parse_engine: str = "",
+    parse_warnings: list[str] | None = None,
+    extract_status: str = "pending",
+    quality_score: float | None = None,
+    supersedes: str | None = None,
+    related_docs: list[str] | None = None,
+) -> dict:
     """按规范 §2.1 元数据格式构造文档档案。"""
     now = _utcnow()
     try:
-        expires = (datetime.now(timezone.utc) + timedelta(days=DEFAULT_TTL_DAYS)
-                   ).strftime("%Y-%m-%dT%H:%M:%SZ")
+        expires = (datetime.now(timezone.utc) + timedelta(days=DEFAULT_TTL_DAYS)).strftime("%Y-%m-%dT%H:%M:%SZ")
     except (OverflowError, OSError):  # pragma: no cover
         expires = ""
     return {
@@ -236,26 +253,25 @@ def bump_parse_version(parse_version: str) -> str:
 
 
 def write_meta(project_id: str, doc_id: str, meta: dict) -> Path:
-    return atomic_write_json(
-        layer_dir(project_id, doc_id, LAYER_PARSED) / f"{doc_id}_meta.json", meta)
+    return atomic_write_json(layer_dir(project_id, doc_id, LAYER_PARSED) / f"{doc_id}_meta.json", meta)
 
 
 def read_meta(project_id: str, doc_id: str) -> dict | None:
-    return read_json(layer_dir(project_id, doc_id, LAYER_PARSED)
-                     / f"{doc_id}_meta.json")
+    return read_json(layer_dir(project_id, doc_id, LAYER_PARSED) / f"{doc_id}_meta.json")
 
 
 # ---------------------------------------------------------------------------
 # 解析层产物写入
 # ---------------------------------------------------------------------------
 
-def write_parsed_layer(project_id: str, doc_id: str, *, markdown: str,
-                       pages: dict, tables: dict, images: dict) -> dict[str, str]:
+
+def write_parsed_layer(
+    project_id: str, doc_id: str, *, markdown: str, pages: dict, tables: dict, images: dict
+) -> dict[str, str]:
     """写解析层四份结构化产物 + Markdown，返回落盘相对路径清单。"""
     base = layer_dir(project_id, doc_id, LAYER_PARSED)
     written: dict[str, str] = {}
-    p = atomic_write_bytes(base / f"{doc_id}_parsed.md",
-                           markdown.encode("utf-8"))
+    p = atomic_write_bytes(base / f"{doc_id}_parsed.md", markdown.encode("utf-8"))
     written["markdown"] = str(p)
     for key, payload in (("pages", pages), ("tables", tables), ("images", images)):
         p = atomic_write_json(base / f"{doc_id}_{key}.json", payload)
@@ -267,23 +283,21 @@ def write_parsed_layer(project_id: str, doc_id: str, *, markdown: str,
 # 提取层 / 语义层产物写入
 # ---------------------------------------------------------------------------
 
-def write_extraction(project_id: str, doc_id: str, extract_type: str,
-                     payload: dict) -> Path:
+
+def write_extraction(project_id: str, doc_id: str, extract_type: str, payload: dict) -> Path:
     """写提取层单项结果（规范 §2.3：value/confidence/source 三要素结构）。"""
     if extract_type not in EXTRACT_TYPES:
         raise ValueError(f"未知提取类别: {extract_type}")
-    return atomic_write_json(
-        layer_dir(project_id, doc_id, LAYER_EXTRACTED)
-        / f"{doc_id}_{extract_type}.json", payload)
+    return atomic_write_json(layer_dir(project_id, doc_id, LAYER_EXTRACTED) / f"{doc_id}_{extract_type}.json", payload)
 
 
 def read_extraction(project_id: str, doc_id: str, extract_type: str) -> dict | None:
-    return read_json(layer_dir(project_id, doc_id, LAYER_EXTRACTED)
-                     / f"{doc_id}_{extract_type}.json")
+    return read_json(layer_dir(project_id, doc_id, LAYER_EXTRACTED) / f"{doc_id}_{extract_type}.json")
 
 
-def write_semantic_index(project_id: str, doc_id: str, *, chunks: list[dict],
-                         embedding_model: str = "", dimension: int = 0) -> Path:
+def write_semantic_index(
+    project_id: str, doc_id: str, *, chunks: list[dict], embedding_model: str = "", dimension: int = 0
+) -> Path:
     """写语义层 chunk 索引（向量嵌入的 offset/length 预留位）。
 
     嵌入服务尚未选型（平台此前无 RAG，检索走结构化提取），本阶段先落
@@ -308,17 +322,17 @@ def write_semantic_index(project_id: str, doc_id: str, *, chunks: list[dict],
                 "text_length": c.get("text_length", 0),
                 "embedding_offset": None,
                 "embedding_length": 0,
-            } for c in chunks
+            }
+            for c in chunks
         ],
     }
-    return atomic_write_json(
-        layer_dir(project_id, doc_id, LAYER_SEMANTIC)
-        / f"{doc_id}_semantic.json", payload)
+    return atomic_write_json(layer_dir(project_id, doc_id, LAYER_SEMANTIC) / f"{doc_id}_semantic.json", payload)
 
 
 # ---------------------------------------------------------------------------
 # 文档索引（documents_index.json）
 # ---------------------------------------------------------------------------
+
 
 def update_index(project_id: str, entry: dict) -> Path:
     """按 doc_id upsert 一条索引记录（幂等）。"""
@@ -342,14 +356,14 @@ def remove_from_index(project_id: str, doc_id: str) -> None:
     path = index_path(project_id)
     items = read_json(path)
     if isinstance(items, list):
-        items = [it for it in items
-                 if not (isinstance(it, dict) and it.get("doc_id") == doc_id)]
+        items = [it for it in items if not (isinstance(it, dict) and it.get("doc_id") == doc_id)]
         atomic_write_json(path, items)
 
 
 # ---------------------------------------------------------------------------
 # 删除与清理
 # ---------------------------------------------------------------------------
+
 
 def delete_doc_tree(project_id: str, doc_id: str) -> bool:
     """删除文档的四层目录树（幂等；只作用于 DOCS_ROOT 管理下的路径）。"""
@@ -364,6 +378,7 @@ def delete_doc_tree(project_id: str, doc_id: str) -> bool:
     if not target.exists():
         return False
     import shutil
+
     shutil.rmtree(target, ignore_errors=True)
     return True
 
@@ -390,5 +405,6 @@ def delete_project_docs_root(project_id: str) -> bool:
     if not target.exists():
         return False
     import shutil
+
     shutil.rmtree(target, ignore_errors=True)
     return True

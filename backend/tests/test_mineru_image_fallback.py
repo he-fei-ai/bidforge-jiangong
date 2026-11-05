@@ -14,6 +14,7 @@
 5. 本地引擎异常（非「不可用」）→ 同样走云端兜底；
 6. 云端返回空内容 → 不冒充成功（回落原错误/空结果）。
 """
+
 import app.services.mineru_client as mineru_client
 import app.services.ocr as ocr_mod
 import pytest
@@ -38,6 +39,7 @@ def _no_local_engine(monkeypatch) -> None:
 # 1. 未配置云端 → 行为与旧版一致
 # ---------------------------------------------------------------------------
 
+
 def test_without_mineru_config_keeps_old_error(monkeypatch):
     monkeypatch.setattr(mineru_client.settings, "mineru_provider", "")
     _no_local_engine(monkeypatch)
@@ -51,17 +53,16 @@ def test_without_mineru_config_keeps_old_error(monkeypatch):
 # 2. 配置云端 → 兜底成功
 # ---------------------------------------------------------------------------
 
+
 def test_mineru_fallback_used_when_local_engine_missing(monkeypatch):
     _configure_mineru(monkeypatch)
     _no_local_engine(monkeypatch)
-    monkeypatch.setattr(mineru_client, "parse_with_mineru",
-                        lambda content, name: "# 扫描件内容\n这是云端识别结果")
+    monkeypatch.setattr(mineru_client, "parse_with_mineru", lambda content, name: "# 扫描件内容\n这是云端识别结果")
 
     text, diag = parse_file_content_ex(_PNG, "扫描件.png")
 
     assert "云端识别结果" in text
-    assert any("MinerU" in w for w in diag["warnings"]), (
-        "云端兜底必须写入解析诊断（用户要能知道内容是怎么来的）")
+    assert any("MinerU" in w for w in diag["warnings"]), "云端兜底必须写入解析诊断（用户要能知道内容是怎么来的）"
 
 
 def test_mineru_fallback_used_when_local_engine_raises(monkeypatch):
@@ -72,8 +73,7 @@ def test_mineru_fallback_used_when_local_engine_raises(monkeypatch):
         raise RuntimeError("引擎内部错误")
 
     monkeypatch.setattr(ocr_mod, "ocr_bytes_sync", _boom)
-    monkeypatch.setattr(mineru_client, "parse_with_mineru",
-                        lambda content, name: "云端兜底成功内容")
+    monkeypatch.setattr(mineru_client, "parse_with_mineru", lambda content, name: "云端兜底成功内容")
 
     text, _diag = parse_file_content_ex(_PNG, "扫描件.png")
     assert "云端兜底成功内容" in text
@@ -83,13 +83,16 @@ def test_mineru_fallback_used_when_local_engine_raises(monkeypatch):
 # 3. 本地成功 → 不调用云端
 # ---------------------------------------------------------------------------
 
+
 def test_local_ocr_success_does_not_call_cloud(monkeypatch):
     _configure_mineru(monkeypatch)
     calls: list[str] = []
 
     monkeypatch.setattr(
-        ocr_mod, "ocr_bytes_sync",
-        lambda data, **kwargs: ocr_mod.OcrResult(text="本地识别出的足够长的文本", engine="tesseract"))
+        ocr_mod,
+        "ocr_bytes_sync",
+        lambda data, **kwargs: ocr_mod.OcrResult(text="本地识别出的足够长的文本", engine="tesseract"),
+    )
 
     def _should_not_be_called(content, name):  # pragma: no cover
         calls.append(name)
@@ -106,13 +109,13 @@ def test_local_ocr_success_does_not_call_cloud(monkeypatch):
 # 4 / 6. 本地结果过少 / 云端为空
 # ---------------------------------------------------------------------------
 
+
 def test_local_empty_text_triggers_cloud(monkeypatch):
     _configure_mineru(monkeypatch)
     monkeypatch.setattr(
-        ocr_mod, "ocr_bytes_sync",
-        lambda data, **kwargs: ocr_mod.OcrResult(text="  ", engine="tesseract"))
-    monkeypatch.setattr(mineru_client, "parse_with_mineru",
-                        lambda content, name: "云端补齐的图纸文字")
+        ocr_mod, "ocr_bytes_sync", lambda data, **kwargs: ocr_mod.OcrResult(text="  ", engine="tesseract")
+    )
+    monkeypatch.setattr(mineru_client, "parse_with_mineru", lambda content, name: "云端补齐的图纸文字")
 
     text, _diag = parse_file_content_ex(_PNG, "扫描件.jpg")
     assert "云端补齐的图纸文字" in text
@@ -121,8 +124,7 @@ def test_local_empty_text_triggers_cloud(monkeypatch):
 def test_cloud_empty_result_does_not_fake_success(monkeypatch):
     _configure_mineru(monkeypatch)
     _no_local_engine(monkeypatch)
-    monkeypatch.setattr(mineru_client, "parse_with_mineru",
-                        lambda content, name: "   \n  ")
+    monkeypatch.setattr(mineru_client, "parse_with_mineru", lambda content, name: "   \n  ")
 
     with pytest.raises(ParseError) as exc:
         parse_file_content_ex(_PNG, "扫描件.png")

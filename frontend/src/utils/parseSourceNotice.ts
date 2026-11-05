@@ -54,17 +54,13 @@ function _joinNames(docs: Array<{ name?: string }>): string {
  * 优先级：被截断的文档（最严重，内容确实缺）> 被整份跳过的文档
  * （预算耗尽，一个字都没用上）> 无异常返回 null。
  */
-export function sourceNotice(
-  report: SourceReportLike | null | undefined,
-): ParseNotice | null {
+export function sourceNotice(report: SourceReportLike | null | undefined): ParseNotice | null {
   if (!report || !report.source_truncated) return null;
   const trunc = (report.truncated_docs || []).filter((d) => d.name);
   const dropped = report.dropped_doc_count || 0;
 
   if (trunc.length > 0) {
-    const detail = dropped > 0
-      ? `其中 ${dropped} 份因长度预算耗尽未被使用`
-      : undefined;
+    const detail = dropped > 0 ? `其中 ${dropped} 份因长度预算耗尽未被使用` : undefined;
     return {
       kind: "warning",
       title: `提取依据不完整：${_joinNames(trunc)} 的解析结果已被截断`,
@@ -94,9 +90,7 @@ export function sourceNotice(
  * 两者绝不能互相覆盖：一份「50 页后被截断」的 PDF 正文很短，
  * `preview_truncated` 为 false，只有解析级信号能暴露问题。
  */
-export function previewNotices(
-  data: PreviewDataLike | null | undefined,
-): ParseNotice[] {
+export function previewNotices(data: PreviewDataLike | null | undefined): ParseNotice[] {
   if (!data) return [];
   const out: ParseNotice[] = [];
 
@@ -110,15 +104,11 @@ export function previewNotices(
     out.push({
       kind: "info",
       title: "预览仅显示前部分内容",
-      detail: data.text_len
-        ? `已解析正文共 ${data.text_len.toLocaleString()} 字`
-        : undefined,
+      detail: data.text_len ? `已解析正文共 ${data.text_len.toLocaleString()} 字` : undefined,
     });
   }
 
-  const warnings = Array.isArray(data.parse_warnings)
-    ? data.parse_warnings.filter((w) => w)
-    : [];
+  const warnings = Array.isArray(data.parse_warnings) ? data.parse_warnings.filter((w) => w) : [];
   if (warnings.length > 0) {
     out.push({
       kind: "info",

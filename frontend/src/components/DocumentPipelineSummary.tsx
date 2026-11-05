@@ -83,23 +83,45 @@ export const PIPELINE_ACTIONS: Array<{
   hint: string;
   icon: React.ReactNode;
 }> = [
-  { key: "reparse", label: "重新解析", hint: "按文件指纹增量重解析，重建解析/分块/语义层产物", icon: <ReloadOutlined /> },
-  { key: "syncExtractions", label: "物化提取层", hint: "把 AI 提取结果按标准格式落盘到提取层（可追溯）", icon: <SyncOutlined /> },
-  { key: "crossCheck", label: "交叉校验", hint: "跑一致性规则，汇总多文档事实冲突", icon: <ThunderboltOutlined /> },
-  { key: "refreshQuality", label: "刷新质量", hint: "重新计算解析/表格/图片/字段覆盖率与质量分", icon: <CheckCircleOutlined /> },
+  {
+    key: "reparse",
+    label: "重新解析",
+    hint: "按文件指纹增量重解析，重建解析/分块/语义层产物",
+    icon: <ReloadOutlined />,
+  },
+  {
+    key: "syncExtractions",
+    label: "物化提取层",
+    hint: "把 AI 提取结果按标准格式落盘到提取层（可追溯）",
+    icon: <SyncOutlined />,
+  },
+  {
+    key: "crossCheck",
+    label: "交叉校验",
+    hint: "跑一致性规则，汇总多文档事实冲突",
+    icon: <ThunderboltOutlined />,
+  },
+  {
+    key: "refreshQuality",
+    label: "刷新质量",
+    hint: "重新计算解析/表格/图片/字段覆盖率与质量分",
+    icon: <CheckCircleOutlined />,
+  },
 ];
 
 /**
  * 某动作是否应展示按钮。
  * 边界：syncExtractions 仅在解析成功后有意义（未解析时提取层无源可物化）。
  */
-export function isActionAvailable(action: PipelineActionKey, status?: DocumentPipelineStatusLike | null): boolean {
+export function isActionAvailable(
+  action: PipelineActionKey,
+  status?: DocumentPipelineStatusLike | null,
+): boolean {
   if (action === "syncExtractions") {
     return (status?.parse_status || "").toLowerCase() === "success";
   }
   return true;
 }
-
 
 /**
  * 某层的产物文件数。
@@ -161,7 +183,9 @@ export default function DocumentPipelineSummary({
     return (
       <Space size={8}>
         <Spin size="small" />
-        <Text type="secondary" style={{ fontSize: 12 }}>正在读取解析质量...</Text>
+        <Text type="secondary" style={{ fontSize: 12 }}>
+          正在读取解析质量...
+        </Text>
       </Space>
     );
   }
@@ -206,21 +230,19 @@ export default function DocumentPipelineSummary({
         <Descriptions.Item label="页数">
           {status.page_count ? `${status.page_count} 页` : "—"}
         </Descriptions.Item>
-        <Descriptions.Item label="解析耗时">
-          {durationLabel || "—"}
-        </Descriptions.Item>
+        <Descriptions.Item label="解析耗时">{durationLabel || "—"}</Descriptions.Item>
         <Descriptions.Item label="提取状态">
           <Tag color={parseStatusColor(status.extract_status)}>
             {status.extract_status || "pending"}
           </Tag>
         </Descriptions.Item>
-        <Descriptions.Item label="有效期">
-          {status.expires_at || "—"}
-        </Descriptions.Item>
+        <Descriptions.Item label="有效期">{status.expires_at || "—"}</Descriptions.Item>
       </Descriptions>
 
       <div>
-        <Text type="secondary" style={{ fontSize: 12, marginRight: 8 }}>四层产物：</Text>
+        <Text type="secondary" style={{ fontSize: 12, marginRight: 8 }}>
+          四层产物：
+        </Text>
         <Space size={4} wrap>
           {PIPELINE_LAYERS.map((layer) => {
             const count = layerFileCount(status.layers, layer.key);
@@ -242,7 +264,9 @@ export default function DocumentPipelineSummary({
 
       {onAction && (
         <div style={{ marginTop: 10, paddingTop: 10, borderTop: "1px solid #f0f0f0" }}>
-          <Text type="secondary" style={{ fontSize: 12, marginRight: 8 }}>管线操作：</Text>
+          <Text type="secondary" style={{ fontSize: 12, marginRight: 8 }}>
+            管线操作：
+          </Text>
           <Space size={4} wrap>
             {PIPELINE_ACTIONS.filter((a) => isActionAvailable(a.key, status)).map((a) => (
               <Tooltip key={a.key} title={a.hint}>
@@ -263,4 +287,3 @@ export default function DocumentPipelineSummary({
     </div>
   );
 }
-

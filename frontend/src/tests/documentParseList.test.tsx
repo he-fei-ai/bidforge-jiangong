@@ -23,26 +23,37 @@ import DocumentParseList, {
 
 if (!(window as any).matchMedia) {
   (window as any).matchMedia = (query: string) => ({
-    matches: false, media: query, onchange: null,
-    addListener: () => {}, removeListener: () => {},
-    addEventListener: () => {}, removeEventListener: () => {}, dispatchEvent: () => false,
+    matches: false,
+    media: query,
+    onchange: null,
+    addListener: () => {},
+    removeListener: () => {},
+    addEventListener: () => {},
+    removeEventListener: () => {},
+    dispatchEvent: () => false,
   });
 }
 if (!(globalThis as any).ResizeObserver) {
   (globalThis as any).ResizeObserver = class {
-    observe() {} unobserve() {} disconnect() {}
+    observe() {}
+    unobserve() {}
+    disconnect() {}
   };
 }
 
 const doc = (over: Partial<DocumentParseItem>): DocumentParseItem => ({
-  id: "d1", file_name: "招标公告.pdf", ...over,
+  id: "d1",
+  file_name: "招标公告.pdf",
+  ...over,
 });
 
 type Overrides = Partial<React.ComponentProps<typeof DocumentParseList>>;
 
 function setup(over: Overrides = {}) {
   const cbs = {
-    onParse: vi.fn(), onPreview: vi.fn(), onDelete: vi.fn(),
+    onParse: vi.fn(),
+    onPreview: vi.fn(),
+    onDelete: vi.fn(),
     onCategoryChange: vi.fn(),
   };
   const utils = render(
@@ -53,23 +64,28 @@ function setup(over: Overrides = {}) {
       categoryOptions={["招标文件", "其他"]}
       {...cbs}
       {...over}
-    />
+    />,
   );
   return { ...utils, ...cbs };
 }
 
 function btn(root: HTMLElement | Document, text: string): HTMLButtonElement | null {
-  return (Array.from(root.querySelectorAll("button")).find(
-    (x) => (x.textContent || "").trim() === text) as HTMLButtonElement) || null;
+  return (
+    (Array.from(root.querySelectorAll("button")).find(
+      (x) => (x.textContent || "").trim() === text,
+    ) as HTMLButtonElement) || null
+  );
 }
 
 afterEach(cleanup);
 
 /** 在 antd Select 下拉层（挂到 document.body）里按文本找选项 */
 function dropdownOption(text: string): HTMLElement | null {
-  return (Array.from(
-    document.body.querySelectorAll(".ant-select-item-option")).find(
-    (el) => (el.textContent || "").trim() === text) as HTMLElement) || null;
+  return (
+    (Array.from(document.body.querySelectorAll(".ant-select-item-option")).find(
+      (el) => (el.textContent || "").trim() === text,
+    ) as HTMLElement) || null
+  );
 }
 
 describe("DocumentParseList", () => {
@@ -117,7 +133,8 @@ describe("DocumentParseList", () => {
       parsingDocId: "a",
     });
     const deletes = Array.from(container.querySelectorAll("button")).filter(
-      (b) => (b.textContent || "").trim() === "删除");
+      (b) => (b.textContent || "").trim() === "删除",
+    );
     expect(deletes.length).toBe(2);
     // 第一个（id=a）禁用；第二个（id=b）可用 —— 通过 DOM 顺序推断
     expect(deletes[0].disabled).toBe(true);
@@ -150,8 +167,14 @@ describe("DocumentParseList", () => {
 
   it("解析失败（parse_status='failed'）：渲染「解析失败」红标签，且仍可点「解析」重试", () => {
     const { container, onParse } = setup({
-      docs: [doc({ id: "f", file_name: "f.pdf", parse_status: "failed",
-                   parse_warnings: ["解析失败：缺少 OCR 依赖"] })],
+      docs: [
+        doc({
+          id: "f",
+          file_name: "f.pdf",
+          parse_status: "failed",
+          parse_warnings: ["解析失败：缺少 OCR 依赖"],
+        }),
+      ],
     });
     expect(container.textContent || "").toContain("解析失败");
     // 失败文档未解析成功 → 提供「解析」按钮供重试
@@ -186,8 +209,7 @@ describe("DocumentParseList", () => {
     // 却是补列默认值 pending。旧实现在 computeDocStats 与列表标签各写一份
     // isParsed 判定，一旦分叉就会出现「统计条 0 待解析 / 列表仍显待解析」。
     const { container } = setup({
-      docs: [doc({ id: "stale", file_name: "stale.pdf", parse_status: "pending",
-                   text_len: 1234 })],
+      docs: [doc({ id: "stale", file_name: "stale.pdf", parse_status: "pending", text_len: 1234 })],
     });
     expect(container.textContent || "").toContain("待解析");
     expect(container.textContent || "").not.toContain("已解析");
@@ -269,8 +291,7 @@ describe("DocumentParseList · 分类改判交互", () => {
       categoryOptions: ["招标文件", "其他"],
     });
     expect(container.textContent || "").toContain("其他");
-    fireEvent.mouseDown(
-      container.querySelector(".ant-select-selector") as HTMLElement);
+    fireEvent.mouseDown(container.querySelector(".ant-select-selector") as HTMLElement);
     await waitFor(() => expect(dropdownOption("招标文件")).toBeTruthy());
     fireEvent.click(dropdownOption("招标文件")!);
     expect(onCategoryChange).toHaveBeenCalledWith("d9", "招标文件");
@@ -279,11 +300,14 @@ describe("DocumentParseList · 分类改判交互", () => {
 
 describe("DocumentParseList · compact 展开/收起", () => {
   const manyDocs = Array.from({ length: 4 }, (_, i) =>
-    doc({ id: `d${i}`, file_name: `f${i}.pdf` }));
+    doc({ id: `d${i}`, file_name: `f${i}.pdf` }),
+  );
 
   it("默认只显示前 3 行，点「展开全部」显示全部，再点「收起」恢复", () => {
     const { container } = setup({
-      docs: manyDocs, compact: true, defaultVisibleCount: 3,
+      docs: manyDocs,
+      compact: true,
+      defaultVisibleCount: 3,
     });
     const countItems = () => container.querySelectorAll(".ant-list-item").length;
     expect(countItems()).toBe(3);
@@ -297,7 +321,9 @@ describe("DocumentParseList · compact 展开/收起", () => {
 
   it("文件数不超过 defaultVisibleCount 时不出现展开按钮", () => {
     const { container } = setup({
-      docs: manyDocs.slice(0, 3), compact: true, defaultVisibleCount: 3,
+      docs: manyDocs.slice(0, 3),
+      compact: true,
+      defaultVisibleCount: 3,
     });
     expect(btn(container, "展开全部（共 3 项，当前显示 3）")).toBeNull();
     expect(container.querySelectorAll(".ant-list-item").length).toBe(3);

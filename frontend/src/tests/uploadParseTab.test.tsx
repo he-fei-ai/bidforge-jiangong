@@ -65,8 +65,15 @@ function setup(over: Overrides = {}) {
     onCategoryChange: vi.fn(),
     onNavigate: vi.fn(),
   };
+  // ✅ R178（2026-11-04）：antd message 默认 3s 自动关闭。用例断言完提示文案即结束，
+  //    该定时器会比本文件的 jsdom 环境活得更久；拆除后 rc-notification 的
+  //    onNoticeClose 仍会 dispatchSetState → 访问 window → 抛
+  //    「ReferenceError: window is not defined」（Vitest 记为 Unhandled Error，
+  //    全量跑 exit=1，单文件跑则因时序不同偶发不触发）。
+  //    本文件从不断言「提示自动消失」，故把 App 上下文提示设为不自动关闭：
+  //    断言仍是「提示文案确实出现」，且不再有跨环境存活的定时器。
   const utils = render(
-    <AntdApp>
+    <AntdApp message={{ duration: 0 }}>
       <UploadParseTab
         docs={[]}
         categoryOptions={[]}
@@ -78,7 +85,7 @@ function setup(over: Overrides = {}) {
         {...cbs}
         {...over}
       />
-    </AntdApp>
+    </AntdApp>,
   );
   return { ...utils, ...cbs };
 }
@@ -86,7 +93,7 @@ function setup(over: Overrides = {}) {
 /** 在指定根节点内按精确文案找按钮 */
 function btn(root: HTMLElement | Document, text: string): HTMLButtonElement | null {
   const b = Array.from(root.querySelectorAll("button")).find(
-    (x) => (x.textContent || "").trim() === text
+    (x) => (x.textContent || "").trim() === text,
   );
   return (b as HTMLButtonElement) || null;
 }
@@ -155,7 +162,7 @@ describe("UploadParseTab", () => {
     const input = container.querySelector('input[type="file"]') as HTMLInputElement;
     const big = withSize(
       new File(["x"], "big.pdf", { type: "application/pdf" }),
-      MAX_UPLOAD_BYTES + 1
+      MAX_UPLOAD_BYTES + 1,
     );
     fireEvent.change(input, { target: { files: [big] } });
     await expectToast("单个文件不能超过 30MB，已忽略：big.pdf");
@@ -181,7 +188,10 @@ describe("UploadParseTab", () => {
     const { container, onUploadFiles } = setup();
     const input = container.querySelector('input[type="file"]') as HTMLInputElement;
     const upper = new File(["a"], "A.PDF", { type: "application/pdf" });
-    const boundary = withSize(new File(["b"], "edge.txt", { type: "text/plain" }), MAX_UPLOAD_BYTES);
+    const boundary = withSize(
+      new File(["b"], "edge.txt", { type: "text/plain" }),
+      MAX_UPLOAD_BYTES,
+    );
     fireEvent.change(input, { target: { files: [upper, boundary] } });
     await waitFor(() => expect(onUploadFiles).toHaveBeenCalledTimes(1));
     const files = onUploadFiles.mock.calls[0][0] as File[];
@@ -192,10 +202,7 @@ describe("UploadParseTab", () => {
     const customLimit = 1024 * 1024;
     const { container, onUploadFiles } = setup({ maxUploadBytes: customLimit });
     const input = container.querySelector('input[type="file"]') as HTMLInputElement;
-    const big = withSize(
-      new File(["x"], "mid.pdf", { type: "application/pdf" }),
-      customLimit + 1
-    );
+    const big = withSize(new File(["x"], "mid.pdf", { type: "application/pdf" }), customLimit + 1);
     fireEvent.change(input, { target: { files: [big] } });
     await expectToast("单个文件不能超过 1MB，已忽略：mid.pdf");
     expect(onUploadFiles).not.toHaveBeenCalled();
@@ -207,7 +214,7 @@ describe("UploadParseTab", () => {
     const input = container.querySelector('input[type="file"]') as HTMLInputElement;
     const boundary = withSize(
       new File(["b"], "edge.pdf", { type: "application/pdf" }),
-      customLimit
+      customLimit,
     );
     fireEvent.change(input, { target: { files: [boundary] } });
     await waitFor(() => expect(onUploadFiles).toHaveBeenCalledTimes(1));
@@ -222,12 +229,12 @@ describe("UploadParseTab", () => {
       const input = container.querySelector('input[type="file"]') as HTMLInputElement;
       const big = withSize(
         new File(["x"], "big.pdf", { type: "application/pdf" }),
-        MAX_UPLOAD_BYTES + 1
+        MAX_UPLOAD_BYTES + 1,
       );
       fireEvent.change(input, { target: { files: [big] } });
       await expectToast("单个文件不能超过 30MB，已忽略：big.pdf");
       expect(onUploadFiles).not.toHaveBeenCalled();
-    }
+    },
   );
 
   it("上传进度卡：uploadingFacts 时出现并展示文件名 Tag", () => {
@@ -256,7 +263,7 @@ describe("UploadParseTab", () => {
     expect(txt).toContain("可能被截断 1");
 
     const empty = setup({ docs: [] });
-    expect((empty.container.textContent || "")).not.toContain("资料概览");
+    expect(empty.container.textContent || "").not.toContain("资料概览");
   });
 
   it("批量解析按钮：文案带待解析数，点击回调 onParseAll；无待解析时禁用", () => {
@@ -394,7 +401,7 @@ describe("UploadParseTab", () => {
     // 定义未加载（parseGroups 缺省）：不报数，避免硬编码「18 项」在后端增减项后失真
     const nextDisabled = btn(none.container, "下一步：提取项目（全表）")!;
     expect(nextDisabled.disabled).toBe(true);
-    expect((none.container.textContent || "")).toContain("至少解析一份文档后才能进入后续步骤");
+    expect(none.container.textContent || "").toContain("至少解析一份文档后才能进入后续步骤");
 
     const some = setup({ docs: [doc({ id: "a", text_len: 100 })] });
     // 2026-09-23 合并后：未传 onSwitchToExtract 时回退到 outline（bidAnalysis 顶层 Tab 已废除）
@@ -415,7 +422,11 @@ describe("UploadParseTab", () => {
     // 传入分组定义后：按钮文案带真实项数（此处 2+3=5，非 18）
     const groups: BaGroup[] = [
       { key: "g1", label: "分类一", items: [{ item_id: "a" }, { item_id: "b" }] as any },
-      { key: "g2", label: "分类二", items: [{ item_id: "c" }, { item_id: "d" }, { item_id: "e" }] as any },
+      {
+        key: "g2",
+        label: "分类二",
+        items: [{ item_id: "c" }, { item_id: "d" }, { item_id: "e" }] as any,
+      },
     ];
     const dyn = setup({ docs: [doc({ id: "a", text_len: 100 })], parseGroups: groups });
     expect(btn(dyn.container, "下一步：提取项目（5 项全表）")).not.toBeNull();
@@ -580,7 +591,12 @@ describe("UploadParseTab", () => {
       key: "scheme_info",
       label: "方案级基本信息",
       items: [
-        { item_id: "schemeBasicInfo", label: "方案级基本信息", required: 1, output_type: "markdown" },
+        {
+          item_id: "schemeBasicInfo",
+          label: "方案级基本信息",
+          required: 1,
+          output_type: "markdown",
+        },
       ],
     },
   ];

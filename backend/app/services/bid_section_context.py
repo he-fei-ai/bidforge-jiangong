@@ -15,6 +15,7 @@ system 消息**注入每一次招标文件解析调用（单项提取与分段�
 - 纯函数 `build_bid_section_context_hint` 不依赖 DB，便于单测与复用；
 - 无选中标段时返回空串 → 调用方 system prompt 与旧版逐字一致（向后兼容）。
 """
+
 from __future__ import annotations
 
 import json
@@ -37,8 +38,7 @@ _BASE_HINT = (
 )
 #: 没有标段明细时的提示（仅「已选定范围」这一事实可告知）
 _NO_DETAIL_HINT = (
-    "本项目包含多个标段，当前资料已按用户选择的施工范围处理。"
-    "请以当前输入内容为准，不要主动扩展到其他标段。"
+    "本项目包含多个标段，当前资料已按用户选择的施工范围处理。" "请以当前输入内容为准，不要主动扩展到其他标段。"
 )
 
 #: evidence 最多保留条数（与参考实现一致：避免把大段原文塞进 system 消息）
@@ -57,8 +57,7 @@ def _normalize_evidence(value) -> list[str]:
     return [x for x in out if x][:_MAX_EVIDENCE]
 
 
-def build_bid_section_context_hint(selected_section: Optional[dict] = None,
-                                   has_selected_section: bool = False) -> str:
+def build_bid_section_context_hint(selected_section: Optional[dict] = None, has_selected_section: bool = False) -> str:
     """构建标段上下文提示（无任何有效信息时返回空串）。
 
     Args:
@@ -116,9 +115,11 @@ async def load_bid_section_row(db, project_id: str, scheme_id: str = "") -> dict
     params: list = [project_id]
     if scheme_id:
         # 精确匹配当前方案优先（scheme_id 相同），其次项目级（scheme_id=''）
-        sql += (" AND (scheme_id=? OR scheme_id='')"
-                " ORDER BY CASE WHEN scheme_id=? THEN 0 ELSE 1 END,"
-                " updated_at DESC LIMIT 1")
+        sql += (
+            " AND (scheme_id=? OR scheme_id='')"
+            " ORDER BY CASE WHEN scheme_id=? THEN 0 ELSE 1 END,"
+            " updated_at DESC LIMIT 1"
+        )
         params.extend([scheme_id, scheme_id])
     else:
         sql += " ORDER BY updated_at DESC LIMIT 1"
@@ -146,8 +147,7 @@ def selected_section_from_row(row: dict) -> dict:
     return {}
 
 
-async def resolve_section_hint(db, project_id: str,
-                               scheme_id: str = "") -> tuple[str, dict]:
+async def resolve_section_hint(db, project_id: str, scheme_id: str = "") -> tuple[str, dict]:
     """读取当前选中标段并生成提示（唯一注入入口）。
 
     ✅ 向后兼容约定：**只有用户确实选定过施工范围时**才返回非空提示。
@@ -160,6 +160,5 @@ async def resolve_section_hint(db, project_id: str,
     """
     row = await load_bid_section_row(db, project_id, scheme_id)
     section = selected_section_from_row(row)
-    hint = build_bid_section_context_hint(
-        section, has_selected_section=bool(section))
+    hint = build_bid_section_context_hint(section, has_selected_section=bool(section))
     return hint, section

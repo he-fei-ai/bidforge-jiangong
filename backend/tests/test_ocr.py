@@ -7,6 +7,7 @@
 - ocr_bytes_sync（空数据 / 禁用 / 无引擎时的可操作报错）
 - file_parser.ParseError（图片无 OCR 引擎、.xls 缺依赖时抛异常而非返回错误字符串）
 """
+
 import pytest
 from app.services import ocr as ocr_mod
 from app.services.file_parser import ParseError, parse_file_content
@@ -14,6 +15,7 @@ from app.services.file_parser import ParseError, parse_file_content
 # ============================================================
 # 能力探测
 # ============================================================
+
 
 class TestOcrCapabilities:
     def test_sync_capabilities_keys(self):
@@ -38,20 +40,24 @@ class TestOcrCapabilities:
 # 引擎顺序
 # ============================================================
 
+
 class TestEngineOrder:
     def test_auto_default(self, monkeypatch):
         from app.config import settings
+
         monkeypatch.setattr(settings, "ocr_engine", "auto")
         assert ocr_mod._engine_order() == ["tesseract", "rapidocr", "vision"]
 
     def test_prefer_rapidocr(self, monkeypatch):
         from app.config import settings
+
         monkeypatch.setattr(settings, "ocr_engine", "rapidocr")
         order = ocr_mod._engine_order()
         assert order[0] == "rapidocr"
 
     def test_prefer_vision(self, monkeypatch):
         from app.config import settings
+
         monkeypatch.setattr(settings, "ocr_engine", "vision")
         assert ocr_mod._engine_order()[0] == "vision"
 
@@ -59,6 +65,7 @@ class TestEngineOrder:
 # ============================================================
 # RapidOCR 结果解析（多版本兼容）
 # ============================================================
+
 
 class TestRapidOcrParsing:
     def test_single_line_shape(self):
@@ -92,6 +99,7 @@ class TestRapidOcrParsing:
 # ocr_bytes_sync 行为
 # ============================================================
 
+
 class TestOcrBytesSync:
     def test_empty_data(self):
         res = ocr_mod.ocr_bytes_sync(b"")
@@ -99,12 +107,14 @@ class TestOcrBytesSync:
 
     def test_disabled_by_switch(self, monkeypatch):
         from app.config import settings
+
         monkeypatch.setattr(settings, "ocr_enabled", False)
         with pytest.raises(ocr_mod.OcrUnavailableError):
             ocr_mod.ocr_bytes_sync(b"abc")
 
     def test_engine_off(self, monkeypatch):
         from app.config import settings
+
         monkeypatch.setattr(settings, "ocr_enabled", True)
         monkeypatch.setattr(settings, "ocr_engine", "off")
         with pytest.raises(ocr_mod.OcrUnavailableError):
@@ -112,6 +122,7 @@ class TestOcrBytesSync:
 
     def test_no_engine_gives_actionable_hint(self, monkeypatch):
         from app.config import settings
+
         monkeypatch.setattr(settings, "ocr_enabled", True)
         monkeypatch.setattr(settings, "ocr_engine", "auto")
         monkeypatch.setattr(ocr_mod, "tesseract_available", lambda: False)
@@ -127,9 +138,11 @@ class TestOcrBytesSync:
 # file_parser 错误语义（不得返回错误字符串）
 # ============================================================
 
+
 class TestParseErrorSemantics:
     def _no_engine(self, monkeypatch):
         from app.config import settings
+
         monkeypatch.setattr(settings, "ocr_enabled", True)
         monkeypatch.setattr(settings, "ocr_engine", "auto")
         monkeypatch.setattr(ocr_mod, "tesseract_available", lambda: False)
@@ -146,6 +159,7 @@ class TestParseErrorSemantics:
     def test_xls_without_xlrd_raises(self):
         try:
             import xlrd  # noqa: F401
+
             pytest.skip("xlrd 已安装，该分支不适用")
         except ImportError:
             pass

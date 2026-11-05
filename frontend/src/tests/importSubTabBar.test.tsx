@@ -39,22 +39,23 @@ function setup(props: Partial<React.ComponentProps<typeof ImportSubTabBar>> = {}
       activeKey={props.activeKey ?? "docs"}
       onChange={props.onChange ?? onChange}
       summary={props.summary}
-    />
+    />,
   );
   return { ...utils, onChange };
 }
 
-const summary = (over: Partial<BaSummary>): BaSummary => ({
-  total: 18,
-  success: 3,
-  success_valid: 3,
-  errors: 0,
-  running: 0,
-  pending: 15,
-  missing_required: [],
-  all_required_done: false,
-  ...over,
-} as BaSummary);
+const summary = (over: Partial<BaSummary>): BaSummary =>
+  ({
+    total: 18,
+    success: 3,
+    success_valid: 3,
+    errors: 0,
+    running: 0,
+    pending: 15,
+    missing_required: [],
+    all_required_done: false,
+    ...over,
+  }) as BaSummary;
 
 describe("ImportSubTabBar", () => {
   it("渲染两个子标签：文档解析 / 项目提取", () => {
@@ -85,7 +86,10 @@ describe("ImportSubTabBar", () => {
       return (
         <ImportSubTabBar
           activeKey={k}
-          onChange={(next) => { onChange(next); setK(next); }}
+          onChange={(next) => {
+            onChange(next);
+            setK(next);
+          }}
         />
       );
     }

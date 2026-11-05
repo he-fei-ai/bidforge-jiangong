@@ -13,6 +13,7 @@
 source_ref（`{doc_id}#page:N#section:标题`）/ 前后链 / 关联 tables/images。
 AI 提取结果据此可逐字回溯到原文页码与段落。
 """
+
 from __future__ import annotations
 
 import hashlib
@@ -20,8 +21,8 @@ import re
 from typing import Any
 
 # 语义分块（长段落）
-SEMANTIC_CHUNK_SIZE = 800      # 500-1000 字区间的中位取值
-SEMANTIC_OVERLAP = 100         # 段间重叠 100 字（规范 §3.2）
+SEMANTIC_CHUNK_SIZE = 800  # 500-1000 字区间的中位取值
+SEMANTIC_OVERLAP = 100  # 段间重叠 100 字（规范 §3.2）
 
 _HEADING_RE = re.compile(r"^(#{1,6})\s+(.*)")
 _PAGE_MARK_RE = re.compile(r"<!--\s*page\s*:?\s*(\d+)\s*-->", re.I)
@@ -80,7 +81,7 @@ def _split_semantic(text: str) -> list[str]:
         nonlocal cur
         while len(s) > SEMANTIC_CHUNK_SIZE:
             out.append(s[:SEMANTIC_CHUNK_SIZE])
-            s = s[SEMANTIC_CHUNK_SIZE - SEMANTIC_OVERLAP:]
+            s = s[SEMANTIC_CHUNK_SIZE - SEMANTIC_OVERLAP :]
         cur = s
 
     for p in [x for x in re.split(r"\n\s*\n", text) if x.strip()]:
@@ -100,8 +101,7 @@ def _split_semantic(text: str) -> list[str]:
     return out or ([text] if text.strip() else [])
 
 
-def chunk_document(markdown: str, *, doc_id: str,
-                   structured: dict | None = None) -> list[dict]:
+def chunk_document(markdown: str, *, doc_id: str, structured: dict | None = None) -> list[dict]:
     """对解析层 Markdown 分块。structured 为 md_structured.parse_markdown_structured
     的输出（用于把 tables/images 关联挂到对应块）。
     """
@@ -132,23 +132,34 @@ def chunk_document(markdown: str, *, doc_id: str,
             buf = []
             return
         base = {
-            "doc_id": doc_id, "title": cur_heading, "level": cur_level,
+            "doc_id": doc_id,
+            "title": cur_heading,
+            "level": cur_level,
             "page_num": buf_page_start if buf_page_start else cur_page,
         }
         if len(body) > SEMANTIC_CHUNK_SIZE * 2:
             for piece in _split_semantic(body):
-                chunks.append(_new_chunk(
-                    doc_id, len(chunks), chunk_type="semantic",
-                    text=piece,
-                    source_ref=(f"{doc_id}#page:{base['page_num']}"
-                                f"#section:{cur_heading or 'untitled'}"),
-                    **{k: v for k, v in base.items() if k != "doc_id"}))
+                chunks.append(
+                    _new_chunk(
+                        doc_id,
+                        len(chunks),
+                        chunk_type="semantic",
+                        text=piece,
+                        source_ref=(f"{doc_id}#page:{base['page_num']}" f"#section:{cur_heading or 'untitled'}"),
+                        **{k: v for k, v in base.items() if k != "doc_id"},
+                    )
+                )
         else:
-            chunks.append(_new_chunk(
-                doc_id, len(chunks), chunk_type="section", text=body,
-                source_ref=(f"{doc_id}#page:{base['page_num']}"
-                            f"#section:{cur_heading or 'untitled'}"),
-                **{k: v for k, v in base.items() if k != "doc_id"}))
+            chunks.append(
+                _new_chunk(
+                    doc_id,
+                    len(chunks),
+                    chunk_type="section",
+                    text=body,
+                    source_ref=(f"{doc_id}#page:{base['page_num']}" f"#section:{cur_heading or 'untitled'}"),
+                    **{k: v for k, v in base.items() if k != "doc_id"},
+                )
+            )
         buf = []
 
     for ln in lines:
@@ -180,13 +191,19 @@ def chunk_document(markdown: str, *, doc_id: str,
     for t in structured.get("tables", []):
         hdr = "| " + " | ".join(t.get("headers", [])) + " |" if t.get("headers") else ""
         body = "\n".join("| " + " | ".join(r) + " |" for r in t.get("rows", []))
-        tbl_text = (_TABLE_ANCHOR + "\n" + (hdr + "\n" if hdr else "")
-                    + body).strip()
-        table_chunks.append(_new_chunk(
-            doc_id, len(chunks) + len(table_chunks), chunk_type="table",
-            title=t.get("title", ""), page_num=t.get("page_num", 1),
-            text=tbl_text, source_ref=t.get("source_ref", ""),
-            tables=[t["table_id"]]))
+        tbl_text = (_TABLE_ANCHOR + "\n" + (hdr + "\n" if hdr else "") + body).strip()
+        table_chunks.append(
+            _new_chunk(
+                doc_id,
+                len(chunks) + len(table_chunks),
+                chunk_type="table",
+                title=t.get("title", ""),
+                page_num=t.get("page_num", 1),
+                text=tbl_text,
+                source_ref=t.get("source_ref", ""),
+                tables=[t["table_id"]],
+            )
+        )
 
     all_chunks = _link(chunks + table_chunks)
 
@@ -202,18 +219,29 @@ def chunk_document(markdown: str, *, doc_id: str,
 def chunk_row_of(c: dict, created_at: str = "") -> tuple:
     """chunk dict → doc_chunks 表插入行（列序与 schema_sql 一致）。"""
     import json
+
     return (
-        c["chunk_id"], c["doc_id"], c["chunk_type"], c.get("title", ""),
-        c.get("level", 1), c.get("page_num", 1), c.get("text", ""),
-        c.get("source_ref", ""), c.get("parent_chunk_id") or "",
-        c.get("prev_chunk_id") or "", c.get("next_chunk_id") or "",
+        c["chunk_id"],
+        c["doc_id"],
+        c["chunk_type"],
+        c.get("title", ""),
+        c.get("level", 1),
+        c.get("page_num", 1),
+        c.get("text", ""),
+        c.get("source_ref", ""),
+        c.get("parent_chunk_id") or "",
+        c.get("prev_chunk_id") or "",
+        c.get("next_chunk_id") or "",
         json.dumps(c.get("tables", []), ensure_ascii=False),
         json.dumps(c.get("images", []), ensure_ascii=False),
         c.get("hash", ""),
-        json.dumps({
-            "formulas": c.get("formulas", []),
-            "text_offset": c.get("text_offset", 0),
-            "text_length": c.get("text_length", 0),
-        }, ensure_ascii=False),
+        json.dumps(
+            {
+                "formulas": c.get("formulas", []),
+                "text_offset": c.get("text_offset", 0),
+                "text_length": c.get("text_length", 0),
+            },
+            ensure_ascii=False,
+        ),
         created_at,
     )

@@ -19,19 +19,13 @@ export type ImportSubTabBarProps = {
   summary?: BaSummary | null;
 };
 
-export default function ImportSubTabBar({
-  activeKey,
-  onChange,
-  summary,
-}: ImportSubTabBarProps) {
+export default function ImportSubTabBar({ activeKey, onChange, summary }: ImportSubTabBarProps) {
   return (
     <Tabs
       activeKey={activeKey}
       onChange={(k) => onChange(k as ImportSubTabKey)}
       size="small"
-      renderTabBar={(tabBarProps, DefaultTabBar) => (
-        <DefaultTabBar {...tabBarProps} />
-      )}
+      renderTabBar={(tabBarProps, DefaultTabBar) => <DefaultTabBar {...tabBarProps} />}
       items={[
         {
           key: "docs",

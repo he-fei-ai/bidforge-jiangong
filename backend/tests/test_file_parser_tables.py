@@ -7,6 +7,7 @@
 - 表头智能识别（find_table_header / render_table_with_header）+ CSV 端到端
 - MinerU 客户端纯函数（make_data_id / extract_markdown_from_zip）与分派守卫
 """
+
 import io
 import zipfile
 
@@ -28,6 +29,7 @@ from app.services.file_parser import (
 # 文本归一化
 # ---------------------------------------------------------------------------
 
+
 def test_normalize_pdf_text_formfeed_and_blank_lines():
     text = "第一段\n\f\n\n\n第二段"
     out = normalize_pdf_text(text)
@@ -38,7 +40,7 @@ def test_normalize_pdf_text_formfeed_and_blank_lines():
 
 def test_normalize_pdf_text_collapses_cjk_spaces():
     assert normalize_pdf_text("工 程 概 况") == "工程概况"
-    assert normalize_pdf_text("施工 总平面布置 。") .startswith("施工总平面布置")
+    assert normalize_pdf_text("施工 总平面布置 。").startswith("施工总平面布置")
 
 
 def test_normalize_pdf_text_collapses_repeated_cjk_chunks():
@@ -59,6 +61,7 @@ def test_normalize_pdf_text_keeps_number_sequences():
 # 文字层缺失判定
 # ---------------------------------------------------------------------------
 
+
 def test_has_informative_text_positive_and_negative():
     assert has_informative_text("隐蔽工程验收记录表格")
     assert has_informative_text("1 2 3 第4页 第5页 建筑工程施工质量验收统一标准GB50300")
@@ -71,14 +74,16 @@ def test_has_informative_text_positive_and_negative():
 # 双引擎表格合并去重
 # ---------------------------------------------------------------------------
 
+
 def test_remove_lines_covered_by_tables_exact_and_chunk():
-    table = ["【表格】", "| 设备名称 | 数量 |", "| --- | --- |",
-             "| 塔吊 | 2 |", "| 挖掘机 | 3 |"]
-    text = ("施工部署说明\n"
-            "设备名称 数量\n"
-            "塔吊 2\n"
-            "挖掘机型号为三一SY215C履带式挖掘机数量三台\n"
-            "未被表格覆盖的独立行")
+    table = ["【表格】", "| 设备名称 | 数量 |", "| --- | --- |", "| 塔吊 | 2 |", "| 挖掘机 | 3 |"]
+    text = (
+        "施工部署说明\n"
+        "设备名称 数量\n"
+        "塔吊 2\n"
+        "挖掘机型号为三一SY215C履带式挖掘机数量三台\n"
+        "未被表格覆盖的独立行"
+    )
     out = remove_lines_covered_by_tables(text, ["\n".join(table)])
     assert "施工部署说明" in out
     assert "设备名称 数量" not in out
@@ -101,6 +106,7 @@ def test_remove_lines_no_tables_noop():
 # ---------------------------------------------------------------------------
 # 表头智能识别
 # ---------------------------------------------------------------------------
+
 
 def test_find_table_header_simple():
     rows = [["设备", "数量"], ["塔吊", "2"], ["挖掘机", "3"]]
@@ -174,6 +180,7 @@ def test_parse_csv_uses_smart_header():
 # ---------------------------------------------------------------------------
 # MinerU 客户端纯函数与分派守卫
 # ---------------------------------------------------------------------------
+
 
 def test_make_data_id_sanitizes_and_truncates():
     assert mineru_client.make_data_id("招标文件 2026.docx") == "招标文件_2026.docx"

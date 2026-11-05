@@ -20,6 +20,7 @@ B9（启动按钮双击）经代码核实为**非缺陷**，不在此护栏内�
 `TestExportGateHighSeverityParity` 同构）；纯函数行为测试在
 `frontend/src/tests/uploadAccept.test.ts`。
 """
+
 from __future__ import annotations
 
 import re
@@ -37,7 +38,10 @@ def _page_src() -> str:
     # 预检顺序与唯一出口断言语义不变。
     parts = [_PAGE.read_text(encoding="utf-8").replace("\r\n", "\n")]
     wb = _REPO / "frontend" / "src" / "pages" / "schemeWorkbench"
-    for p in sorted(list(wb.glob("*.ts")) + list(wb.glob("*.tsx"))):
+    # R176：拆分仍在继续（含 tabs/ 子目录）—— 递归 + 非空兜底。
+    wb_files = sorted(list(wb.rglob("*.ts")) + list(wb.rglob("*.tsx")))
+    assert wb_files, f"拆分目录未被递归扫描到（0 个 ts/tsx）：{wb}"
+    for p in wb_files:
         parts.append(p.read_text(encoding="utf-8").replace("\r\n", "\n"))
     return "\n".join(parts)
 
@@ -58,7 +62,7 @@ def _slice_after(src: str, anchor: str, span: int) -> str:
     """取 anchor 之后 span 个字符（行号会随编辑漂移，故按锚点定位）。"""
     i = src.find(anchor)
     assert i >= 0, f"锚点未命中：{anchor!r}（文件被改动或锚点失效，先复核源码）"
-    return src[i:i + span]
+    return src[i : i + span]
 
 
 # --------------------------------------------------------------------------- #
@@ -68,16 +72,17 @@ def test_b5_unmount_cleanup_aborts_facts_list_refs():
     src = _page_src()
     # 注释即锚点：卸载 effect 的独有说明（[id] effect 里不会出现这段话）。
     # 注意源码该行是 `// ✅ 组件卸载时…`，故锚点**不带 `// ` 前缀**。
-    block = _slice_after(src, "\u7ec4\u4ef6\u5378\u8f7d\u65f6\u53d6\u6d88\u6240\u6709\u8fdb\u884c\u4e2d\u7684 SSE", 4000)
+    block = _slice_after(
+        src, "\u7ec4\u4ef6\u5378\u8f7d\u65f6\u53d6\u6d88\u6240\u6709\u8fdb\u884c\u4e2d\u7684 SSE", 4000
+    )
     # 只截到本 effect 结束（依赖数组 []），防止断言命中的是别处代码。
     end = block.find("}, []);")
     assert end > 0, "未定位到卸载 effect 的结束（}, []);）"
     body = block[:end]
     assert "factsListAbortRef.current?.abort();" in body, (
-        "卸载 cleanup 缺 factsListAbortRef.abort —— 全局事实列表请求泄漏，"
-        "组件卸载后仍会 setState（B5 回归）")
-    assert "factsDocsListAbortRef.current?.abort();" in body, (
-        "卸载 cleanup 缺 factsDocsListAbortRef.abort（B5 回归）")
+        "卸载 cleanup 缺 factsListAbortRef.abort —— 全局事实列表请求泄漏，" "组件卸载后仍会 setState（B5 回归）"
+    )
+    assert "factsDocsListAbortRef.current?.abort();" in body, "卸载 cleanup 缺 factsDocsListAbortRef.abort（B5 回归）"
 
 
 def test_b5_both_refs_are_declared():
@@ -107,17 +112,18 @@ def test_b6_scheme_switch_resets_ba_selection():
     end = block.find("}, [id]);")
     assert end > 0, "未定位到 [id] effect 的结束"
     body = block[:end]
-    assert "setSelectedBaItem(null);" in body, (
-        "切换方案未清空 selectedBaItem —— 右侧面板残留上一个方案的提取项详情（B6 回归）")
-    assert "setSectionCheckResult(null);" in body, (
-        "切换方案未清空 sectionCheckResult —— 多标段检测结果残留上一个方案（B6 回归）")
+    assert (
+        "setSelectedBaItem(null);" in body
+    ), "切换方案未清空 selectedBaItem —— 右侧面板残留上一个方案的提取项详情（B6 回归）"
+    assert (
+        "setSectionCheckResult(null);" in body
+    ), "切换方案未清空 sectionCheckResult —— 多标段检测结果残留上一个方案（B6 回归）"
 
 
 def test_b6_both_states_are_declared_and_written():
     src = _page_src()
     assert re.search(r"const \[selectedBaItem, setSelectedBaItem\]", src), "selectedBaItem 未声明"
-    assert re.search(r"const \[sectionCheckResult, setSectionCheckResult\]", src), (
-        "sectionCheckResult 未声明")
+    assert re.search(r"const \[sectionCheckResult, setSectionCheckResult\]", src), "sectionCheckResult 未声明"
 
 
 # --------------------------------------------------------------------------- #
@@ -126,15 +132,18 @@ def test_b6_both_states_are_declared_and_written():
 def test_b7_extract_panel_title_is_dynamic():
     src = _page_src()
     # 动态口径：`${baDefs.length} 项结构化提取`
-    assert "`${baDefs.length} \u9879\u7ed3\u6784\u5316\u63d0\u53d6`" in src, (
-        "左面板标题未按 baDefs.length 动态渲染（B7 回归）")
+    assert (
+        "`${baDefs.length} \u9879\u7ed3\u6784\u5316\u63d0\u53d6`" in src
+    ), "左面板标题未按 baDefs.length 动态渲染（B7 回归）"
     # 剥离注释后不得残留写死的「18 项结构化提取」（注释里的说明文字不算）
     code = _strip_comments(src)
-    assert "18 \u9879\u7ed3\u6784\u5316\u63d0\u53d6" not in code, (
-        "源码（非注释）仍写死「18 项结构化提取」—— 后端增减项后标题即失真（B7 回归）")
+    assert (
+        "18 \u9879\u7ed3\u6784\u5316\u63d0\u53d6" not in code
+    ), "源码（非注释）仍写死「18 项结构化提取」—— 后端增减项后标题即失真（B7 回归）"
     # 必须有兜底文案：定义未加载时不报数
-    assert "\u7ed3\u6784\u5316\u63d0\u53d6}" in code or "\u7ed3\u6784\u5316\u63d0\u53d6\"" in code, (
-        "缺少「定义未加载则不报数」的兜底分支")
+    assert (
+        "\u7ed3\u6784\u5316\u63d0\u53d6}" in code or '\u7ed3\u6784\u5316\u63d0\u53d6"' in code
+    ), "缺少「定义未加载则不报数」的兜底分支"
 
 
 def test_b7_defs_state_exists():
@@ -151,36 +160,32 @@ def test_b8_quota_helper_is_wired_into_upload():
     src = _page_src()
     assert "splitByUploadTotalQuota" in src, "页面未引入累计体积配额预检（B8 未接线）"
     block = _slice_after(src, "const handleUploadDocuments = async", 4000)
-    assert "splitByUploadTotalQuota(" in block, (
-        "handleUploadDocuments 内未调用配额预检 —— 两条上传入口都不做预检（B8 回归）")
+    assert (
+        "splitByUploadTotalQuota(" in block
+    ), "handleUploadDocuments 内未调用配额预检 —— 两条上传入口都不做预检（B8 回归）"
     assert "msg.warning(" in block, "配额命中时未提示用户（B8 回归：静默扣文件）"
     # 预检必须先于「开始上传」，否则已经 setUploadingFacts 才提示会让按钮态跳变
     i_helper = block.find("splitByUploadTotalQuota(")
     i_start = block.find("setUploadingFacts(true)")
     assert 0 <= i_helper < i_start, "配额预检必须发生在 setUploadingFacts 之前（B8 回归）"
     # 实际上传用的是分流后的文件，不是原批次
-    assert "factsApi.uploadDocuments(toUpload" in block, (
-        "预检分流结果未被使用 —— 超限文件仍会被发往后端（B8 回归）")
+    assert "factsApi.uploadDocuments(toUpload" in block, "预检分流结果未被使用 —— 超限文件仍会被发往后端（B8 回归）"
 
 
 def test_b8_reads_max_total_bytes_from_limits_endpoint():
     src = _page_src()
     block = _slice_after(src, "max_upload_bytes", 900)
-    assert "max_total_bytes" in block, (
-        "页面未读取 /system/upload-limits 的 max_total_bytes（B8 回归：上限恒为兜底值）")
-    assert re.search(r"const \[maxUploadTotalBytes, setMaxUploadTotalBytes\]", src), (
-        "maxUploadTotalBytes 状态缺失")
+    assert "max_total_bytes" in block, "页面未读取 /system/upload-limits 的 max_total_bytes（B8 回归：上限恒为兜底值）"
+    assert re.search(r"const \[maxUploadTotalBytes, setMaxUploadTotalBytes\]", src), "maxUploadTotalBytes 状态缺失"
 
 
 def test_b8_helper_exported_with_sane_contract():
     src = _upload_src()
-    assert re.search(r"export function splitByUploadTotalQuota", src), (
-        "uploadAccept.ts 未导出 splitByUploadTotalQuota")
+    assert re.search(r"export function splitByUploadTotalQuota", src), "uploadAccept.ts 未导出 splitByUploadTotalQuota"
     m = re.search(r"export const MAX_UPLOAD_TOTAL_FALLBACK:\s*number\s*=\s*(.+?);", src)
     assert m, "缺少 MAX_UPLOAD_TOTAL_FALLBACK 常量导出"
     # 200 * 1024 * 1024 形态（与后端三处默认值对齐）
-    assert m.group(1).replace(" ", "").startswith("200*1024*1024"), (
-        f"兜底上限不是 200MB：{m.group(1)!r}")
+    assert m.group(1).replace(" ", "").startswith("200*1024*1024"), f"兜底上限不是 200MB：{m.group(1)!r}"
 
 
 # --------------------------------------------------------------------------- #
@@ -195,19 +200,17 @@ def test_upload_total_limit_default_is_consistent_across_sources():
     cfg_default = Settings.model_fields["upload_max_total_bytes"].default
     assert cfg_default == 200 * 1024 * 1024, f"config 默认值漂移：{cfg_default}"
     # global_facts 的回落默认 + 运行时权威都应与 config 默认一致
-    assert global_facts._DEFAULT_UPLOAD_TOTAL_BYTES == cfg_default, (
-        "global_facts 的兜底与 config 默认值不一致")
-    assert global_facts.MAX_UPLOAD_TOTAL_BYTES == cfg_default, (
-        "global_facts 运行时权威与 config 默认值不一致（settings 未覆盖时应相等）")
+    assert global_facts._DEFAULT_UPLOAD_TOTAL_BYTES == cfg_default, "global_facts 的兜底与 config 默认值不一致"
+    assert (
+        global_facts.MAX_UPLOAD_TOTAL_BYTES == cfg_default
+    ), "global_facts 运行时权威与 config 默认值不一致（settings 未覆盖时应相等）"
     # ✅ R73 续作 G5：system 端点不再自带 _UPLOAD_LIMIT_DEFAULTS，直接读 gf 权威
-    assert not hasattr(system, "_UPLOAD_LIMIT_DEFAULTS"), (
-        "system.py 不应再保留 _UPLOAD_LIMIT_DEFAULTS（G5 收敛后已删）")
+    assert not hasattr(system, "_UPLOAD_LIMIT_DEFAULTS"), "system.py 不应再保留 _UPLOAD_LIMIT_DEFAULTS（G5 收敛后已删）"
 
     front = _upload_src()
     m = re.search(r"MAX_UPLOAD_TOTAL_FALLBACK:\s*number\s*=\s*(\d+)\s*\*\s*1024\s*\*\s*1024", front)
     assert m, "前端兜底上限未能解析"
-    assert int(m.group(1)) * 1024 * 1024 == cfg_default, (
-        "前端 MAX_UPLOAD_TOTAL_FALLBACK 与后端默认值不一致")
+    assert int(m.group(1)) * 1024 * 1024 == cfg_default, "前端 MAX_UPLOAD_TOTAL_FALLBACK 与后端默认值不一致"
 
 
 async def test_upload_limits_endpoint_reads_runtime_authority(monkeypatch):
@@ -264,8 +267,8 @@ def test_b9_start_button_guard_recorded_as_non_defect():
     p = _REPO / "frontend" / "src" / "components" / "BidAnalysisTab.tsx"
     src = p.read_text(encoding="utf-8").replace("\r\n", "\n")
     assert re.search(r"\{\s*!running\s*\?\s*\(", src), (
-        "启动按钮不再受 !running 条件渲染保护 —— B9 从「非缺陷」变成真缺陷，"
-        "需重新评估双击守卫")
+        "启动按钮不再受 !running 条件渲染保护 —— B9 从「非缺陷」变成真缺陷，" "需重新评估双击守卫"
+    )
 
 
 # --------------------------------------------------------------------------- #
@@ -282,7 +285,9 @@ def test_page_abort_refs_all_covered_by_unmount_cleanup():
     src = _page_src()
     written = set(re.findall(r"(\w+AbortRef)\.current\s*=\s*ac", src))
     assert written, "未找到任何 AbortController 写入点（判据失效，先复核源码）"
-    block = _slice_after(src, "\u7ec4\u4ef6\u5378\u8f7d\u65f6\u53d6\u6d88\u6240\u6709\u8fdb\u884c\u4e2d\u7684 SSE", 4000)
+    block = _slice_after(
+        src, "\u7ec4\u4ef6\u5378\u8f7d\u65f6\u53d6\u6d88\u6240\u6709\u8fdb\u884c\u4e2d\u7684 SSE", 4000
+    )
     end = block.find("}, []);")
     assert end > 0
     cleanup = block[:end]
@@ -290,8 +295,7 @@ def test_page_abort_refs_all_covered_by_unmount_cleanup():
     # 外部库/别处管理的 ref 允许豁免（登记即白名单，按符号名登记、不按行号）
     allowlist: set[str] = set()
     missing = [r for r in missing if r not in allowlist]
-    assert not missing, (
-        f"以下 AbortController 在请求中被赋值，但卸载 cleanup 未 abort：{missing}")
+    assert not missing, f"以下 AbortController 在请求中被赋值，但卸载 cleanup 未 abort：{missing}"
 
 
 # --------------------------------------------------------------------------- #
@@ -314,14 +318,14 @@ def test_b10_partition_helper_is_wired_into_upload_handler():
     block = _upload_block()
     assert "partitionUploadFiles(" in block, (
         "handleUploadDocuments 未做单文件硬校验 —— 「① 上传文件保存」入口仍会"
-        "把超限/非法扩展名文件发给后端（B10 回归）")
+        "把超限/非法扩展名文件发给后端（B10 回归）"
+    )
     assert "msg.error(" in block, "被拒文件未提示用户（B10 回归：静默丢弃）"
     # 顺序：单文件过滤 → 累计配额 → 开始上传
     i_part = block.find("partitionUploadFiles(")
     i_quota = block.find("splitByUploadTotalQuota(")
     i_start = block.find("setUploadingFacts(true)")
-    assert 0 <= i_part < i_quota < i_start, (
-        "预检顺序错位：应为 单文件过滤 → 累计配额 → setUploadingFacts")
+    assert 0 <= i_part < i_quota < i_start, "预检顺序错位：应为 单文件过滤 → 累计配额 → setUploadingFacts"
     # 实际上传用的是过滤后的文件
     assert "factsApi.uploadDocuments(toUpload" in block, "过滤结果未被使用（B10 回归）"
 
@@ -329,8 +333,9 @@ def test_b10_partition_helper_is_wired_into_upload_handler():
 def test_b10_single_choke_point_for_upload_requests():
     """页面内 `factsApi.uploadDocuments` 只能有 1 处调用（唯一出口）。"""
     src = _page_src()
-    assert src.count("factsApi.uploadDocuments(") == 1, (
-        "页面出现多处 factsApi.uploadDocuments —— 预检必然绕过其中一条入口")
+    assert (
+        src.count("factsApi.uploadDocuments(") == 1
+    ), "页面出现多处 factsApi.uploadDocuments —— 预检必然绕过其中一条入口"
     # 两条入口都汇入同一 handler
     assert "onUploadFiles={handleUploadDocuments}" in src, "import Tab 入口未接 handler"
     assert "handleUploadDocuments(files)" in src, "「① 上传文件保存」入口未接 handler"
@@ -340,17 +345,23 @@ def test_b10_import_tab_keeps_its_own_preflight():
     """入口 1 的先验过滤不得被摘除（否则两处提示文案分叉、且整批先发后端）。"""
     tab = _REPO / "frontend" / "src" / "components" / "UploadParseTab.tsx"
     src = tab.read_text(encoding="utf-8").replace("\r\n", "\n")
-    assert "partitionUploadFiles(files, effectiveMaxBytes)" in src, (
-        "UploadParseTab 摘掉了自身预检 —— 拖拽入口的「先拦后发」退化为先发后端")
+    assert (
+        "partitionUploadFiles(files, effectiveMaxBytes)" in src
+    ), "UploadParseTab 摘掉了自身预检 —— 拖拽入口的「先拦后发」退化为先发后端"
 
 
 def test_b10_reject_wording_is_consistent_across_both_entries():
     """两条入口的拒绝文案必须同口径（同一判据两处措辞 → 用户看到两套说法）。"""
     page = _page_src()
-    tab = (_REPO / "frontend" / "src" / "components" / "UploadParseTab.tsx").read_text(
-        encoding="utf-8").replace("\r\n", "\n")
-    for phrase in ("\u4e0d\u652f\u6301\u7684\u6587\u4ef6\u7c7b\u578b\uff0c\u5df2\u5ffd\u7565\uff1a",
-                   "\uff0c\u5df2\u5ffd\u7565\uff1a"):
+    tab = (
+        (_REPO / "frontend" / "src" / "components" / "UploadParseTab.tsx")
+        .read_text(encoding="utf-8")
+        .replace("\r\n", "\n")
+    )
+    for phrase in (
+        "\u4e0d\u652f\u6301\u7684\u6587\u4ef6\u7c7b\u578b\uff0c\u5df2\u5ffd\u7565\uff1a",
+        "\uff0c\u5df2\u5ffd\u7565\uff1a",
+    ):
         assert phrase in page and phrase in tab, f"两条入口的拒绝文案不一致：{phrase!r}"
 
 
@@ -385,23 +396,24 @@ def test_d1_notice_text_is_parameterized_not_hardcoded():
     src = _workflow_src()
     code = _strip_comments(src)
     # 逐字硬编码旧文案不得再出现在**代码**（注释里的历史说明不算）
-    for literal in ("\u4e2a\u8d85\u8fc7 30MB", "\u5355\u6b21 20 \u4e2a\u4e0a\u9650",
-                    "200MB \u4e0a\u9650"):
-        assert literal not in code, (
-            f"workflowDerived.ts 仍硬编码上限文案 {literal!r} —— 与后端可配置上限漂移（D1 回归）")
+    for literal in ("\u4e2a\u8d85\u8fc7 30MB", "\u5355\u6b21 20 \u4e2a\u4e0a\u9650", "200MB \u4e0a\u9650"):
+        assert (
+            literal not in code
+        ), f"workflowDerived.ts 仍硬编码上限文案 {literal!r} —— 与后端可配置上限漂移（D1 回归）"
     # 必须存在按入参渲染的形参（limits）与 MB 格式化辅助
-    assert re.search(r"export function summarizeUploadResult\(\s*[\s\S]{0,120}?limits\?:\s*UploadLimitHints", src), (
-        "summarizeUploadResult 未接收 limits 入参（D1 回归）")
-    assert re.search(r"export function buildUploadNotice\(\s*[\s\S]{0,120}?limits\?:\s*UploadLimitHints", src), (
-        "buildUploadNotice 未接收 limits 入参（D1 回归）")
+    assert re.search(
+        r"export function summarizeUploadResult\(\s*[\s\S]{0,120}?limits\?:\s*UploadLimitHints", src
+    ), "summarizeUploadResult 未接收 limits 入参（D1 回归）"
+    assert re.search(
+        r"export function buildUploadNotice\(\s*[\s\S]{0,120}?limits\?:\s*UploadLimitHints", src
+    ), "buildUploadNotice 未接收 limits 入参（D1 回归）"
     assert "export type UploadLimitHints" in src, "缺少 UploadLimitHints 类型导出"
 
 
 def test_d1_page_passes_delivered_limits_into_notice():
     """页面必须把 /system/upload-limits 的三个上限透传给 buildUploadNotice。"""
     src = _page_src()
-    assert "buildUploadNotice(data, {" in src, (
-        "页面未向上传提示透传 limits —— 文案又退回硬编码默认值（D1 回归）")
+    assert "buildUploadNotice(data, {" in src, "页面未向上传提示透传 limits —— 文案又退回硬编码默认值（D1 回归）"
     block = _slice_after(src, "buildUploadNotice(data, {", 300)
     for field in ("maxBytes:", "maxTotalBytes:", "maxFiles:"):
         assert field in block, f"buildUploadNotice 缺少上限字段 {field}（D1 回归）"
@@ -409,39 +421,44 @@ def test_d1_page_passes_delivered_limits_into_notice():
 
 def test_d2_file_count_helper_exported_and_default_matches_backend():
     up = _upload_src()
-    assert re.search(r"export function splitByUploadFileCount", up), (
-        "uploadAccept.ts 未导出 splitByUploadFileCount（D2 未实现）")
+    assert re.search(
+        r"export function splitByUploadFileCount", up
+    ), "uploadAccept.ts 未导出 splitByUploadFileCount（D2 未实现）"
     m = re.search(r"MAX_UPLOAD_FILES_FALLBACK:\s*number\s*=\s*(\d+)", up)
     assert m, "缺少 MAX_UPLOAD_FILES_FALLBACK 常量导出"
     # 与后端三处默认值同值（config 默认 = global_facts 兜底 = 前端兜底）
     from app.config import Settings
     from app.routers import global_facts
+
     cfg_default = Settings.model_fields["upload_max_files_per_request"].default
-    assert int(m.group(1)) == cfg_default == global_facts._DEFAULT_UPLOAD_FILES, (
-        "前端兜底文件数上限与后端默认值不一致 → 预检口径漂移")
+    assert (
+        int(m.group(1)) == cfg_default == global_facts._DEFAULT_UPLOAD_FILES
+    ), "前端兜底文件数上限与后端默认值不一致 → 预检口径漂移"
 
 
 def test_d2_file_count_preflight_wired_into_upload_handler():
     block = _upload_block()
-    assert "splitByUploadFileCount(" in block, (
-        "handleUploadDocuments 未做单次文件数预检 —— 超量文件要等整批传完才被发现（D2 回归）")
+    assert (
+        "splitByUploadFileCount(" in block
+    ), "handleUploadDocuments 未做单次文件数预检 —— 超量文件要等整批传完才被发现（D2 回归）"
     # 顺序：单文件过滤 → 累计体积 → 文件数 → 开始上传
     i_part = block.find("partitionUploadFiles(")
     i_quota = block.find("splitByUploadTotalQuota(")
     i_count = block.find("splitByUploadFileCount(")
     i_start = block.find("setUploadingFacts(true)")
-    assert 0 <= i_part < i_quota < i_count < i_start, (
-        "预检顺序错位：应为 单文件过滤 → 累计体积 → 文件数 → setUploadingFacts")
+    assert (
+        0 <= i_part < i_quota < i_count < i_start
+    ), "预检顺序错位：应为 单文件过滤 → 累计体积 → 文件数 → setUploadingFacts"
     assert "factsApi.uploadDocuments(toUpload" in block, "文件数分流结果未被使用（D2 回归）"
 
 
 def test_d2_page_reads_max_files_per_request_from_limits():
     src = _page_src()
-    assert re.search(r"const \[maxUploadFiles, setMaxUploadFiles\]", src), (
-        "maxUploadFiles 状态缺失（D2 回归）")
+    assert re.search(r"const \[maxUploadFiles, setMaxUploadFiles\]", src), "maxUploadFiles 状态缺失（D2 回归）"
     block = _slice_after(src, "max_upload_bytes", 900)
-    assert "max_files_per_request" in block, (
-        "页面未读取 /system/upload-limits 的 max_files_per_request（D2 回归：上限恒为兜底值）")
+    assert (
+        "max_files_per_request" in block
+    ), "页面未读取 /system/upload-limits 的 max_files_per_request（D2 回归：上限恒为兜底值）"
     assert "setMaxUploadFiles" in block, "读取到 max_files_per_request 后未写入状态（D2 回归）"
 
 
@@ -464,20 +481,20 @@ def test_d3_outline_import_entries_use_dynamic_upload_limit():
     modal = _MODAL_TS.read_text(encoding="utf-8").replace("\r\n", "\n")
     outline_page = _OUTLINE_PAGE_TS.read_text(encoding="utf-8").replace("\r\n", "\n")
 
-    for name, src in (("SchemeWorkbenchPage.tsx", page),
-                      ("OutlineLibraryEditModal.tsx", modal)):
+    for name, src in (("SchemeWorkbenchPage.tsx", page), ("OutlineLibraryEditModal.tsx", modal)):
         code = _strip_comments(src)
-        assert "30 * 1024 * 1024" not in code, (
-            f"{name} 仍硬编码 30MB 上传上限 —— 与后端可配置上限漂移（D3 回归）")
+        assert "30 * 1024 * 1024" not in code, f"{name} 仍硬编码 30MB 上传上限 —— 与后端可配置上限漂移（D3 回归）"
         assert "resolveMaxUploadBytes(" in code, f"{name} 未用动态上限解析（D3 回归）"
         assert "formatUploadLimitMb(" in code, f"{name} 未用动态上限文案（D3 回归）"
 
     # 受控组件约定：弹窗不自取网络配置，由宿主页下传。
-    assert re.search(r"maxUploadBytes\?:\s*number", modal), (
-        "OutlineLibraryEditModal 未接收 maxUploadBytes 受控入参（D3 回归）")
-    assert "systemApi.uploadLimits()" in outline_page, (
-        "目录库页未从 /system/upload-limits 读取上限（D3 回归）")
-    assert re.search(r"const \[maxUploadBytes, setMaxUploadBytes\]", outline_page), (
-        "目录库页未持有 maxUploadBytes 状态（D3 回归）")
-    assert "maxUploadBytes={maxUploadBytes}" in outline_page, (
-        "目录库页未把 maxUploadBytes 下传编辑弹窗（D3 回归）")
+    assert re.search(
+        r"maxUploadBytes\?:\s*number", modal
+    ), "OutlineLibraryEditModal 未接收 maxUploadBytes 受控入参（D3 回归）"
+    assert re.search(
+        r"systemApi\s*\.\s*uploadLimits\(\)", outline_page
+    ), "目录库页未从 /system/upload-limits 读取上限（D3 回归）"
+    assert re.search(
+        r"const \[maxUploadBytes, setMaxUploadBytes\]", outline_page
+    ), "目录库页未持有 maxUploadBytes 状态（D3 回归）"
+    assert "maxUploadBytes={maxUploadBytes}" in outline_page, "目录库页未把 maxUploadBytes 下传编辑弹窗（D3 回归）"

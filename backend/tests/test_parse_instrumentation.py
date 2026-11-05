@@ -4,6 +4,7 @@
 1. app.utils.log_context：关联 ID 透传与日志前缀过滤器。
 2. facts_extractor.resolve_fact_is_resolved：AUTO_RESOLVE_EXTRACTED_FACTS 门控。
 """
+
 from __future__ import annotations
 
 import logging
@@ -22,6 +23,7 @@ from app.utils.log_context import (
 # 1. 全链路日志埋点
 # ---------------------------------------------------------------------------
 
+
 def test_trace_id_generation_and_suffix():
     clear_context()
     tid = new_trace_id()
@@ -39,8 +41,7 @@ def test_suffix_empty_when_no_context():
 
 def test_trace_context_filter_prefixes_message():
     clear_context()
-    rec = logging.LogRecord(
-        "mod", logging.INFO, __file__, 1, "原始消息", None, None)
+    rec = logging.LogRecord("mod", logging.INFO, __file__, 1, "原始消息", None, None)
     flt = TraceContextFilter()
     set_context(trace_id="abc123", project_id="pX", doc_id="dX")
     assert flt.filter(rec) is True
@@ -49,8 +50,7 @@ def test_trace_context_filter_prefixes_message():
 
 def test_trace_context_filter_idempotent():
     clear_context()
-    rec = logging.LogRecord(
-        "mod", logging.INFO, __file__, 1, "msg", None, None)
+    rec = logging.LogRecord("mod", logging.INFO, __file__, 1, "msg", None, None)
     flt = TraceContextFilter()
     set_context(trace_id="abc123", project_id="pY")
     flt.filter(rec)
@@ -73,6 +73,7 @@ def test_install_filter_idempotent():
 # ---------------------------------------------------------------------------
 # 2. 信息调用完整性门控（AUTO_RESOLVE_EXTRACTED_FACTS）
 # ---------------------------------------------------------------------------
+
 
 def _item(**kw) -> FactItem:
     return FactItem(name="测试事实", value="100", **kw)

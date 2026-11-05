@@ -26,9 +26,21 @@ import {
 
 /** 镜像后端 file_parser.SUPPORTED_EXTENSIONS（2026-09-23） */
 const BACKEND_SUPPORTED_EXTENSIONS = [
-  "docx", "pdf", "md", "txt", "xlsx", "xls", "csv",
-  "png", "jpg", "jpeg", "bmp", "tiff",
-  "doc", "wps",
+  "docx",
+  "pdf",
+  "md",
+  "txt",
+  "xlsx",
+  "xls",
+  "csv",
+  "png",
+  "jpg",
+  "jpeg",
+  "bmp",
+  "tiff",
+  "tif",
+  "doc",
+  "wps",
 ];
 
 describe("UPLOAD_FILE_ACCEPT", () => {

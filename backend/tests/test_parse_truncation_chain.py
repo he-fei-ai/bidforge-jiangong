@@ -24,6 +24,7 @@
 测试直接调用路由/服务函数（与 test_bid_analysis.py 风格一致），
 避免 TestClient 跨事件循环持有 aiosqlite 连接导致的偶发失败。
 """
+
 from __future__ import annotations
 
 import json
@@ -43,36 +44,47 @@ from app.services.file_parser import MAX_PARSE_WARNINGS, dump_parse_warnings
     ("doc", "expected", "reason"),
     [
         # ① 权威口径：解析阶段持久化的标记
-        ({"parse_truncated": 1, "parsed_markdown": "很短的正文"},
-         True, "parse_truncated=1 必须判定为截断"),
-        ({"parse_truncated": 0, "parsed_markdown": "很短的正文"},
-         False, "parse_truncated=0 且无其它信号 → 不截断"),
+        ({"parse_truncated": 1, "parsed_markdown": "很短的正文"}, True, "parse_truncated=1 必须判定为截断"),
+        ({"parse_truncated": 0, "parsed_markdown": "很短的正文"}, False, "parse_truncated=0 且无其它信号 → 不截断"),
         # ② 中文告警兜底（file_parser 的真实输出形态）
-        ({"parse_truncated": 0, "parsed_markdown": "x" * 20,
-          "parse_warnings": "原文 400000 字，已截断至 120000 字上限"},
-         True, "中文告警含「截断」必须判定为截断"),
-        ({"parse_truncated": 0, "parsed_markdown": "x" * 20,
-          "parse_warnings": "PDF 第 50 页之后已截断，建议拆分文件"},
-         True, "PDF 截页类中文告警必须判定为截断"),
+        (
+            {
+                "parse_truncated": 0,
+                "parsed_markdown": "x" * 20,
+                "parse_warnings": "原文 400000 字，已截断至 120000 字上限",
+            },
+            True,
+            "中文告警含「截断」必须判定为截断",
+        ),
+        (
+            {
+                "parse_truncated": 0,
+                "parsed_markdown": "x" * 20,
+                "parse_warnings": "PDF 第 50 页之后已截断，建议拆分文件",
+            },
+            True,
+            "PDF 截页类中文告警必须判定为截断",
+        ),
         # ② 兼容历史/外部写入的英文告警
-        ({"parse_truncated": 0, "parsed_markdown": "x" * 20,
-          "parse_warnings": "content truncated at limit"},
-         True, "英文 truncated 仍须兼容"),
+        (
+            {"parse_truncated": 0, "parsed_markdown": "x" * 20, "parse_warnings": "content truncated at limit"},
+            True,
+            "英文 truncated 仍须兼容",
+        ),
         # parse_warnings 可能被外部写成分数组（历史写入形态）
-        ({"parse_truncated": 0, "parsed_markdown": "x" * 20,
-          "parse_warnings": ["第 3 页之后已截断"]},
-         True, "数组形态的告警也必须判定"),
-        ({"parse_truncated": 0, "parsed_markdown": "x" * 20},
-         False, "小正文无信号 → 不截断"),
-        ({"parse_truncated": 0, "parsed_markdown": ""},
-         False, "空正文 → 不截断"),
+        (
+            {"parse_truncated": 0, "parsed_markdown": "x" * 20, "parse_warnings": ["第 3 页之后已截断"]},
+            True,
+            "数组形态的告警也必须判定",
+        ),
+        ({"parse_truncated": 0, "parsed_markdown": "x" * 20}, False, "小正文无信号 → 不截断"),
+        ({"parse_truncated": 0, "parsed_markdown": ""}, False, "空正文 → 不截断"),
         # 旧版入库截断哨兵值 -1：保留其「已截断」语义（既有契约，见
         # test_import_module_fixes_20260925.py::test_doc_is_truncated_*）。
         # 生产路径不会产出 -1（本模块 SELECT 不取 text_len 列，_doc_text_len
         # 缺列时回退 len(parsed_markdown) ≥ 0），保留仅为了不破坏既有契约；
         # 方向是保守的 —— 宁可多提示，也不能让残缺资料被当成完整资料。
-        ({"text_len": -1, "parsed_markdown": "x" * 20},
-         True, "旧版入库截断哨兵值 -1 仍须判定为截断"),
+        ({"text_len": -1, "parsed_markdown": "x" * 20}, True, "旧版入库截断哨兵值 -1 仍须判定为截断"),
     ],
 )
 def test_doc_is_truncated_layers(doc, expected, reason):
@@ -90,15 +102,13 @@ def test_doc_is_truncated_char_limit_fallback():
     legacy = {"parse_truncated": 0, "parsed_markdown": "x" * 80_000}
     assert ba._doc_is_truncated(legacy) is True, "历史 80000 字上限必须判定为截断"
     # 上限减一字 → 不截断（避免把「接近上限的正常文档」误报）
-    just_below = {"parse_truncated": 0,
-                  "parsed_markdown": "x" * (gf.MAX_PARSED_CHARS - 1)}
+    just_below = {"parse_truncated": 0, "parsed_markdown": "x" * (gf.MAX_PARSED_CHARS - 1)}
     assert ba._doc_is_truncated(just_below) is False
 
 
 def test_doc_is_truncated_parse_truncated_wins_over_warnings():
     """标记为 0 但告警文本含「截断」→ 仍判定为截断（四层是 OR 关系）。"""
-    doc = {"parse_truncated": 0, "parsed_markdown": "x" * 10,
-           "parse_warnings": "解析器判定内容不完整（PDF 页数截断）"}
+    doc = {"parse_truncated": 0, "parsed_markdown": "x" * 10, "parse_warnings": "解析器判定内容不完整（PDF 页数截断）"}
     assert ba._doc_is_truncated(doc) is True
 
 
@@ -107,26 +117,26 @@ def test_doc_is_truncated_parse_truncated_wins_over_warnings():
 # ---------------------------------------------------------------------------
 
 
-_DOC_COLS = ("id, project_id, file_name, file_type, parsed_markdown, "
-             "doc_category, parse_warnings, parse_truncated, parse_status, "
-             "parse_time")
+_DOC_COLS = (
+    "id, project_id, file_name, file_type, parsed_markdown, "
+    "doc_category, parse_warnings, parse_truncated, parse_status, "
+    "parse_time"
+)
 
 
 async def _seed_docs(db, pid: str) -> list[str]:
     """写入三份已解析文档，分别覆盖三种截断信号来源（标记/告警/无）。"""
     ids = [uuid.uuid4().hex for _ in range(3)]
     rows = [
-        (ids[0], "招标文件.pdf", "pdf", "正文A", "招标文件",
-         "第 50 页之后已截断", 1, 1.0),
+        (ids[0], "招标文件.pdf", "pdf", "正文A", "招标文件", "第 50 页之后已截断", 1, 1.0),
         (ids[1], "地勘报告.docx", "docx", "正文B", "地勘报告", "[]", 0, 2.0),
         (ids[2], "合同.doc", "doc", "正文C", "合同文件", "", 0, 3.0),
     ]
     for doc_id, fname, ftype, body, cat, warnings, trunc, secs in rows:
         await db.execute(
-            f"INSERT INTO project_documents({_DOC_COLS}) "
-            "VALUES(?,?,?,?,?,?,?,?,?,?)",
-            (doc_id, pid, fname, ftype, body * 10, cat, warnings, trunc,
-             "success", secs))
+            f"INSERT INTO project_documents({_DOC_COLS}) " "VALUES(?,?,?,?,?,?,?,?,?,?)",
+            (doc_id, pid, fname, ftype, body * 10, cat, warnings, trunc, "success", secs),
+        )
     await db.commit()
     return ids
 
@@ -195,8 +205,7 @@ async def test_list_parsed_documents_table_without_both_columns(db_conn):
     docs = await ba._list_parsed_documents(db, pid)
     assert len(docs) == 3
     d0 = {d["id"]: d for d in docs}[ids[0]]
-    assert set(d0) == {"id", "file_name", "file_type", "parsed_markdown",
-                       "doc_category", "file_size", "parse_time"}
+    assert set(d0) == {"id", "file_name", "file_type", "parsed_markdown", "doc_category", "file_size", "parse_time"}
     assert ba._doc_is_truncated(d0) is False, "无诊断信息时不得误报截断"
 
 
@@ -205,8 +214,7 @@ async def test_list_parsed_documents_table_without_both_columns(db_conn):
 # ---------------------------------------------------------------------------
 
 
-def _mk_doc(name: str, chars: int, truncated: bool = False,
-            category: str = "招标文件") -> dict:
+def _mk_doc(name: str, chars: int, truncated: bool = False, category: str = "招标文件") -> dict:
     """构造一份已解析文档行（与 _list_parsed_documents 返回形状一致）。"""
     return {
         "id": uuid.uuid4().hex,
@@ -222,8 +230,7 @@ def _mk_doc(name: str, chars: int, truncated: bool = False,
 
 def test_report_flags_truncated_source_document():
     """任一参与提取的文档被截断 → source_truncated=True 且给出文件名清单。"""
-    docs = [_mk_doc("招标文件.pdf", 12_000, truncated=True),
-            _mk_doc("合同.doc", 3_000, category="合同文件")]
+    docs = [_mk_doc("招标文件.pdf", 12_000, truncated=True), _mk_doc("合同.doc", 3_000, category="合同文件")]
     text, report = ba._combine_doc_texts_report(docs)
     assert text.strip(), "合并文本不得为空"
     assert report["source_truncated"] is True
@@ -243,8 +250,7 @@ def test_report_flags_truncated_source_document():
 
 def test_report_clean_when_all_docs_complete():
     """全部文档完整 → source_truncated=False、清单为空（不得误报）。"""
-    docs = [_mk_doc("招标文件.pdf", 8_000),
-            _mk_doc("地勘报告.docx", 4_000, category="地勘报告")]
+    docs = [_mk_doc("招标文件.pdf", 8_000), _mk_doc("地勘报告.docx", 4_000, category="地勘报告")]
     _text, report = ba._combine_doc_texts_report(docs)
     assert report["source_truncated"] is False
     assert report["truncated_docs"] == []
@@ -269,21 +275,23 @@ def test_report_flags_docs_dropped_by_budget():
     故第一份取预算的 1.2 倍（单份就超预算），第二份必然被整份丢弃。
     """
     budget = ba._MAX_DOC_CHARS
-    docs = [_mk_doc("招标文件.pdf", int(budget * 1.2)),
-            _mk_doc("地勘报告.docx", int(budget * 0.5),
-                    category="地勘报告")]
+    docs = [
+        _mk_doc("招标文件.pdf", int(budget * 1.2)),
+        _mk_doc("地勘报告.docx", int(budget * 0.5), category="地勘报告"),
+    ]
     _text, report = ba._combine_doc_texts_report(docs)
-    assert report["dropped_doc_count"] == 1, \
-        f"第二份应被整份跳过（预算={budget}）：{report}"
+    assert report["dropped_doc_count"] == 1, f"第二份应被整份跳过（预算={budget}）：{report}"
     assert report["source_truncated"] is True
     assert report["used_doc_count"] == 1
 
 
 def test_report_text_identical_to_legacy_string_branch():
     """接通报告分支后，合并文本语义必须与旧字符串返回逐字一致（无回归）。"""
-    docs = [_mk_doc("招标文件.pdf", 5_000),
-            _mk_doc("合同.doc", 2_000, category="合同文件", truncated=True),
-            _mk_doc("空文档.txt", 0)]
+    docs = [
+        _mk_doc("招标文件.pdf", 5_000),
+        _mk_doc("合同.doc", 2_000, category="合同文件", truncated=True),
+        _mk_doc("空文档.txt", 0),
+    ]
     legacy = ba._combine_doc_texts(docs)
     new_text, _report = ba._combine_doc_texts_report(docs)
     assert new_text == legacy, "报告分支不得改变合并文本内容"
@@ -293,31 +301,46 @@ def test_report_empty_docs_contract():
     """空文档列表：报告形状仍完整（供端点契约对称复用）。"""
     text, report = ba._combine_doc_texts_report([])
     assert text == ""
-    assert report == {"source_truncated": False, "truncated_docs": [],
-                      "used_doc_count": 0, "input_doc_count": 0,
-                      "dropped_doc_count": 0, "total_chars": 0}
+    assert report == {
+        "source_truncated": False,
+        "truncated_docs": [],
+        "used_doc_count": 0,
+        "input_doc_count": 0,
+        "dropped_doc_count": 0,
+        "total_chars": 0,
+    }
 
 
 def test_report_keys_are_stable():
     """报告字段集合固定，供前端与四个端点统一判读（防止各端点自行漂移）。"""
     assert set(ba._combine_doc_texts_report([])[1]) == {
-        "source_truncated", "truncated_docs", "used_doc_count",
-        "input_doc_count", "dropped_doc_count", "total_chars"}
+        "source_truncated",
+        "truncated_docs",
+        "used_doc_count",
+        "input_doc_count",
+        "dropped_doc_count",
+        "total_chars",
+    }
 
 
 # ---------------------------------------------------------------------------
 # 不变量 4：端点契约 —— 报告字段必须出现在每个提取入口的响应里
 # ---------------------------------------------------------------------------
 
-_REPORT_KEYS = {"source_truncated", "truncated_docs", "used_doc_count",
-                "input_doc_count", "dropped_doc_count", "total_chars"}
+_REPORT_KEYS = {
+    "source_truncated",
+    "truncated_docs",
+    "used_doc_count",
+    "input_doc_count",
+    "dropped_doc_count",
+    "total_chars",
+}
 
 
 async def _seed_scheme(db) -> tuple[str, str]:
     pid, sid = uuid.uuid4().hex, uuid.uuid4().hex
     await db.execute("INSERT INTO projects(id,name) VALUES(?,?)", (pid, "p"))
-    await db.execute("INSERT INTO schemes(id,project_id,name) VALUES(?,?,?)",
-                     (sid, pid, "s"))
+    await db.execute("INSERT INTO schemes(id,project_id,name) VALUES(?,?,?)", (sid, pid, "s"))
     await db.commit()
     return pid, sid
 
@@ -330,6 +353,7 @@ async def test_check_sections_response_carries_source_report(db_conn, monkeypatc
 
     async def _no_docs(_db, _pid):
         return []
+
     monkeypatch.setattr(ba, "_list_parsed_documents", _no_docs)
     r = await ba.check_bid_sections(scheme_id=sid, project_id="", db=db)
     assert r["source"] == "no_documents"
@@ -338,9 +362,17 @@ async def test_check_sections_response_carries_source_report(db_conn, monkeypatc
 
     # 文档存在但合并后为空
     async def _empty_docs(_db, _pid):
-        return [{"id": "d1", "file_name": "空白.txt", "doc_category": "其他",
-                 "parsed_markdown": "   ", "parse_warnings": "[]",
-                 "parse_truncated": 0}]
+        return [
+            {
+                "id": "d1",
+                "file_name": "空白.txt",
+                "doc_category": "其他",
+                "parsed_markdown": "   ",
+                "parse_warnings": "[]",
+                "parse_truncated": 0,
+            }
+        ]
+
     monkeypatch.setattr(ba, "_list_parsed_documents", _empty_docs)
     r = await ba.check_bid_sections(scheme_id=sid, project_id="", db=db)
     assert r["source"] == "empty_text"
@@ -349,6 +381,7 @@ async def test_check_sections_response_carries_source_report(db_conn, monkeypatc
     # 正常检测路径
     async def _ok_docs(_db, _pid):
         return [_mk_doc("招标文件.pdf", 3_000)]
+
     monkeypatch.setattr(ba, "_list_parsed_documents", _ok_docs)
     r = await ba.check_bid_sections(scheme_id=sid, project_id="", db=db)
     assert r["ok"] is True
@@ -366,14 +399,16 @@ async def test_extract_sections_response_carries_source_report(db_conn, monkeypa
 
     async def _fake_list(_db, _pid):
         return [src_doc]
+
     monkeypatch.setattr(ba, "_list_parsed_documents", _fake_list)
 
-    sections = [{"id": "sec-1", "title": "第一标段", "description": "",
-                 "evidence": [], "start_line": 1, "end_line": 1}]
+    sections = [{"id": "sec-1", "title": "第一标段", "description": "", "evidence": [], "start_line": 1, "end_line": 1}]
 
     async def _fake_extract(*, markdown):
         return {"sections": sections, "segment_count": 1, "estimated_calls": 1}
+
     import app.services.bid_section_extraction as bse
+
     monkeypatch.setattr(bse, "extract_bid_sections", _fake_extract)
 
     r = await ba.extract_bid_sections_api(scheme_id=sid, project_id="", db=db)
@@ -388,17 +423,27 @@ async def test_extract_sections_response_carries_source_report(db_conn, monkeypa
 # ---------------------------------------------------------------------------
 
 
-async def _seed_doc(db, pid: str, file_name: str, body: str, *,
-                    parse_truncated: int = 0,
-                    warnings: list[str] | None = None) -> str:
+async def _seed_doc(
+    db, pid: str, file_name: str, body: str, *, parse_truncated: int = 0, warnings: list[str] | None = None
+) -> str:
     """写入一份已解析文档行；告警按真实落库形态（JSON 数组串）存储。"""
     doc_id = uuid.uuid4().hex
     await db.execute(
         "INSERT INTO project_documents(id, project_id, file_name, file_type, "
         "parsed_markdown, doc_category, parse_warnings, parse_truncated, "
         "parse_status) VALUES(?,?,?,?,?,?,?,?,?)",
-        (doc_id, pid, file_name, file_name.rsplit(".", 1)[-1], body, "其他",
-         dump_parse_warnings(warnings or []), parse_truncated, "success"))
+        (
+            doc_id,
+            pid,
+            file_name,
+            file_name.rsplit(".", 1)[-1],
+            body,
+            "其他",
+            dump_parse_warnings(warnings or []),
+            parse_truncated,
+            "success",
+        ),
+    )
     await db.commit()
     return doc_id
 
@@ -412,9 +457,7 @@ async def test_preview_returns_parse_level_truncated(db_conn):
     await db.commit()
 
     # ① 解析器级截断（PDF 截页）：正文很短 → preview_truncated 必为 False
-    short_id = await _seed_doc(
-        db, pid, "超长图纸.pdf", "x" * 500, parse_truncated=1,
-        warnings=["第 50 页之后已截断"])
+    short_id = await _seed_doc(db, pid, "超长图纸.pdf", "x" * 500, parse_truncated=1, warnings=["第 50 页之后已截断"])
     # ② 完全正常的文档
     ok_id = await _seed_doc(db, pid, "完整说明.txt", "y" * 500)
     # ③ 正文长 → 只被预览截取
@@ -422,9 +465,9 @@ async def test_preview_returns_parse_level_truncated(db_conn):
     # ④ 未解析
     unparsed_id = uuid.uuid4().hex
     await db.execute(
-        "INSERT INTO project_documents(id, project_id, file_name, "
-        "parsed_markdown, parse_status) VALUES(?,?,?,?,?)",
-        (unparsed_id, pid, "未解析.txt", "", ""))
+        "INSERT INTO project_documents(id, project_id, file_name, " "parsed_markdown, parse_status) VALUES(?,?,?,?,?)",
+        (unparsed_id, pid, "未解析.txt", "", ""),
+    )
     await db.commit()
 
     r1 = await gf.preview_document(short_id, max_chars=5000, db=db)
@@ -447,8 +490,7 @@ async def test_preview_returns_parse_level_truncated(db_conn):
     assert r4["is_parsed"] is False
 
     # 两条路径字段集合一致（既有契约对称护栏 + 新增字段）
-    assert set(r1) == set(r4), (
-        f"预览接口两条返回路径字段集合必须一致：{sorted(set(r1) ^ set(r4))}")
+    assert set(r1) == set(r4), f"预览接口两条返回路径字段集合必须一致：{sorted(set(r1) ^ set(r4))}"
 
 
 @pytest.mark.asyncio
@@ -458,8 +500,7 @@ async def test_preview_legacy_char_limit_doc_is_truncated(db_conn):
     pid = uuid.uuid4().hex
     await db.execute("INSERT INTO projects(id,name) VALUES(?,?)", (pid, "p"))
     await db.commit()
-    doc_id = await _seed_doc(
-        db, pid, "历史大文件.pdf", "x" * gf.MAX_PARSED_CHARS, parse_truncated=0)
+    doc_id = await _seed_doc(db, pid, "历史大文件.pdf", "x" * gf.MAX_PARSED_CHARS, parse_truncated=0)
     r = await gf.preview_document(doc_id, max_chars=5000, db=db)
     assert r["truncated"] is True, "字数上限回退口径必须生效"
     assert r["preview_truncated"] is True, "预览本身也被截取"
@@ -498,7 +539,3 @@ def test_parse_warnings_empty_and_none_inputs():
     assert gf._decode_parse_warnings("") == []
     assert gf._decode_parse_warnings("not-json") == []
     assert gf._decode_parse_warnings('{"not": "a list"}') == []
-
-
-
-

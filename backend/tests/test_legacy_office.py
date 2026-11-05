@@ -13,6 +13,7 @@
 6. 全部后端失败 → 报错含具体后端名（便于用户排查）；
 7. 扩展名为 .docx 但内容为 OLE 复合文档 → 按真实类型改走旧版 Word 通道。
 """
+
 import io
 import zipfile
 
@@ -38,13 +39,10 @@ def _build_docx(paragraphs: list[tuple[int, str]]) -> bytes:
     body: list[str] = []
     for level, text in paragraphs:
         if level:
-            body.append(
-                f'<w:p><w:pPr><w:pStyle w:val="Heading{level}"/></w:pPr>'
-                f'<w:r><w:t>{text}</w:t></w:r></w:p>')
+            body.append(f'<w:p><w:pPr><w:pStyle w:val="Heading{level}"/></w:pPr>' f"<w:r><w:t>{text}</w:t></w:r></w:p>")
         else:
-            body.append(f'<w:p><w:r><w:t>{text}</w:t></w:r></w:p>')
-    xml = ('<?xml version="1.0" encoding="UTF-8"?>'
-           f'<w:document {ns}><w:body>{"".join(body)}</w:body></w:document>')
+            body.append(f"<w:p><w:r><w:t>{text}</w:t></w:r></w:p>")
+    xml = '<?xml version="1.0" encoding="UTF-8"?>' f'<w:document {ns}><w:body>{"".join(body)}</w:body></w:document>'
     buf = io.BytesIO()
     with zipfile.ZipFile(buf, "w") as zf:
         zf.writestr("word/document.xml", xml)
@@ -63,15 +61,17 @@ def _install_fake_libreoffice(monkeypatch, docx_bytes: bytes):
 
     monkeypatch.setattr(legacy_office, "_run_libreoffice_convert", _fake_convert)
     monkeypatch.setattr(
-        legacy_office, "detect_office_backends",
-        lambda ext="doc": [{"type": "libreoffice", "label": "LibreOffice",
-                            "command": "soffice"}])
+        legacy_office,
+        "detect_office_backends",
+        lambda ext="doc": [{"type": "libreoffice", "label": "LibreOffice", "command": "soffice"}],
+    )
     return calls
 
 
 # ---------------------------------------------------------------------------
 # 1. 文件头签名
 # ---------------------------------------------------------------------------
+
 
 def test_signature_accepts_ole_and_zip_for_legacy_word():
     assert signature_valid("doc", _OLE_HEADER) is True
@@ -87,9 +87,9 @@ def test_signature_accepts_ole_and_zip_for_legacy_word():
 # 2 / 3. 无组件与关闭开关
 # ---------------------------------------------------------------------------
 
+
 def test_no_backend_gives_actionable_message(monkeypatch):
-    monkeypatch.setattr(legacy_office, "detect_office_backends",
-                        lambda ext="doc": [])
+    monkeypatch.setattr(legacy_office, "detect_office_backends", lambda ext="doc": [])
     monkeypatch.setattr(legacy_office.settings, "legacy_office_enabled", True)
     with pytest.raises(ParseError) as exc:
         parse_file_content_ex(_FAKE_OLE_DOC, "招标文件.doc")
@@ -110,6 +110,7 @@ def test_disabled_by_config_raises(monkeypatch):
 # ---------------------------------------------------------------------------
 # 4. 转换成功后复用 OOXML 解析
 # ---------------------------------------------------------------------------
+
 
 def test_convert_then_parse_keeps_heading_structure(monkeypatch):
     docx_bytes = _build_docx([(1, "工程概况"), (2, "地质条件"), (0, "正文段落")])
@@ -139,6 +140,7 @@ def test_wps_extension_routes_through_legacy_channel(monkeypatch):
 # 5 / 6. 多后端回退语义
 # ---------------------------------------------------------------------------
 
+
 def test_falls_back_to_next_backend_when_first_fails(monkeypatch):
     docx_bytes = _build_docx([(1, "回退成功")])
 
@@ -151,12 +153,18 @@ def test_falls_back_to_next_backend_when_first_fails(monkeypatch):
     monkeypatch.setattr(legacy_office, "_run_libreoffice_convert", _failing_lo)
     monkeypatch.setattr(legacy_office, "_run_com_convert", _ok_com)
     monkeypatch.setattr(
-        legacy_office, "detect_office_backends",
+        legacy_office,
+        "detect_office_backends",
         lambda ext="doc": [
             {"type": "libreoffice", "label": "LibreOffice", "command": "soffice"},
-            {"type": "word", "label": "Microsoft Word (Word.Application)",
-             "command": "powershell.exe", "prog_id": "Word.Application"},
-        ])
+            {
+                "type": "word",
+                "label": "Microsoft Word (Word.Application)",
+                "command": "powershell.exe",
+                "prog_id": "Word.Application",
+            },
+        ],
+    )
 
     text, diag = parse_file_content_ex(_FAKE_OLE_DOC, "招标文件.doc")
     assert "# 回退成功" in text
@@ -170,12 +178,18 @@ def test_all_backends_failed_reports_each_attempt(monkeypatch):
     monkeypatch.setattr(legacy_office, "_run_libreoffice_convert", _boom)
     monkeypatch.setattr(legacy_office, "_run_com_convert", _boom)
     monkeypatch.setattr(
-        legacy_office, "detect_office_backends",
+        legacy_office,
+        "detect_office_backends",
         lambda ext="doc": [
             {"type": "libreoffice", "label": "LibreOffice", "command": "soffice"},
-            {"type": "word", "label": "Microsoft Word (Word.Application)",
-             "command": "powershell.exe", "prog_id": "Word.Application"},
-        ])
+            {
+                "type": "word",
+                "label": "Microsoft Word (Word.Application)",
+                "command": "powershell.exe",
+                "prog_id": "Word.Application",
+            },
+        ],
+    )
 
     with pytest.raises(ParseError) as exc:
         parse_file_content_ex(_FAKE_OLE_DOC, "招标文件.doc")
@@ -187,6 +201,7 @@ def test_all_backends_failed_reports_each_attempt(monkeypatch):
 # ---------------------------------------------------------------------------
 # 7. 扩展名与真实内容不符（.docx + OLE）
 # ---------------------------------------------------------------------------
+
 
 def test_ole_content_with_docx_extension_routed_to_legacy(monkeypatch):
     """旧版 Word「另存为 .docx」失败 / 手工改名 → 不应报「文件已损坏」。"""

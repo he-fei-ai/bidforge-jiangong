@@ -15,6 +15,7 @@
    未解析文档占满名额 → 已解析资料对生成完全不可见。
 7. **批量解析不写 parse_time**：与单文档解析口径不一致，前端"解析用时"恒为空。
 """
+
 import io
 import uuid
 import zipfile
@@ -37,13 +38,13 @@ def _upload(name: str, data: bytes) -> UploadFile:
 # 1. Markdown 表格：对齐分隔行 + 单元格竖线转义
 # ---------------------------------------------------------------------------
 
+
 def _table_lines(text: str) -> list[str]:
     return [ln for ln in text.splitlines() if ln.startswith("|")]
 
 
 def test_csv_table_has_alignment_separator():
-    out = fp.parse_file_content(
-        "设备名称,规格型号,数量\n塔吊,QTZ80,2\n".encode("utf-8"), "equip.csv")
+    out = fp.parse_file_content("设备名称,规格型号,数量\n塔吊,QTZ80,2\n".encode("utf-8"), "equip.csv")
     lines = _table_lines(out)
     assert lines[0] == "| 设备名称 | 规格型号 | 数量 |"
     # ✅ 对齐分隔行必须存在，否则 GFM 不渲染为表格
@@ -53,6 +54,7 @@ def test_csv_table_has_alignment_separator():
 
 def test_excel_table_has_alignment_separator():
     from openpyxl import Workbook
+
     wb = Workbook()
     ws = wb.active
     ws.title = "机械表"
@@ -72,7 +74,7 @@ def _minimal_docx_with_table() -> bytes:
     """构造只含一个段落 + 一张两行两列表格的最小 OOXML。"""
     xml = (
         '<?xml version="1.0" encoding="UTF-8" standalone="yes"?>'
-        '<w:document xmlns:w='
+        "<w:document xmlns:w="
         '"http://schemas.openxmlformats.org/wordprocessingml/2006/main">'
         "<w:body>"
         "<w:p><w:r><w:t>设备清单</w:t></w:r></w:p>"
@@ -118,6 +120,7 @@ def test_separator_column_count_matches_header():
 # 2. 目录节点 id 唯一性
 # ---------------------------------------------------------------------------
 
+
 def _collect_ids(nodes: list, out: list) -> None:
     for n in nodes:
         out.append(n["id"])
@@ -145,6 +148,7 @@ def test_unique_numbering_ids_are_preserved():
 # ---------------------------------------------------------------------------
 # 3. 多页 TIFF 逐帧识别
 # ---------------------------------------------------------------------------
+
 
 def test_multi_frame_tiff_ocrs_every_frame(monkeypatch):
     pytest.importorskip("PIL")
@@ -196,6 +200,7 @@ def test_single_page_image_uses_single_call(monkeypatch):
 # 4. 公共文件头校验
 # ---------------------------------------------------------------------------
 
+
 def test_signature_valid_public_helper():
     assert fp.signature_valid("pdf", b"%PDF-1.7") is True
     assert fp.signature_valid("pdf", b"not-a-pdf") is False
@@ -219,11 +224,12 @@ def test_global_facts_signature_helper_delegates():
 # 5. 目录识别：文件头校验 + 解析诊断回传
 # ---------------------------------------------------------------------------
 
+
 async def test_parse_outline_rejects_spoofed_binary(db_conn):
     with pytest.raises(HTTPException) as e:
         await uo.parse_outline(
-            file=_upload("fake.png", b"this is definitely not a png"),
-            scheme_name="", reorganize=False, db=db_conn)
+            file=_upload("fake.png", b"this is definitely not a png"), scheme_name="", reorganize=False, db=db_conn
+        )
     assert e.value.status_code == 400
     assert "不符" in e.value.detail
 
@@ -238,9 +244,7 @@ async def test_parse_outline_reports_parser_warnings(db_conn, monkeypatch):
     monkeypatch.setattr(uo, "collect_json_response", _no_ai)
 
     csv = ("表头1,表头2\n" + "\n".join(f"r{i},v{i}" for i in range(20))).encode("utf-8")
-    res = await uo.parse_outline(
-        file=_upload("outline.csv", csv),
-        scheme_name="", reorganize=False, db=db_conn)
+    res = await uo.parse_outline(file=_upload("outline.csv", csv), scheme_name="", reorganize=False, db=db_conn)
 
     assert res.get("parse_truncated") is True
     assert any("超过上限" in w for w in res.get("parse_warnings", [])), res
@@ -248,6 +252,7 @@ async def test_parse_outline_reports_parser_warnings(db_conn, monkeypatch):
 
 async def test_parse_outline_text_file_has_no_warnings(db_conn, monkeypatch):
     """正常文本文件不得凭空产生解析告警（避免误报）。"""
+
     async def _no_ai(*_a, **_k):
         raise RuntimeError("测试环境不调用 AI")
 
@@ -255,8 +260,8 @@ async def test_parse_outline_text_file_has_no_warnings(db_conn, monkeypatch):
 
     text = "\n".join(f"第{i}章 章节{i}" for i in range(1, 7))
     res = await uo.parse_outline(
-        file=_upload("outline.txt", text.encode("utf-8")),
-        scheme_name="", reorganize=False, db=db_conn)
+        file=_upload("outline.txt", text.encode("utf-8")), scheme_name="", reorganize=False, db=db_conn
+    )
 
     assert "parse_warnings" not in res
     assert "parse_truncated" not in res
@@ -265,14 +270,13 @@ async def test_parse_outline_text_file_has_no_warnings(db_conn, monkeypatch):
 
 async def test_parse_outline_reports_empty_text(db_conn, monkeypatch):
     """空白文件必须明确回传原因（避免用户只看到"共 0 个章节"而反复重试）。"""
+
     async def _no_ai(*_a, **_k):
         raise RuntimeError("测试环境不调用 AI")
 
     monkeypatch.setattr(uo, "collect_json_response", _no_ai)
 
-    res = await uo.parse_outline(
-        file=_upload("blank.txt", b"   \n\n  "),
-        scheme_name="", reorganize=False, db=db_conn)
+    res = await uo.parse_outline(file=_upload("blank.txt", b"   \n\n  "), scheme_name="", reorganize=False, db=db_conn)
 
     assert res["empty_text"] is True
     assert "未从文件中解析到有效文本" in res["warning"]
@@ -283,14 +287,16 @@ async def test_parse_outline_reports_empty_text(db_conn, monkeypatch):
 # 6. 跨模块取已解析文档：非空条件下推 SQL
 # ---------------------------------------------------------------------------
 
+
 async def test_load_parsed_texts_skips_unparsed_documents(db_conn):
     from app.routers.global_facts import load_parsed_texts
 
     pid = "p-parse"
     for i, md in enumerate(["", "已解析A", "", "已解析B"]):
         await db_conn.execute(
-            "INSERT INTO project_documents (id, project_id, file_name, parsed_markdown)"
-            " VALUES (?,?,?,?)", (f"d{i}", pid, f"f{i}.txt", md))
+            "INSERT INTO project_documents (id, project_id, file_name, parsed_markdown)" " VALUES (?,?,?,?)",
+            (f"d{i}", pid, f"f{i}.txt", md),
+        )
     await db_conn.commit()
 
     assert await load_parsed_texts(db_conn, pid, limit=5) == ["已解析A", "已解析B"]
@@ -300,6 +306,7 @@ async def test_load_parsed_texts_skips_unparsed_documents(db_conn):
 
 async def test_load_parsed_texts_empty_project_id(db_conn):
     from app.routers.global_facts import load_parsed_texts
+
     assert await load_parsed_texts(db_conn, "", limit=5) == []
 
 
@@ -315,8 +322,9 @@ async def test_load_parsed_docs_returns_name_text_pairs(db_conn):
     pid = "p-docs"
     for i, md in enumerate(["", "甲", "", "乙"]):
         await db_conn.execute(
-            "INSERT INTO project_documents (id, project_id, file_name, parsed_markdown)"
-            " VALUES (?,?,?,?)", (f"d{i}", pid, f"f{i}.txt", md))
+            "INSERT INTO project_documents (id, project_id, file_name, parsed_markdown)" " VALUES (?,?,?,?)",
+            (f"d{i}", pid, f"f{i}.txt", md),
+        )
     await db_conn.commit()
 
     # 全量（limit=None，事实提取用）：只返回非空文档，带文件名、固定 (created_at,id) 顺序
@@ -327,6 +335,7 @@ async def test_load_parsed_docs_returns_name_text_pairs(db_conn):
 
 async def test_load_parsed_docs_empty_project_id(db_conn):
     from app.routers.global_facts import load_parsed_docs
+
     assert await load_parsed_docs(db_conn, "") == []
     assert await load_parsed_docs(db_conn, "", limit=None) == []
 
@@ -334,6 +343,7 @@ async def test_load_parsed_docs_empty_project_id(db_conn):
 # ---------------------------------------------------------------------------
 # 7. 批量解析写入 parse_time
 # ---------------------------------------------------------------------------
+
 
 @pytest.fixture
 async def gf_ctx(tmp_path, monkeypatch):
@@ -359,23 +369,23 @@ async def gf_ctx(tmp_path, monkeypatch):
     await db.execute(
         "INSERT INTO project_documents (id, project_id, file_name, file_type,"
         " parsed_markdown, file_path) VALUES (?,?,?,?,?,?)",
-        ("d1", pid, "a.txt", "txt", "", str(fpath)))
+        ("d1", pid, "a.txt", "txt", "", str(fpath)),
+    )
     await db.commit()
     yield db, pid
 
 
 async def test_parse_all_documents_records_parse_time(gf_ctx):
     db, pid = gf_ctx
-    res = await gf.parse_all_documents(
-        scheme_id="", project_id=pid, force=False, db=db)
+    res = await gf.parse_all_documents(scheme_id="", project_id=pid, force=False, db=db)
 
     assert res["parsed"] == 1
-    cur = await db.execute(
-        "SELECT parsed_markdown, parse_time FROM project_documents WHERE id='d1'")
+    cur = await db.execute("SELECT parsed_markdown, parse_time FROM project_documents WHERE id='d1'")
     row = await cur.fetchone()
     assert row["parsed_markdown"], "解析结果必须落库"
-    assert row["parse_time"] is not None and row["parse_time"] >= 0, \
-        "批量解析必须记录 parse_time（与单文档解析口径一致）"
+    assert (
+        row["parse_time"] is not None and row["parse_time"] >= 0
+    ), "批量解析必须记录 parse_time（与单文档解析口径一致）"
 
 
 async def test_parse_all_documents_reports_failure_without_losing_others(gf_ctx):
@@ -385,11 +395,11 @@ async def test_parse_all_documents_reports_failure_without_losing_others(gf_ctx)
     await db.execute(
         "INSERT INTO project_documents (id, project_id, file_name, file_type,"
         " parsed_markdown, file_path) VALUES (?,?,?,?,?,?)",
-        ("d2", pid, "missing.txt", "txt", "", str(missing)))
+        ("d2", pid, "missing.txt", "txt", "", str(missing)),
+    )
     await db.commit()
 
-    res = await gf.parse_all_documents(
-        scheme_id="", project_id=pid, force=False, db=db)
+    res = await gf.parse_all_documents(scheme_id="", project_id=pid, force=False, db=db)
     assert res["parsed"] == 1
     assert res["failed_count"] == 1
     assert res["failed"][0]["file_name"] == "missing.txt"

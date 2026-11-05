@@ -18,6 +18,7 @@ P2 提取项重跑级联失效不全          ``_invalidate_extraction_derived``
 另记录两条**经核实后判定为非缺陷**的项（见 ``TestNotDefects``），
 避免后续重复排查。
 """
+
 from __future__ import annotations
 
 import asyncio
@@ -41,8 +42,7 @@ class TestSectionHintAsSeparateSystemMessage:
         assert len(msgs) == 1
         assert msgs[0]["content"] == svc.build_system_prompt()
         assert msgs[0]["content"] == svc.STABLE_SYSTEM_PROMPT
-        assert svc.build_system_messages("", "")[0]["content"] == \
-            svc.STABLE_SYSTEM_PROMPT
+        assert svc.build_system_messages("", "")[0]["content"] == svc.STABLE_SYSTEM_PROMPT
 
     def test_section_hint_is_independent_second_system(self):
         """标段上下文必须是**独立第二条** system 消息。"""
@@ -85,10 +85,15 @@ class TestSectionHintAsSeparateSystemMessage:
 # =========================================================================
 class TestDownstreamBudget:
     def _items(self, n=12, size=9000):
-        return {d["item_id"]: {"status": "success", "content": "A" * size,
-                               "output_type": d.get("output_type", "markdown"),
-                               "label": d["label"]}
-                for d in svc.ANALYSIS_ITEMS[:n]}
+        return {
+            d["item_id"]: {
+                "status": "success",
+                "content": "A" * size,
+                "output_type": d.get("output_type", "markdown"),
+                "label": d["label"],
+            }
+            for d in svc.ANALYSIS_ITEMS[:n]
+        }
 
     def test_budget_constants_positive(self):
         assert svc.DOWNSTREAM_CONTEXT_MAX_CHARS > 0
@@ -105,10 +110,15 @@ class TestDownstreamBudget:
 
     def test_small_input_untouched(self):
         """小输入必须逐字不变（不引入无谓的裁剪标记）。"""
-        items = {d["item_id"]: {"status": "success", "content": "内容X",
-                               "output_type": d.get("output_type", "markdown"),
-                               "label": d["label"]}
-                 for d in svc.ANALYSIS_ITEMS[:2]}
+        items = {
+            d["item_id"]: {
+                "status": "success",
+                "content": "内容X",
+                "output_type": d.get("output_type", "markdown"),
+                "label": d["label"],
+            }
+            for d in svc.ANALYSIS_ITEMS[:2]
+        }
         out = svc.format_downstream_context(items)
         assert "已截断" not in out and "超出下发预算" not in out
         assert "内容X" in out
@@ -122,8 +132,7 @@ class TestDownstreamBudget:
         assert svc._apply_downstream_budget("") == ""
         short = "a" * 100
         assert svc._apply_downstream_budget(short) == short
-        capped = svc._apply_downstream_budget("x" * 5000, max_chars=1000,
-                                              per_item=0)
+        capped = svc._apply_downstream_budget("x" * 5000, max_chars=1000, per_item=0)
         assert len(capped) <= 1100
 
 
@@ -133,8 +142,10 @@ class TestDownstreamBudget:
 def _db(with_diag=True):
     c = sqlite3.connect(":memory:")
     c.row_factory = sqlite3.Row
-    c.execute("CREATE TABLE project_documents (id TEXT PRIMARY KEY, project_id TEXT,"
-              " file_name TEXT, parsed_markdown TEXT, created_at TEXT DEFAULT '')")
+    c.execute(
+        "CREATE TABLE project_documents (id TEXT PRIMARY KEY, project_id TEXT,"
+        " file_name TEXT, parsed_markdown TEXT, created_at TEXT DEFAULT '')"
+    )
     if with_diag:
         c.execute("ALTER TABLE project_documents ADD COLUMN parse_warnings TEXT DEFAULT ''")
         c.execute("ALTER TABLE project_documents ADD COLUMN parse_truncated INTEGER DEFAULT 0")
@@ -148,9 +159,11 @@ _SEQ = [0]
 def _add(c, name, text, warn="", trunc=0):
     """插入一行。用递增序号而非 hash（hash 受 PYTHONHASHSEED 影响、顺序不确定）。"""
     _SEQ[0] += 1
-    c.execute("INSERT INTO project_documents(id,project_id,file_name,parsed_markdown,"
-              "parse_warnings,parse_truncated) VALUES(?,?,?,?,?,?)",
-              (f"r{_SEQ[0]}", "p", name, text, warn, trunc))
+    c.execute(
+        "INSERT INTO project_documents(id,project_id,file_name,parsed_markdown,"
+        "parse_warnings,parse_truncated) VALUES(?,?,?,?,?,?)",
+        (f"r{_SEQ[0]}", "p", name, text, warn, trunc),
+    )
     c.commit()
 
 
@@ -201,8 +214,9 @@ class TestLoadParsedDocsTruncation:
     def test_fallback_when_diag_cols_absent(self):
         """旧库无诊断列 → 只取基础两列（= 引入前行为）。"""
         c = _db(with_diag=False)
-        c.execute("INSERT INTO project_documents(id,project_id,file_name,parsed_markdown)"
-                  " VALUES('1','p','a.md','正文A')")
+        c.execute(
+            "INSERT INTO project_documents(id,project_id,file_name,parsed_markdown)" " VALUES('1','p','a.md','正文A')"
+        )
         c.commit()
         out: list = []
         pairs = asyncio.run(gf.load_parsed_docs(_Shim(c), "p", None, out))
@@ -213,8 +227,7 @@ class TestLoadParsedDocsTruncation:
         """截断**不阻止使用**：残缺依据仍比没有依据好。"""
         c = _db()
         _add(c, "b.md", "残缺正文", "已截断", 1)
-        assert asyncio.run(gf.load_parsed_docs(_Shim(c), "p")) == \
-            [("b.md", "残缺正文")]
+        assert asyncio.run(gf.load_parsed_docs(_Shim(c), "p")) == [("b.md", "残缺正文")]
 
     def test_limit_still_applied(self):
         c = _db()
@@ -233,8 +246,8 @@ class TestLoadParsedDocsTruncation:
         class Boom:
             async def execute(self, *a, **k):
                 raise RuntimeError("db down")
-        assert asyncio.run(gf.load_parsed_docs(Boom(), "p")) == []
 
+        assert asyncio.run(gf.load_parsed_docs(Boom(), "p")) == []
 
 
 # =========================================================================
@@ -266,15 +279,14 @@ class TestInvalidationCascade:
 
             async def commit(self):
                 pass
+
         return c, DB()
 
     def test_clears_consistency_cache_for_target_only(self):
         c, db = self._db()
         asyncio.run(ba._invalidate_extraction_derived(db, "p1", ["s1"]))
-        n1 = c.execute("SELECT COUNT(*) FROM consistency_scan_cache"
-                       " WHERE scheme_id='s1'").fetchone()[0]
-        n2 = c.execute("SELECT COUNT(*) FROM consistency_scan_cache"
-                       " WHERE scheme_id='s2'").fetchone()[0]
+        n1 = c.execute("SELECT COUNT(*) FROM consistency_scan_cache" " WHERE scheme_id='s1'").fetchone()[0]
+        n2 = c.execute("SELECT COUNT(*) FROM consistency_scan_cache" " WHERE scheme_id='s2'").fetchone()[0]
         assert n1 == 0 and n2 == 1
 
     def test_advances_facts_timestamp_for_target_only(self):
@@ -288,10 +300,8 @@ class TestInvalidationCascade:
     def test_marks_extractions_stale_scoped_by_project(self):
         c, db = self._db()
         asyncio.run(ba._invalidate_extraction_derived(db, "p1", ["s1"]))
-        got = {r[0] for r in c.execute(
-            "SELECT status FROM doc_extractions WHERE project_id='p1'")}
-        other = c.execute("SELECT status FROM doc_extractions"
-                          " WHERE project_id='p9'").fetchone()[0]
+        got = {r[0] for r in c.execute("SELECT status FROM doc_extractions WHERE project_id='p1'")}
+        other = c.execute("SELECT status FROM doc_extractions" " WHERE project_id='p9'").fetchone()[0]
         assert got == {"stale"}
         assert other == "success", "其它项目不得被波及"
 
@@ -303,12 +313,14 @@ class TestInvalidationCascade:
 
     def test_missing_table_is_fail_soft(self):
         """表缺失（测试库/迁移未跑）只记 WARNING，不抛。"""
+
         class DB:
             async def execute(self, *a, **k):
                 raise RuntimeError("no such table")
 
             async def commit(self):
                 pass
+
         asyncio.run(ba._invalidate_extraction_derived(DB(), "p1", ["s1"]))
 
     def test_cascade_called_from_invalidate(self):
@@ -324,17 +336,14 @@ class TestInvalidationCascade:
         import ast
 
         from app import schema_sql
+
         block = schema_sql.SCHEMA_SQL
         i = block.index("CREATE TABLE IF NOT EXISTS doc_extractions")
-        j = block.index("CREATE TABLE", i + 10) if "CREATE TABLE" in block[i + 10:] \
-            else len(block)
-        assert "updated_at" not in block[i:j], \
-            "doc_extractions 竟有 updated_at 列，可放宽本护栏"
+        j = block.index("CREATE TABLE", i + 10) if "CREATE TABLE" in block[i + 10 :] else len(block)
+        assert "updated_at" not in block[i:j], "doc_extractions 竟有 updated_at 列，可放宽本护栏"
         tree = ast.parse(inspect.getsource(ba._invalidate_extraction_derived))
-        sql_literals = [n.value for n in ast.walk(tree)
-                        if isinstance(n, ast.Constant) and isinstance(n.value, str)]
-        bad = [s for s in sql_literals
-               if "doc_extractions" in s and "updated_at" in s]
+        sql_literals = [n.value for n in ast.walk(tree) if isinstance(n, ast.Constant) and isinstance(n.value, str)]
+        bad = [s for s in sql_literals if "doc_extractions" in s and "updated_at" in s]
         assert not bad, f"SQL 引用了不存在的列：{bad}"
 
 
@@ -356,14 +365,12 @@ class TestNotDefects:
         13 项需先新增提取类别（产品决策 + schema 语义变更）。
         """
         from app.services.doc_pipeline import doc_storage, pipeline
+
         special = set(doc_storage.RESERVED_EXTRACT_TYPES) | {"global_facts"}
         active = [t for t in doc_storage.EXTRACT_TYPES if t not in special]
-        covered = {t for types in pipeline._ITEM_TO_EXTRACT_TYPE.values()
-                   for t in types}
-        assert set(active) == covered, (
-            f"非预留、非特供的提取类别未全部被物化：{set(active) - covered}")
-        assert "global_facts" not in covered, \
-            "global_facts 走 sync_extract_layer 独立分支，不应出现在解析项映射里"
+        covered = {t for types in pipeline._ITEM_TO_EXTRACT_TYPE.values() for t in types}
+        assert set(active) == covered, f"非预留、非特供的提取类别未全部被物化：{set(active) - covered}"
+        assert "global_facts" not in covered, "global_facts 走 sync_extract_layer 独立分支，不应出现在解析项映射里"
 
     def test_three_chain_limits_are_intentional(self):
         """目录 5 / 正文 3 / 事实无 LIMIT —— 各自的量级与职责不同。
@@ -375,4 +382,3 @@ class TestNotDefects:
         src = inspect.getsource(sh)
         assert "project_id, limit=5" in src
         assert "project_id, limit=3" in src
-

@@ -18,6 +18,7 @@
 - 多后端「依次尝试、逐个记录失败原因」，与参考实现一致：LibreOffice 装了但
   转换失败时，仍会继续尝试 Windows 上的 Word / WPS COM。
 """
+
 from __future__ import annotations
 
 import logging
@@ -61,52 +62,54 @@ _WORD_PROG_IDS = ("Word.Application",)
 
 #: PowerShell COM 转换脚本（逐行拼接，避免缩进差异；与参考实现等价：
 #: 优先 SaveAs2(16=wdFormatDocumentDefault)，失败回退 SaveAs(12=wdFormatXMLDocument)）
-_POWERSHELL_OFFICE_CONVERT_SCRIPT = "\n".join([
-    "param(",
-    "  [Parameter(Mandatory=$true)][string]$ProgId,",
-    "  [Parameter(Mandatory=$true)][string]$InputPath,",
-    "  [Parameter(Mandatory=$true)][string]$OutputPath",
-    ")",
-    '$ErrorActionPreference = "Stop"',
-    "function Release-ComObject([object]$ComObject) {",
-    "  if ($null -ne $ComObject) {",
-    "    try { [void][System.Runtime.InteropServices.Marshal]::ReleaseComObject($ComObject) } catch {}",
-    "  }",
-    "}",
-    "function Save-AsDocx([object]$Document, [string]$TargetPath) {",
-    "  $lastError = $null",
-    "  foreach ($format in @(16, 12)) {",
-    "    try {",
-    "      if (Test-Path -LiteralPath $TargetPath) { Remove-Item -LiteralPath $TargetPath -Force }",
-    "      try { $Document.SaveAs2($TargetPath, $format) } catch { $Document.SaveAs($TargetPath, $format) }",
-    "      if (Test-Path -LiteralPath $TargetPath) { return }",
-    "    } catch {",
-    "      $lastError = $_",
-    "    }",
-    "  }",
-    "  if ($null -ne $lastError) { throw $lastError }",
-    '  throw "save failed"',
-    "}",
-    "$app = $null",
-    "$doc = $null",
-    "try {",
-    "  $app = New-Object -ComObject $ProgId",
-    "  try { $app.Visible = $false } catch {}",
-    "  try { $app.DisplayAlerts = 0 } catch {}",
-    "  try { $app.AutomationSecurity = 3 } catch {}",
-    "  $doc = $app.Documents.Open($InputPath, $false, $true, $false)",
-    "  Save-AsDocx $doc $OutputPath",
-    "  if (!(Test-Path -LiteralPath $OutputPath)) { throw \"output missing\" }",
-    "} finally {",
-    "  if ($null -ne $doc) { try { $doc.Close($false) } catch {} }",
-    "  if ($null -ne $app) { try { $app.Quit() } catch {} }",
-    "  Release-ComObject $doc",
-    "  Release-ComObject $app",
-    "  [GC]::Collect()",
-    "  [GC]::WaitForPendingFinalizers()",
-    "}",
-    "",
-])
+_POWERSHELL_OFFICE_CONVERT_SCRIPT = "\n".join(
+    [
+        "param(",
+        "  [Parameter(Mandatory=$true)][string]$ProgId,",
+        "  [Parameter(Mandatory=$true)][string]$InputPath,",
+        "  [Parameter(Mandatory=$true)][string]$OutputPath",
+        ")",
+        '$ErrorActionPreference = "Stop"',
+        "function Release-ComObject([object]$ComObject) {",
+        "  if ($null -ne $ComObject) {",
+        "    try { [void][System.Runtime.InteropServices.Marshal]::ReleaseComObject($ComObject) } catch {}",
+        "  }",
+        "}",
+        "function Save-AsDocx([object]$Document, [string]$TargetPath) {",
+        "  $lastError = $null",
+        "  foreach ($format in @(16, 12)) {",
+        "    try {",
+        "      if (Test-Path -LiteralPath $TargetPath) { Remove-Item -LiteralPath $TargetPath -Force }",
+        "      try { $Document.SaveAs2($TargetPath, $format) } catch { $Document.SaveAs($TargetPath, $format) }",
+        "      if (Test-Path -LiteralPath $TargetPath) { return }",
+        "    } catch {",
+        "      $lastError = $_",
+        "    }",
+        "  }",
+        "  if ($null -ne $lastError) { throw $lastError }",
+        '  throw "save failed"',
+        "}",
+        "$app = $null",
+        "$doc = $null",
+        "try {",
+        "  $app = New-Object -ComObject $ProgId",
+        "  try { $app.Visible = $false } catch {}",
+        "  try { $app.DisplayAlerts = 0 } catch {}",
+        "  try { $app.AutomationSecurity = 3 } catch {}",
+        "  $doc = $app.Documents.Open($InputPath, $false, $true, $false)",
+        "  Save-AsDocx $doc $OutputPath",
+        '  if (!(Test-Path -LiteralPath $OutputPath)) { throw "output missing" }',
+        "} finally {",
+        "  if ($null -ne $doc) { try { $doc.Close($false) } catch {} }",
+        "  if ($null -ne $app) { try { $app.Quit() } catch {} }",
+        "  Release-ComObject $doc",
+        "  Release-ComObject $app",
+        "  [GC]::Collect()",
+        "  [GC]::WaitForPendingFinalizers()",
+        "}",
+        "",
+    ]
+)
 
 
 def legacy_word_enabled() -> bool:
@@ -155,8 +158,7 @@ def validate_ole_compound_header(content: bytes) -> str | None:
     # ⚠️ 0x34~0x3C 是「事务签名 / 迷你扇区上限 / 首个迷你 FAT 扇区」，不是扇区
     #    计数：早期版本从这里连读 4 个计数，把真实的 Excel 97 .xls 误判成「截断」。
     try:
-        minor, major, byte_order, sec_shift, mini_shift = struct.unpack_from(
-            "<HHHHH", content, 0x18)
+        minor, major, byte_order, sec_shift, mini_shift = struct.unpack_from("<HHHHH", content, 0x18)
         n_dir, n_fat, first_dir = struct.unpack_from("<III", content, 0x28)
         n_mini = struct.unpack_from("<I", content, 0x40)[0]
         n_difat = struct.unpack_from("<I", content, 0x48)[0]
@@ -183,8 +185,7 @@ def validate_ole_compound_header(content: bytes) -> str | None:
     total = (len(content) - _CFB_HEADER_SIZE) // sector
     declared = n_fat + n_dir + n_mini + n_difat
     if total < declared:
-        return (f"OLE 头声明的扇区数（{declared}）超出文件实际容量"
-                f"（{total} 个扇区），文件已被截断")
+        return f"OLE 头声明的扇区数（{declared}）超出文件实际容量" f"（{total} 个扇区），文件已被截断"
     # 只校验目录扇区索引 —— 它是整份文件的入口。首个 FAT 扇区索引在 v3 里
     # 可能合法地指向内联位置，多校验一条只增加误拒风险、收益极小。
     if first_dir >= _CFB_RESERVED_SECTORS or first_dir >= total:
@@ -250,8 +251,10 @@ def _is_com_progid_registered(prog_id: str) -> bool:
     try:
         proc = subprocess.run(
             [reg, "query", f"HKCR\\{prog_id}\\CLSID"],
-            capture_output=True, timeout=10,
-            creationflags=getattr(subprocess, "CREATE_NO_WINDOW", 0))
+            capture_output=True,
+            timeout=10,
+            creationflags=getattr(subprocess, "CREATE_NO_WINDOW", 0),
+        )
     except Exception:
         return False
     return proc.returncode == 0
@@ -264,8 +267,7 @@ def detect_office_backends(ext: str = "doc") -> list[dict]:
     - 其它  ：LibreOffice → Word COM → WPS COM
     """
     soffice = find_libreoffice_command()
-    libreoffice = ([{"type": "libreoffice", "label": "LibreOffice",
-                     "command": soffice}] if soffice else [])
+    libreoffice = [{"type": "libreoffice", "label": "LibreOffice", "command": soffice}] if soffice else []
 
     word, wps = [], []
     if os.name == "nt" and getattr(settings, "legacy_office_com_enabled", True):
@@ -273,13 +275,20 @@ def detect_office_backends(ext: str = "doc") -> list[dict]:
         if powershell:
             for prog_id in _WORD_PROG_IDS:
                 if _is_com_progid_registered(prog_id):
-                    word.append({"type": "word", "label": f"Microsoft Word ({prog_id})",
-                                 "command": powershell, "prog_id": prog_id})
+                    word.append(
+                        {
+                            "type": "word",
+                            "label": f"Microsoft Word ({prog_id})",
+                            "command": powershell,
+                            "prog_id": prog_id,
+                        }
+                    )
                     break
             for prog_id in _WPS_PROG_IDS:
                 if _is_com_progid_registered(prog_id):
-                    wps.append({"type": "wps", "label": f"WPS Office ({prog_id})",
-                                "command": powershell, "prog_id": prog_id})
+                    wps.append(
+                        {"type": "wps", "label": f"WPS Office ({prog_id})", "command": powershell, "prog_id": prog_id}
+                    )
                     break
 
     if (ext or "").lower() == "wps":
@@ -297,13 +306,22 @@ def _run_process(cmd: list[str], timeout_s: int) -> subprocess.CompletedProcess:
     )
 
 
-def _run_libreoffice_convert(soffice: str, src: Path, out_dir: Path,
-                             timeout_s: int) -> Path:
+def _run_libreoffice_convert(soffice: str, src: Path, out_dir: Path, timeout_s: int) -> Path:
     """`soffice --headless --convert-to docx --outdir <dir> <src>` 并返回产物路径。"""
-    _run_process([
-        soffice, "--headless", "--norestore", "--nolockcheck",
-        "--convert-to", "docx", "--outdir", str(out_dir), str(src),
-    ], timeout_s)
+    _run_process(
+        [
+            soffice,
+            "--headless",
+            "--norestore",
+            "--nolockcheck",
+            "--convert-to",
+            "docx",
+            "--outdir",
+            str(out_dir),
+            str(src),
+        ],
+        timeout_s,
+    )
     produced = sorted(out_dir.glob("*.docx"))
     if not produced:
         raise ParseError("LibreOffice 未生成 DOCX 文件")
@@ -312,17 +330,26 @@ def _run_libreoffice_convert(soffice: str, src: Path, out_dir: Path,
     return (same_stem or produced)[0]
 
 
-def _run_com_convert(powershell: str, prog_id: str, src: Path, dst: Path,
-                     timeout_s: int) -> None:
+def _run_com_convert(powershell: str, prog_id: str, src: Path, dst: Path, timeout_s: int) -> None:
     """Windows COM 转换：PowerShell 调 Word/WPS 另存为 DOCX。"""
     script = src.parent / f"office-convert-{prog_id.split('.')[0]}.ps1"
     script.write_text(_POWERSHELL_OFFICE_CONVERT_SCRIPT, encoding="utf-8")
     try:
-        proc = _run_process([
-            powershell, "-NoProfile", "-NonInteractive",
-            "-ExecutionPolicy", "Bypass", "-File", str(script),
-            prog_id, str(src), str(dst),
-        ], timeout_s)
+        proc = _run_process(
+            [
+                powershell,
+                "-NoProfile",
+                "-NonInteractive",
+                "-ExecutionPolicy",
+                "Bypass",
+                "-File",
+                str(script),
+                prog_id,
+                str(src),
+                str(dst),
+            ],
+            timeout_s,
+        )
     except subprocess.TimeoutExpired as e:
         raise ParseError(f"{prog_id} 转换超时（{timeout_s}s）") from e
     if not dst.exists() or dst.stat().st_size == 0:
@@ -341,9 +368,7 @@ def convert_legacy_word_to_docx(content: bytes, file_name: str) -> tuple[bytes, 
         ParseError: 未安装任何转换组件，或全部后端转换失败。
     """
     if not legacy_word_enabled():
-        raise ParseError(
-            "旧版 Word（.doc/.wps）解析已关闭（LEGACY_OFFICE_ENABLED=false）："
-            "请改用 .docx 格式上传")
+        raise ParseError("旧版 Word（.doc/.wps）解析已关闭（LEGACY_OFFICE_ENABLED=false）：" "请改用 .docx 格式上传")
     if not content:
         raise ParseError("文件内容为空，无法转换")
 
@@ -352,14 +377,12 @@ def convert_legacy_word_to_docx(content: bytes, file_name: str) -> tuple[bytes, 
     #    放在 `detect_office_backends` 之前：连组件探测的开销都省掉。
     _ole_reason = ole_preflight_reason(content)
     if _ole_reason:
-        logger.warning("旧版 Word 文件 OLE 结构异常，跳过转换后端：%s（%s）",
-                       _ole_reason, file_name)
+        logger.warning("旧版 Word 文件 OLE 结构异常，跳过转换后端：%s（%s）", _ole_reason, file_name)
         raise ParseError(
-            f"旧版 Word 文件已损坏（{_ole_reason}）："
-            "请用 Word/WPS 重新打开并另存为标准 .docx 后重新上传")
+            f"旧版 Word 文件已损坏（{_ole_reason}）：" "请用 Word/WPS 重新打开并另存为标准 .docx 后重新上传"
+        )
 
-    ext = (file_name.rsplit(".", 1)[-1].lower()
-           if "." in (file_name or "") else "doc")
+    ext = file_name.rsplit(".", 1)[-1].lower() if "." in (file_name or "") else "doc"
     if ext not in LEGACY_WORD_EXTENSIONS:
         ext = "doc"
 
@@ -380,13 +403,11 @@ def convert_legacy_word_to_docx(content: bytes, file_name: str) -> tuple[bytes, 
         for backend in backends:
             try:
                 if backend["type"] == "libreoffice":
-                    produced = _run_libreoffice_convert(
-                        backend["command"], src, tmp_dir, timeout_s)
+                    produced = _run_libreoffice_convert(backend["command"], src, tmp_dir, timeout_s)
                     docx_bytes = produced.read_bytes()
                 else:
                     dst = tmp_dir / f"{stem}-{backend['type']}.docx"
-                    _run_com_convert(backend["command"], backend["prog_id"],
-                                     src, dst, timeout_s)
+                    _run_com_convert(backend["command"], backend["prog_id"], src, dst, timeout_s)
                     docx_bytes = dst.read_bytes()
             except subprocess.TimeoutExpired:
                 attempts.append(f"{backend['label']}：转换超时（{timeout_s}s）")
@@ -398,12 +419,9 @@ def convert_legacy_word_to_docx(content: bytes, file_name: str) -> tuple[bytes, 
                 attempts.append(f"{backend['label']}：{e}")
                 continue
             if docx_bytes:
-                logger.info("旧版 Word 已通过 %s 转换为 DOCX（%d 字节）",
-                            backend["label"], len(docx_bytes))
+                logger.info("旧版 Word 已通过 %s 转换为 DOCX（%d 字节）", backend["label"], len(docx_bytes))
                 return docx_bytes, backend["label"]
             attempts.append(f"{backend['label']}：转换结果为空")
 
     detail = "；".join(attempts[:3])
-    raise ParseError(
-        f"旧版 Word 文件转换失败：{detail or '未知原因'}。"
-        "请用 Word/WPS 另存为标准 .docx 后重新上传")
+    raise ParseError(f"旧版 Word 文件转换失败：{detail or '未知原因'}。" "请用 Word/WPS 另存为标准 .docx 后重新上传")

@@ -13,6 +13,7 @@
 全部用例均先证伪后写断言：每组都含「修复前必失败」的锚点（A/B 反向验证见
 docs/解析提取模块R79收口报告）。
 """
+
 import ast
 import importlib
 import io
@@ -89,16 +90,19 @@ class TestBidAnalysisR13Closeout:
         tree = ast.parse(src)
         helper_nodes: set[int] = set()
         for node in ast.walk(tree):
-            if isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef)) \
-                    and node.name == "_execute":
+            if isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef)) and node.name == "_execute":
                 for sub in ast.walk(node):
                     helper_nodes.add(id(sub))
         raw: list[int] = []
         for node in ast.walk(tree):
             if isinstance(node, ast.Await) and isinstance(node.value, ast.Call):
                 f = node.value.func
-                if isinstance(f, ast.Attribute) and f.attr == "execute" \
-                        and isinstance(f.value, ast.Name) and f.value.id == "db":
+                if (
+                    isinstance(f, ast.Attribute)
+                    and f.attr == "execute"
+                    and isinstance(f.value, ast.Name)
+                    and f.value.id == "db"
+                ):
                     if id(node) in helper_nodes:
                         continue
                     raw.append(node.lineno)
@@ -111,8 +115,7 @@ class TestBidAnalysisR13Closeout:
         该断言不依赖具体数字 —— 新增调用点若绕过 helper 立刻失败。
         """
         raw = self._raw_execute_locations()
-        assert raw == [], (
-            "bid_analysis.py 存在绕过 _execute 的裸 db.execute 调用：%s" % raw)
+        assert raw == [], "bid_analysis.py 存在绕过 _execute 的裸 db.execute 调用：%s" % raw
 
     def test_helper_sites_present(self):
         """helper 必须真实被消费（防空转：只定义不接线）。"""
@@ -128,17 +131,21 @@ class TestBidAnalysisR13Closeout:
 
     def test_helper_raises_503_on_none(self):
         """helper 契约：游标 None → HTTPException(503)，绝不降级为空结果。"""
+
         async def _run():
             return await ba._execute(_BrokenDb(), "SELECT 1")
+
         with pytest.raises(HTTPException) as ei:
             asyncio_run(_run())
         assert ei.value.status_code == 503
 
-    @pytest.mark.parametrize("caller,args", [
-        ("list_analysis_results", {"scheme_id": "s", "project_id": "p"}),
-        ("get_single_result", {"item_id": "projectBasicInfo",
-                               "scheme_id": "s", "project_id": "p"}),
-    ])
+    @pytest.mark.parametrize(
+        "caller,args",
+        [
+            ("list_analysis_results", {"scheme_id": "s", "project_id": "p"}),
+            ("get_single_result", {"item_id": "projectBasicInfo", "scheme_id": "s", "project_id": "p"}),
+        ],
+    )
     def test_read_paths_503_on_none_cursor(self, caller, args):
         """读路径 None 游标 → 503（此前 AttributeError → 500）。
 
@@ -159,8 +166,7 @@ class TestBidAnalysisR13Closeout:
         with caplog.at_level("WARNING"):
             out = asyncio_run(ba._fetch_scheme_name(_BrokenDb(), "s"))
         assert out == ""
-        assert any("R13" in r.getMessage() for r in caplog.records), \
-            "None 游标必须留下可观测告警"
+        assert any("R13" in r.getMessage() for r in caplog.records), "None 游标必须留下可观测告警"
 
     def test_scheme_name_empty_short_circuit(self):
         """空 scheme_id 直接短路返回空串（不触库）。"""
@@ -178,16 +184,17 @@ class TestBidAnalysisR13Closeout:
     def test_write_path_503_on_none_cursor(self):
         """写路径 None 游标 → 503（此前 UPDATE/INSERT 静默不生效）。"""
         with pytest.raises(HTTPException) as ei:
-            asyncio_run(ba._update_item_status(
-                _BrokenDb(), "pid", "projectBasicInfo", "success", "内容"))
+            asyncio_run(ba._update_item_status(_BrokenDb(), "pid", "projectBasicInfo", "success", "内容"))
         assert ei.value.status_code == 503
 
     def test_update_single_result_503_on_none_cursor(self):
         """人工校正端点 None → 503（此前用户提交的校正静默丢失）。"""
         with pytest.raises(HTTPException) as ei:
-            asyncio_run(ba.update_single_result(
-                "projectBasicInfo", {"content": "某项目"},
-                scheme_id="s", project_id="p", db=_BrokenDb()))
+            asyncio_run(
+                ba.update_single_result(
+                    "projectBasicInfo", {"content": "某项目"}, scheme_id="s", project_id="p", db=_BrokenDb()
+                )
+            )
         assert ei.value.status_code == 503
 
     async def test_normal_path_unaffected(self, db_conn):
@@ -195,14 +202,24 @@ class TestBidAnalysisR13Closeout:
         db = db_conn
         pid, sid = uuid.uuid4().hex, uuid.uuid4().hex
         await db.execute("INSERT INTO projects(id,name) VALUES(?,?)", (pid, "p"))
-        await db.execute(
-            "INSERT INTO schemes(id,project_id,name) VALUES(?,?,?)", (sid, pid, "s"))
+        await db.execute("INSERT INTO schemes(id,project_id,name) VALUES(?,?,?)", (sid, pid, "s"))
         await db.execute(
             "INSERT INTO bid_analysis_items(id, project_id, item_id, label,"
             " output_type, required, status, content, sort_order, source)"
             " VALUES(?,?,?,?,?,?,?,?,?,?)",
-            (f"{pid}_projectBasicInfo", pid, "projectBasicInfo", "项目基本信息",
-             "json", 1, "success", json.dumps({"project_name": "某项目"}), 1, "ai"))
+            (
+                f"{pid}_projectBasicInfo",
+                pid,
+                "projectBasicInfo",
+                "项目基本信息",
+                "json",
+                1,
+                "success",
+                json.dumps({"project_name": "某项目"}),
+                1,
+                "ai",
+            ),
+        )
         await db.commit()
         out = await ba.list_analysis_results(scheme_id=sid, project_id="", db=db)
         # summary.total 是 18 项提取目录的固定口径（len(ANALYSIS_ITEMS)），
@@ -218,6 +235,7 @@ def asyncio_run(coro):
     循环时直接 RuntimeError，asyncio.run 在 3.13/3.14 行为一致。
     """
     import asyncio
+
     return asyncio.run(coro)
 
 
@@ -226,23 +244,28 @@ def asyncio_run(coro):
 # ---------------------------------------------------------------------------
 class TestDownstreamJsonArray:
     def _items(self, content: str):
-        return {"projectBasicInfo": {
-            "status": "success", "content": content,
-            "output_type": "json", "label": "项目基本信息"}}
+        return {
+            "projectBasicInfo": {
+                "status": "success",
+                "content": content,
+                "output_type": "json",
+                "label": "项目基本信息",
+            }
+        }
 
     def test_array_content_does_not_raise(self):
         """修复前：data.items() 对 list 抛 AttributeError（被上层吞成降级）。"""
         from app.services.bid_analysis_service import format_downstream_context
-        content = json.dumps([{"name": "甲段"}, {"name": "乙段"}],
-                             ensure_ascii=False)
+
+        content = json.dumps([{"name": "甲段"}, {"name": "乙段"}], ensure_ascii=False)
         out = format_downstream_context(self._items(content))
         assert "项目基本信息" in out
         assert "甲段" in out and "乙段" in out, "数组条目必须展平下发，不得整段丢弃"
 
     def test_array_of_scalars_and_nested_dicts(self):
         from app.services.bid_analysis_service import format_downstream_context
-        content = json.dumps(["清单A", {"k1": "v1", "k2": ""}, "没有提及"],
-                             ensure_ascii=False)
+
+        content = json.dumps(["清单A", {"k1": "v1", "k2": ""}, "没有提及"], ensure_ascii=False)
         out = format_downstream_context(self._items(content))
         assert "清单A" in out
         assert "k1：v1" in out, "dict 元素须拼为 k：v"
@@ -252,20 +275,21 @@ class TestDownstreamJsonArray:
     def test_object_form_unchanged(self):
         """回归：对象形态与旧行为逐字一致（仍是 - **k**: v 行）。"""
         from app.services.bid_analysis_service import format_downstream_context
-        out = format_downstream_context(
-            self._items(json.dumps({"project_name": "某项目"},
-                                   ensure_ascii=False)))
+
+        out = format_downstream_context(self._items(json.dumps({"project_name": "某项目"}, ensure_ascii=False)))
         assert "- **project_name**: 某项目" in out
 
     def test_invalid_json_falls_back_to_raw(self):
         """回归：坏 JSON 仍原样下发（不抛异常、不吞内容）。"""
         from app.services.bid_analysis_service import format_downstream_context
+
         out = format_downstream_context(self._items("{not json"))
         assert "{not json" in out
 
     def test_empty_object_still_skipped(self):
         """回归：空对象失败哨兵仍整体跳过（§4.11.2 修复不回退）。"""
         from app.services.bid_analysis_service import format_downstream_context
+
         out = format_downstream_context(self._items("{}"))
         assert "项目基本信息" not in out
 
@@ -279,6 +303,7 @@ class TestSyncExtractLayerR13:
     async def ctx(self, db_conn, tmp_path, monkeypatch):
         import app.routers.global_facts as gf
         import app.services.doc_pipeline.doc_storage as ds
+
         monkeypatch.setattr(gf, "FACT_UPLOADS_DIR", tmp_path / "uploads")
         monkeypatch.setattr(ds, "DOCS_ROOT", tmp_path / "projects")
         db = db_conn
@@ -287,37 +312,40 @@ class TestSyncExtractLayerR13:
         await db.execute(
             "INSERT INTO project_documents(id, project_id, file_name,"
             " parse_status, parsed_markdown) VALUES(?,?,?,?,?)",
-            (doc_id, pid, "a.docx", "success", "正文"))
+            (doc_id, pid, "a.docx", "success", "正文"),
+        )
         await db.commit()
         return {"db": db, "project_id": pid, "doc_id": doc_id}
 
     async def test_stale_update_none_does_not_raise(self, ctx, caplog):
         """修复前：db.execute 返回 None 时陈旧标记静默不生效。"""
         from app.services.doc_pipeline import pipeline
+
         c = ctx
-        await db_execute(c["db"],
-                         "INSERT INTO doc_extractions(extraction_id, doc_id,"
-                         " project_id, extract_type, extract_data, status)"
-                         " VALUES(?,?,?,?,?,?)",
-                         (uuid.uuid4().hex, c["doc_id"], c["project_id"],
-                          "project_info", "{}", "success"))
+        await db_execute(
+            c["db"],
+            "INSERT INTO doc_extractions(extraction_id, doc_id,"
+            " project_id, extract_type, extract_data, status)"
+            " VALUES(?,?,?,?,?,?)",
+            (uuid.uuid4().hex, c["doc_id"], c["project_id"], "project_info", "{}", "success"),
+        )
         await c["db"].commit()
         fake = _R13Db(c["db"], ["UPDATE doc_extractions SET status='stale'"])
         with caplog.at_level("WARNING"):
-            res = await pipeline.sync_extract_layer(
-                fake, doc_id=c["doc_id"], project_id=c["project_id"])
+            res = await pipeline.sync_extract_layer(fake, doc_id=c["doc_id"], project_id=c["project_id"])
         assert fake.hit, "测试必须真实命中被拦截的 UPDATE"
         assert isinstance(res, dict), "判空后必须继续返回，不得抛错"
-        assert any("db.execute 返回 None" in r.message or "R13" in r.message
-                   for r in caplog.records), "None 游标必须留下可观测告警"
+        assert any(
+            "db.execute 返回 None" in r.message or "R13" in r.message for r in caplog.records
+        ), "None 游标必须留下可观测告警"
 
     async def test_extract_status_update_none_does_not_raise(self, ctx, caplog):
         from app.services.doc_pipeline import pipeline
+
         c = ctx
         fake = _R13Db(c["db"], ["UPDATE project_documents SET extract_status"])
         with caplog.at_level("WARNING"):
-            res = await pipeline.sync_extract_layer(
-                fake, doc_id=c["doc_id"], project_id=c["project_id"])
+            res = await pipeline.sync_extract_layer(fake, doc_id=c["doc_id"], project_id=c["project_id"])
         assert fake.hit
         assert res["extract_status"] in ("success", "pending")
 
@@ -329,6 +357,7 @@ def test_both_updates_are_guarded():
     类里会触发 pytest 警告（标记与函数形态不符），噪音会掩盖真实告警。
     """
     from app.services.doc_pipeline import pipeline as _pl
+
     src = textwrap.dedent(inspect_getsource(_pl.sync_extract_layer))
     tree = ast.parse(src)
     guarded = 0
@@ -347,10 +376,11 @@ def test_both_updates_are_guarded():
             # 纯字符串字面量（非 f-string）：SQL 在 .value 里
             text = sql.value if isinstance(sql.value, str) else ""
         else:
-            text = "".join(v.value for v in sql.values
-                           if isinstance(v, ast.Constant))
-        if "UPDATE doc_extractions SET status='stale'" not in text \
-                and "UPDATE project_documents SET extract_status" not in text:
+            text = "".join(v.value for v in sql.values if isinstance(v, ast.Constant))
+        if (
+            "UPDATE doc_extractions SET status='stale'" not in text
+            and "UPDATE project_documents SET extract_status" not in text
+        ):
             continue
         target = node.targets[0]
         name = target.id if isinstance(target, ast.Name) else ""
@@ -368,6 +398,7 @@ async def db_execute(db, sql, params=()):
 
 def inspect_getsource(fn) -> str:
     import inspect
+
     return inspect.getsource(fn)
 
 
@@ -376,6 +407,7 @@ def inspect_getsource(fn) -> str:
 # ---------------------------------------------------------------------------
 def _upload(name: str, data: bytes):
     from starlette.datastructures import UploadFile
+
     return UploadFile(file=io.BytesIO(data), filename=name, size=len(data))
 
 
@@ -384,16 +416,17 @@ class TestFirstParseInvalidatesDownstream:
     @pytest_asyncio.fixture
     async def ctx(self, tmp_path, monkeypatch):
         import app.db as appdb
+
         appdb.DB_PATH = tmp_path / "first-parse.sqlite"
         await init_db()
         monkeypatch.setattr(ba, "_appdb_stub", appdb, raising=False)
         import app.routers.global_facts as gf
+
         monkeypatch.setattr(gf, "FACT_UPLOADS_DIR", tmp_path / "uploads")
         db = await get_conn()
         pid, sid = uuid.uuid4().hex, uuid.uuid4().hex
         await db.execute("INSERT INTO projects(id,name) VALUES(?,?)", (pid, "p"))
-        await db.execute(
-            "INSERT INTO schemes(id,project_id,name) VALUES(?,?,?)", (sid, pid, "s"))
+        await db.execute("INSERT INTO schemes(id,project_id,name) VALUES(?,?,?)", (sid, pid, "s"))
         await db.commit()
         yield db, pid, sid
         await appdb.close_db()
@@ -401,12 +434,14 @@ class TestFirstParseInvalidatesDownstream:
     async def _first_doc(self, ctx):
         db, pid, sid = ctx
         import app.routers.global_facts as gf
+
         await gf.upload_documents(
-            scheme_id=sid, project_id="",
+            scheme_id=sid,
+            project_id="",
             files=[_upload("spec.txt", "工程名称：某产业园\n工期：120 日历天".encode("utf-8"))],
-            db=db)
-        cur = await db.execute(
-            "SELECT id FROM project_documents WHERE project_id=?", (pid,))
+            db=db,
+        )
+        cur = await db.execute("SELECT id FROM project_documents WHERE project_id=?", (pid,))
         return (await cur.fetchone())[0]
 
     async def test_first_parse_marks_facts_stale(self, ctx):
@@ -416,14 +451,16 @@ class TestFirstParseInvalidatesDownstream:
         await db.execute(
             "INSERT INTO global_facts(id,project_id,scheme_id,group_id,title,"
             "content,category,is_resolved) VALUES(?,?,?,'g','工期',"
-            "'- **工期**: 120 日历天','schedule',1)", (uuid.uuid4().hex, pid, sid))
+            "'- **工期**: 120 日历天','schedule',1)",
+            (uuid.uuid4().hex, pid, sid),
+        )
         await db.commit()
         import app.routers.global_facts as gf
+
         res = await gf.parse_document(doc_id, db=db)
         assert res.get("stale_facts") == 1
         assert res.get("note")
-        cur = await db.execute("SELECT is_stale FROM global_facts WHERE project_id=?",
-                               (pid,))
+        cur = await db.execute("SELECT is_stale FROM global_facts WHERE project_id=?", (pid,))
         assert (await cur.fetchone())["is_stale"] == 1
 
     async def test_first_parse_all_marks_facts_stale(self, ctx):
@@ -433,15 +470,17 @@ class TestFirstParseInvalidatesDownstream:
         await db.execute(
             "INSERT INTO global_facts(id,project_id,scheme_id,group_id,title,"
             "content,category,is_resolved) VALUES(?,?,?,'g','工期',"
-            "'- **工期**: 120 日历天','schedule',1)", (uuid.uuid4().hex, pid, sid))
+            "'- **工期**: 120 日历天','schedule',1)",
+            (uuid.uuid4().hex, pid, sid),
+        )
         await db.commit()
         import app.routers.global_facts as gf
+
         res = await gf.parse_all_documents(scheme_id=sid, project_id="", db=db)
         assert res.get("parsed") == 1
         assert res.get("stale_facts") == 1
         assert res.get("note")
-        cur = await db.execute("SELECT is_stale FROM global_facts WHERE project_id=?",
-                               (pid,))
+        cur = await db.execute("SELECT is_stale FROM global_facts WHERE project_id=?", (pid,))
         assert (await cur.fetchone())["is_stale"] == 1
 
     async def test_force_reparse_note_unchanged(self, ctx):
@@ -449,6 +488,7 @@ class TestFirstParseInvalidatesDownstream:
         db, pid, sid = ctx
         doc_id = await self._first_doc(ctx)
         import app.routers.global_facts as gf
+
         await gf.parse_document(doc_id, db=db)
         res = await gf.parse_document(doc_id, force=True, db=db)
         assert "已重新解析" in res.get("note", "")
@@ -458,6 +498,7 @@ class TestFirstParseInvalidatesDownstream:
         db, pid, sid = ctx
         doc_id = await self._first_doc(ctx)
         import app.routers.global_facts as gf
+
         await gf.parse_document(doc_id, db=db)
         res = await gf.parse_document(doc_id, db=db)
         assert res.get("already_parsed") is True
@@ -475,23 +516,24 @@ class TestMaxDocCharsConfig:
         """
         env = dict(os.environ, BID_ANALYSIS_SEGMENT_BUDGET="0")
         r = subprocess.run(
-            [sys.executable, "-c",
-             "from app.routers import bid_analysis as ba;"
-             "print(ba._MAX_DOC_CHARS)"],
+            [sys.executable, "-c", "from app.routers import bid_analysis as ba;" "print(ba._MAX_DOC_CHARS)"],
             # _BA_PATH = backend/app/routers/bid_analysis.py
             # → 三层 dirname 才是 backend（先前少取一层落在 backend/app，
             #   子进程 `import app` 报 ModuleNotFoundError）
             cwd=os.path.dirname(os.path.dirname(os.path.dirname(_BA_PATH))),
-            env=env, capture_output=True)
+            env=env,
+            capture_output=True,
+        )
         assert r.returncode == 0, r.stderr.decode("utf-8", "replace")
-        assert r.stdout.decode().strip() == "1000", (
-            "显式 0 必须被尊重（走到 max(1000, 0)=1000），而不是被 or 改成默认值")
+        assert (
+            r.stdout.decode().strip() == "1000"
+        ), "显式 0 必须被尊重（走到 max(1000, 0)=1000），而不是被 or 改成默认值"
 
     def test_default_budget_unchanged(self):
         """回归：未配置时仍是配置默认值。"""
         from app.config import settings
-        assert ba._MAX_DOC_CHARS == max(
-            1000, settings.bid_analysis_segment_budget)
+
+        assert ba._MAX_DOC_CHARS == max(1000, settings.bid_analysis_segment_budget)
 
     def test_source_has_no_or_default_pattern(self):
         """静态锁：赋值右值不得再出现 `or <默认>` 形态。"""
@@ -502,8 +544,7 @@ class TestMaxDocCharsConfig:
                 for t in node.targets:
                     if isinstance(t, ast.Name) and t.id == "_MAX_DOC_CHARS":
                         seg = ast.get_source_segment(src, node) or ""
-                        assert " or " not in seg, (
-                            "_MAX_DOC_CHARS 仍用 or 读取配置：%s" % seg)
+                        assert " or " not in seg, "_MAX_DOC_CHARS 仍用 or 读取配置：%s" % seg
                         assert "is None" in seg, "必须显式判 None"
 
 
@@ -528,8 +569,8 @@ class TestTiffPageMarkers:
     def patched(self, monkeypatch):
         import app.services.file_parser as fp
         import app.services.ocr as ocr
-        monkeypatch.setattr(fp, "_split_tiff_frames",
-                            lambda content: [b"f1", b"f2", b"f3"])
+
+        monkeypatch.setattr(fp, "_split_tiff_frames", lambda content: [b"f1", b"f2", b"f3"])
 
         def _fake_ocr_bytes(frame):
             idx = {b"f1": 1, b"f2": 2, b"f3": 3}[frame]
@@ -543,8 +584,7 @@ class TestTiffPageMarkers:
         diag = {}
         out = patched._parse_image_ocr(b"II*", "tiff", diag)
         for n in (1, 2, 3):
-            assert f"<!-- page:{n} -->" in out, (
-                f"第 {n} 帧缺页码标记（内容会被错记到第 1 页）")
+            assert f"<!-- page:{n} -->" in out, f"第 {n} 帧缺页码标记（内容会被错记到第 1 页）"
         assert out.index("<!-- page:1 -->") < out.index("<!-- page:2 -->")
 
     def test_content_preserved(self, patched):
@@ -571,16 +611,13 @@ class TestTiffPageMarkers:
 
     def test_no_bare_join_left(self):
         """静态锁：多页 TIFF 分支不得再出现裸 join（防止判据被抄第二份）。"""
-        src = _read(os.path.join(os.path.dirname(_BA_PATH), "..", "services",
-                                "file_parser.py"))
+        src = _read(os.path.join(os.path.dirname(_BA_PATH), "..", "services", "file_parser.py"))
         tree = ast.parse(src)
         for node in ast.walk(tree):
-            if isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef)) \
-                    and node.name == "_parse_image_ocr":
+            if isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef)) and node.name == "_parse_image_ocr":
                 seg = ast.get_source_segment(src, node) or ""
         assert "_add_page_markers(" in seg, "TIFF 多帧路径必须复用页码标记单一出口"
-        assert 'return "\\n".join(parts)' not in seg, (
-            "不得再出现裸 join（帧号即页号，缺标记即溯源失真）")
+        assert 'return "\\n".join(parts)' not in seg, "不得再出现裸 join（帧号即页号，缺标记即溯源失真）"
 
 
 # ---------------------------------------------------------------------------
@@ -593,8 +630,7 @@ class TestResetForRerunSingleSource:
 
     def test_no_handcrafted_pk(self, src):
         """主键唯一出口纪律：不得手拼 f"{project_id}_{item_id}"。"""
-        assert 'f"{project_id}_{def_' not in src, (
-            "主键必须由 build_item_pk 生成（当前无行为差异，但域一旦启用即分叉）")
+        assert 'f"{project_id}_{def_' not in src, "主键必须由 build_item_pk 生成（当前无行为差异，但域一旦启用即分叉）"
         assert "build_item_pk(" in src
 
     def test_domain_column_present(self, src):
@@ -610,9 +646,9 @@ class TestResetForRerunSingleSource:
         await db.commit()
         await ba._reset_items_for_rerun(db, pid, ["projectBasicInfo"])
         from app.services.bid_analysis_service import build_item_pk, get_item_domain
+
         pk = build_item_pk(pid, "projectBasicInfo", get_item_domain("projectBasicInfo"))
-        cur = await db.execute(
-            "SELECT id, status, source FROM bid_analysis_items WHERE id=?", (pk,))
+        cur = await db.execute("SELECT id, status, source FROM bid_analysis_items WHERE id=?", (pk,))
         row = await cur.fetchone()
         assert row is not None, "重置重跑必须补齐待跑项的记录"
         assert row["status"] == "idle" and row["source"] == "ai"
@@ -625,7 +661,5 @@ class TestResetForRerunSingleSource:
         await db.commit()
         await ba._reset_items_for_rerun(db, pid, ["projectBasicInfo"])
         await ba._reset_items_for_rerun(db, pid, ["projectBasicInfo"])
-        cur = await db.execute(
-            "SELECT COUNT(*) AS n FROM bid_analysis_items WHERE project_id=?",
-            (pid,))
+        cur = await db.execute("SELECT COUNT(*) AS n FROM bid_analysis_items WHERE project_id=?", (pid,))
         assert (await cur.fetchone())["n"] == 1

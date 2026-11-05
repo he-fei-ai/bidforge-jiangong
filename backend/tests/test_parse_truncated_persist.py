@@ -8,6 +8,7 @@
 - 字数达上限（旧口径）仍判定 truncated=True（回退逻辑不退化）。
 - 迁移补列：parse_truncated 列必须存在（防 schema 漂移）。
 """
+
 import uuid
 
 import app.db as _appdb
@@ -35,7 +36,8 @@ async def _insert_doc(db, pid, doc_id, text_len, parse_truncated):
     await db.execute(
         "INSERT INTO project_documents(id, project_id, file_name, parsed_markdown, "
         "parse_truncated, parse_status) VALUES(?,?,?,?,?,?)",
-        (doc_id, pid, doc_id, stored, parse_truncated, "success"))
+        (doc_id, pid, doc_id, stored, parse_truncated, "success"),
+    )
     await db.commit()
 
 
@@ -46,8 +48,7 @@ async def test_parse_truncated_persisted_and_listed(ctx):
     # ② 正常小文档：无截断
     await _insert_doc(db, pid, "b", text_len=100, parse_truncated=0)
     # ③ 旧口径兜底：字数达上限（无 parse_truncated 列时为 NULL→0）仍应判定截断
-    await _insert_doc(db, pid, "c", text_len=global_facts.MAX_PARSED_CHARS + 10,
-                      parse_truncated=0)
+    await _insert_doc(db, pid, "c", text_len=global_facts.MAX_PARSED_CHARS + 10, parse_truncated=0)
 
     res = await global_facts.list_documents(project_id=pid, scheme_id="", db=db)
     docs = {d["id"]: d for d in res["documents"]}
