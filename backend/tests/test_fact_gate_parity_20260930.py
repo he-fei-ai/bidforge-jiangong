@@ -44,6 +44,7 @@
      `build_rerun_plan` 不把它们算作可注入语料；
   C. 反向：正常已确认事实仍必须判为可补齐（防止「为修 A 把门控删空」）。
 """
+
 import re
 import uuid
 from pathlib import Path
@@ -71,13 +72,13 @@ def _strip_doc_and_comments(src: str) -> str:
     try:
         import io
         import tokenize
+
         out: list[str] = []
         prev_end = (1, 0)
         for tok in tokenize.generate_tokens(io.StringIO(src).readline):
             if tok.type == tokenize.COMMENT:
                 continue
-            if tok.type == tokenize.STRING and tok.line.strip().startswith(
-                    ('"""', "'''", 'r"""', "r'''")):
+            if tok.type == tokenize.STRING and tok.line.strip().startswith(('"""', "'''", 'r"""', "r'''")):
                 continue
             if tok.start[0] > prev_end[0]:
                 out.append("\n" * (tok.start[0] - prev_end[0]))
@@ -101,14 +102,12 @@ class TestInputCoverageGateParity:
 
     def test_ok_cnt_counts_all_four_conditions(self):
         code = _strip_doc_and_comments(_read("services/input_coverage.py"))
-        loose = ("SUM(CASE WHEN has_conflict=0 AND is_resolved=1 "
-                 "THEN 1 ELSE 0 END)")
+        loose = "SUM(CASE WHEN has_conflict=0 AND is_resolved=1 " "THEN 1 ELSE 0 END)"
         assert loose not in code, "input_coverage 的 ok_cnt 仍只判两列"
 
     def test_uses_single_source_accessor(self):
         code = _strip_doc_and_comments(_read("services/input_coverage.py"))
-        assert "get_facts_inject_where" in code, \
-            "应复用 facts_extractor.get_facts_inject_where() 单一出口"
+        assert "get_facts_inject_where" in code, "应复用 facts_extractor.get_facts_inject_where() 单一出口"
 
 
 class TestRerunPlanRejectsUninjectableFacts:
@@ -117,6 +116,7 @@ class TestRerunPlanRejectsUninjectableFacts:
     @pytest.fixture
     async def db(self, tmp_path, monkeypatch):
         import app.db as _appdb
+
         _appdb.DB_PATH = tmp_path / "fact-gate-parity.sqlite"
         await init_db()
         conn = await get_conn()
@@ -127,28 +127,38 @@ class TestRerunPlanRejectsUninjectableFacts:
     async def _mk_scheme(conn):
         pid, sid = uuid.uuid4().hex, uuid.uuid4().hex
         await conn.execute("INSERT INTO projects (id, name) VALUES (?,?)", (pid, "p"))
-        await conn.execute(
-            "INSERT INTO schemes (id, project_id, name) VALUES (?,?,?)", (sid, pid, "s"))
+        await conn.execute("INSERT INTO schemes (id, project_id, name) VALUES (?,?,?)", (sid, pid, "s"))
         return pid, sid
 
     @staticmethod
-    async def _mk_fact(conn, sid, *, title, resolved=1, conflict=0,
-                       simulated=0, stale=0):
+    async def _mk_fact(conn, sid, *, title, resolved=1, conflict=0, simulated=0, stale=0):
         fid = uuid.uuid4().hex
         await conn.execute(
             "INSERT INTO global_facts (id, project_id, scheme_id, category, "
             "group_title, title, content, is_resolved, has_conflict, "
             "is_simulated, is_stale) VALUES (?,?,?,?,?,?,?,?,?,?,?)",
-            (fid, "", sid, "project_overview", "工程概况", title,
-             f"内容-{title}", resolved, conflict, simulated, stale))
+            (
+                fid,
+                "",
+                sid,
+                "project_overview",
+                "工程概况",
+                title,
+                f"内容-{title}",
+                resolved,
+                conflict,
+                simulated,
+                stale,
+            ),
+        )
         return fid
 
     @staticmethod
     async def _mk_section(conn, sid, content):
         sec = uuid.uuid4().hex
         await conn.execute(
-            "INSERT INTO sections (id, scheme_id, title, content) VALUES (?,?,?,?)",
-            (sec, sid, "第一章", content))
+            "INSERT INTO sections (id, scheme_id, title, content) VALUES (?,?,?,?)", (sec, sid, "第一章", content)
+        )
         return sec
 
     @pytest.mark.asyncio
@@ -161,10 +171,8 @@ class TestRerunPlanRejectsUninjectableFacts:
         plan = await placeholder_inventory.build_rerun_plan(sid, db)
         by_field = {f["field"]: f for f in plan["fields"]}
         assert "基础埋深" in by_field, "前置条件：应扫出该占位字段"
-        assert by_field["基础埋深"]["fillable"] is False, \
-            "过期事实(is_stale=1)被算作可注入语料 → 承诺可消除却消除不了"
-        assert plan["rerunnable_count"] == 0, \
-            "含过期事实的章节不应被判为可重跑"
+        assert by_field["基础埋深"]["fillable"] is False, "过期事实(is_stale=1)被算作可注入语料 → 承诺可消除却消除不了"
+        assert plan["rerunnable_count"] == 0, "含过期事实的章节不应被判为可重跑"
 
     @pytest.mark.asyncio
     async def test_simulated_fact_not_counted_as_injectable_corpus(self, db):
@@ -175,8 +183,7 @@ class TestRerunPlanRejectsUninjectableFacts:
 
         plan = await placeholder_inventory.build_rerun_plan(sid, db)
         by_field = {f["field"]: f for f in plan["fields"]}
-        assert by_field["基础埋深"]["fillable"] is False, \
-            "模拟值(is_simulated=1)被算作可注入语料 → 违反数据真实性红线"
+        assert by_field["基础埋深"]["fillable"] is False, "模拟值(is_simulated=1)被算作可注入语料 → 违反数据真实性红线"
 
     @pytest.mark.asyncio
     async def test_confirmed_normal_fact_still_fillable(self, db):
@@ -197,6 +204,7 @@ class TestInputCoverageInventoryMatchesGate:
     @pytest.fixture
     async def db(self, tmp_path, monkeypatch):
         import app.db as _appdb
+
         _appdb.DB_PATH = tmp_path / "fact-gate-parity-ic.sqlite"
         await init_db()
         conn = await get_conn()
@@ -207,49 +215,57 @@ class TestInputCoverageInventoryMatchesGate:
     async def _seed(conn, **flags):
         pid, sid = uuid.uuid4().hex, uuid.uuid4().hex
         await conn.execute("INSERT INTO projects (id, name) VALUES (?,?)", (pid, "p"))
-        await conn.execute(
-            "INSERT INTO schemes (id, project_id, name) VALUES (?,?,?)", (sid, pid, "s"))
+        await conn.execute("INSERT INTO schemes (id, project_id, name) VALUES (?,?,?)", (sid, pid, "s"))
         await conn.execute(
             "INSERT INTO global_facts (id, project_id, scheme_id, category, "
             "group_title, title, content, is_resolved, has_conflict, "
             "is_simulated, is_stale) VALUES (?,?,?,?,?,?,?,?,?,?,?)",
-            (uuid.uuid4().hex, pid, sid, "project_overview", "工程概况",
-             "基础埋深", "基础埋深 18m",
-             flags.get("resolved", 1), flags.get("conflict", 0),
-             flags.get("simulated", 0), flags.get("stale", 0)))
+            (
+                uuid.uuid4().hex,
+                pid,
+                sid,
+                "project_overview",
+                "工程概况",
+                "基础埋深",
+                "基础埋深 18m",
+                flags.get("resolved", 1),
+                flags.get("conflict", 0),
+                flags.get("simulated", 0),
+                flags.get("stale", 0),
+            ),
+        )
         return pid, sid
 
     @pytest.mark.asyncio
     async def test_stale_fact_not_available_but_visible(self, db):
         from app.services import input_coverage
+
         pid, sid = await self._seed(db, stale=1)
         inv = await input_coverage.build_inventory(db, pid, sid)
         facts = [e for e in inv.entries if e.source == input_coverage.SRC_FACTS]
-        assert not [e for e in facts if e.status == "available"], \
-            "过期事实被计为 available → 差集报告会假报「已调用」"
+        assert not [e for e in facts if e.status == "available"], "过期事实被计为 available → 差集报告会假报「已调用」"
         stale = [e for e in facts if e.status == "filtered_stale"]
         assert stale, "过期事实在台账里必须可见（否则就是静默丢失）"
 
     @pytest.mark.asyncio
     async def test_simulated_fact_not_available_but_visible(self, db):
         from app.services import input_coverage
+
         pid, sid = await self._seed(db, simulated=1)
         inv = await input_coverage.build_inventory(db, pid, sid)
         facts = [e for e in inv.entries if e.source == input_coverage.SRC_FACTS]
-        assert not [e for e in facts if e.status == "available"], \
-            "模拟值被计为 available → 违反数据真实性红线"
-        assert [e for e in facts if e.status == "filtered_simulated"], \
-            "模拟值在台账里必须可见"
+        assert not [e for e in facts if e.status == "available"], "模拟值被计为 available → 违反数据真实性红线"
+        assert [e for e in facts if e.status == "filtered_simulated"], "模拟值在台账里必须可见"
 
     @pytest.mark.asyncio
     async def test_normal_fact_still_available(self, db):
         """反向断言：正常事实仍必须计为 available（防止把门控删空）"""
         from app.services import input_coverage
+
         pid, sid = await self._seed(db)
         inv = await input_coverage.build_inventory(db, pid, sid)
         facts = [e for e in inv.entries if e.source == input_coverage.SRC_FACTS]
         assert [e for e in facts if e.status == "available"]
-
 
     def test_canonical_gate_is_not_legacy_loose(self):
         assert CANONICAL != LEGACY_LOOSE_GATE
@@ -260,13 +276,13 @@ class TestPlaceholderInventoryGateParity:
 
     def test_source_has_no_legacy_loose_gate_literal(self):
         code = _strip_doc_and_comments(_read("services/placeholder_inventory.py"))
-        assert "is_resolved=1 AND has_conflict=0" not in code, \
-            "build_rerun_plan 仍硬编码旧宽松口径（漏 is_simulated / is_stale）"
+        assert (
+            "is_resolved=1 AND has_conflict=0" not in code
+        ), "build_rerun_plan 仍硬编码旧宽松口径（漏 is_simulated / is_stale）"
 
     def test_uses_single_source_accessor(self):
         code = _strip_doc_and_comments(_read("services/placeholder_inventory.py"))
-        assert "get_facts_inject_where" in code, \
-            "应复用 facts_extractor.get_facts_inject_where() 单一出口"
+        assert "get_facts_inject_where" in code, "应复用 facts_extractor.get_facts_inject_where() 单一出口"
 
     def test_docstring_no_longer_states_deprecated_gate(self):
         """修复前 docstring 把旧口径陈述为**现行契约**；现在不得再这么写。
@@ -276,5 +292,4 @@ class TestPlaceholderInventoryGateParity:
         """
         src = _read("services/placeholder_inventory.py")
         spec_claim = "：``is_resolved=1 AND has_conflict=0``（与 _render_facts_text"
-        assert spec_claim not in src, \
-            "docstring 仍把已废弃的旧口径陈述为现行契约"
+        assert spec_claim not in src, "docstring 仍把已废弃的旧口径陈述为现行契约"

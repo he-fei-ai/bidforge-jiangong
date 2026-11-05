@@ -11,6 +11,7 @@
 - 章节聚合与字段完整性差集；
 - DB 往返：新增 4 列幂等补列、persist_extraction INSERT 列数一致、读路径惰性派生。
 """
+
 import json
 
 import app.services.facts_extractor as fe
@@ -22,10 +23,18 @@ from app.services import scheme_classification as sc
 # 1. 分类体系完整性
 # ---------------------------------------------------------------------------
 
+
 def test_nine_chapters_order_and_titles():
     assert fc.CHAPTER_ORDER == [
-        "overview", "basis", "plan", "technique", "safety",
-        "personnel", "acceptance", "emergency", "calc_drawings",
+        "overview",
+        "basis",
+        "plan",
+        "technique",
+        "safety",
+        "personnel",
+        "acceptance",
+        "emergency",
+        "calc_drawings",
     ]
     assert fc.CHAPTER_TITLES["overview"] == "工程概况"
     assert fc.CHAPTER_TITLES["calc_drawings"] == "计算书及相关施工图纸"
@@ -36,11 +45,29 @@ def test_category_map_covers_all_categories():
     """既有 category 值域必须全部有映射项（未分类回退空串也算已覆盖）。"""
     covered = set(fc.CATEGORY_TO_CHAPTER.keys())
     assert covered == {
-        "basic", "basis", "personnel", "labor", "schedule", "equipment",
-        "machinery", "material_mgmt", "tech_param", "scale", "risk",
-        "safety_critical", "deployment", "temporary", "process", "execution",
-        "monitoring", "quality", "acceptance", "commitment", "environment",
-        "emergency", "other",
+        "basic",
+        "basis",
+        "personnel",
+        "labor",
+        "schedule",
+        "equipment",
+        "machinery",
+        "material_mgmt",
+        "tech_param",
+        "scale",
+        "risk",
+        "safety_critical",
+        "deployment",
+        "temporary",
+        "process",
+        "execution",
+        "monitoring",
+        "quality",
+        "acceptance",
+        "commitment",
+        "environment",
+        "emergency",
+        "other",
     }
 
 
@@ -56,6 +83,7 @@ def test_chapter_targets_all_valid():
 # 2. 章节归属判定
 # ---------------------------------------------------------------------------
 
+
 def test_chapter_from_category_fallback():
     assert fc.classify_chapter_from_text("项目经理", "张三", category="personnel") == "personnel"
     assert fc.classify_chapter_from_text("劳动力", "焊工8人", category="labor") == "plan"
@@ -64,8 +92,7 @@ def test_chapter_from_category_fallback():
 
 def test_chapter_text_rule_overrides_coarse_fact_type():
     """基坑开挖深度 → 第一章工程概况（专项工程特征），不被 design_param 误吞。"""
-    ch = fc.classify_chapter_from_text(
-        "基坑开挖深度", "4.2 m", category="tech_param", fact_type="design_param")
+    ch = fc.classify_chapter_from_text("基坑开挖深度", "4.2 m", category="tech_param", fact_type="design_param")
     assert ch == "overview"
 
 
@@ -77,10 +104,8 @@ def test_chapter_calc_drawings_gap_filled():
 
 def test_chapter_fact_type_as_second_signal():
     """文本规则未命中时回退到 fact_type（比 category 更细）。"""
-    assert fc.classify_chapter_from_text(
-        "某参数", "v", category="other", fact_type="monitoring") == "safety"
-    assert fc.classify_chapter_from_text(
-        "某参数", "v", category="other", fact_type="material") == "technique"
+    assert fc.classify_chapter_from_text("某参数", "v", category="other", fact_type="monitoring") == "safety"
+    assert fc.classify_chapter_from_text("某参数", "v", category="other", fact_type="material") == "technique"
 
 
 def test_chapter_concrete_examples():
@@ -101,6 +126,7 @@ def test_chapter_concrete_examples():
 # ---------------------------------------------------------------------------
 # 3. 事实属性判定
 # ---------------------------------------------------------------------------
+
 
 def test_attr_quantitative():
     assert fc.classify_fact_attr("基坑开挖深度", "4.2 m") == "quantitative"
@@ -136,6 +162,7 @@ def test_attr_qualitative():
 # 4. 数据来源判定
 # ---------------------------------------------------------------------------
 
+
 def test_source_kind_rules():
     assert fc.classify_source_kind(source="岩土工程勘察报告.pdf") == "survey"
     assert fc.classify_source_kind(source="结构设计施工图.pdf") == "drawing"
@@ -157,18 +184,14 @@ def test_source_kind_parses_json_ref():
 # 5. 跨章节共性事实
 # ---------------------------------------------------------------------------
 
+
 def test_shared_chapters_detected():
     """共性事实 → 复用章节集合（按九大章节序号升序，稳定可展示）。"""
-    assert fc.shared_chapters_for("工程名称", "XX小区") == (
-        "overview", "basis", "acceptance", "emergency")
-    assert fc.shared_chapters_for("混凝土强度等级", "C30") == (
-        "technique", "acceptance", "calc_drawings")
-    assert fc.shared_chapters_for("施工总工期", "240天") == (
-        "plan", "safety", "emergency")
-    assert fc.shared_chapters_for("管理人员名单", "张三") == (
-        "personnel", "acceptance", "emergency")
-    assert fc.shared_chapters_for("基坑开挖深度", "4.2m") == (
-        "technique", "safety", "calc_drawings")
+    assert fc.shared_chapters_for("工程名称", "XX小区") == ("overview", "basis", "acceptance", "emergency")
+    assert fc.shared_chapters_for("混凝土强度等级", "C30") == ("technique", "acceptance", "calc_drawings")
+    assert fc.shared_chapters_for("施工总工期", "240天") == ("plan", "safety", "emergency")
+    assert fc.shared_chapters_for("管理人员名单", "张三") == ("personnel", "acceptance", "emergency")
+    assert fc.shared_chapters_for("基坑开挖深度", "4.2m") == ("technique", "safety", "calc_drawings")
 
 
 def test_non_shared_fact_returns_empty():
@@ -177,14 +200,14 @@ def test_non_shared_fact_returns_empty():
 
 def test_classify_fact_dimensions_shape():
     d = fc.classify_fact_dimensions("施工总工期", "240")
-    assert set(d.keys()) == {"chapter", "fact_attr", "source_kind", "is_shared",
-                             "shared_chapters"}
+    assert set(d.keys()) == {"chapter", "fact_attr", "source_kind", "is_shared", "shared_chapters"}
     assert d["chapter"] == "plan"
     assert d["is_shared"] is True
     # shared_chapters 按九大章节序号升序（plan=3, safety=5, emergency=8）
     assert d["shared_chapters"] == fc.shared_chapters_for("施工总工期", "240")
     assert [fc.CHAPTER_NUMBERS[c] for c in d["shared_chapters"]] == sorted(
-        fc.CHAPTER_NUMBERS[c] for c in d["shared_chapters"])
+        fc.CHAPTER_NUMBERS[c] for c in d["shared_chapters"]
+    )
     # 非共性事实：shared_chapters 只含主归属章节（完整归属集合，不含复用扩展示例）
     d2 = fc.classify_fact_dimensions("监测点布置方式", "按网格布置")
     assert d2["is_shared"] is False
@@ -198,6 +221,7 @@ def test_classify_fact_dimensions_shape():
 # ---------------------------------------------------------------------------
 # 6. 危大工程阈值参数抽取
 # ---------------------------------------------------------------------------
+
 
 def test_extract_params_unit_conversion_and_max():
     rows = [
@@ -213,70 +237,89 @@ def test_extract_params_loads_kept_as_is():
         {"name": "集中线荷载", "value": "20", "value_unit": "kN/m"},
         {"name": "单件起吊重量", "value": "10", "value_unit": "kN"},
     ]
-    assert fc.extract_danger_params(rows) == {
-        "total_load": 15.0, "line_load": 20.0, "single_weight": 10.0}
+    assert fc.extract_danger_params(rows) == {"total_load": 15.0, "line_load": 20.0, "single_weight": 10.0}
 
 
 def test_extract_params_ignores_bad_rows():
     """非 dict / 无可提取数值的行被忽略（不做任何臆测）。"""
-    assert fc.extract_danger_params([
-        None, "x", {"name": "基坑开挖深度", "value": "深基坑"},
-        {"name": "基坑开挖深度"}, {"value": "6.5"},
-    ]) == {}
+    assert (
+        fc.extract_danger_params(
+            [
+                None,
+                "x",
+                {"name": "基坑开挖深度", "value": "深基坑"},
+                {"name": "基坑开挖深度"},
+                {"value": "6.5"},
+            ]
+        )
+        == {}
+    )
 
 
 def test_extract_params_approximate_is_conservative():
     """「约6米多」这类模糊表述仍抽取数值（6.0m）—— 危大判定宁可保守不可漏判。"""
-    got = fc.extract_danger_params([
-        {"name": "基坑开挖深度", "value": "约6米多", "value_unit": ""}])
+    got = fc.extract_danger_params([{"name": "基坑开挖深度", "value": "约6米多", "value_unit": ""}])
     assert got["depth"] == pytest.approx(6.0)
 
 
 def test_extract_params_from_fact_key():
-    assert fc.extract_danger_params([
-        {"name": "设计参数", "value": "4.2", "value_unit": "m",
-         "fact_key": "foundation_depth"}]) == {"depth": 4.2}
+    assert fc.extract_danger_params(
+        [{"name": "设计参数", "value": "4.2", "value_unit": "m", "fact_key": "foundation_depth"}]
+    ) == {"depth": 4.2}
 
 
 # ---------------------------------------------------------------------------
 # 7. 方案类型识别 + 危大/超规模阈值判定（BUG 修复重点）
 # ---------------------------------------------------------------------------
 
-@pytest.mark.parametrize("depth,hazard,oversize", [
-    (2.8, False, False),
-    (3.0, True, False),    # ← 3m 即危大（旧实现误判为非危大）
-    (4.2, True, False),
-    (5.0, True, True),     # ← 5m 即超规模
-    (6.2, True, True),
-])
+
+@pytest.mark.parametrize(
+    "depth,hazard,oversize",
+    [
+        (2.8, False, False),
+        (3.0, True, False),  # ← 3m 即危大（旧实现误判为非危大）
+        (4.2, True, False),
+        (5.0, True, True),  # ← 5m 即超规模
+        (6.2, True, True),
+    ],
+)
 def test_pit_threshold_waterline(depth, hazard, oversize):
     """开挖深度分水岭：≥3m 危大，≥5m 超过一定规模（部文附件一）。"""
-    r = fc.danger_check("基坑支护工程专项施工方案",
-                        [{"name": "基坑开挖深度", "value": str(depth), "value_unit": "m"}])
+    r = fc.danger_check("基坑支护工程专项施工方案", [{"name": "基坑开挖深度", "value": str(depth), "value_unit": "m"}])
     c = r["classification"]
     assert c["is_hazardous"] is hazard, f"depth={depth}"
     assert c["is_oversize"] is oversize, f"depth={depth}"
 
 
-@pytest.mark.parametrize("param,val,expect_oversize", [
-    ("height", 8, True), ("height", 7.9, False),
-    ("span", 18, True), ("span", 17.9, False),
-    ("total_load", 15, True), ("total_load", 14.9, False),
-    ("line_load", 20, True), ("line_load", 19.9, False),
-])
+@pytest.mark.parametrize(
+    "param,val,expect_oversize",
+    [
+        ("height", 8, True),
+        ("height", 7.9, False),
+        ("span", 18, True),
+        ("span", 17.9, False),
+        ("total_load", 15, True),
+        ("total_load", 14.9, False),
+        ("line_load", 20, True),
+        ("line_load", 19.9, False),
+    ],
+)
 def test_formwork_threshold_closed_interval(param, val, expect_oversize):
     """「及以上」为闭区间：临界值必须命中（旧实现用 > 会漏判临界值）。"""
     lvl = sc.evaluate_hazard_level("fw_tall", {param: val})
     assert lvl["is_oversize"] is expect_oversize
 
 
-@pytest.mark.parametrize("name,expect_hazardous", [
-    ("基坑支护工程专项施工方案", True),
-    ("高支模专项施工方案", True),
-    ("塔式起重机安装拆卸专项施工方案", True),
-    ("附着式升降脚手架专项施工方案", True),
-    ("普通装饰装修施工方案", False),
-])
+@pytest.mark.parametrize(
+    "name,expect_hazardous",
+    [
+        ("基坑支护工程专项施工方案", True),
+        ("高支模专项施工方案", True),
+        ("塔式起重机安装拆卸专项施工方案", True),
+        ("附着式升降脚手架专项施工方案", True),
+        ("普通装饰装修施工方案", False),
+    ],
+)
 def test_scheme_type_auto_recognition(name, expect_hazardous):
     """方案名称关键词 → 自动判定专项方案类型（六大类危大工程）。"""
     r = fc.danger_check(name, [])
@@ -292,8 +335,7 @@ def test_hazard_always_has_no_missing_params():
 
 
 def test_danger_check_returns_params():
-    r = fc.danger_check("基坑支护工程专项施工方案",
-                        [{"name": "基坑开挖深度", "value": "6.5", "value_unit": "m"}])
+    r = fc.danger_check("基坑支护工程专项施工方案", [{"name": "基坑开挖深度", "value": "6.5", "value_unit": "m"}])
     assert r["threshold_params"] == {"depth": 6.5}
     assert r["classification"]["scheme_name"] == "基坑支护工程专项施工方案"
 
@@ -302,11 +344,18 @@ def test_danger_check_returns_params():
 # 8. 章节聚合与字段完整性（差集分析）
 # ---------------------------------------------------------------------------
 
-def _row(name, value, chapter="", fact_attr="", source_kind="", is_shared=0,
-         category="", fact_type=""):
-    return {"name": name, "value": value, "chapter": chapter, "fact_attr": fact_attr,
-            "source_kind": source_kind, "is_shared": is_shared,
-            "category": category, "fact_type": fact_type}
+
+def _row(name, value, chapter="", fact_attr="", source_kind="", is_shared=0, category="", fact_type=""):
+    return {
+        "name": name,
+        "value": value,
+        "chapter": chapter,
+        "fact_attr": fact_attr,
+        "source_kind": source_kind,
+        "is_shared": is_shared,
+        "category": category,
+        "fact_type": fact_type,
+    }
 
 
 def test_chapter_field_completeness_missing_chapters():
@@ -334,7 +383,6 @@ def test_chapter_field_completeness_normalizes_punctuation_and_labels():
     assert "工程名称" in comp["chapters"]["overview"]["covered_fields"]
 
 
-
 def test_nine_chapter_summary_shape():
     rows = [
         _row("工程名称", "XX小区", "overview"),
@@ -360,10 +408,19 @@ def test_category_map_payload():
 # 9. 提取管线接入（确定性标注，不改动既有 category 口径）
 # ---------------------------------------------------------------------------
 
+
 def test_apply_fact_dimensions_is_idempotent_and_non_overwriting():
-    items = [fe.FactItem(name="基坑开挖深度", value="4.2", value_unit="m",
-                         category="tech_param", fact_type="design_param",
-                         key="foundation_depth", source="招标文件.pdf")]
+    items = [
+        fe.FactItem(
+            name="基坑开挖深度",
+            value="4.2",
+            value_unit="m",
+            category="tech_param",
+            fact_type="design_param",
+            key="foundation_depth",
+            source="招标文件.pdf",
+        )
+    ]
     fc.apply_fact_dimensions(items)
     got = (items[0].chapter, items[0].fact_attr, items[0].source_kind, items[0].is_shared)
     assert got == ("overview", "quantitative", "bid_doc", True)
@@ -375,8 +432,7 @@ def test_apply_fact_dimensions_is_idempotent_and_non_overwriting():
 
 def test_run_post_extract_normalize_applies_dimensions(monkeypatch):
     monkeypatch.setattr(fe.settings, "facts_chapter_classification", True)
-    items = [fe.FactItem(name="总工期", value="240", value_unit="日历天",
-                         category="schedule", fact_type="schedule")]
+    items = [fe.FactItem(name="总工期", value="240", value_unit="日历天", category="schedule", fact_type="schedule")]
     out = fe.run_post_extract_normalize(items)
     assert out[0].chapter == "plan"
     assert out[0].is_shared is True  # 工期为跨章节共性事实
@@ -385,15 +441,13 @@ def test_run_post_extract_normalize_applies_dimensions(monkeypatch):
 def test_run_post_extract_normalize_disabled_switch(monkeypatch):
     """配置关闭时完全不标注（默认行为不变）。"""
     monkeypatch.setattr(fe.settings, "facts_chapter_classification", False)
-    items = [fe.FactItem(name="总工期", value="240", value_unit="日历天",
-                         category="schedule")]
+    items = [fe.FactItem(name="总工期", value="240", value_unit="日历天", category="schedule")]
     out = fe.run_post_extract_normalize(items)
     assert out[0].chapter == ""
 
 
 def test_to_db_row_has_four_dimension_columns():
-    it = fe.FactItem(name="施工总工期", value="240", value_unit="日历天",
-                     category="schedule", source="招标文件.pdf")
+    it = fe.FactItem(name="施工总工期", value="240", value_unit="日历天", category="schedule", source="招标文件.pdf")
     fc.apply_fact_dimensions([it])
     row = it.to_db_row("g", "p", "s", "工期安排")
     # 尾部 4 列 = chapter / fact_attr / source_kind / is_shared
@@ -404,10 +458,12 @@ def test_to_db_row_has_four_dimension_columns():
 # 10. DB 往返（新增 4 列幂等补列 + 插入 + 读路径惰性派生）
 # ---------------------------------------------------------------------------
 
+
 @pytest.fixture
 async def ctx(tmp_path, monkeypatch):
     import app.db as _appdb
     import app.routers.global_facts as gf
+
     _appdb.DB_PATH = tmp_path / "facts-chapter.sqlite"
     await _appdb.init_db()
     db = await _appdb.get_conn()
@@ -434,9 +490,15 @@ async def test_migrate_adds_dimension_columns(ctx):
 
 async def test_insert_and_lazy_derive_roundtrip(ctx):
     """新写入的行带标注；历史行（无标注）由读路径惰性派生兜底。"""
-    it = fe.FactItem(name="基坑开挖深度", value="4.2", value_unit="m",
-                     category="tech_param", fact_type="design_param",
-                     key="foundation_depth", source="招标文件.pdf")
+    it = fe.FactItem(
+        name="基坑开挖深度",
+        value="4.2",
+        value_unit="m",
+        category="tech_param",
+        fact_type="design_param",
+        key="foundation_depth",
+        source="招标文件.pdf",
+    )
     fc.apply_fact_dimensions(items := [it])
     row = items[0].to_db_row("g1", "p1", "s1", "技术参数")
     # ✅ 2026-10-06：改走 GLOBAL_FACTS_INSERT_SQL 单一事实源。
@@ -450,7 +512,8 @@ async def test_insert_and_lazy_derive_roundtrip(ctx):
         "INSERT INTO global_facts "
         "(id, project_id, scheme_id, group_id, title, content, category, is_resolved) "
         "VALUES ('legacy-1', 'p1', 's1', 'g1', '监测报警值', "
-        "'- **监测报警值**: 累计沉降20mm', 'monitoring', 1)")
+        "'- **监测报警值**: 累计沉降20mm', 'monitoring', 1)"
+    )
     await ctx.commit()
 
     cur = await ctx.execute("SELECT * FROM global_facts ORDER BY title")
@@ -466,10 +529,10 @@ async def test_insert_and_lazy_derive_roundtrip(ctx):
     assert n["is_shared"] == 1
 
     legacy = [r for r in rows if r["id"] == "legacy-1"][0]
-    assert legacy["chapter"] == ""          # 历史行未标注
+    assert legacy["chapter"] == ""  # 历史行未标注
     # 读路径惰性派生：不写库，但章节视图/正文精选不会丢这条事实
     dims = fc.dimensions_for_row(legacy)
-    assert dims["chapter"] == "safety"      # 监测报警值 → 第五章
+    assert dims["chapter"] == "safety"  # 监测报警值 → 第五章
     assert dims["fact_attr"] == "quantitative"
 
 
@@ -477,16 +540,14 @@ async def test_persist_extraction_writes_dimensions(ctx):
     """persist_extraction 的 INSERT 列数与 FactItem.to_db_row 严格一致（新增 4 列后）。"""
     sid, pid = "s1", "p1"
     await ctx.execute("INSERT INTO projects(id,name) VALUES(?,?)", (pid, "p"))
-    await ctx.execute(
-        "INSERT INTO schemes(id,project_id,name) VALUES(?,?,?)", (sid, pid, "s"))
+    await ctx.execute("INSERT INTO schemes(id,project_id,name) VALUES(?,?,?)", (sid, pid, "s"))
     await ctx.commit()
 
-    items = [fe.FactItem(name="施工总工期", value="240", value_unit="日历天",
-                         category="schedule", fact_type="schedule")]
+    items = [
+        fe.FactItem(name="施工总工期", value="240", value_unit="日历天", category="schedule", fact_type="schedule")
+    ]
     fc.apply_fact_dimensions(items)
-    res = fe.ExtractionResult(
-        groups=[fe.FactGroup(title="工期安排", category="schedule", items=items)],
-        total_items=1)
+    res = fe.ExtractionResult(groups=[fe.FactGroup(title="工期安排", category="schedule", items=items)], total_items=1)
     await fe.persist_extraction(res, ctx, pid, sid)
     await ctx.commit()
 
@@ -502,6 +563,7 @@ async def test_persist_extraction_writes_dimensions(ctx):
 # ---------------------------------------------------------------------------
 def test_chapter_key_of_title_matches_nine_chapters():
     from app.routers import sse_handlers as sh
+
     cases = {
         "1 工程概况": "overview",
         "工程概况": "overview",
@@ -523,6 +585,7 @@ def test_chapter_key_of_title_matches_nine_chapters():
 def test_chapter_key_of_title_returns_empty_when_unknown():
     """识别不到时不猜（避免错误归类导致事实被挤到尾部而丢失）。"""
     from app.routers import sse_handlers as sh
+
     assert sh.chapter_key_of_title("") == ""
     assert sh.chapter_key_of_title(None) == ""
     assert sh.chapter_key_of_title("附录") == ""
@@ -531,6 +594,7 @@ def test_chapter_key_of_title_returns_empty_when_unknown():
 def test_render_facts_text_chapter_prioritizes_without_dropping():
     """章节内事实前置，补充事实保留在尾部（顺序稳定、总量不丢）。"""
     from app.routers import sse_handlers as sh
+
     rows = [
         ("工期安排", "总工期", "- **总工期**: 240日历天", 0.9, "plan"),
         ("技术参数", "基坑深度", "- **基坑深度**: 12.5m", 0.9, "overview"),
@@ -546,13 +610,14 @@ def test_render_facts_text_chapter_prioritizes_without_dropping():
 def test_render_facts_text_chapter_never_drops_facts():
     """预算收紧时，被舍弃的只能是尾部（非本章）事实。"""
     from app.routers import sse_handlers as sh
+
     rows = [
         ("A组", "A1", "- **A1**: " + "甲" * 200, 0.9, "plan"),
         ("B组", "B1", "- **B1**: " + "乙" * 200, 0.9, "overview"),
         ("C组", "C1", "- **C1**: " + "丙" * 200, 0.9, "technique"),
     ]
     text = sh._render_facts_text(rows, chapter="plan", max_total=400)
-    assert "A1" in text           # 本章事实必须注入
+    assert "A1" in text  # 本章事实必须注入
     # ✅ 2026-09-27 契约变更：超预算时改为**按比例分配**，
     # 本章事实优先，但其余事实**不再整段丢弃**（旧实现为头部优先
     # break，尾部事实在提示词里完全不可见 → AI 误判「事实缺失」
@@ -568,6 +633,7 @@ def test_render_facts_text_legacy_rows_ignored_but_kept():
     """历史 3/4 元组行（无 chapter 列）不参与章节分区，但仍完整保留。"""
     from app.routers import sse_handlers as sh
     from app.services.facts_builder import _row_chapter
+
     rows = [
         ("旧组", "旧事实", "- **旧事实**: 保留"),
         ("旧组2", "旧事实2", "- **旧事实2**: 保留", 0.8),
@@ -585,20 +651,31 @@ async def test_load_facts_rows_returns_chapter_column(ctx):
 
     sid, pid = "s1", "p1"
     await ctx.execute("INSERT INTO projects(id,name) VALUES(?,?)", (pid, "p"))
-    await ctx.execute(
-        "INSERT INTO schemes(id,project_id,name) VALUES(?,?,?)", (sid, pid, "s"))
+    await ctx.execute("INSERT INTO schemes(id,project_id,name) VALUES(?,?,?)", (sid, pid, "s"))
 
-    it = fe.FactItem(name="施工总工期", value="240", value_unit="日历天",
-                     category="schedule", fact_type="schedule")
+    it = fe.FactItem(name="施工总工期", value="240", value_unit="日历天", category="schedule", fact_type="schedule")
     fc.apply_fact_dimensions([it])
     await ctx.execute(
         "INSERT INTO global_facts "
         "(id,project_id,scheme_id,group_id,group_title,title,content,category,"
         "is_resolved,chapter,fact_attr,source_kind,is_shared) "
         "VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?)",
-        ("new-1", pid, sid, "g1", "工期安排", "施工总工期",
-         "- **施工总工期**: 240", "schedule", 1, "plan",
-         "quantitative", "bid_doc", 1))
+        (
+            "new-1",
+            pid,
+            sid,
+            "g1",
+            "工期安排",
+            "施工总工期",
+            "- **施工总工期**: 240",
+            "schedule",
+            1,
+            "plan",
+            "quantitative",
+            "bid_doc",
+            1,
+        ),
+    )
     await ctx.commit()
 
     rows = await sh._load_facts_rows(ctx, sid)
@@ -613,6 +690,7 @@ async def test_load_facts_rows_returns_chapter_column(ctx):
 # ---------------------------------------------------------------------------
 async def test_category_map_endpoint(ctx):
     import app.routers.global_facts as gf
+
     payload = await gf.get_fact_category_map()
     assert len(payload["chapters"]) == 9
     assert payload["chapters"][0]["key"] == "overview"
@@ -630,14 +708,13 @@ async def test_category_map_endpoint(ctx):
 
 
 def _insert_scheme(ctx, sid, pid, name="深基坑支护专项施工方案"):
-    return ctx.execute(
-        "INSERT INTO schemes(id,project_id,name) VALUES(?,?,?)",
-        (sid, pid, name))
+    return ctx.execute("INSERT INTO schemes(id,project_id,name) VALUES(?,?,?)", (sid, pid, name))
 
 
 async def test_list_facts_returns_dimension_fields(ctx):
     """list_facts 必须回传四维标注；历史行由读路径惰性派生兜底。"""
     import app.routers.global_facts as gf
+
     sid, pid = "s1", "p1"
     await ctx.execute("INSERT INTO projects(id,name) VALUES(?,?)", (pid, "p"))
     await _insert_scheme(ctx, sid, pid)
@@ -646,16 +723,29 @@ async def test_list_facts_returns_dimension_fields(ctx):
         "(id,project_id,scheme_id,group_id,group_title,title,content,category,"
         "is_resolved,chapter,fact_attr,source_kind,is_shared) "
         "VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?)",
-        ("n1", pid, sid, "g1", "技术参数", "基坑开挖深度",
-         "- **基坑开挖深度**: 4.5m", "tech_param", 1, "overview",
-         "quantitative", "bid_doc", 1))
+        (
+            "n1",
+            pid,
+            sid,
+            "g1",
+            "技术参数",
+            "基坑开挖深度",
+            "- **基坑开挖深度**: 4.5m",
+            "tech_param",
+            1,
+            "overview",
+            "quantitative",
+            "bid_doc",
+            1,
+        ),
+    )
     # 历史行：无四维标注列
     await ctx.execute(
         "INSERT INTO global_facts "
         "(id,project_id,scheme_id,group_id,title,content,category,is_resolved) "
         "VALUES (?,?,?,?,?,?,?,1)",
-        ("n2", pid, sid, "g2", "混凝土强度等级",
-         "- **混凝土强度等级**: C30", "material_mgmt"))
+        ("n2", pid, sid, "g2", "混凝土强度等级", "- **混凝土强度等级**: C30", "material_mgmt"),
+    )
     await ctx.commit()
 
     res = await gf.list_facts(scheme_id=sid, project_id="", db=ctx)
@@ -686,6 +776,7 @@ async def test_list_facts_returns_dimension_fields(ctx):
 async def test_chapters_endpoint_groups_and_reports_missing(ctx):
     """/chapters 按章节重组事实，并给出应提取字段与缺失字段差集。"""
     import app.routers.global_facts as gf
+
     sid, pid = "s1", "p1"
     await ctx.execute("INSERT INTO projects(id,name) VALUES(?,?)", (pid, "p"))
     await _insert_scheme(ctx, sid, pid)
@@ -693,8 +784,8 @@ async def test_chapters_endpoint_groups_and_reports_missing(ctx):
         "INSERT INTO global_facts "
         "(id,project_id,scheme_id,group_id,group_title,title,content,category,"
         "is_resolved,chapter) VALUES (?,?,?,?,?,?,?,?,1,?)",
-        ("c1", pid, sid, "g1", "工程概况", "基坑开挖深度",
-         "- **基坑开挖深度**: 4.5m", "tech_param", "overview"))
+        ("c1", pid, sid, "g1", "工程概况", "基坑开挖深度", "- **基坑开挖深度**: 4.5m", "tech_param", "overview"),
+    )
     await ctx.commit()
 
     res = await gf.list_facts_by_chapters(scheme_id=sid, project_id="", db=ctx)
@@ -715,6 +806,7 @@ async def test_chapters_endpoint_groups_and_reports_missing(ctx):
 async def test_danger_check_endpoint_uses_fact_params(ctx):
     """/danger-check：从全局事实抽取定量参数再对照阈值判定。"""
     import app.routers.global_facts as gf
+
     sid, pid = "s1", "p1"
     await ctx.execute("INSERT INTO projects(id,name) VALUES(?,?)", (pid, "p"))
     await _insert_scheme(ctx, sid, pid, "深基坑支护与降水工程专项施工方案")
@@ -722,24 +814,25 @@ async def test_danger_check_endpoint_uses_fact_params(ctx):
         "INSERT INTO global_facts "
         "(id,project_id,scheme_id,group_id,title,content,category,is_resolved,"
         "value_unit,fact_key) VALUES (?,?,?,?,?,?,?,?,?,?)",
-        ("d1", pid, sid, "g1", "基坑开挖深度", "- **基坑开挖深度**: 4.5",
-         "tech_param", 1, "m", "foundation_depth"))
+        ("d1", pid, sid, "g1", "基坑开挖深度", "- **基坑开挖深度**: 4.5", "tech_param", 1, "m", "foundation_depth"),
+    )
     await ctx.commit()
 
     res = await gf.check_danger_scheme(
-        gf.DangerCheckRequest(scheme_name="深基坑支护与降水工程专项施工方案"),
-        scheme_id=sid, project_id="", db=ctx)
+        gf.DangerCheckRequest(scheme_name="深基坑支护与降水工程专项施工方案"), scheme_id=sid, project_id="", db=ctx
+    )
     assert res["category_id"] == "foundation_pit"
     assert res["threshold_params"] == {"depth": 4.5}
     c = res["classification"]
-    assert c["is_hazardous"] is True      # ≥3m 即危大
-    assert c["is_oversize"] is False      # <5m 未超规模
+    assert c["is_hazardous"] is True  # ≥3m 即危大
+    assert c["is_oversize"] is False  # <5m 未超规模
     assert res["missing_params"] == []
 
 
 async def test_danger_check_unit_conversion_to_meter(ctx):
     """毫米/厘米统一换算为米，再对照阈值（4.2m → 危大不超规模）。"""
     import app.routers.global_facts as gf
+
     sid, pid = "s1", "p1"
     await ctx.execute("INSERT INTO projects(id,name) VALUES(?,?)", (pid, "p"))
     await _insert_scheme(ctx, sid, pid, "基坑支护专项施工方案")
@@ -747,13 +840,13 @@ async def test_danger_check_unit_conversion_to_meter(ctx):
         "INSERT INTO global_facts "
         "(id,project_id,scheme_id,group_id,title,content,category,is_resolved,"
         "value_unit,fact_key) VALUES (?,?,?,?,?,?,?,?,?,?)",
-        ("d2", pid, sid, "g1", "基坑深度", "- **基坑深度**: 4200",
-         "tech_param", 1, "mm", "foundation_depth"))
+        ("d2", pid, sid, "g1", "基坑深度", "- **基坑深度**: 4200", "tech_param", 1, "mm", "foundation_depth"),
+    )
     await ctx.commit()
 
     res = await gf.check_danger_scheme(
-        gf.DangerCheckRequest(scheme_name="基坑支护专项施工方案"),
-        scheme_id=sid, project_id="", db=ctx)
+        gf.DangerCheckRequest(scheme_name="基坑支护专项施工方案"), scheme_id=sid, project_id="", db=ctx
+    )
     assert res["threshold_params"] == {"depth": 4.2}
     assert res["classification"]["is_hazardous"] is True
     assert res["classification"]["is_oversize"] is False
@@ -762,15 +855,18 @@ async def test_danger_check_unit_conversion_to_meter(ctx):
 async def test_danger_check_requires_name(ctx):
     """无方案名且无补充文本时返回 400（不做无依据判定）。"""
     import app.routers.global_facts as gf
+
     sid, pid = "s1", "p1"
     await ctx.execute("INSERT INTO projects(id,name) VALUES(?,?)", (pid, "p"))
     await _insert_scheme(ctx, sid, pid, "")  # 空方案名
     await ctx.commit()
 
     from fastapi import HTTPException
+
     with pytest.raises(HTTPException) as ei:
         await gf.check_danger_scheme(gf.DangerCheckRequest(), scheme_id=sid, project_id="", db=ctx)
     assert ei.value.status_code == 400
+
 
 async def test_danger_check_scheme_id_only_loads_name_from_db(ctx):
     """前端主路径（body 空对象 + 仅 query scheme_id）：从库中取方案名正常判定。
@@ -781,6 +877,7 @@ async def test_danger_check_scheme_id_only_loads_name_from_db(ctx):
     且注释声明「前端只传 scheme_id 时从库中取方案名」与实现矛盾、分支不可达。
     """
     import app.routers.global_facts as gf
+
     sid, pid = "s1", "p1"
     await ctx.execute("INSERT INTO projects(id,name) VALUES(?,?)", (pid, "p"))
     await _insert_scheme(ctx, sid, pid, "基坑支护专项施工方案")
@@ -788,8 +885,8 @@ async def test_danger_check_scheme_id_only_loads_name_from_db(ctx):
         "INSERT INTO global_facts "
         "(id,project_id,scheme_id,group_id,title,content,category,is_resolved,"
         "value_unit,fact_key) VALUES (?,?,?,?,?,?,?,?,?,?)",
-        ("d3", pid, sid, "g1", "基坑深度", "- **基坑深度**: 4.5",
-         "tech_param", 1, "m", "foundation_depth"))
+        ("d3", pid, sid, "g1", "基坑深度", "- **基坑深度**: 4.5", "tech_param", 1, "m", "foundation_depth"),
+    )
     await ctx.commit()
 
     # body 为空对象（与前端 factsApi.dangerCheck({}, schemeId) 逐字一致）

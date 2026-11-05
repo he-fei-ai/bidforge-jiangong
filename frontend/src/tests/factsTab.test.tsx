@@ -29,12 +29,21 @@ import { describe, it, expect, vi, afterEach } from "vitest";
 import { render, fireEvent, cleanup } from "@testing-library/react";
 import React from "react";
 import {
-  applyFactsFilter, FactsGroupList, hasFactsFilterMatch,
-  buildBatchResolveCopy, buildBatchResolveResultCopy, isCurrentSchemeRequest,
-  FactsExtractProgressCard, FactsSegmentFailuresAlert, FactsDiagnosticsPanel,
-  buildFactsCategoryEntries, resolveSelectedFactCategory,
-  filterFactsGroupsByCategory, FactsCategoryPanel,
-  FACT_CHAPTER_TITLES, factChapterTitle,
+  applyFactsFilter,
+  FactsGroupList,
+  hasFactsFilterMatch,
+  buildBatchResolveCopy,
+  buildBatchResolveResultCopy,
+  isCurrentSchemeRequest,
+  FactsExtractProgressCard,
+  FactsSegmentFailuresAlert,
+  FactsDiagnosticsPanel,
+  buildFactsCategoryEntries,
+  resolveSelectedFactCategory,
+  filterFactsGroupsByCategory,
+  FactsCategoryPanel,
+  FACT_CHAPTER_TITLES,
+  factChapterTitle,
 } from "../pages/SchemeWorkbenchPage";
 
 // vitest 未开 globals，RTL 自动清理不生效 —— 显式清理，避免跨用例 DOM 累积
@@ -137,9 +146,25 @@ function makeGroup() {
       id: "g1",
       title: "基本信息",
       items: [
-        { fact_id: "f1", name: "工程名称", value: "示范工程", is_simulated: true, is_resolved: false, has_conflict: false, confidence: 0.5 },
-        { fact_id: "f2", name: "合同工期", value: "365", is_simulated: false, is_resolved: true, has_conflict: true, confidence: 0.8,
-          conflict_values: [{ value: "400", source: "招标文件", confidence: 0.7 }] },
+        {
+          fact_id: "f1",
+          name: "工程名称",
+          value: "示范工程",
+          is_simulated: true,
+          is_resolved: false,
+          has_conflict: false,
+          confidence: 0.5,
+        },
+        {
+          fact_id: "f2",
+          name: "合同工期",
+          value: "365",
+          is_simulated: false,
+          is_resolved: true,
+          has_conflict: true,
+          confidence: 0.8,
+          conflict_values: [{ value: "400", source: "招标文件", confidence: 0.7 }],
+        },
       ],
     },
   ];
@@ -209,17 +234,27 @@ describe("FactsGroupList（全局事实分组列表）", () => {
     const utils = render(<FactsGroupList {...props} />);
     expandFirstPanel(utils);
     expect(utils.getByText("工程名称")).toBeTruthy(); // f1 模拟，保留
-    expect(utils.queryByText("合同工期")).toBeNull();   // f2 非模拟，被过滤
+    expect(utils.queryByText("合同工期")).toBeNull(); // f2 非模拟，被过滤
   });
 
   it("过期条目：点击「来源已变化」Tag 上抛 fact_id（锁 BUG2 修复：不能用已删除的 it.id）", () => {
-    const groups: any = [{
-      id: "g-stale", title: "编制依据",
-      items: [{
-        fact_id: "f-stale", name: "工程所在地", value: "北京",
-        is_stale: true, is_resolved: false, is_simulated: false, has_conflict: false,
-      }],
-    }];
+    const groups: any = [
+      {
+        id: "g-stale",
+        title: "编制依据",
+        items: [
+          {
+            fact_id: "f-stale",
+            name: "工程所在地",
+            value: "北京",
+            is_stale: true,
+            is_resolved: false,
+            is_simulated: false,
+            has_conflict: false,
+          },
+        ],
+      },
+    ];
     const props = baseProps({ groups });
     const utils = render(<FactsGroupList {...props} />);
     expandFirstPanel(utils);
@@ -245,9 +280,10 @@ describe("FactsGroupList（全局事实分组列表）", () => {
 // ============================================================
 describe("hasFactsFilterMatch（筛选命中判定）", () => {
   const groups = [
-    { id: "g1", items: [
-      { name: "A", is_simulated: true, is_resolved: false, has_conflict: false },
-    ] },
+    {
+      id: "g1",
+      items: [{ name: "A", is_simulated: true, is_resolved: false, has_conflict: false }],
+    },
   ];
 
   it("all 恒真（不参与悬空判定）", () => {
@@ -306,7 +342,10 @@ describe("FactsExtractProgressCard（提取进度卡）", () => {
       <FactsExtractProgressCard
         progress={0.42}
         progressMsg="正在提取第 2/5 段"
-        logs={[{ progress: 0.2, message: "分段完成" }, { progress: 0.4, message: "提取中" }]}
+        logs={[
+          { progress: 0.2, message: "分段完成" },
+          { progress: 0.4, message: "提取中" },
+        ]}
       />,
     );
     expect(getByText("正在提取第 2/5 段")).toBeTruthy();
@@ -349,10 +388,14 @@ describe("FactsExtractProgressCard（提取进度卡）", () => {
 describe("FactsSegmentFailuresAlert（分段失败告警）", () => {
   it("部分失败：warning 文案 + 失败明细（最多 6 条）+ 常见原因", () => {
     const details = Array.from({ length: 8 }, (_, i) => ({
-      index: i + 1, heading: `段${i + 1}`, reason: "模型超时",
+      index: i + 1,
+      heading: `段${i + 1}`,
+      reason: "模型超时",
     }));
     const { getByText, queryByText, container } = render(
-      <FactsSegmentFailuresAlert stats={{ ok: 4, failed: 8, total: 12, failed_details: details }} />,
+      <FactsSegmentFailuresAlert
+        stats={{ ok: 4, failed: 8, total: 12, failed_details: details }}
+      />,
     );
     expect(getByText("本次提取有 8/12 段失败，结果可能不完整")).toBeTruthy();
     expect(getByText(/第 1 段（段1）：模型超时/)).toBeTruthy();
@@ -369,6 +412,47 @@ describe("FactsSegmentFailuresAlert（分段失败告警）", () => {
     expect(getByText(/建议稍后点击「③ AI 提取事实」重新提取/)).toBeTruthy();
     expect(container.querySelector(".ant-alert-error")).toBeTruthy();
   });
+
+  // ✅ R179（2026-11-05）：declared_failed 未进告警 → 用户只看到 ok 数变少
+  it("模型声明无事实（failed=0、declared_failed>0）：info 文案可见且不误报为失败", () => {
+    const { getByText, queryByText, container } = render(
+      <FactsSegmentFailuresAlert
+        stats={{
+          ok: 5,
+          failed: 0,
+          total: 7,
+          declared_failed: 2,
+          declared_failed_details: [
+            { index: 6, heading: "段6", reason: "模型声明该段无事实" },
+            { index: 7, heading: "段7", reason: "模型声明该段无事实" },
+          ],
+        }}
+      />,
+    );
+    expect(getByText("本次提取有 2/7 段模型未提取到事实（不是失败）")).toBeTruthy();
+    expect(getByText(/第 6 段（段6）：模型声明该段无事实/)).toBeTruthy();
+    expect(getByText(/下次增量提取会自动重试/)).toBeTruthy();
+    expect(queryByText(/本次提取有 0/)).toBeNull(); // 不得退化成「0 段失败」
+    expect(container.querySelector(".ant-alert-info")).toBeTruthy();
+    expect(queryByText(/常见原因：模型超时\/限流/)).toBeNull();
+  });
+
+  it("失败与声明无事实并存：仍以 warning 为主，同时给出声明明细", () => {
+    const { getByText, container } = render(
+      <FactsSegmentFailuresAlert
+        stats={{
+          ok: 3,
+          failed: 2,
+          total: 7,
+          declared_failed: 2,
+          declared_failed_details: [{ index: 7, heading: "段7", reason: "模型声明该段无事实" }],
+        }}
+      />,
+    );
+    expect(getByText("本次提取有 2/7 段失败，结果可能不完整")).toBeTruthy();
+    expect(getByText(/第 7 段（段7）：模型声明该段无事实/)).toBeTruthy();
+    expect(container.querySelector(".ant-alert-warning")).toBeTruthy();
+  });
 });
 
 // ============================================================
@@ -378,10 +462,18 @@ import { buildFactsSummary, applyFactsCompletedEvent } from "../pages/SchemeWork
 
 describe("buildFactsSummary（stats → summary）", () => {
   it("has_warnings = 模拟值 / 未确认 / 矛盾 任一 > 0", () => {
-    expect(buildFactsSummary({ total: 5, simulated: 1, unresolved: 0, conflicts: 0 }).has_warnings).toBe(true);
-    expect(buildFactsSummary({ total: 5, simulated: 0, unresolved: 2, conflicts: 0 }).has_warnings).toBe(true);
-    expect(buildFactsSummary({ total: 5, simulated: 0, unresolved: 0, conflicts: 3 }).has_warnings).toBe(true);
-    expect(buildFactsSummary({ total: 5, simulated: 0, unresolved: 0, conflicts: 0 }).has_warnings).toBe(false);
+    expect(
+      buildFactsSummary({ total: 5, simulated: 1, unresolved: 0, conflicts: 0 }).has_warnings,
+    ).toBe(true);
+    expect(
+      buildFactsSummary({ total: 5, simulated: 0, unresolved: 2, conflicts: 0 }).has_warnings,
+    ).toBe(true);
+    expect(
+      buildFactsSummary({ total: 5, simulated: 0, unresolved: 0, conflicts: 3 }).has_warnings,
+    ).toBe(true);
+    expect(
+      buildFactsSummary({ total: 5, simulated: 0, unresolved: 0, conflicts: 0 }).has_warnings,
+    ).toBe(false);
   });
 
   // ✅ BUG 回归（2026-09-27 · 过期事实被误判为「全部就绪」）
@@ -394,12 +486,28 @@ describe("buildFactsSummary（stats → summary）", () => {
 
   it("stale 归一化：缺字段/脏值按 0 处理且不误报", () => {
     // 老后端不返回 stale 字段时按 0 处理，行为与旧版逐字一致（向后兼容）
-    expect(buildFactsSummary({ total: 3, simulated: 0, unresolved: 0, conflicts: 0 }).stale).toBe(0);
-    expect(buildFactsSummary({ total: 3, simulated: 0, unresolved: 0, conflicts: 0 }).has_warnings).toBe(false);
-    const dirty = buildFactsSummary({ total: 3, simulated: 0, unresolved: 0, conflicts: 0, stale: undefined });
+    expect(buildFactsSummary({ total: 3, simulated: 0, unresolved: 0, conflicts: 0 }).stale).toBe(
+      0,
+    );
+    expect(
+      buildFactsSummary({ total: 3, simulated: 0, unresolved: 0, conflicts: 0 }).has_warnings,
+    ).toBe(false);
+    const dirty = buildFactsSummary({
+      total: 3,
+      simulated: 0,
+      unresolved: 0,
+      conflicts: 0,
+      stale: undefined,
+    });
     expect(dirty.stale).toBe(0);
     expect(dirty.has_warnings).toBe(false);
-    const dirty2 = buildFactsSummary({ total: 3, simulated: 0, unresolved: 0, conflicts: 0, stale: "abc" });
+    const dirty2 = buildFactsSummary({
+      total: 3,
+      simulated: 0,
+      unresolved: 0,
+      conflicts: 0,
+      stale: "abc",
+    });
     expect(dirty2.stale).toBe(0);
     expect(dirty2.has_warnings).toBe(false);
   });
@@ -417,7 +525,10 @@ describe("buildFactsSummary（stats → summary）", () => {
       expect(buildFactsSummary({ total: 1, ...c }).has_warnings).toBe(true);
     }
     // 四条件全满足 → 允许进入下一步
-    expect(buildFactsSummary({ total: 1, simulated: 0, unresolved: 0, conflicts: 0, stale: 0 }).has_warnings).toBe(false);
+    expect(
+      buildFactsSummary({ total: 1, simulated: 0, unresolved: 0, conflicts: 0, stale: 0 })
+        .has_warnings,
+    ).toBe(false);
   });
 
   it("脏值（undefined / 字符串）按 0 处理，不抛异常", () => {
@@ -487,25 +598,38 @@ describe("applyFactsCompletedEvent（completed 事件收口）", () => {
 describe("buildFactsCategoryEntries（分类聚合）", () => {
   const groups = [
     {
-      id: "g1", title: "工程概况", category: "project_info",
+      id: "g1",
+      title: "工程概况",
+      category: "project_info",
       items: [
         { name: "A", value: "1", is_simulated: true, is_resolved: false, has_conflict: false },
         { name: "B", value: "2", is_simulated: false, is_resolved: true, has_conflict: true },
       ],
     },
     {
-      id: "g2", title: "项目名称", category: "project_info",
-      items: [{ name: "C", value: "3", is_simulated: false, is_resolved: false, has_conflict: false }],
+      id: "g2",
+      title: "项目名称",
+      category: "project_info",
+      items: [
+        { name: "C", value: "3", is_simulated: false, is_resolved: false, has_conflict: false },
+      ],
     },
     {
-      id: "g3", title: "工期要求", category: "schedule",
-      items: [{ name: "D", value: "4", is_simulated: false, is_resolved: true, has_conflict: false }],
+      id: "g3",
+      title: "工期要求",
+      category: "schedule",
+      items: [
+        { name: "D", value: "4", is_simulated: false, is_resolved: true, has_conflict: false },
+      ],
     },
     { id: "g4", title: "未归类", items: [] }, // 无 category → 兜底 other
   ];
 
   it("同分类多组合并，计数正确", () => {
-    const entries = buildFactsCategoryEntries(groups, (c) => ({ project_info: "项目信息", schedule: "工期安排" }[c] || ""));
+    const entries = buildFactsCategoryEntries(
+      groups,
+      (c) => ({ project_info: "项目信息", schedule: "工期安排" })[c] || "",
+    );
     expect(entries.map((e) => e.category)).toEqual(["project_info", "schedule", "other"]);
     const pi = entries[0];
     expect(pi.title).toBe("项目信息");
@@ -530,8 +654,24 @@ describe("buildFactsCategoryEntries（分类聚合）", () => {
 
 describe("resolveSelectedFactCategory（选中悬空回退）", () => {
   const entries = [
-    { category: "a", title: "A", groupCount: 1, itemCount: 1, simulated: 0, conflicts: 0, unresolved: 0 },
-    { category: "b", title: "B", groupCount: 1, itemCount: 1, simulated: 0, conflicts: 0, unresolved: 0 },
+    {
+      category: "a",
+      title: "A",
+      groupCount: 1,
+      itemCount: 1,
+      simulated: 0,
+      conflicts: 0,
+      unresolved: 0,
+    },
+    {
+      category: "b",
+      title: "B",
+      groupCount: 1,
+      itemCount: 1,
+      simulated: 0,
+      conflicts: 0,
+      unresolved: 0,
+    },
   ];
 
   it("选中仍存在 → 原样保留", () => {
@@ -570,8 +710,24 @@ describe("filterFactsGroupsByCategory（按分类取分组）", () => {
 
 describe("FactsCategoryPanel（左侧分类面板组件）", () => {
   const entries = [
-    { category: "a", title: "项目信息", groupCount: 2, itemCount: 3, simulated: 1, conflicts: 0, unresolved: 2 },
-    { category: "b", title: "工期安排", groupCount: 1, itemCount: 4, simulated: 0, conflicts: 0, unresolved: 0 },
+    {
+      category: "a",
+      title: "项目信息",
+      groupCount: 2,
+      itemCount: 3,
+      simulated: 1,
+      conflicts: 0,
+      unresolved: 2,
+    },
+    {
+      category: "b",
+      title: "工期安排",
+      groupCount: 1,
+      itemCount: 4,
+      simulated: 0,
+      conflicts: 0,
+      unresolved: 0,
+    },
   ];
 
   it("渲染分类标题、条数徽标与模拟/待审标记", () => {
@@ -601,10 +757,11 @@ describe("FactsCategoryPanel（左侧分类面板组件）", () => {
   });
 });
 
-
 describe("事实安全与诊断交互", () => {
   it("批量确认安全跳过时返回告警，不误报注入就绪", () => {
-    expect(buildBatchResolveResultCopy({ changed: 2, skipped: 1, skipped_safety_count: 3 })).toEqual({
+    expect(
+      buildBatchResolveResultCopy({ changed: 2, skipped: 1, skipped_safety_count: 3 }),
+    ).toEqual({
       tone: "warning",
       // ✅ 2026-10-06 加法式：blockedNames 列出被拦下的事实名（后端 skipped_safety
       //    一直逐条回传，此前只读计数 —— 用户不知「是哪 3 项」）。
@@ -612,8 +769,9 @@ describe("事实安全与诊断交互", () => {
       text: "已确认 2 项；3 项模拟值或安全关键事实未放行，请逐条核对裁决",
       blockedNames: [],
     });
-    expect(buildBatchResolveResultCopy({ changed: 2, skipped: 1, skipped_safety_count: 0 }).tone)
-      .toBe("success");
+    expect(
+      buildBatchResolveResultCopy({ changed: 2, skipped: 1, skipped_safety_count: 0 }).tone,
+    ).toBe("success");
   });
 
   it("方案请求守卫同时校验路由 ID 与 AbortSignal", () => {
@@ -629,8 +787,21 @@ describe("事实安全与诊断交互", () => {
     const { getByText } = render(
       <FactsDiagnosticsPanel
         loading={false}
-        chapterReport={{ chapters: [{ order: 1, key: "overview", title: "工程概况", coverage: 0.5, missing_fields: ["工程规模"] }] }}
-        dangerReport={{ classification: { is_hazardous: true, is_oversize: false }, missing_params: ["depth"] }}
+        chapterReport={{
+          chapters: [
+            {
+              order: 1,
+              key: "overview",
+              title: "工程概况",
+              coverage: 0.5,
+              missing_fields: ["工程规模"],
+            },
+          ],
+        }}
+        dangerReport={{
+          classification: { is_hazardous: true, is_oversize: false },
+          missing_params: ["depth"],
+        }}
         onRefresh={onRefresh}
       />,
     );
@@ -644,7 +815,12 @@ describe("事实安全与诊断交互", () => {
 
   it("诊断面板无数据时显示空态", () => {
     const { getByText } = render(
-      <FactsDiagnosticsPanel loading={false} chapterReport={null} dangerReport={null} onRefresh={() => {}} />,
+      <FactsDiagnosticsPanel
+        loading={false}
+        chapterReport={null}
+        dangerReport={null}
+        onRefresh={() => {}}
+      />,
     );
     expect(getByText("暂无诊断数据")).toBeTruthy();
   });
@@ -680,4 +856,3 @@ describe("factChapterTitle · 九大章节中文标题", () => {
     expect(factChapterTitle("nope")).toBe("");
   });
 });
-

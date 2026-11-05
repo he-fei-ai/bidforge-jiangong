@@ -12,6 +12,7 @@
 3. 相关性预筛命中为空时必须回退全量（绝不因预筛丢事实）。
 4. 一级章节号 > 20 时仍输出中文编号（`_cn_number`）。
 """
+
 import inspect
 import time
 
@@ -24,6 +25,7 @@ from app.routers.sse_handlers import (
 )
 
 # ---------- 工具 ----------
+
 
 class FakeDb:
     """最小异步 db mock：返回预设的事实行。"""
@@ -65,11 +67,12 @@ def _rows_without_generic():
 
 # ---------- _facts_keywords ----------
 
+
 def test_facts_keywords_chinese_and_ascii():
     kws = _facts_keywords("深基坑支护 HDPE 施工")
-    assert "深基" in kws and "基坑" in kws          # 中文 2-gram
-    assert "hdpe" in kws                            # ASCII 单词转小写
-    assert "施" not in kws                          # 单字不入词
+    assert "深基" in kws and "基坑" in kws  # 中文 2-gram
+    assert "hdpe" in kws  # ASCII 单词转小写
+    assert "施" not in kws  # 单字不入词
 
 
 def test_facts_keywords_empty():
@@ -79,12 +82,13 @@ def test_facts_keywords_empty():
 
 # ---------- _filter_facts_rows ----------
 
+
 def test_filter_keeps_generic_group_and_matches():
     leaf = {"title": "基坑开挖", "description": "开挖深度与分层"}
     out = _filter_facts_rows(_rows(), leaf)
     titles = [r[1] for r in out]
-    assert "工程名称" in titles      # 通用组（项目概况）始终保留
-    assert "开挖深度" in titles      # 命中关键词
+    assert "工程名称" in titles  # 通用组（项目概况）始终保留
+    assert "开挖深度" in titles  # 命中关键词
     assert "搭设高度" not in titles  # 未命中且非通用组 → 剔除
 
 
@@ -101,6 +105,7 @@ def test_filter_no_keywords_returns_all():
 
 
 # ---------- _render_facts_text ----------
+
 
 def test_render_groups_by_group_title():
     text = _render_facts_text(_rows())
@@ -142,7 +147,7 @@ def test_render_never_exceeds_budget_and_covers_all_facts():
     # 10 组全部出现（旧实现只有2组）；
     # 每组内容被等比例缩短，但**一条不丢**。
     assert text.count("### ") == 10, "尾部事实被整段丢弃"
-    assert len(text) <= 250, "不得突破提示词长度硬上限"      # 第 3 条会超出 250 → 提前停止
+    assert len(text) <= 250, "不得突破提示词长度硬上限"  # 第 3 条会超出 250 → 提前停止
 
 
 def test_render_empty_rows():
@@ -150,6 +155,7 @@ def test_render_empty_rows():
 
 
 # ---------- _load_facts_rows ----------
+
 
 async def test_load_facts_rows_returns_rows():
     rows = [(("项目概况"), "工程名称", "X")]
@@ -161,9 +167,11 @@ async def test_load_facts_rows_includes_project_scope():
     class ScopeDb(FakeDb):
         async def execute(self, sql, params=None):
             if "SELECT project_id FROM schemes" in sql:
+
                 class Cursor:
                     async def fetchone(self):
                         return ("project-1",)
+
                 return Cursor()
             assert "scheme_id=? OR (project_id=?" in sql
             assert params == ("scheme-1", "project-1")
@@ -181,6 +189,7 @@ async def test_load_facts_rows_failure_degrades_to_empty():
 
 # ---------- 一级章节中文编号 ----------
 
+
 def test_cn_number_within_static_table():
     assert _cn_number(1) == "一"
     assert _cn_number(10) == "十"
@@ -193,7 +202,7 @@ def test_cn_number_beyond_twenty():
     assert _cn_number(30) == "三十"
     assert _cn_number(35) == "三十五"
     assert _cn_number(99) == "九十九"
-    assert _cn_number(100) == "100"     # 100+ 仍回退阿拉伯数字
+    assert _cn_number(100) == "100"  # 100+ 仍回退阿拉伯数字
 
 
 def test_cn_number_invalid():
@@ -202,6 +211,7 @@ def test_cn_number_invalid():
 
 
 # ---------- 致命 BUG 源码级回归 ----------
+
 
 def test_generate_content_has_no_unbound_leaf_reference():
     """回归护栏：正文生成不得再用「整批共享」的事实构建方式。

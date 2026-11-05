@@ -42,13 +42,10 @@ from app.services.facts_builder import (
     fact_injection_audit,
 )
 
-_SH_FILE = (Path(__file__).resolve().parents[1]
-            / "app" / "routers" / "sse_handlers.py")
+_SH_FILE = Path(__file__).resolve().parents[1] / "app" / "routers" / "sse_handlers.py"
 # B1 拆分（2026-11-03）：正文终态载荷拼装点下沉到该模块，结构断言改读其源码。
-_PAYLOADS_FILE = (Path(__file__).resolve().parents[1]
-                  / "app" / "routers" / "_sse_content_payloads.py")
-_CU_FILE = (Path(__file__).resolve().parents[1]
-            / "app" / "services" / "content_utils.py")
+_PAYLOADS_FILE = Path(__file__).resolve().parents[1] / "app" / "routers" / "_sse_content_payloads.py"
+_CU_FILE = Path(__file__).resolve().parents[1] / "app" / "services" / "content_utils.py"
 
 
 def _src() -> str:
@@ -59,6 +56,7 @@ def _src() -> str:
 # 端到端 harness（沿用 test_content_terminal_payload_20261005 范式并扩展：
 # 捕获 chat messages 与落库报告 JSON）
 # ============================================================================
+
 
 class _FakeRequest:
     def __init__(self, body):
@@ -79,12 +77,20 @@ class _DB:
     @staticmethod
     def _sec(sid, num, sort):
         return {
-            "id": sid, "scheme_id": "sc1", "title": f"支护章节 {sid}",
-            "level": 1, "parent_id": "", "sort_order": sort,
-            "word_budget": 20, "content": "", "status": "empty",
+            "id": sid,
+            "scheme_id": "sc1",
+            "title": f"支护章节 {sid}",
+            "level": 1,
+            "parent_id": "",
+            "sort_order": sort,
+            "word_budget": 20,
+            "content": "",
+            "status": "empty",
             "description": "d",
             "outline_json": json.dumps({"id": num}, ensure_ascii=False),
-            "generation_standard": "", "review_status": "", "word_count": 0,
+            "generation_standard": "",
+            "review_status": "",
+            "word_count": 0,
         }
 
     class _Cur:
@@ -100,11 +106,20 @@ class _DB:
     async def execute(self, sql, params=()):
         s = str(sql)
         if "FROM schemes" in s:
-            return self._Cur([{
-                "id": "sc1", "project_id": "p1", "name": "测试方案",
-                "type": "深基坑", "word_budget": 3000, "config_json": "{}",
-                "auto_consistency_repair": 0, "generation_standard": "",
-            }])
+            return self._Cur(
+                [
+                    {
+                        "id": "sc1",
+                        "project_id": "p1",
+                        "name": "测试方案",
+                        "type": "深基坑",
+                        "word_budget": 3000,
+                        "config_json": "{}",
+                        "auto_consistency_repair": 0,
+                        "generation_standard": "",
+                    }
+                ]
+            )
         if "FROM sections" in s and "ORDER BY sort_order" in s:
             return self._Cur([dict(x) for x in self._sections])
         if s.strip().upper().startswith("UPDATE SECTIONS SET CONTENT"):
@@ -197,8 +212,7 @@ async def _run(db, body=None):
     resp = await sh.generate_content("sc1", _FakeRequest(payload), db=db)
     chunks: list[str] = []
     async for piece in resp.body_iterator:
-        chunks.append(piece.decode("utf-8", "replace")
-                      if isinstance(piece, bytes) else str(piece))
+        chunks.append(piece.decode("utf-8", "replace") if isinstance(piece, bytes) else str(piece))
     text = "".join(chunks)
     events = [json.loads(ln[6:]) for ln in text.splitlines() if ln.startswith("data: ")]
     return events, text
@@ -212,23 +226,23 @@ def _terminal(events) -> dict:
 
 
 def _user_text(chat_messages: list[dict]) -> str:
-    return "".join(str(m.get("content") or "") for m in chat_messages
-                   if isinstance(m, dict) and m.get("role") == "user")
+    return "".join(
+        str(m.get("content") or "") for m in chat_messages if isinstance(m, dict) and m.get("role") == "user"
+    )
 
 
 # ============================================================================
 # A · G1 顺序留痕：派发序记录 → 终态 order_check → 三拼装点同键
 # ============================================================================
 
-class TestR105OrderCheckWiring:
 
+class TestR105OrderCheckWiring:
     @pytest.mark.asyncio
     async def test_completed_terminal_order_check_ok(self, stub_env):
         db = _DB()
         events, text = await _run(db)
         term = _terminal(events)
-        assert term["event"] == "completed", (
-            f"{[e.get('event') for e in events]} / {text[:400]}")
+        assert term["event"] == "completed", f"{[e.get('event') for e in events]} / {text[:400]}"
         oc = term.get("order_check")
         assert isinstance(oc, dict) and oc, f"completed 必须带非空 order_check: {term}"
         assert oc.get("ok") is True, f"派发序应严格等于目录 DFS 序: {oc}"
@@ -263,7 +277,7 @@ class TestR105OrderCheckWiring:
         """派发序记录点必须在 `async with _run_semaphore:` **之内**、try **之前**：
         过闸=启动（FIFO 放行序=协程创建序=目录序），且只记一次。"""
         src = _src()
-        gate = src[src.index("async def guarded_gen"):]
+        gate = src[src.index("async def guarded_gen") :]
         i_with = gate.index("async with _run_semaphore:")
         i_append = gate.index("_dispatched_order.append", i_with)
         i_try = gate.index("try:", i_with)
@@ -274,8 +288,9 @@ class TestR105OrderCheckWiring:
         """早退分支（无待生成章节）在事实加载**之前**返回 → 期望序不建立，
         终态 order_check 为空 dict，载荷与功能引入前同构。"""
         src = _src()
-        assert src.index("if not leaves:") < src.index('_expected_order[:]'), (
-            "期望序必须建立在空章节早退之后（没派发过就不该产校验）")
+        assert src.index("if not leaves:") < src.index(
+            "_expected_order[:]"
+        ), "期望序必须建立在空章节早退之后（没派发过就不该产校验）"
 
     def test_order_warning_fires_once(self):
         """失守 WARNING 必须走一次闸（多条收尾路径反复调拼装点不得刷屏）。
@@ -284,8 +299,7 @@ class TestR105OrderCheckWiring:
         结构断言改读下沉模块源码（闸门仍在拼装点内，一次闸语义不变）。
         """
         src = _PAYLOADS_FILE.read_text(encoding="utf-8")
-        block = src[src.index("def build_content_checkpoint("):
-                    src.index("def build_stopped_payload(")]
+        block = src[src.index("def build_content_checkpoint(") : src.index("def build_stopped_payload(")]
         assert 'order_warned["flag"]' in block, "顺序失守告警必须经一次闸"
         assert block.count("logger.warning") >= 1 and "order_check" in block
 
@@ -294,8 +308,8 @@ class TestR105OrderCheckWiring:
 # B · G5 前驱叶子承接：prev_leaf_summary 注入双装配函数
 # ============================================================================
 
-class TestR105PrevLeafContext:
 
+class TestR105PrevLeafContext:
     @pytest.mark.asyncio
     async def test_second_chapter_prompt_contains_prev_tail(self, stub_env):
         db = _DB()
@@ -304,8 +318,7 @@ class TestR105PrevLeafContext:
         assert len(stub_env["chats"]) >= 2, f"两轮 chat 应发生: {len(stub_env['chats'])}"
         first, second = (_user_text(m) for m in stub_env["chats"][:2])
         assert _PREV_TAG not in first, "首章无文档前驱，不得出现承接段"
-        assert _PREV_TAG in second, (
-            f"第二章提示词必须含前驱叶子结尾段: {second[:600]}")
+        assert _PREV_TAG in second, f"第二章提示词必须含前驱叶子结尾段: {second[:600]}"
 
     @pytest.mark.asyncio
     async def test_switch_off_falls_back_verbatim(self, stub_env, monkeypatch):
@@ -321,6 +334,7 @@ class TestR105PrevLeafContext:
     @pytest.mark.asyncio
     async def test_tail_extractor_failure_is_failsoft(self, stub_env, monkeypatch):
         """服务层取片段抛异常 → 回落空串，生成照常完成（承接绝不拖垮正文）。"""
+
         def _explode(content, *a, **k):
             raise RuntimeError("模拟片段函数炸")
 
@@ -335,8 +349,8 @@ class TestR105PrevLeafContext:
         """分层与非分层两条装配路径都必须传 prev_leaf_summary（同口径纪律）。"""
         src = _src()
         assert src.count("prev_leaf_summary=_prev_leaf_tail_for(leaf)") == 2, (
-            "build_chapter_layered_messages 与 build_chapter_user_content "
-            "两处调用点必须各传一次")
+            "build_chapter_layered_messages 与 build_chapter_user_content " "两处调用点必须各传一次"
+        )
 
     def test_pure_function_tail_shape(self):
         """服务层纯函数契约：≤max_chars、围栏剔除（接线两侧依赖该语义）。"""
@@ -349,22 +363,21 @@ class TestR105PrevLeafContext:
 # C · G3 注入审计：单一出口 + 留痕落库 + 逐字节一致
 # ============================================================================
 
-class TestR105FactInjectionAudit:
 
+class TestR105FactInjectionAudit:
     def test_audit_rendered_text_identical_to_bare_call(self):
         """fact_injection_audit 与裸 _render_facts_text 默认参数同值 → 逐字节一致
         （正文替换零文案漂移的结构性保证）。"""
         leaf = {"title": "支护章节 s1", "description": "开挖"}
         for rows in ([], _FACT_ROWS):
-            assert fact_injection_audit(rows)["rendered_text"] \
-                == _render_facts_text(rows)
-            assert fact_injection_audit(rows, leaf=leaf, chapter="plan")["rendered_text"] \
-                == _render_facts_text(rows, relevant_to=leaf, chapter="plan")
+            assert fact_injection_audit(rows)["rendered_text"] == _render_facts_text(rows)
+            assert fact_injection_audit(rows, leaf=leaf, chapter="plan")["rendered_text"] == _render_facts_text(
+                rows, relevant_to=leaf, chapter="plan"
+            )
 
     def test_audit_reports_budget_drops(self):
         """预算远少于事实量时审计必须点名被丢事实（留痕即观测）。"""
-        rows = [("组", f"事实{i}", "内容" * 60, 0.9, "", "measured")
-                for i in range(300)]
+        rows = [("组", f"事实{i}", "内容" * 60, 0.9, "", "measured") for i in range(300)]
         au = fact_injection_audit(rows, max_total=100, per_fact=50)
         assert au["budget_dropped_count"] == len(au["budget_dropped"])
         assert au["budget_dropped"], "300 条事实挤 100 字预算必有丢弃"
@@ -391,36 +404,34 @@ class TestR105FactInjectionAudit:
         rep = json.loads(db.reports[0])
         fa = rep.get("fact_audit")
         assert isinstance(fa, dict), f"报告必须有 fact_audit 键: {list(rep)}"
-        for key in ("injected_facts", "rendered_chars",
-                    "budget_dropped", "budget_dropped_count"):
+        for key in ("injected_facts", "rendered_chars", "budget_dropped", "budget_dropped_count"):
             assert key in fa, f"留痕缺键 {key}: {fa}"
 
     def test_bare_render_facts_text_has_no_call_site(self):
         """正文生成链单一出口纪律：generate_content 内不得再裸调 _render_facts_text
         （re-export 仅留给 tests，import 行带 noqa 说明）。"""
-        assert "_render_facts_text(" not in _src(), (
-            "调用点必须走 fact_injection_audit，防再次漂移出第二套口径")
+        assert "_render_facts_text(" not in _src(), "调用点必须走 fact_injection_audit，防再次漂移出第二套口径"
         # ✅ R122（2026-10-21）：core/chapter/plain 三分支之外新增第 4 处——
         #    content_plan_selected_facts_inject 门控内的「选中事实重算」，
         #    同样走 fact_injection_audit 出口（纪律不变，计数+1）。
-        assert _src().count("fact_injection_audit(") == 4, (
-            "core/chapter/plain 三分支 + R122-G1 门控重算各一次，不多不少")
+        assert (
+            _src().count("fact_injection_audit(") == 4
+        ), "core/chapter/plain 三分支 + R122-G1 门控重算各一次，不多不少"
 
 
 # ============================================================================
 # D · G4 章节→事实映射表：全量进 checkpoint、汇总进 SSE 终态
 # ============================================================================
 
-class TestR105ChapterFactMapping:
 
+class TestR105ChapterFactMapping:
     @pytest.mark.asyncio
     async def test_checkpoint_carries_full_mapping(self, stub_env):
         db = _DB()
         events, text = await _run(db)
         term = _terminal(events)
         mapping = stub_env["ckpts"][-1].get("fact_mapping")
-        assert isinstance(mapping, list) and len(mapping) == 2, (
-            f"映射表须与 leaves 同序全量: {mapping}")
+        assert isinstance(mapping, list) and len(mapping) == 2, f"映射表须与 leaves 同序全量: {mapping}"
         assert [m["section_id"] for m in mapping] == ["s1", "s2"], mapping
         for m in mapping:
             assert set(m) >= {"section_id", "title", "fact_titles", "fact_count"}
@@ -430,8 +441,7 @@ class TestR105ChapterFactMapping:
         assert isinstance(stats, dict) and stats, f"终态必须带映射汇总: {term}"
         assert stats["sections"] == len(mapping)
         assert stats["fact_refs"] == sum(m["fact_count"] for m in mapping)
-        assert stats["sections_with_facts"] + stats["sections_without_facts"] \
-            == stats["sections"]
+        assert stats["sections_with_facts"] + stats["sections_without_facts"] == stats["sections"]
 
     def test_mapping_uses_same_criterion_as_injection(self):
         """chapter_fact_mapping 与 _filter_facts_rows 同一判据（声明式视图，
@@ -439,13 +449,11 @@ class TestR105ChapterFactMapping:
         leaf = {"title": "支护章节 s1", "description": "开挖"}
         mapping = chapter_fact_mapping([leaf], _FACT_ROWS)
         assert len(mapping) == 1
-        assert mapping[0]["fact_titles"] == [
-            str(r[1]) for r in _filter_facts_rows(list(_FACT_ROWS), leaf) if r[1]]
+        assert mapping[0]["fact_titles"] == [str(r[1]) for r in _filter_facts_rows(list(_FACT_ROWS), leaf) if r[1]]
 
     def test_summarize_dirty_input_degrades(self):
         """汇总纯函数：脏入参不抛 —— 非 dict 行被过滤，int 炸则降级 degraded。"""
-        s = summarize_fact_mapping([{"bogus": 1}, None, 3],
-                                   {"x": {"budget_dropped_count": 2}})
+        s = summarize_fact_mapping([{"bogus": 1}, None, 3], {"x": {"budget_dropped_count": 2}})
         assert s["sections"] == 1, "非 dict 脏行过滤，dict 行计入"
         assert s["budget_dropped_total"] == 2
         bad = summarize_fact_mapping([{"fact_count": "abc"}], None)
@@ -455,7 +463,8 @@ class TestR105ChapterFactMapping:
         # 正常口径：丢弃统计来自逐章留痕
         s3 = summarize_fact_mapping(
             [{"section_id": "a", "fact_count": 2}, {"section_id": "b", "fact_count": 0}],
-            {"a": {"budget_dropped_count": 3}, "b": {"budget_dropped_count": 0}})
+            {"a": {"budget_dropped_count": 3}, "b": {"budget_dropped_count": 0}},
+        )
         assert s3["sections"] == 2 and s3["sections_with_facts"] == 1
         assert s3["fact_refs"] == 2 and s3["budget_dropped_total"] == 3
         assert s3["budget_dropped_sections"] == 1
@@ -465,8 +474,8 @@ class TestR105ChapterFactMapping:
 # E · fail-soft：留痕/映射/校验任何一环炸都不阻断生成与落库
 # ============================================================================
 
-class TestR105FailSoftDiscipline:
 
+class TestR105FailSoftDiscipline:
     @pytest.mark.asyncio
     async def test_mapping_failure_degrades_to_empty(self, stub_env, monkeypatch):
         def _explode(*a, **k):
@@ -499,6 +508,7 @@ class TestR105FailSoftDiscipline:
     async def test_zero_facts_still_records_audit(self, stub_env, monkeypatch):
         """无事实方案：留痕容器仍逐章记录（空 injected_facts），
         汇总 sections 计数不为 0 —— 「没调用」与「没留痕」必须可区分。"""
+
         async def _no_facts(db, scheme_id):
             return []
 
@@ -515,8 +525,8 @@ class TestR105FailSoftDiscipline:
 # F · 字节体检（本仓工作树 CRLF 约定，防 A/B 与编辑工具漂移行尾）
 # ============================================================================
 
-class TestR105ByteHygiene:
 
+class TestR105ByteHygiene:
     @pytest.mark.parametrize("path", [_SH_FILE, _CU_FILE])
     def test_crlf_no_bom_no_replacement_char(self, path: Path):
         raw = path.read_bytes()

@@ -1,16 +1,32 @@
 import { factsApi } from "../../api";
-import { type FactChapterStat, type FactChapterStatBlock, type FactCrossConflict, type FactGroupLike, type FactItemLike, type FactSegmentStats, type FactStats, type FactsSummary } from "../../types/facts";
+import {
+  type FactChapterStat,
+  type FactChapterStatBlock,
+  type FactCrossConflict,
+  type FactGroupLike,
+  type FactItemLike,
+  type FactSegmentStats,
+  type FactStats,
+  type FactsSummary,
+} from "../../types/facts";
 import { FactsChapterCoveragePanel } from "./FactsChapterCoveragePanel.tsx";
 import { FactsDiagnosticsPanel } from "./FactsDiagnosticsPanel.tsx";
 import { Collapse, Pagination, Tag } from "antd";
 
-export function hasFactsFilterMatch(groups: FactGroupLike[] | null | undefined, filter: string): boolean {
+export function hasFactsFilterMatch(
+  groups: FactGroupLike[] | null | undefined,
+  filter: string,
+): boolean {
   if (filter === "all") return true;
   return (groups || []).some((g) =>
     (g?.items || []).some((it) =>
-      filter === "simulated" ? it.is_simulated
-        : filter === "conflict" ? it.has_conflict
-          : !it.is_resolved));
+      filter === "simulated"
+        ? it.is_simulated
+        : filter === "conflict"
+          ? it.has_conflict
+          : !it.is_resolved,
+    ),
+  );
 }
 
 /** 批量确认文案：修复旧文案把「模拟值 ∩ 未确认」交集重复计数（unresolved+simulated） */
@@ -24,12 +40,17 @@ export function isCurrentSchemeRequest(
 }
 
 /** 批量确认结果文案：安全跳过时不得误报“事实注入已就绪”。 */
-export function buildBatchResolveResultCopy(result: {
-  changed?: unknown;
-  skipped?: unknown;
-  skipped_safety_count?: unknown;
-  skipped_safety?: unknown;
-} | null | undefined): {
+export function buildBatchResolveResultCopy(
+  result:
+    | {
+        changed?: unknown;
+        skipped?: unknown;
+        skipped_safety_count?: unknown;
+        skipped_safety?: unknown;
+      }
+    | null
+    | undefined,
+): {
   tone: "success" | "warning";
   text: string;
   /** ✅ 2026-10-06：被安全闸门拦下的事实**名称**列表。
@@ -44,14 +65,17 @@ export function buildBatchResolveResultCopy(result: {
   const rawSkippedSafety: unknown = result?.skipped_safety;
   const blockedNames: string[] = Array.isArray(rawSkippedSafety)
     ? rawSkippedSafety
-      .map((it: { name?: unknown; title?: unknown }) => String(it?.name || it?.title || "").trim())
-      .filter(Boolean)
+        .map((it: { name?: unknown; title?: unknown }) =>
+          String(it?.name || it?.title || "").trim(),
+        )
+        .filter(Boolean)
     : [];
   if (safety > 0) {
     const shown = blockedNames.slice(0, 6);
     const detail = shown.length
-      ? `（${shown.join("、")}${blockedNames.length > shown.length
-        ? ` 等 ${blockedNames.length} 条` : ""}）`
+      ? `（${shown.join("、")}${
+          blockedNames.length > shown.length ? ` 等 ${blockedNames.length} 条` : ""
+        }）`
       : "";
     return {
       tone: "warning",
@@ -68,11 +92,20 @@ export function buildBatchResolveResultCopy(result: {
 
 /** 九大章节完整性与危大诊断只读面板（组件级测试锁定空态/覆盖率/缺参）。 */
 
-export function buildBatchResolveCopy(stats: {
-  unresolved?: number; simulated?: number; conflicts?: number;
-} | null | undefined): {
-  headline: string; confirmType: "warning" | "confirm";
-  simulatedNote: string; conflictNote: string;
+export function buildBatchResolveCopy(
+  stats:
+    | {
+        unresolved?: number;
+        simulated?: number;
+        conflicts?: number;
+      }
+    | null
+    | undefined,
+): {
+  headline: string;
+  confirmType: "warning" | "confirm";
+  simulatedNote: string;
+  conflictNote: string;
 } {
   const unresolved = Number(stats?.unresolved) || 0;
   const simulated = Number(stats?.simulated) || 0;
@@ -80,12 +113,14 @@ export function buildBatchResolveCopy(stats: {
   return {
     headline: `当前方案共有 ${unresolved} 项事实未确认，是否全部确认为“已核实”？`,
     confirmType: simulated > 0 ? "warning" : "confirm",
-    simulatedNote: simulated > 0
-      ? `⚠️ 其中含模拟值 ${simulated} 项（AI 推断的占位数据），确认后会被直接注入正文生成，请先核对真实值。`
-      : "",
-    conflictNote: conflicts > 0
-      ? `另有 ${conflicts} 项存在矛盾（多源取值不一致），批量确认不处理矛盾，建议逐条裁决。`
-      : "",
+    simulatedNote:
+      simulated > 0
+        ? `⚠️ 其中含模拟值 ${simulated} 项（AI 推断的占位数据），确认后会被直接注入正文生成，请先核对真实值。`
+        : "",
+    conflictNote:
+      conflicts > 0
+        ? `另有 ${conflicts} 项存在矛盾（多源取值不一致），批量确认不处理矛盾，建议逐条裁决。`
+        : "",
   };
 }
 
@@ -173,7 +208,9 @@ export function normalizeFactsAdjustPlan(data: unknown): FactsAdjustPlanShape {
 }
 
 /** 未纳入计划的操作数（后端 `ignored_count` 的前端兜底口径） */
-export function factsAdjustIgnoredCount(plan?: { ignored?: FactsAdjustIgnoredItem[] } | null): number {
+export function factsAdjustIgnoredCount(
+  plan?: { ignored?: FactsAdjustIgnoredItem[] } | null,
+): number {
   return Array.isArray(plan?.ignored) ? plan!.ignored.length : 0;
 }
 
@@ -186,7 +223,6 @@ export function formatFactsAdjustOperation(op: FactsAdjustOperation, i: number):
   const value = op.value ? ` ${op.value}` : "";
   return `${op.op} · ${label}${value}`;
 }
-
 
 export function buildFactsSummary(stats: unknown): FactsSummary {
   // ✅ any 清理（2026-11-02）：入参改 `unknown` —— 本函数仍是「把后端可能为脏/
@@ -258,7 +294,9 @@ export function buildFactChapterStats(
    */
   const rows: FactChapterStat[] = Array.isArray(bc)
     ? (bc as unknown as FactChapterStat[])
-    : (Array.isArray(bc?.chapters) ? bc.chapters : []);
+    : Array.isArray(bc?.chapters)
+      ? bc.chapters
+      : [];
   return rows
     .map((c) => {
       const key = String(c?.key || "");
@@ -279,11 +317,21 @@ export function buildFactChapterStats(
 }
 
 /** 分页参数归一（消费后端 `pagination`）。total_groups 为 0 时不渲染分页控件。 */
-export function buildFactsPagination(pagination: {
-  total_groups?: unknown;
-  offset?: unknown;
-} | null | undefined, pageSize: number): {
-  page: number; pageSize: number; total: number; totalPages: number; show: boolean;
+export function buildFactsPagination(
+  pagination:
+    | {
+        total_groups?: unknown;
+        offset?: unknown;
+      }
+    | null
+    | undefined,
+  pageSize: number,
+): {
+  page: number;
+  pageSize: number;
+  total: number;
+  totalPages: number;
+  show: boolean;
 } {
   const total = Number(pagination?.total_groups) || 0;
   const limit = Math.max(1, Number(pageSize) || 20);
@@ -326,7 +374,9 @@ export function applyFactsCompletedEvent(evt: unknown): {
   const ss = e.segment_stats;
   return {
     segmentStats: ss && typeof ss === "object" ? (ss as FactSegmentStats) : null,
-    crossConflicts: Array.isArray(e.cross_conflicts) ? (e.cross_conflicts as FactCrossConflict[]) : [],
+    crossConflicts: Array.isArray(e.cross_conflicts)
+      ? (e.cross_conflicts as FactCrossConflict[])
+      : [],
   };
 }
 
@@ -487,13 +537,68 @@ export function applyFactsFilter<T extends FactGroupLike>(
 //    现改 Promise.allSettled 独立落定；合并判定抽成纯函数供组件级测试
 //    （沿用 applyFactsFilter 惯例，API 调用留在页面层）。
 // ============================================================
+/**
+ * ✅ BUG-06 前端半边（R176 · 2026-11-04）：事实列表首个请求的页码裁决。
+ *
+ * 切方案时 `/scheme/:id` 是同一路由组件，组件不卸载 → `factsPageRef` 保留旧页码，
+ * 新方案首屏带着旧 `offset` 去请求；越界后即便后端已做 clamp，看到的仍是
+ * 「新方案事实全没了」的假象。根因必须在**首个请求**就落回第 1 页（offset=0）。
+ *
+ * 判据：本次请求的方案 ≠ 上一次已请求的方案 ⇒ 强制第 1 页；
+ * 同方案翻页仍走 override → ref 的原顺序（零回归）。
+ */
+export function resolveFactsLoadPage(input: {
+  schemeId: string;
+  lastSchemeId: string;
+  pageOverride?: number;
+  refPage: number;
+}): number {
+  if ((input.schemeId || "") !== (input.lastSchemeId || "")) return 1;
+  return Math.max(1, Number(input.pageOverride) || input.refPage);
+}
+
+/**
+ * ✅ 诊断报告落板的**唯一判定源**（R176/R177 · 2026-11-04）。
+ *
+ * 规则：`undefined`（请求失败/键缺席）与 `null`（成功但无数据）一律视为
+ * 「无法判定」⇒ 返回 `null`，面板据此渲染「无法判定 / 无数据」。
+ *
+ * ⚠️ 语义说明（勿当 bug 改回）：`mergeFactsDiagnosticsSettled` 对 fulfilled
+ * 但 `data` 为 `undefined` 的响应同样**不设置**对应键（与失败同形）。这是
+ * **有意**的：成功但无数据 = 无法判定，而不是「沿用上一次结论」。任何一侧
+ * 都不得再写 `if (merged.x !== undefined) set(...)` 式的条件赋值。
+ */
+function diagnosticReportOrNull<T>(value: T | null | undefined): T | null {
+  return value === undefined ? null : (value ?? null);
+}
+
+/** 危大/超规模报告落板（与章节覆盖度同源，仅按侧取键）。 */
+export function resolveFactsDangerSettled<T>(merged: { danger?: T | null }): T | null {
+  return diagnosticReportOrNull(merged.danger);
+}
+
+/** 章节覆盖度报告落板（与危大侧同源；刷新失败同样清空旧覆盖率）。 */
+export function resolveFactsChapterSettled<T>(merged: { chapters?: T | null }): T | null {
+  return diagnosticReportOrNull(merged.chapters);
+}
+
 export function mergeFactsDiagnosticsSettled<TChapters = unknown, TDanger = unknown>(
   chaptersRes: PromiseSettledResult<{ data?: TChapters }>,
   dangerRes: PromiseSettledResult<{ data?: TDanger }>,
-): { chapters?: TChapters | null; danger?: TDanger | null; warning: string | null; aborted: boolean } {
-  const isAbort = (e: unknown) => (e as { name?: string } | null | undefined)?.name === "AbortError";
-  const out: { chapters?: TChapters | null; danger?: TDanger | null; warning: string | null; aborted: boolean } =
-    { warning: null, aborted: false };
+): {
+  chapters?: TChapters | null;
+  danger?: TDanger | null;
+  warning: string | null;
+  aborted: boolean;
+} {
+  const isAbort = (e: unknown) =>
+    (e as { name?: string } | null | undefined)?.name === "AbortError";
+  const out: {
+    chapters?: TChapters | null;
+    danger?: TDanger | null;
+    warning: string | null;
+    aborted: boolean;
+  } = { warning: null, aborted: false };
   const failed: unknown[] = [];
   if (chaptersRes.status === "fulfilled") out.chapters = chaptersRes.value?.data;
   else failed.push(chaptersRes.reason);
@@ -590,9 +695,7 @@ export function filterFactsGroupsByCategory<T extends FactGroupLike>(
   category: string,
 ): T[] {
   if (!category) return groups || [];
-  return (groups || []).filter(
-    (g) => ((g?.category || "other").trim() || "other") === category,
-  );
+  return (groups || []).filter((g) => ((g?.category || "other").trim() || "other") === category);
 }
 
 /**

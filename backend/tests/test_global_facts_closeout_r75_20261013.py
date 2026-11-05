@@ -31,6 +31,7 @@ routers→services 反向依赖造成第二份回解），routers 侧 ``_fact_na
 - C 组 · 口径切换的实质性分叉证明：新旧出口在注释语料上**确实不同值**
   （防止护栏在出口被改回旧行为后仍恒绿）。
 """
+
 from __future__ import annotations
 
 import ast
@@ -48,12 +49,12 @@ FE_PATH = os.path.join(APP, "app", "services", "facts_extractor.py")
 #: 本轮统一出口的六个读路径函数（G-A/G-B/G-C 全部落点）。
 #: 其中 _lookup_old / _carry_dimensions 是嵌套闭包，ast.walk 同样能取到。
 READ_PATH_FNS = [
-    "_facts_for_adjust_prompt",   # G-A adjust 提示词
-    "check_danger_scheme",        # G-C 危大阈值
-    "_apply_item_updates",        # G-B 条目更新 old_value
-    "resolve_conflict",           # G-B 人工裁决 prior_value
-    "_lookup_old",                # G-B 同族回解
-    "_carry_dimensions",          # G-B 分组重建回解
+    "_facts_for_adjust_prompt",  # G-A adjust 提示词
+    "check_danger_scheme",  # G-C 危大阈值
+    "_apply_item_updates",  # G-B 条目更新 old_value
+    "resolve_conflict",  # G-B 人工裁决 prior_value
+    "_lookup_old",  # G-B 同族回解
+    "_carry_dimensions",  # G-B 分组重建回解
 ]
 
 #: 允许直调底层原语 extract_value_from_markdown_line 的函数白名单 ——
@@ -102,29 +103,40 @@ def _defs_by_name(tree: ast.Module) -> dict:
 
 def _gf():
     from app.routers import global_facts as gf
+
     return gf
 
 
 #: 脏语料：四类「显示侧与旧回解侧会分叉」的真实落库形态
 DIRTY_ROWS = [
-    {   # 1) 粗体行带 *(注释)*：旧 extract 侧剥注释，显示侧保留
-        "id": "d1", "title": "旧名称-开挖深度", "category": "tech_param",
+    {  # 1) 粗体行带 *(注释)*：旧 extract 侧剥注释，显示侧保留
+        "id": "d1",
+        "title": "旧名称-开挖深度",
+        "category": "tech_param",
         "content": "- **基坑开挖深度**: 12.5m *(根据图纸)*",
     },
-    {   # 2) 非粗体整段正文：旧危大侧把整段当名称，显示侧名称取 title 列
-        "id": "d2", "title": "基坑概况说明", "category": "overview",
+    {  # 2) 非粗体整段正文：旧危大侧把整段当名称，显示侧名称取 title 列
+        "id": "d2",
+        "title": "基坑概况说明",
+        "category": "overview",
         "content": "本场区基坑深度约12.5米，采用桩锚支护体系，地下水位约-2.0米。",
     },
-    {   # 3) 粗体行带模拟值标记：标记必须先于粗体被剥离，不残留在值里
-        "id": "d3", "title": "工期", "category": "schedule",
+    {  # 3) 粗体行带模拟值标记：标记必须先于粗体被剥离，不残留在值里
+        "id": "d3",
+        "title": "工期",
+        "category": "schedule",
         "content": "- **合同工期**: 90天 ⚠️*(模拟值)*",
     },
-    {   # 4) content 为空：值回落 content（空串），名称回落 title，不得异常
-        "id": "d4", "title": "项目经理", "category": "personnel",
+    {  # 4) content 为空：值回落 content（空串），名称回落 title，不得异常
+        "id": "d4",
+        "title": "项目经理",
+        "category": "personnel",
         "content": "",
     },
-    {   # 5) content 为 None（历史行/NULL）：同上，全程 None 安全
-        "id": "d5", "title": "总工", "category": "personnel",
+    {  # 5) content 为 None（历史行/NULL）：同上，全程 None 安全
+        "id": "d5",
+        "title": "总工",
+        "category": "personnel",
         "content": None,
     },
 ]
@@ -153,21 +165,23 @@ class TestReadPathSingleSourceASTLock:
         for fn in READ_PATH_FNS:
             for node in self.defs[fn]:
                 calls = _called_names(node)
-                assert "_fact_name_value" in calls, (
-                    f"{fn} 未走读路径唯一出口 _fact_name_value")
+                assert "_fact_name_value" in calls, f"{fn} 未走读路径唯一出口 _fact_name_value"
                 assert "extract_value_from_markdown_line" not in calls, (
                     f"{fn} 直调 extract_value_from_markdown_line —— "
-                    f"name/value 第二份切分回流（R75 G-A/G-B/G-C 同族缺陷复活）")
+                    f"name/value 第二份切分回流（R75 G-A/G-B/G-C 同族缺陷复活）"
+                )
 
     def test_direct_extract_callers_are_exactly_write_side_allowlist(self):
         """全模块直调底层原语的函数集合 ⊆ 写路径白名单。"""
         offenders = {
-            name for name, nodes in self.defs.items()
+            name
+            for name, nodes in self.defs.items()
             for node in nodes
             if "extract_value_from_markdown_line" in _called_names(node)
         }
-        assert offenders <= ALLOWED_DIRECT_EXTRACT_CALLERS, (
-            f"出现白名单外的直调点：{sorted(offenders - ALLOWED_DIRECT_EXTRACT_CALLERS)}")
+        assert (
+            offenders <= ALLOWED_DIRECT_EXTRACT_CALLERS
+        ), f"出现白名单外的直调点：{sorted(offenders - ALLOWED_DIRECT_EXTRACT_CALLERS)}"
 
     def test_single_exit_authority_is_delegate_plus_services_fallback(self):
         """✅ R75b 反向锁改形：防「唯一出口被掏空」的锁改指 services 本体。
@@ -181,16 +195,17 @@ class TestReadPathSingleSourceASTLock:
         fv = self.defs.get("_fact_name_value")
         assert fv, "routers._fact_name_value 不在 global_facts.py（护栏锚点漂移）"
         wrapper_calls = _called_names(fv[0])
-        assert "fact_name_value" in wrapper_calls, (
-            "routers._fact_name_value 不再委托 services 权威本体 —— 包装被掏空/改写")
-        assert "extract_value_from_markdown_line" not in wrapper_calls, (
-            "routers 薄包装内回流自持切分 —— 同一判据两份实现复活（R75b 下沉成果丢失）")
+        assert (
+            "fact_name_value" in wrapper_calls
+        ), "routers._fact_name_value 不再委托 services 权威本体 —— 包装被掏空/改写"
+        assert (
+            "extract_value_from_markdown_line" not in wrapper_calls
+        ), "routers 薄包装内回流自持切分 —— 同一判据两份实现复活（R75b 下沉成果丢失）"
         auth = _defs_by_name(_extractor_tree()).get("fact_name_value")
-        assert auth, (
-            "services.fact_name_value 不在 facts_extractor.py —— 权威本体被改名/删除")
+        assert auth, "services.fact_name_value 不在 facts_extractor.py —— 权威本体被改名/删除"
         assert any(
-            "extract_value_from_markdown_line" in _called_names(n) for n in auth), (
-            "services.fact_name_value 不再用底层原语回解非粗体行 —— 唯一出口被掏空")
+            "extract_value_from_markdown_line" in _called_names(n) for n in auth
+        ), "services.fact_name_value 不再用底层原语回解非粗体行 —— 唯一出口被掏空"
 
 
 class TestAdjustPromptDisplayParity:
@@ -202,10 +217,8 @@ class TestAdjustPromptDisplayParity:
         assert [o["fact_id"] for o in out] == [r["id"] for r in DIRTY_ROWS]
         for o, row in zip(out, DIRTY_ROWS):
             name, value = _display_pair(row)
-            assert o["name"] == name, (
-                f"{row['id']}: AI 看到的名称与界面显示分叉（{o['name']!r} vs {name!r}）")
-            assert o["value"] == value, (
-                f"{row['id']}: AI 看到的取值与界面显示分叉（{o['value']!r} vs {value!r}）")
+            assert o["name"] == name, f"{row['id']}: AI 看到的名称与界面显示分叉（{o['name']!r} vs {name!r}）"
+            assert o["value"] == value, f"{row['id']}: AI 看到的取值与界面显示分叉（{o['value']!r} vs {value!r}）"
 
     def test_danger_name_is_not_whole_paragraph(self):
         """G-C 行为等价：非粗体段落的「名称」取 title 列，不是整段正文。"""
@@ -243,20 +256,20 @@ class TestCaliberSwitchIsMaterial:
 
     def test_bare_extract_differs_from_single_exit_on_annotation(self):
         from app.services.facts_extractor import extract_value_from_markdown_line
+
         gf = _gf()
         content = DIRTY_ROWS[0]["content"]
         _, old_value = extract_value_from_markdown_line(content)
         _, new_value = gf._fact_name_value(dict(DIRTY_ROWS[0]))
-        assert "*(根据图纸)*" not in old_value, (
-            "底层原语不再剥注释？本对照前提失效，请同步修订 C 组与 A 组白名单")
+        assert "*(根据图纸)*" not in old_value, "底层原语不再剥注释？本对照前提失效，请同步修订 C 组与 A 组白名单"
         assert "*(根据图纸)*" in new_value
 
     def test_single_exit_falls_back_to_title_not_content_name(self):
         from app.services.facts_extractor import extract_value_from_markdown_line
+
         gf = _gf()
         content = DIRTY_ROWS[1]["content"]
         old_name, _ = extract_value_from_markdown_line(content)
         new_name, _ = gf._fact_name_value(dict(DIRTY_ROWS[1]))
-        assert old_name != new_name, (
-            "段落行的名称分叉不复存在？前提失效请修订护栏")
+        assert old_name != new_name, "段落行的名称分叉不复存在？前提失效请修订护栏"
         assert new_name == DIRTY_ROWS[1]["title"]

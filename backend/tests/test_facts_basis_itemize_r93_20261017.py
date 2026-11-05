@@ -16,6 +16,7 @@ fact_key 追加「::值域标签」；历史裸键已确认行按 base-key 回�
   回写 conflict_keys（无假矛盾）/ 五部规范端到端全落库
 - D 静态契约：P14 提示词逐条纪律、basis_zone 关键词、别名表、自动分类器
 """
+
 import re
 import uuid
 
@@ -54,8 +55,12 @@ _SCOPED_RE = re.compile(r"^execution_standard::[0-9a-f]{8}$")
 def _basis(name: str, value: str, confidence: float = 0.9) -> FactItem:
     """按 P14 产出形态构造并存类事实（fact_type=basis → category=basis）。"""
     return FactItem(
-        name=name, value=value, key=normalize_key(name),
-        category="basis", fact_type="basis", confidence=confidence,
+        name=name,
+        value=value,
+        key=normalize_key(name),
+        category="basis",
+        fact_type="basis",
+        confidence=confidence,
     )
 
 
@@ -81,8 +86,16 @@ async def _insert_confirmed_legacy(db, pid, sid, *, fact_key, name, value):
         "INSERT INTO global_facts(id,project_id,scheme_id,group_id,title,"
         "content,category,fact_key,is_resolved,has_conflict,is_stale) "
         "VALUES(?,?,?,?,?,?, 'basis',?,1,0,1)",
-        (uuid.uuid4().hex, pid, sid, uuid.uuid4().hex, name,
-         f"- **{name}**: {value}", fact_key,))
+        (
+            uuid.uuid4().hex,
+            pid,
+            sid,
+            uuid.uuid4().hex,
+            name,
+            f"- **{name}**: {value}",
+            fact_key,
+        ),
+    )
     await db.commit()
 
 
@@ -102,11 +115,13 @@ class TestMergeBasisCoexist:
 
     def test_same_standard_across_segments_converges(self):
         """同一部规范跨段重复（空白/全角差异）→ 收敛 1 条，仍独立成条。"""
-        out = merge_and_deduplicate([
-            _basis("执行标准", "GB 50300-2013《建筑工程施工质量验收统一标准》"),
-            _basis("执行标准", "GB50300-2013《建筑工程施工质量验收统一标准》"),
-            _basis("执行标准", "GB 50300-2013《建筑工程施工质量验收统一标准》 "),
-        ])
+        out = merge_and_deduplicate(
+            [
+                _basis("执行标准", "GB 50300-2013《建筑工程施工质量验收统一标准》"),
+                _basis("执行标准", "GB50300-2013《建筑工程施工质量验收统一标准》"),
+                _basis("执行标准", "GB 50300-2013《建筑工程施工质量验收统一标准》 "),
+            ]
+        )
         assert len(out) == 1
         assert not out[0].has_conflict
         assert _SCOPED_RE.match(out[0].key)
@@ -115,10 +130,12 @@ class TestMergeBasisCoexist:
         """不变式：非并存键同键多值仍走「best + 矛盾候选」原路径。"""
         k = normalize_key("基坑深度")
         assert not is_basis_coexist_key(k)
-        out = merge_and_deduplicate([
-            FactItem(name="基坑深度", value=v, key=k,
-                     category="tech_param", confidence=0.9)
-            for v in ("12.5m", "13.0m", "12.0m")])
+        out = merge_and_deduplicate(
+            [
+                FactItem(name="基坑深度", value=v, key=k, category="tech_param", confidence=0.9)
+                for v in ("12.5m", "13.0m", "12.0m")
+            ]
+        )
         assert len(out) == 1
         assert out[0].has_conflict
         assert len(out[0].conflict_values) == 2
@@ -126,10 +143,12 @@ class TestMergeBasisCoexist:
 
     def test_unregistered_basis_name_splits_via_category(self):
         """未注册名（设计文件→兜底哈希键）靠 category=basis 兜住拆分。"""
-        out = merge_and_deduplicate([
-            _basis("设计文件", "XX设计院施工图（建-01）"),
-            _basis("设计文件", "XX项目岩土工程勘察报告"),
-        ])
+        out = merge_and_deduplicate(
+            [
+                _basis("设计文件", "XX设计院施工图（建-01）"),
+                _basis("设计文件", "XX项目岩土工程勘察报告"),
+            ]
+        )
         assert len(out) == 2
         assert all(not o.has_conflict for o in out)
         assert out[0].key != out[1].key
@@ -137,8 +156,7 @@ class TestMergeBasisCoexist:
 
     def test_key_whitelist_catches_missing_fact_type(self):
         """AI 漏标 fact_type（category=other）时键白名单仍兜住「执行标准」。"""
-        it = FactItem(name="执行标准", value=STANDARDS[0],
-                      key=normalize_key("执行标准"), category="other")
+        it = FactItem(name="执行标准", value=STANDARDS[0], key=normalize_key("执行标准"), category="other")
         assert is_basis_coexist_item(it)
         out = merge_and_deduplicate([it])
         assert _SCOPED_RE.match(out[0].key)
@@ -162,8 +180,9 @@ class TestMergeBasisCoexist:
         assert not is_basis_coexist_key("execution_standard" + "::zzzzzzzz")
         # 无后缀键原样返回；异值必得异标签
         assert basis_base_key("project_name") == "project_name"
-        assert (basis_scoped_key("execution_standard", STANDARDS[0])
-                != basis_scoped_key("execution_standard", STANDARDS[1]))
+        assert basis_scoped_key("execution_standard", STANDARDS[0]) != basis_scoped_key(
+            "execution_standard", STANDARDS[1]
+        )
 
 
 # ---------------------------------------------------------------------------
@@ -176,14 +195,25 @@ class TestKeyNormalization:
 
     def test_basis_keys_all_in_coexist_whitelist(self):
         """新增别名必须同步进并存白名单（否则折叠病灶复发）。"""
-        for k in ("compilation_basis", "execution_standard", "tech_standard",
-                  "acceptance_code", "standard_atlas", "legal_basis"):
+        for k in (
+            "compilation_basis",
+            "execution_standard",
+            "tech_standard",
+            "acceptance_code",
+            "standard_atlas",
+            "legal_basis",
+        ):
             assert k in BASIS_COEXIST_KEYS
 
     def test_coexist_whitelist_exact_lock(self):
         assert set(BASIS_COEXIST_KEYS) == {
-            "compilation_basis", "execution_standard", "tech_standard",
-            "acceptance_code", "standard_atlas", "legal_basis"}
+            "compilation_basis",
+            "execution_standard",
+            "tech_standard",
+            "acceptance_code",
+            "standard_atlas",
+            "legal_basis",
+        }
 
     def test_scoped_key_chapter_parity_with_bare_key(self):
         """scoped 键与裸键的九大章节派生**逐字一致**（不改判据只加后缀）。
@@ -199,17 +229,16 @@ class TestKeyNormalization:
         ):
             base = normalize_key(name)
             scoped = basis_scoped_key(base, value)
-            assert classify_chapter_from_text(
-                name, value, "basis", "basis", scoped) == \
-                classify_chapter_from_text(
-                    name, value, "basis", "basis", base), name
+            assert classify_chapter_from_text(name, value, "basis", "basis", scoped) == classify_chapter_from_text(
+                name, value, "basis", "basis", base
+            ), name
 
     def test_basis_fact_type_without验收_word_is_basis_chapter(self):
         """值不含他章关键词时，并存条目仍归「编制依据」章（scoped 键可用）。"""
         scoped = basis_scoped_key("execution_standard", STANDARDS[2])
         ch = classify_chapter_from_text(
-            name="执行标准", value=STANDARDS[2],
-            category="basis", fact_type="basis", fact_key=scoped)
+            name="执行标准", value=STANDARDS[2], category="basis", fact_type="basis", fact_key=scoped
+        )
         assert ch == "basis"
 
 
@@ -221,20 +250,20 @@ class TestPersistLegacyCompat:
         """旧裸键已确认行 + 新 scoped 同值 → 不重复插入，is_stale 解除。"""
         db, pid, sid = ctx
         val = STANDARDS[0]
-        await _insert_confirmed_legacy(
-            db, pid, sid, fact_key="execution_standard",
-            name="执行标准", value=val)
+        await _insert_confirmed_legacy(db, pid, sid, fact_key="execution_standard", name="执行标准", value=val)
 
         it = _basis("执行标准", val)
         it.key = basis_scoped_key("execution_standard", val)
         await persist_extraction(
-            ExtractionResult(groups=[
-                FactGroup(title="编制依据", category="basis", items=[it])],
-                total_items=1), db, pid, sid)
+            ExtractionResult(groups=[FactGroup(title="编制依据", category="basis", items=[it])], total_items=1),
+            db,
+            pid,
+            sid,
+        )
 
         cur = await db.execute(
-            "SELECT fact_key,is_stale,has_conflict,conflict_keys "
-            "FROM global_facts WHERE scheme_id=?", (sid,))
+            "SELECT fact_key,is_stale,has_conflict,conflict_keys " "FROM global_facts WHERE scheme_id=?", (sid,)
+        )
         rows = [dict(r) for r in await cur.fetchall()]
         assert len(rows) == 1, "同值并存条目绝不重复插入"
         assert rows[0]["fact_key"] == "execution_standard"
@@ -245,44 +274,51 @@ class TestPersistLegacyCompat:
     async def test_legacy_diff_value_coexists_no_fake_conflict(self, ctx):
         """旧裸键已确认行 + 新 scoped 异值 → 独立插入，绝不回写矛盾。"""
         db, pid, sid = ctx
-        await _insert_confirmed_legacy(
-            db, pid, sid, fact_key="execution_standard",
-            name="执行标准", value=STANDARDS[0])
+        await _insert_confirmed_legacy(db, pid, sid, fact_key="execution_standard", name="执行标准", value=STANDARDS[0])
 
         it = _basis("执行标准", STANDARDS[2])
         it.key = basis_scoped_key("execution_standard", STANDARDS[2])
         await persist_extraction(
-            ExtractionResult(groups=[
-                FactGroup(title="编制依据", category="basis", items=[it])],
-                total_items=1), db, pid, sid)
+            ExtractionResult(groups=[FactGroup(title="编制依据", category="basis", items=[it])], total_items=1),
+            db,
+            pid,
+            sid,
+        )
 
         cur = await db.execute(
             "SELECT fact_key,content,has_conflict,conflict_keys "
-            "FROM global_facts WHERE scheme_id=? ORDER BY fact_key", (sid,))
+            "FROM global_facts WHERE scheme_id=? ORDER BY fact_key",
+            (sid,),
+        )
         rows = [dict(r) for r in await cur.fetchall()]
         assert len(rows) == 2, "异值规范必须并存为两条独立事实"
         legacy = next(r for r in rows if r["fact_key"] == "execution_standard")
         assert legacy["has_conflict"] == 0
-        assert (legacy["conflict_keys"] or "") == "", \
-            "并存异值绝不回写已确认行的矛盾候选"
+        assert (legacy["conflict_keys"] or "") == "", "并存异值绝不回写已确认行的矛盾候选"
         assert STANDARDS[0] in legacy["content"]
 
     async def test_legacy_notation_variant_treated_as_same_value(self, ctx):
         """记法变体（GB 50300 / GB50300）按既有同值口径收敛，不并列重复。"""
         db, pid, sid = ctx
         await _insert_confirmed_legacy(
-            db, pid, sid, fact_key="execution_standard",
-            name="执行标准", value="GB 50300-2013《建筑工程施工质量验收统一标准》")
+            db,
+            pid,
+            sid,
+            fact_key="execution_standard",
+            name="执行标准",
+            value="GB 50300-2013《建筑工程施工质量验收统一标准》",
+        )
 
         it = _basis("执行标准", "GB50300-2013《建筑工程施工质量验收统一标准》")
         it.key = basis_scoped_key("execution_standard", it.value)
         await persist_extraction(
-            ExtractionResult(groups=[
-                FactGroup(title="编制依据", category="basis", items=[it])],
-                total_items=1), db, pid, sid)
+            ExtractionResult(groups=[FactGroup(title="编制依据", category="basis", items=[it])], total_items=1),
+            db,
+            pid,
+            sid,
+        )
 
-        cur = await db.execute(
-            "SELECT id FROM global_facts WHERE scheme_id=?", (sid,))
+        cur = await db.execute("SELECT id FROM global_facts WHERE scheme_id=?", (sid,))
         assert len(await cur.fetchall()) == 1
 
     async def test_five_standards_end_to_end_all_land(self, ctx):
@@ -291,13 +327,15 @@ class TestPersistLegacyCompat:
         merged = merge_and_deduplicate([_basis("执行标准", v) for v in STANDARDS])
         assert len(merged) == 5
         await persist_extraction(
-            ExtractionResult(groups=[
-                FactGroup(title="编制依据", category="basis", items=merged)],
-                total_items=5), db, pid, sid)
+            ExtractionResult(groups=[FactGroup(title="编制依据", category="basis", items=merged)], total_items=5),
+            db,
+            pid,
+            sid,
+        )
 
         cur = await db.execute(
-            "SELECT fact_key,has_conflict,conflict_keys,content "
-            "FROM global_facts WHERE scheme_id=?", (sid,))
+            "SELECT fact_key,has_conflict,conflict_keys,content " "FROM global_facts WHERE scheme_id=?", (sid,)
+        )
         rows = [dict(r) for r in await cur.fetchall()]
         assert len(rows) == 5
         assert all(r["has_conflict"] == 0 for r in rows)
@@ -313,8 +351,7 @@ class TestPersistLegacyCompat:
 class TestPromptAndZoneContract:
     def test_p14_requires_itemize(self):
         p = get_prompt("facts_extract_system")
-        for kw in ("逐条提取", "一条不落", "同名多条不是矛盾",
-                   "标准图集", "法规依据", "勘察报告", "禁止用"):
+        for kw in ("逐条提取", "一条不落", "同名多条不是矛盾", "标准图集", "法规依据", "勘察报告", "禁止用"):
             assert kw in p, f"P14 缺关键纪律/成员：{kw}"
 
     def test_basis_zone_keywords_cover_atlas_forms(self):

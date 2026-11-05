@@ -28,6 +28,7 @@ BUG-3【P1 · checkpoint 契约漂移】``facts_generation`` 缺席于单一事�
     后果：生成的 ``checkpointSchema.ts`` 无 ``facts_result`` ⇒ 前端页面只能
     **内联第三份手抄**；且 facts 是**唯一没有** parity 断言的一族。
 """
+
 from __future__ import annotations
 
 import ast
@@ -41,14 +42,15 @@ import sys
 import pytest
 
 BACKEND = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))  # …\backend
-APP = os.path.join(BACKEND, "app")                                   # …\backend\app
-ROOT = os.path.dirname(BACKEND)                                      # 仓库根
+APP = os.path.join(BACKEND, "app")  # …\backend\app
+ROOT = os.path.dirname(BACKEND)  # 仓库根
 FE = os.path.join(ROOT, "frontend", "src")
 sys.path.insert(0, BACKEND)
 
 
 def _gf():
     from app.routers import global_facts as gf
+
     return gf
 
 
@@ -69,9 +71,13 @@ def _page() -> str:
     # taskPolling.ts —— 聚合 facade + 子模块读取，断言阈值与语义不变。
     parts = [_read(os.path.join(FE, "pages", "SchemeWorkbenchPage.tsx"))]
     wb = os.path.join(FE, "pages", "schemeWorkbench")
-    for p in sorted(os.listdir(wb)):
-        if p.endswith((".ts", ".tsx")):
-            parts.append(_read(os.path.join(wb, p)))
+    # R176：拆分仍在继续，递归（含 tabs/）+ 非空兜底。
+    files = []
+    for dirpath, _dirs, fnames in os.walk(wb):
+        files += [os.path.join(dirpath, n) for n in sorted(fnames) if n.endswith((".ts", ".tsx"))]
+    assert files, f"拆分目录未被递归扫描到（0 个 ts/tsx）：{wb}"
+    for p in files:
+        parts.append(_read(p))
     return "\n".join(parts)
 
 
@@ -88,18 +94,25 @@ async def _seed(db):
     """经模块自身单一 INSERT 出口建事实（避免列清单漂移）。"""
     gf = _gf()
     # 项目须真实存在：`/chapters` 的 _validate_fact_scope 会校验（不存在即 404）
-    await db.execute(
-        "INSERT OR REPLACE INTO projects (id, name) VALUES ('r89p', 'R89')")
+    await db.execute("INSERT OR REPLACE INTO projects (id, name) VALUES ('r89p', 'R89')")
     for i, (name, value, cat) in enumerate(SEEDS):
         await db.execute(
             gf.MANUAL_FACT_INSERT_SQL,
             gf._manual_fact_row(
-                fid=f"r89f{i}", pid="r89p", sid="", group_id="r89g",
-                group_title="工程概况", name=name,
+                fid=f"r89f{i}",
+                pid="r89p",
+                sid="",
+                group_id="r89g",
+                group_title="工程概况",
+                name=name,
                 content=gf._build_fact_content(name, value, False),
-                category=cat, source_file="测试录入",
-                is_simulated=False, confidence=1.0, is_resolved=True,
-            ))
+                category=cat,
+                source_file="测试录入",
+                is_simulated=False,
+                confidence=1.0,
+                is_resolved=True,
+            ),
+        )
     await db.commit()
 
 
@@ -110,15 +123,23 @@ def _expected_shared_by_chapter() -> dict:
         chapter_of_row,
         shared_chapters_for,
     )
+
     out: dict[str, int] = {}
     for name, value, cat in SEEDS:
         if not shared_chapters_for(name, value):
             continue
-        ch = chapter_of_row({
-            "name": name, "value": value, "content": "",
-            "category": cat, "fact_type": CATEGORY_TO_FACT_TYPE.get(cat, ""),
-            "fact_key": "", "source": "", "source_ref": "",
-        })
+        ch = chapter_of_row(
+            {
+                "name": name,
+                "value": value,
+                "content": "",
+                "category": cat,
+                "fact_type": CATEGORY_TO_FACT_TYPE.get(cat, ""),
+                "fact_key": "",
+                "source": "",
+                "source_ref": "",
+            }
+        )
         if ch:
             out[ch] = out.get(ch, 0) + 1
     return out
@@ -171,15 +192,15 @@ def _ts_fn_body(src: str, name: str) -> str:
                     if d2 == 0:
                         break
                 e2 += 1
-            rest = src[e2 + 1:]
+            rest = src[e2 + 1 :]
             if rest.lstrip().startswith("{"):
-                k = e2 + 1          # 这是**返回类型注解**，跳过继续找函数体
+                k = e2 + 1  # 这是**返回类型注解**，跳过继续找函数体
                 continue
-            return src[k:e2 + 1]   # 其后是代码 ⇒ 这才是函数体
+            return src[k : e2 + 1]  # 其后是代码 ⇒ 这才是函数体
         if ch in ";":
             k += 1
             continue
-        if ch == "{" or ch == "\n" and src[k:k + 2].strip().startswith("{"):
+        if ch == "{" or ch == "\n" and src[k : k + 2].strip().startswith("{"):
             break
         k += 1
     raise AssertionError(f"{name} 未能定位函数体")
@@ -198,6 +219,7 @@ def _strip_ts_comments(src: str) -> str:
 # ============================================================
 # A 组 · 后端真实形状（BUG-1 的行为基线；修复前本组即失败）
 # ============================================================
+
 
 class TestBackendByChapterRealShape:
     """用**真实 DB + 真实路由**坐实 ``stats.by_chapter`` 的形状。"""
@@ -218,13 +240,12 @@ class TestBackendByChapterRealShape:
         await _seed(db_conn)
         bc = (await _list_stats(db_conn))["by_chapter"]
         # 前端读取面（buildFactChapterStats / FactsChapterCoveragePanel）
-        for key in ("chapters", "totals", "by_fact_attr", "by_source_kind",
-                    "shared_count"):
+        for key in ("chapters", "totals", "by_fact_attr", "by_source_kind", "shared_count"):
             assert key in bc, f"by_chapter 缺 {key}（前端/未来消费方会静默取空）"
-        assert isinstance(bc["chapters"], list) and bc["chapters"], \
-            "by_chapter.chapters 必须是九章非空列表（章节数恒为 9）"
-        assert len(bc["chapters"]) == 9, \
-            f"九大章节应恒为 9 条，实得 {len(bc['chapters'])}"
+        assert (
+            isinstance(bc["chapters"], list) and bc["chapters"]
+        ), "by_chapter.chapters 必须是九章非空列表（章节数恒为 9）"
+        assert len(bc["chapters"]) == 9, f"九大章节应恒为 9 条，实得 {len(bc['chapters'])}"
 
     async def test_chapter_row_carries_every_field_frontend_reads(self, db_conn):
         """章条目上必须有前端逐项读取的字段（缺一即面板少一列）。"""
@@ -248,21 +269,18 @@ class TestBackendByChapterRealShape:
         """
         await _seed(db_conn)
         bc = (await _list_stats(db_conn))["by_chapter"]
-        assert all("shared_count" in r for r in bc["chapters"]), \
-            "每个章条目都必须带 shared_count（前端逐章读该键）"
+        assert all("shared_count" in r for r in bc["chapters"]), "每个章条目都必须带 shared_count（前端逐章读该键）"
 
         expected = _expected_shared_by_chapter()
         assert expected, "测试语料未命中任何共性规则 —— 断言会空转，先证伪语料"
         got = {r["key"]: int(r["shared_count"]) for r in bc["chapters"]}
         for key, n in expected.items():
-            assert got.get(key, 0) == n, \
-                f"章 {key} 的 shared_count 应为 {n}，实得 {got.get(key, 0)}"
+            assert got.get(key, 0) == n, f"章 {key} 的 shared_count 应为 {n}，实得 {got.get(key, 0)}"
         # 顶层合计（加法式不得破坏原键）
         from app.services.facts_classification import shared_chapters_for
-        total_expected = sum(
-            1 for name, value, _ in SEEDS if shared_chapters_for(name, value))
-        assert bc["shared_count"] == total_expected, \
-            f"顶层合计应为 {total_expected}，实得 {bc['shared_count']}"
+
+        total_expected = sum(1 for name, value, _ in SEEDS if shared_chapters_for(name, value))
+        assert bc["shared_count"] == total_expected, f"顶层合计应为 {total_expected}，实得 {bc['shared_count']}"
         # 不变式：逐章之和 ≥ 顶层合计（多章复用只会放大，不会缩小）
         assert sum(got.values()) >= bc["shared_count"]
 
@@ -271,12 +289,22 @@ class TestBackendByChapterRealShape:
         await _seed(db_conn)
         bc = (await _list_stats(db_conn))["by_chapter"]
         assert set(bc) == {
-            "chapters", "totals", "by_fact_attr", "by_source_kind",
+            "chapters",
+            "totals",
+            "by_fact_attr",
+            "by_source_kind",
             "shared_count",
         }, f"by_chapter 键集合被改动：{sorted(bc)}"
         assert set(bc["chapters"][0]) == {
-            "order", "key", "title", "count", "coverage", "total_fields",
-            "covered_fields", "missing_fields", "shared_count",
+            "order",
+            "key",
+            "title",
+            "count",
+            "coverage",
+            "total_fields",
+            "covered_fields",
+            "missing_fields",
+            "shared_count",
         }, f"章条目键集合被改动：{sorted(bc['chapters'][0])}"
 
     async def test_chapters_endpoint_shape_unchanged(self, db_conn):
@@ -295,13 +323,13 @@ class TestBackendByChapterRealShape:
         assert bc["totals"]["facts"] == len(SEEDS), bc["totals"]
         # 跨章合计必须等于种子条数（防某章漏计/重复计）
         assert sum(int(r["count"]) for r in bc["chapters"]) == len(SEEDS)
-        assert any(int(r["count"]) > 0 for r in bc["chapters"]), \
-            "九章全为 0 —— 计数链路断了（形状对但值恒 0）"
+        assert any(int(r["count"]) > 0 for r in bc["chapters"]), "九章全为 0 —— 计数链路断了（形状对但值恒 0）"
 
 
 # ============================================================
 # B 组 · 跨语言 parity（BUG-1 的复发防线）
 # ============================================================
+
 
 class TestFrontendBackendShapeParity:
     """三侧形状必须一致：后端真实响应 / 前端类型声明 / 前端读取判据。
@@ -314,48 +342,47 @@ class TestFrontendBackendShapeParity:
     def test_ts_by_chapter_declared_as_object_block(self):
         """types/facts.ts 必须声明 FactChapterStatBlock（对象），不得回退数组。"""
         src = _types_facts()
-        assert "export interface FactChapterStatBlock" in src, \
-            "types/facts.ts 缺 FactChapterStatBlock —— by_chapter 的对象形状无类型承载"
+        assert (
+            "export interface FactChapterStatBlock" in src
+        ), "types/facts.ts 缺 FactChapterStatBlock —— by_chapter 的对象形状无类型承载"
         assert re.search(
-            r"by_chapter\?:\s*FactChapterStatBlock\s*;", src), \
-            "FactStats.by_chapter 必须声明为 FactChapterStatBlock（B-1 复发形态）"
-        assert not re.search(r"by_chapter\?:\s*FactChapterStat\[\]", src), \
-            "by_chapter 不得再声明为裸数组 —— 那正是 BUG-1 的根因（契约与实现同错）"
+            r"by_chapter\?:\s*FactChapterStatBlock\s*;", src
+        ), "FactStats.by_chapter 必须声明为 FactChapterStatBlock（B-1 复发形态）"
+        assert not re.search(
+            r"by_chapter\?:\s*FactChapterStat\[\]", src
+        ), "by_chapter 不得再声明为裸数组 —— 那正是 BUG-1 的根因（契约与实现同错）"
 
     def test_ts_block_declares_backend_keys(self):
         """块类型必须覆盖后端真实下发的全部键（逐键比对 A 组读到的形状）。"""
         src = _types_facts()
-        m = re.search(
-            r"export interface FactChapterStatBlock \{(.*?)\n\}", src, re.S)
+        m = re.search(r"export interface FactChapterStatBlock \{(.*?)\n\}", src, re.S)
         assert m, "取不到 FactChapterStatBlock 定义"
         body = m.group(1)
-        for key in ("chapters", "totals", "by_fact_attr", "by_source_kind",
-                    "shared_count"):
-            assert re.search(rf"\b{key}\s*:", body), \
-                f"FactChapterStatBlock 缺后端真实下发的键 {key}"
+        for key in ("chapters", "totals", "by_fact_attr", "by_source_kind", "shared_count"):
+            assert re.search(rf"\b{key}\s*:", body), f"FactChapterStatBlock 缺后端真实下发的键 {key}"
 
     def test_ts_per_chapter_shared_count_declared(self):
         """逐章 shared_count 必须在章条目类型上（B-2：前端读该键）。"""
         src = _types_facts()
         m = re.search(r"export interface FactChapterStat \{(.*?)\n\}", src, re.S)
         assert m, "取不到 FactChapterStat 定义"
-        assert re.search(r"shared_count\?\s*:\s*number", m.group(1)), \
-            "FactChapterStat 缺 shared_count —— 前端「共性 N」列恒为 0"
+        assert re.search(
+            r"shared_count\?\s*:\s*number", m.group(1)
+        ), "FactChapterStat 缺 shared_count —— 前端「共性 N」列恒为 0"
 
     def test_page_reads_object_shape_not_array_guard(self):
         """前端读取判据必须是「先 .chapters 再兜底裸数组」，不得只有数组分支。"""
         body = _ts_fn_body(_page(), "buildFactChapterStats")
-        assert "bc?.chapters" in body, \
-            "buildFactChapterStats 未读取 by_chapter.chapters（B-3 复发形态）"
-        assert re.search(r"Array\.isArray\(bc\?\.chapters\)", body), \
-            "by_chapter.chapters 必须做数组性判定"
+        assert "bc?.chapters" in body, "buildFactChapterStats 未读取 by_chapter.chapters（B-3 复发形态）"
+        assert re.search(r"Array\.isArray\(bc\?\.chapters\)", body), "by_chapter.chapters 必须做数组性判定"
         # 对象分支必须是**主**路径：裸数组只作兜底（否则等于回退到缺陷形态）
         assert re.search(
-            r"Array\.isArray\(bc\)\s*\?\s*\(bc as unknown as FactChapterStat\[\]\)",
-            body), "裸数组兜底分支形态被改动（应保留为第二分支）"
+            r"Array\.isArray\(bc\)\s*\?\s*\(bc as unknown as FactChapterStat\[\]\)", body
+        ), "裸数组兜底分支形态被改动（应保留为第二分支）"
         assert re.search(
-            r":\s*\(Array\.isArray\(bc\?\.chapters\) \? bc\.chapters : \[\]\)", body), \
-            "对象分支必须是三元主路径（by_chapter.chapters）"
+            r":\s*(?:\(\s*)?Array\.isArray\(bc\?\.chapters\)\s*\?\s*bc\.chapters\s*:\s*\[\]\s*(?:\))?",
+            body,
+        ), "对象分支必须是三元主路径（by_chapter.chapters）"
 
     def test_no_stale_array_only_criterion_left(self):
         """反向锁：**代码**中不得残留「仅判 Array.isArray(stats.by_chapter)」旧判据。
@@ -363,68 +390,78 @@ class TestFrontendBackendShapeParity:
         ⚠️ 判据必须剥注释后再扫 —— 否则本文件/源码里解释该缺陷的说明文字会自咬。
         """
         code = _strip_ts_comments(_page())
-        assert "Array.isArray(stats?.by_chapter)" not in code, \
-            "旧判据 Array.isArray(stats?.by_chapter) 仍在代码中（对对象恒 false）"
+        assert (
+            "Array.isArray(stats?.by_chapter)" not in code
+        ), "旧判据 Array.isArray(stats?.by_chapter) 仍在代码中（对对象恒 false）"
         assert "Array.isArray(stats?.by_chapter) ? stats.by_chapter" not in code
 
     def test_facts_pagination_integer_guard(self):
         """分页页码必须取整并处理非有限值（B-4）。"""
         body = _ts_fn_body(_page(), "buildFactsPagination")
-        assert "Math.floor(offset / limit) + 1" in body, \
-            "页码必须 Math.floor 后再加 1（小数页码会让 Pagination 落在空页）"
-        assert "Number.isFinite" in body, \
-            "offset 必须做 isFinite 守卫（Math.min/max 对 NaN 恒返回 NaN）"
+        assert (
+            "Math.floor(offset / limit) + 1" in body
+        ), "页码必须 Math.floor 后再加 1（小数页码会让 Pagination 落在空页）"
+        assert "Number.isFinite" in body, "offset 必须做 isFinite 守卫（Math.min/max 对 NaN 恒返回 NaN）"
         # 反向锁：不得残留未取整的页码表达式。
         # ⚠️ 必须剥注释：函数体内说明该缺陷的注释逐字引用了旧形态 `offset/limit+1`，
         #    不剥注释则判据自咬（本轮实踩）。
         code = _strip_ts_comments(body)
         assert "/ limit + 1" not in code.replace(
-            "Math.floor(offset / limit) + 1", ""), \
-            "残留未取整的 `offset / limit + 1`（小数页码复发形态）"
+            "Math.floor(offset / limit) + 1", ""
+        ), "残留未取整的 `offset / limit + 1`（小数页码复发形态）"
 
     def test_checkpoint_schema_is_single_source_for_facts(self):
         """facts_generation 必须在单一事实源里（B-5：漂移根源）。"""
         from app.services import checkpoint_schema as cs
-        assert "facts_generation" in cs.CHECKPOINT_KINDS, \
-            "checkpoint_schema 缺 facts_generation ⇒ 生成的 TS 无 facts_result"
+
+        assert (
+            "facts_generation" in cs.CHECKPOINT_KINDS
+        ), "checkpoint_schema 缺 facts_generation ⇒ 生成的 TS 无 facts_result"
         kind, fields = cs.CHECKPOINT_KINDS["facts_generation"]
         assert kind == "facts_result"
         assert set(fields) == {
-            "event", "message", "segment_stats", "cross_conflicts",
-            "warnings", "group_count", "total_items",
+            "event",
+            "message",
+            "segment_stats",
+            "cross_conflicts",
+            "warnings",
+            "group_count",
+            "total_items",
         }, f"facts 白名单漂移：{sorted(fields)}"
-        assert "facts_result" in cs.CHECKPOINT_FIELD_TYPES, \
-            "facts_result 缺字段类型声明（生成的 TS 会全是 unknown）"
+        assert "facts_result" in cs.CHECKPOINT_FIELD_TYPES, "facts_result 缺字段类型声明（生成的 TS 会全是 unknown）"
 
     def test_write_side_whitelist_derived_not_handwritten(self):
         """写入侧筛选白名单必须**派生**自 schema，不得再手写第二份。"""
         from app.routers import sse_checkpoint as sc
         from app.services.checkpoint_schema import FACTS_CHECKPOINT_FIELDS
+
         assert set(sc._FACTS_CHECKPOINT_FIELDS) == set(FACTS_CHECKPOINT_FIELDS) - {
-            "event", "message"}, "sse_checkpoint 的筛选白名单与 schema 不一致"
+            "event",
+            "message",
+        }, "sse_checkpoint 的筛选白名单与 schema 不一致"
         src = inspect.getsource(sc)
         m = re.search(r"_FACTS_CHECKPOINT_FIELDS\s*=\s*(.+?)\n\n", src, re.S)
-        assert m and "SCHEMA_FACTS_CHECKPOINT_FIELDS" in m.group(1), \
-            "_FACTS_CHECKPOINT_FIELDS 必须由 schema 派生（手写副本会静默分叉）"
+        assert m and "SCHEMA_FACTS_CHECKPOINT_FIELDS" in m.group(
+            1
+        ), "_FACTS_CHECKPOINT_FIELDS 必须由 schema 派生（手写副本会静默分叉）"
 
     def test_router_whitelist_matches_schema(self):
         """路由侧 _CHECKPOINT_KINDS 与 schema 逐项相等（facts 族的 parity 断言）。"""
         from app.routers import sse_handlers as sh
         from app.services.checkpoint_schema import CHECKPOINT_KINDS
+
         for task_type in CHECKPOINT_KINDS:
-            assert task_type in sh._CHECKPOINT_KINDS, \
-                f"路由侧缺 {task_type}"
+            assert task_type in sh._CHECKPOINT_KINDS, f"路由侧缺 {task_type}"
             assert sh._CHECKPOINT_KINDS[task_type][0] == CHECKPOINT_KINDS[task_type][0]
             assert set(sh._CHECKPOINT_KINDS[task_type][1]) == set(
-                CHECKPOINT_KINDS[task_type][1]), \
-                f"{task_type} 白名单与单一事实源不一致"
+                CHECKPOINT_KINDS[task_type][1]
+            ), f"{task_type} 白名单与单一事实源不一致"
 
     def test_generated_ts_contains_facts_result(self):
         """生成的 checkpointSchema.ts 必须含 facts_result（前端不再内联手抄）。"""
         src = _read(os.path.join(FE, "types", "checkpointSchema.ts"))
         assert "export interface facts_result {" in src
-        assert re.search(r"facts_result\?:\s*facts_result\s*;", src), \
-            "TaskTerminalInfo 缺 facts_result 键"
+        assert re.search(r"facts_result\?:\s*facts_result\s*;", src), "TaskTerminalInfo 缺 facts_result 键"
         assert "AUTO-GENERATED" in src, "checkpointSchema.ts 必须是生成产物"
 
     def test_generated_ts_matches_generator_output_byte_exact(self):
@@ -436,41 +473,40 @@ class TestFrontendBackendShapeParity:
         这是本轮实测踩到的陷阱（不是缺陷，故不修生成器，只在判据里归一）。
         """
         from app.services.checkpoint_schema import generate_typescript_schema
+
         disk = _read(os.path.join(FE, "types", "checkpointSchema.ts"))
         gen = generate_typescript_schema()
-        assert gen.replace("\r\n", "\n") == disk.replace("\r\n", "\n"), \
-            "checkpointSchema.ts 与生成器输出不一致 —— 有人手改了生成物"
+        gen_norm = gen.replace("\r\n", "\n").rstrip("\n")
+        disk_norm = disk.replace("\r\n", "\n").rstrip("\n")
+        assert gen_norm == disk_norm, "checkpointSchema.ts 与生成器输出不一致（仅忽略文件末尾换行差异）"
 
     def test_page_uses_generated_facts_result_type(self):
         """页面必须引用生成的类型，不得再内联第三份手抄形状。"""
         src = _page()
-        assert 'from "../types/checkpointSchema"' in src, \
-            "页面未 import 生成的 checkpointSchema"
+        assert 'from "../types/checkpointSchema"' in src, "页面未 import 生成的 checkpointSchema"
         assert re.search(
-            r"import type \{ facts_result as GeneratedFactsResult \}", src), \
-            "页面未引用生成的 facts_result 类型（手抄副本会再次分叉）"
-        assert re.search(r"facts_result\?:\s*GeneratedFactsResult\s*;", src), \
-            "TaskTerminalInfo.facts_result 必须用生成类型"
+            r"import type \{ facts_result as GeneratedFactsResult \}", src
+        ), "页面未引用生成的 facts_result 类型（手抄副本会再次分叉）"
+        assert re.search(
+            r"facts_result\?:\s*GeneratedFactsResult\s*;", src
+        ), "TaskTerminalInfo.facts_result 必须用生成类型"
         # 旧的内联形状：segment_stats 逐字段声明
         assert not re.search(
-            r"facts_result\?:\s*\{\s*event\?:\s*string", src), \
-            "页面仍在内联 facts_result 形状（第三份手抄）"
+            r"facts_result\?:\s*\{\s*event\?:\s*string", src
+        ), "页面仍在内联 facts_result 形状（第三份手抄）"
 
     def test_fact_category_options_match_backend(self):
         """前端兜底分类表 ↔ 后端 CATEGORY_TITLES 逐项相等（F-5 缺失的 parity）。"""
         gf = _gf()
         backend = dict(gf.CATEGORY_TITLES)
         src = _page()
-        m = re.search(
-            r"const FACT_CATEGORY_OPTIONS[^=]*=\s*\[(.*?)\n\];", src, re.S)
+        m = re.search(r"const FACT_CATEGORY_OPTIONS[^=]*=\s*\[(.*?)\n\];", src, re.S)
         assert m, "取不到 FACT_CATEGORY_OPTIONS"
-        fe = dict(re.findall(
-            r"\{\s*value:\s*\"([^\"]+)\",\s*label:\s*\"([^\"]+)\"\s*\}",
-            m.group(1)))
+        fe = dict(re.findall(r"\{\s*value:\s*\"([^\"]+)\",\s*label:\s*\"([^\"]+)\"\s*\}", m.group(1)))
         assert fe, "FACT_CATEGORY_OPTIONS 解析为空"
         assert set(fe) == set(backend), (
-            f"分类键不一致：前端缺 {sorted(set(backend) - set(fe))} / "
-            f"前端多 {sorted(set(fe) - set(backend))}")
+            f"分类键不一致：前端缺 {sorted(set(backend) - set(fe))} / " f"前端多 {sorted(set(fe) - set(backend))}"
+        )
         diff = {k: (fe[k], backend[k]) for k in backend if fe[k] != backend[k]}
         assert not diff, f"分类中文名不一致：{diff}"
 
@@ -478,6 +514,7 @@ class TestFrontendBackendShapeParity:
 # ============================================================
 # C 组 · 零回归与字节体检
 # ============================================================
+
 
 class TestNoRegressionAndByteHealth:
     TOUCHED = [
@@ -503,13 +540,10 @@ class TestNoRegressionAndByteHealth:
         """per-chapter shared 聚合不得引入新的维度派生调用（零 AI、零额外查询）。"""
         src = _read(_gf().__file__)
         tree = ast.parse(src)
-        fn = next(n for n in tree.body
-                  if isinstance(n, ast.FunctionDef)
-                  and n.name == "_chapter_stats_for_items")
-        called = {ast.unparse(n.func) for n in ast.walk(fn)
-                  if isinstance(n, ast.Call)}
+        fn = next(n for n in tree.body if isinstance(n, ast.FunctionDef) and n.name == "_chapter_stats_for_items")
+        called = {ast.unparse(n.func) for n in ast.walk(fn) if isinstance(n, ast.Call)}
         # 该函数是纯聚合：不得出现 DB 读写或 AI 调用
-        assert not any(c.startswith(("db.", "await", "cursor")) for c in called), \
-            f"_chapter_stats_for_items 出现了非聚合调用：{sorted(called)}"
-        assert "classify" not in " ".join(called), \
-            "per-chapter 聚合不得触发维度派生（纯聚合即可算出）"
+        assert not any(
+            c.startswith(("db.", "await", "cursor")) for c in called
+        ), f"_chapter_stats_for_items 出现了非聚合调用：{sorted(called)}"
+        assert "classify" not in " ".join(called), "per-chapter 聚合不得触发维度派生（纯聚合即可算出）"

@@ -16,9 +16,11 @@
   D. 静态接线与配置面（sse_handlers 接线 / 提示词注册 / 场景登记 /
      配置默认值）。
 """
+
 import inspect
 import json
 import os
+import re
 from pathlib import Path
 
 import pytest
@@ -37,6 +39,7 @@ _REPO = Path(__file__).resolve().parents[2]
 
 
 # ---------- 工具 ----------
+
 
 class _FakeChat:
     """记录每次调用的 messages，按队列返回预置响应（或抛错）。"""
@@ -69,16 +72,18 @@ def _fact_rows():
 
 # ---------- A. select_fact_conflicts ----------
 
+
 def test_select_extracts_three_fact_conflict_types():
     """三类 error 级事实冲突必须全部选中（与 standard_report 值域对齐）。"""
-    report = {"issues": [
-        _conflict_issue("value_mismatch"),
-        _conflict_issue("value_conflict"),
-        _conflict_issue("model_conflict"),
-    ]}
+    report = {
+        "issues": [
+            _conflict_issue("value_mismatch"),
+            _conflict_issue("value_conflict"),
+            _conflict_issue("model_conflict"),
+        ]
+    }
     out = select_fact_conflicts(report)
-    assert [i["type"] for i in out] == [
-        "value_mismatch", "value_conflict", "model_conflict"]
+    assert [i["type"] for i in out] == ["value_mismatch", "value_conflict", "model_conflict"]
 
 
 def test_select_ignores_non_conflict_types():
@@ -87,13 +92,15 @@ def test_select_ignores_non_conflict_types():
     依据易标审计纪律「正文没有涉及某条事实时，不要报告缺失」——缺项≠冲突，
     报缺失会诱导 AI 补写编造值。
     """
-    report = {"issues": [
-        _conflict_issue("fact_value_missing", severity="warning"),
-        _conflict_issue("placeholder_mark"),          # error 但非事实冲突
-        _conflict_issue("fabricated_date"),           # error 但非事实冲突
-        _conflict_issue("fuzzy_expression", severity="warning"),
-        {"type": "value_mismatch", "severity": "warning"},  # 类型对但级别不对
-    ]}
+    report = {
+        "issues": [
+            _conflict_issue("fact_value_missing", severity="warning"),
+            _conflict_issue("placeholder_mark"),  # error 但非事实冲突
+            _conflict_issue("fabricated_date"),  # error 但非事实冲突
+            _conflict_issue("fuzzy_expression", severity="warning"),
+            {"type": "value_mismatch", "severity": "warning"},  # 类型对但级别不对
+        ]
+    }
     assert select_fact_conflicts(report) == []
 
 
@@ -107,18 +114,17 @@ def test_select_tolerates_bad_shapes():
 
 def test_conflict_types_tuple_is_frozen_contract():
     """FACT_CONFLICT_ISSUE_TYPES 是与 standard_report 的契约，禁止漂移。"""
-    assert FACT_CONFLICT_ISSUE_TYPES == (
-        "value_mismatch", "value_conflict", "model_conflict")
+    assert FACT_CONFLICT_ISSUE_TYPES == ("value_mismatch", "value_conflict", "model_conflict")
 
 
 # ---------- B. 与 standard_report 的真实集成 ----------
+
 
 def test_standard_report_conflict_is_selectable():
     """端到端：真实正文冲突 → standard_report → select 能选中。"""
     rows = _fact_rows()
     content = "本工程基坑开挖深度为 9.2m，采用灌注桩支护，详见计算书。"
-    report = standard_report(content, "precise", rows,
-                             section_id="s1", section_title="基坑开挖")
+    report = standard_report(content, "precise", rows, section_id="s1", section_title="基坑开挖")
     conflicts = select_fact_conflicts(report)
     assert len(conflicts) == 1
     assert conflicts[0]["type"] == "value_mismatch"
@@ -129,20 +135,20 @@ def test_clean_section_yields_no_conflicts():
     """正文与事实一致时 select 返回空（无冲突 → 调用方零 AI 成本）。"""
     rows = _fact_rows()
     content = "本工程基坑开挖深度为 8.6m，采用灌注桩支护，详见计算书。"
-    report = standard_report(content, "precise", rows,
-                             section_id="s1", section_title="基坑开挖")
+    report = standard_report(content, "precise", rows, section_id="s1", section_title="基坑开挖")
     assert select_fact_conflicts(report) == []
 
 
 # ---------- C. autofix_section_fact_conflicts ----------
+
 
 @pytest.mark.asyncio
 async def test_no_conflicts_means_no_ai_call():
     """无冲突 → attempted=False，一次 AI 调用都不发（成本中性）。"""
     chat = _FakeChat([])
     body, res = await autofix_section_fact_conflicts(
-        content="正文", standard="precise", fact_rows=_fact_rows(),
-        conflicts=[], section_id="s1", chat_fn=chat)
+        content="正文", standard="precise", fact_rows=_fact_rows(), conflicts=[], section_id="s1", chat_fn=chat
+    )
     assert body == "正文"
     assert res["attempted"] is False
     assert res["applied"] == 0
@@ -154,8 +160,8 @@ async def test_no_fact_text_means_no_ai_call():
     """事实行为空（渲染不出事实文本）→ 双保险，不发起调用。"""
     chat = _FakeChat([])
     body, res = await autofix_section_fact_conflicts(
-        content="正文", standard="precise", fact_rows=[],
-        conflicts=[_conflict_issue()], section_id="s1", chat_fn=chat)
+        content="正文", standard="precise", fact_rows=[], conflicts=[_conflict_issue()], section_id="s1", chat_fn=chat
+    )
     assert body == "正文"
     assert res["attempted"] is False
     assert chat.calls == []
@@ -165,15 +171,31 @@ async def test_no_fact_text_means_no_ai_call():
 async def test_unique_hit_replaces_conflicting_value():
     """old_text 唯一命中 → 精确替换，只动冲突处。"""
     content = "本工程基坑开挖深度为 9.2m，采用灌注桩支护。"
-    chat = _FakeChat([json.dumps({"edits": [{
-        "old_text": "基坑开挖深度为 9.2m",
-        "new_text": "基坑开挖深度为 8.6m",
-        "reason": "违反事实「开挖深度 8.6m」",
-    }]}, ensure_ascii=False)])
+    chat = _FakeChat(
+        [
+            json.dumps(
+                {
+                    "edits": [
+                        {
+                            "old_text": "基坑开挖深度为 9.2m",
+                            "new_text": "基坑开挖深度为 8.6m",
+                            "reason": "违反事实「开挖深度 8.6m」",
+                        }
+                    ]
+                },
+                ensure_ascii=False,
+            )
+        ]
+    )
     body, res = await autofix_section_fact_conflicts(
-        content=content, standard="precise", fact_rows=_fact_rows(),
-        conflicts=[_conflict_issue()], section_id="s1",
-        section_title="基坑开挖", chat_fn=chat)
+        content=content,
+        standard="precise",
+        fact_rows=_fact_rows(),
+        conflicts=[_conflict_issue()],
+        section_id="s1",
+        section_title="基坑开挖",
+        chat_fn=chat,
+    )
     assert body == "本工程基坑开挖深度为 8.6m，采用灌注桩支护。"
     assert res["attempted"] is True
     assert res["applied"] == 1
@@ -190,27 +212,44 @@ async def test_ambiguous_old_text_rejected_then_retried_with_feedback():
     重新定位 → 唯一命中成功。回灌消息必须包含「上次修复应用失败原因」。
     """
     content = "工期按 120 天组织。赶工阶段工期按 120 天考核，不得延误。"
-    first = json.dumps({"edits": [{
-        "old_text": "工期按 120 天",
-        "new_text": "工期按 90 天",
-        "reason": "违反事实「总工期 90 天」",
-    }]}, ensure_ascii=False)
-    second = json.dumps({"edits": [{
-        "old_text": "赶工阶段工期按 120 天考核",
-        "new_text": "赶工阶段工期按 90 天考核",
-        "reason": "违反事实「总工期 90 天」",
-    }]}, ensure_ascii=False)
+    first = json.dumps(
+        {
+            "edits": [
+                {
+                    "old_text": "工期按 120 天",
+                    "new_text": "工期按 90 天",
+                    "reason": "违反事实「总工期 90 天」",
+                }
+            ]
+        },
+        ensure_ascii=False,
+    )
+    second = json.dumps(
+        {
+            "edits": [
+                {
+                    "old_text": "赶工阶段工期按 120 天考核",
+                    "new_text": "赶工阶段工期按 90 天考核",
+                    "reason": "违反事实「总工期 90 天」",
+                }
+            ]
+        },
+        ensure_ascii=False,
+    )
     chat = _FakeChat([first, second])
     rows = [("工期安排", "项目总工期", "项目总工期 90 天", 1.0, "plan")]
     body, res = await autofix_section_fact_conflicts(
-        content=content, standard="precise", fact_rows=rows,
-        conflicts=[_conflict_issue()], section_id="s1",
-        section_title="施工进度计划", chat_fn=chat)
+        content=content,
+        standard="precise",
+        fact_rows=rows,
+        conflicts=[_conflict_issue()],
+        section_id="s1",
+        section_title="施工进度计划",
+        chat_fn=chat,
+    )
     assert len(chat.calls) == 2
     # 第二轮必须带上第一轮的失败原因（定向修复，不是重新问）
-    feedback = "\n".join(
-        str(m.get("content") or "") for m in chat.calls[1]
-        if m.get("role") == "user")
+    feedback = "\n".join(str(m.get("content") or "") for m in chat.calls[1] if m.get("role") == "user")
     assert "上次修复应用失败原因" in feedback
     assert "ambiguous" in feedback
     assert body == "工期按 120 天组织。赶工阶段工期按 90 天考核，不得延误。"
@@ -225,8 +264,13 @@ async def test_empty_edits_is_safety_valve():
     chat = _FakeChat(['{"edits": []}'])
     rows = [("模板工程", "模板选材", "模板采用 18mm 多层板", 1.0, "technique")]
     body, res = await autofix_section_fact_conflicts(
-        content=content, standard="precise", fact_rows=rows,
-        conflicts=[_conflict_issue()], section_id="s1", chat_fn=chat)
+        content=content,
+        standard="precise",
+        fact_rows=rows,
+        conflicts=[_conflict_issue()],
+        section_id="s1",
+        chat_fn=chat,
+    )
     assert body == content
     assert res["attempted"] is True
     assert res["applied"] == 0
@@ -239,8 +283,13 @@ async def test_chat_failure_is_fail_soft():
     content = "本工程基坑开挖深度为 9.2m。"
     chat = _FakeChat([RuntimeError("boom"), RuntimeError("boom2")])
     body, res = await autofix_section_fact_conflicts(
-        content=content, standard="precise", fact_rows=_fact_rows(),
-        conflicts=[_conflict_issue()], section_id="s1", chat_fn=chat)
+        content=content,
+        standard="precise",
+        fact_rows=_fact_rows(),
+        conflicts=[_conflict_issue()],
+        section_id="s1",
+        chat_fn=chat,
+    )
     assert body == content
     assert res["attempted"] is True
     assert res["applied"] == 0
@@ -256,22 +305,27 @@ async def test_partial_apply_then_giveup_keeps_applied():
     成功替换，不因第二轮放弃而倒退。
     """
     content = "总工期 120 天。质保期 5 年。"
-    first = json.dumps({"edits": [
-        {"old_text": "总工期 120 天", "new_text": "总工期 90 天",
-         "reason": "违反事实「总工期 90 天」"},
-        {"old_text": "不存在的原文片段xyz", "new_text": "质保期 3 年",
-         "reason": "违反事实「质保期 3 年」"},
-    ]}, ensure_ascii=False)
+    first = json.dumps(
+        {
+            "edits": [
+                {"old_text": "总工期 120 天", "new_text": "总工期 90 天", "reason": "违反事实「总工期 90 天」"},
+                {"old_text": "不存在的原文片段xyz", "new_text": "质保期 3 年", "reason": "违反事实「质保期 3 年」"},
+            ]
+        },
+        ensure_ascii=False,
+    )
     chat = _FakeChat([first, '{"edits": []}'])
     rows = [("工期安排", "项目总工期", "项目总工期 90 天", 1.0, "plan")]
     body, res = await autofix_section_fact_conflicts(
-        content=content, standard="precise", fact_rows=rows,
+        content=content,
+        standard="precise",
+        fact_rows=rows,
         conflicts=[_conflict_issue(), _conflict_issue()],
-        section_id="s1", chat_fn=chat)
+        section_id="s1",
+        chat_fn=chat,
+    )
     assert len(chat.calls) == 2
-    feedback = "\n".join(
-        str(m.get("content") or "") for m in chat.calls[1]
-        if m.get("role") == "user")
+    feedback = "\n".join(str(m.get("content") or "") for m in chat.calls[1] if m.get("role") == "user")
     assert "上次修复应用失败原因" in feedback
     assert "not_found" in feedback
     assert body == "总工期 90 天。质保期 5 年。"
@@ -284,21 +338,30 @@ async def test_partial_apply_then_giveup_keeps_applied():
 async def test_malformed_json_then_repaired_by_feedback_round():
     """首轮返回非 JSON → 不放弃，第二轮带反馈重试（有界）。"""
     content = "总工期 120 天。"
-    chat = _FakeChat([
-        "模型输出了一段解释而不是 JSON",
-        json.dumps({"edits": [{
-            "old_text": "总工期 120 天", "new_text": "总工期 90 天",
-            "reason": "违反事实"}]}, ensure_ascii=False),
-    ])
+    chat = _FakeChat(
+        [
+            "模型输出了一段解释而不是 JSON",
+            json.dumps(
+                {"edits": [{"old_text": "总工期 120 天", "new_text": "总工期 90 天", "reason": "违反事实"}]},
+                ensure_ascii=False,
+            ),
+        ]
+    )
     rows = [("工期安排", "项目总工期", "项目总工期 90 天", 1.0, "plan")]
     body, res = await autofix_section_fact_conflicts(
-        content=content, standard="precise", fact_rows=rows,
-        conflicts=[_conflict_issue()], section_id="s1", chat_fn=chat)
+        content=content,
+        standard="precise",
+        fact_rows=rows,
+        conflicts=[_conflict_issue()],
+        section_id="s1",
+        chat_fn=chat,
+    )
     assert body == "总工期 90 天。"
     assert res["applied"] == 1
 
 
 # ---------- D. 静态接线与配置面 ----------
+
 
 def _src(path: str) -> str:
     with open(path, encoding="utf-8") as f:
@@ -308,14 +371,19 @@ def _src(path: str) -> str:
 def test_prompts_registered_and_renderable():
     """两组提示词已注册且全部变量可渲染（无残留占位符）。"""
     from app.services.ai.prompts._registry import _ALL_PROMPTS, render
+
     for key in ("content_fact_autofix_system", "content_fact_autofix_user"):
         assert key in _ALL_PROMPTS, f"提示词未注册: {key}"
     sys_text = render("content_fact_autofix_system")
     assert "old_text" in sys_text and "唯一" in sys_text
     user_text = render(
         "content_fact_autofix_user",
-        global_facts="事实", section_id="s1", section_title="标题",
-        generation_standard="precise", conflicts="[]")
+        global_facts="事实",
+        section_id="s1",
+        section_title="标题",
+        generation_standard="precise",
+        conflicts="[]",
+    )
     assert "{global_facts}" not in user_text
     assert "{conflicts}" not in user_text
 
@@ -362,14 +430,15 @@ def test_outline_wiring_present():
 
 # ---------- E. R77b 终态汇总（accumulate / 载荷 / schema / 前端） ----------
 
+
 def test_empty_summary_keys_match_contract():
     """空汇总键集与 FACT_AUTOFIX_SUMMARY_KEYS 逐字一致（防手写副本漂移）。"""
     from app.services.content_fact_autofix import (
         FACT_AUTOFIX_SUMMARY_KEYS,
         empty_fact_autofix_summary,
     )
-    assert FACT_AUTOFIX_SUMMARY_KEYS == (
-        "sections", "fixed_sections", "conflicts", "applied", "rejected")
+
+    assert FACT_AUTOFIX_SUMMARY_KEYS == ("sections", "fixed_sections", "conflicts", "applied", "rejected")
     assert set(empty_fact_autofix_summary()) == set(FACT_AUTOFIX_SUMMARY_KEYS)
     assert all(v == 0 for v in empty_fact_autofix_summary().values())
 
@@ -377,37 +446,42 @@ def test_empty_summary_keys_match_contract():
 def test_accumulate_counts_attempted_only():
     """只有 attempted 的报告进汇总；无冲突章节（无该键）原样返回。"""
     from app.services.content_fact_autofix import accumulate_fact_autofix
-    base = empty = {"sections": 0, "fixed_sections": 0, "conflicts": 0,
-                    "applied": 0, "rejected": 0}
+
+    base = empty = {"sections": 0, "fixed_sections": 0, "conflicts": 0, "applied": 0, "rejected": 0}
     # 无 fact_autofix 键 / 非 dict / None → 一字不加
     for rep in ({"issues": []}, None, "x", {}):
         assert accumulate_fact_autofix(base, rep) == empty
     # attempted=False（无事实文本等早退）也不进汇总
-    out = accumulate_fact_autofix(
-        base, {"fact_autofix": {"attempted": False, "applied": 3}})
+    out = accumulate_fact_autofix(base, {"fact_autofix": {"attempted": False, "applied": 3}})
     assert out == empty
 
 
 def test_accumulate_full_and_partial():
     """修复成功 / 尝试未成 / 部分拒绝三类形态的计数口径。"""
     from app.services.content_fact_autofix import accumulate_fact_autofix
-    s0 = {"sections": 0, "fixed_sections": 0, "conflicts": 0,
-          "applied": 0, "rejected": 0}
-    s1 = accumulate_fact_autofix(s0, {"fact_autofix": {
-        "attempted": True, "applied": 2, "rejected": [], "conflicts": 3,
-        "attempts": 1}})
-    assert s1 == {"sections": 1, "fixed_sections": 1, "conflicts": 3,
-                  "applied": 2, "rejected": 0}
+
+    s0 = {"sections": 0, "fixed_sections": 0, "conflicts": 0, "applied": 0, "rejected": 0}
+    s1 = accumulate_fact_autofix(
+        s0, {"fact_autofix": {"attempted": True, "applied": 2, "rejected": [], "conflicts": 3, "attempts": 1}}
+    )
+    assert s1 == {"sections": 1, "fixed_sections": 1, "conflicts": 3, "applied": 2, "rejected": 0}
     # attempted 但 applied=0（AI 判定无冲突 / 定位失败）：sections+1、
     # fixed_sections+0、rejected 计入 —— 转人工信号不静默
-    s2 = accumulate_fact_autofix(s1, {"fact_autofix": {
-        "attempted": True, "applied": 0,
-        "rejected": [{"reason": "ambiguous"}], "conflicts": 1, "attempts": 2}})
-    assert s2 == {"sections": 2, "fixed_sections": 1, "conflicts": 4,
-                  "applied": 2, "rejected": 1}
+    s2 = accumulate_fact_autofix(
+        s1,
+        {
+            "fact_autofix": {
+                "attempted": True,
+                "applied": 0,
+                "rejected": [{"reason": "ambiguous"}],
+                "conflicts": 1,
+                "attempts": 2,
+            }
+        },
+    )
+    assert s2 == {"sections": 2, "fixed_sections": 1, "conflicts": 4, "applied": 2, "rejected": 1}
     # 不改入参（纯函数）
-    assert s0 == {"sections": 0, "fixed_sections": 0, "conflicts": 0,
-                  "applied": 0, "rejected": 0}
+    assert s0 == {"sections": 0, "fixed_sections": 0, "conflicts": 0, "applied": 0, "rejected": 0}
     # 坏形状汇总（None / 非 dict）按空汇总起步
     assert accumulate_fact_autofix(None, None)["sections"] == 0
 
@@ -415,11 +489,11 @@ def test_accumulate_full_and_partial():
 def test_accumulate_tolerates_dirty_types():
     """脏值（字符串数字 / rejected 非列表）不得抛，按 0 计。"""
     from app.services.content_fact_autofix import accumulate_fact_autofix
-    out = accumulate_fact_autofix({}, {"fact_autofix": {
-        "attempted": True, "applied": "2", "conflicts": None,
-        "rejected": "x"}})
-    assert out == {"sections": 1, "fixed_sections": 1, "conflicts": 0,
-                   "applied": 2, "rejected": 0}
+
+    out = accumulate_fact_autofix(
+        {}, {"fact_autofix": {"attempted": True, "applied": "2", "conflicts": None, "rejected": "x"}}
+    )
+    assert out == {"sections": 1, "fixed_sections": 1, "conflicts": 0, "applied": 2, "rejected": 0}
 
 
 def test_summary_wiring_in_sse_handlers():
@@ -430,10 +504,13 @@ def test_summary_wiring_in_sse_handlers():
     payloads = _src("app/routers/_sse_content_payloads.py")
     assert "empty_fact_autofix_summary()" in src
     assert "accumulate_fact_autofix(_fa_sum, _std_rep)" in src
-    assert "completed_payload['fact_autofix_summary'] = _fa_sum" in src
-    assert "'fact_autofix_summary': ckpt.get(\"fact_autofix_summary\", {})" in payloads
+    assert re.search(r"completed_payload\[['\"]fact_autofix_summary['\"]\]\s*=\s*_fa_sum", src)
+    assert re.search(
+        r"""['"]fact_autofix_summary['"]:\s*ckpt\.get\("fact_autofix_summary", \{\}\)""",
+        payloads,
+    )
     # 白名单双副本（sse 侧 + schema 侧）必须同步 —— 漏一处则断线重挂丢字段
-    assert '"fact_autofix_summary")),' in src
+    assert re.search(r'"fact_autofix_summary",\s*\),\s*\),', src)
     schema = _src("app/services/checkpoint_schema.py")
     assert '"fact_autofix_summary",' in schema
     assert '"fact_autofix_summary": "dict",' in schema
@@ -449,6 +526,7 @@ def test_checkpoint_kinds_parity_and_ts_regenerated():
     """
     import app.routers.sse_handlers as sh
     from app.services import checkpoint_schema as cs
+
     sse_fields = sh._CHECKPOINT_KINDS["content_generation"][1]
     schema_fields = cs.CHECKPOINT_KINDS["content_generation"][1]
     assert "fact_autofix_summary" in sse_fields
@@ -464,11 +542,20 @@ def test_frontend_hint_pure_functions_present():
     assert "export function normalizeFactAutofixSummary(" in ce
     assert "export function factAutofixHint(" in ce
     assert "export type FactAutofixSummary" in ce
-    for rel in ("frontend/src/hooks/useContentGeneration.ts",
-                "frontend/src/pages/SchemeWorkbenchPage.tsx"):
-        src = _src(str(_REPO / rel))
-        assert "factAutofixHint(evt.fact_autofix_summary)" in src, (
-            f"{rel} 未消费事实冲突修复汇总")
+    hook = _src(str(_REPO / "frontend/src/hooks/useContentGeneration.ts"))
+    assert "factAutofixHint(evt.fact_autofix_summary)" in hook, "hooks/useContentGeneration.ts 未消费事实冲突修复汇总"
+    # R176（2026-11-04）：页面消费点随拆分下沉到 schemeWorkbench/（递归含 tabs/），
+    # 固定读 facade 会在下一次下沉时静默漏检。
+    pages = _REPO / "frontend" / "src" / "pages"
+    page_side = [pages / "SchemeWorkbenchPage.tsx"]
+    page_side += sorted(pages.glob("schemeWorkbench/**/*.ts"))
+    page_side += sorted(pages.glob("schemeWorkbench/**/*.tsx"))
+    split_files = page_side[1:]
+    assert split_files, f"拆分目录未被递归扫描到：{pages / 'schemeWorkbench'}"
+    consumers = [
+        str(p) for p in page_side if p.exists() and "factAutofixHint(evt.fact_autofix_summary)" in _src(str(p))
+    ]
+    assert consumers, "工作台（facade + schemeWorkbench/ 递归）未消费事实冲突修复汇总"
 
 
 def test_fa_sum_rebinding_has_nonlocal():
@@ -484,12 +571,12 @@ def test_fa_sum_rebinding_has_nonlocal():
     累加器家族成员，就必须出现在 nonlocal 声明里。
     """
     import ast
+
     tree = ast.parse(_src("app/routers/sse_handlers.py"))
 
     def _find_fn(node, name):
         for n in ast.walk(node):
-            if isinstance(n, (ast.FunctionDef, ast.AsyncFunctionDef)) \
-                    and n.name == name:
+            if isinstance(n, (ast.FunctionDef, ast.AsyncFunctionDef)) and n.name == name:
                 return n
         return None
 
@@ -502,14 +589,13 @@ def test_fa_sum_rebinding_has_nonlocal():
     for n in ast.walk(gen_one):
         if isinstance(n, ast.Nonlocal):
             declared.update(n.names)
-    rebound = {n.id for n in ast.walk(gen_one)
-               if isinstance(n, ast.Name) and isinstance(n.ctx, ast.Store)}
+    rebound = {n.id for n in ast.walk(gen_one) if isinstance(n, ast.Name) and isinstance(n.ctx, ast.Store)}
     # 累加器家族：闭包外层初始化 + 逐章更新。重绑定任一成员都必须 nonlocal。
     for acc in ("_std_sum", "_fa_sum", "_stat", "_prog", "_ckpt"):
         if acc in rebound:
             assert acc in declared, (
-                f"gen_one 重绑定 {acc} 必须声明 nonlocal（闭包重绑定陷阱："
-                "编译期判局部变量 → UnboundLocalError）")
+                f"gen_one 重绑定 {acc} 必须声明 nonlocal（闭包重绑定陷阱：" "编译期判局部变量 → UnboundLocalError）"
+            )
     assert "_fa_sum" in rebound, "gen_one 内未见 _fa_sum 累加（接线被掏空？）"
     assert "_fa_sum" in declared
 
@@ -520,6 +606,7 @@ def test_outline_functions_importable_and_pure():
         relevant_first_rows,
         render_outline_chapter_facts,
     )
+
     rows = [
         ("项目概况", "工程名称", "某某项目", 1.0, "overview"),
         ("监测方案", "预警值", "监测预警值 30mm", 1.0, "safety"),

@@ -24,6 +24,7 @@ E 【F6 / P3】「名称/取值怎么解」与「作用域谓词」各有多份�
    ignored_out=…)``）全部**加法式**：默认值下既有调用方与既有单测逐字不变，
    旧前端不消费新键也不报错。
 """
+
 from __future__ import annotations
 
 import inspect
@@ -52,11 +53,11 @@ from app.services.facts_extractor import (  # noqa: E402
 )
 
 # ------------------------------------------------------------ 用例常量与基建 --
-NAME = "基坑开挖深度"        # chapter=overview；值决定 fact_attr
+NAME = "基坑开挖深度"  # chapter=overview；值决定 fact_attr
 CAT = "tech_param"
-OLD_Q = "按设计要求"          # qualitative
-NEW_Q = "8.5m"               # quantitative
-STALE_CH, STALE_ATTR = "basis", "norm"   # 故意写入的「过期维度」（派生真值不同）
+OLD_Q = "按设计要求"  # qualitative
+NEW_Q = "8.5m"  # quantitative
+STALE_CH, STALE_ATTR = "basis", "norm"  # 故意写入的「过期维度」（派生真值不同）
 
 
 @pytest.fixture
@@ -64,47 +65,77 @@ async def dbf(db_conn):
     """内存库 + 一个项目 / 一个方案，返回 (db, project_id, scheme_id)。"""
     pid, sid = uuid.uuid4().hex, uuid.uuid4().hex
     await db_conn.execute("INSERT INTO projects(id,name) VALUES(?,?)", (pid, "p"))
-    await db_conn.execute(
-        "INSERT INTO schemes(id,project_id,name) VALUES(?,?,?)", (sid, pid, "s"))
+    await db_conn.execute("INSERT INTO schemes(id,project_id,name) VALUES(?,?,?)", (sid, pid, "s"))
     await db_conn.commit()
     return db_conn, pid, sid
 
 
-async def _ins(db, *, fid=None, pid="p1", sid="", name=NAME, value=OLD_Q,
-               category=CAT, source_file="测试录入", is_resolved=True,
-               is_simulated=False, conflict=None):
+async def _ins(
+    db,
+    *,
+    fid=None,
+    pid="p1",
+    sid="",
+    name=NAME,
+    value=OLD_Q,
+    category=CAT,
+    source_file="测试录入",
+    is_resolved=True,
+    is_simulated=False,
+    conflict=None,
+):
     """走模块自身的单一 INSERT 出口建行（列清单不会漂移），再按需覆盖维度列。"""
     fid = fid or uuid.uuid4().hex
     await db.execute(
         gf.MANUAL_FACT_INSERT_SQL,
         gf._manual_fact_row(
-            fid=fid, pid=pid, sid=sid, group_id=uuid.uuid4().hex,
+            fid=fid,
+            pid=pid,
+            sid=sid,
+            group_id=uuid.uuid4().hex,
             group_title=gf.CATEGORY_TITLES.get(category, "") or "技术参数",
-            name=name, content=gf._build_fact_content(name, value, is_simulated),
-            category=category, source_file=source_file,
-            is_simulated=is_simulated, confidence=1.0, is_resolved=is_resolved))
+            name=name,
+            content=gf._build_fact_content(name, value, is_simulated),
+            category=category,
+            source_file=source_file,
+            is_simulated=is_simulated,
+            confidence=1.0,
+            is_resolved=is_resolved,
+        ),
+    )
     if conflict is not None:
         await db.execute(
             "UPDATE global_facts SET has_conflict=1, conflict_keys=? WHERE id=?",
-            (json.dumps(conflict, ensure_ascii=False), fid))
+            (json.dumps(conflict, ensure_ascii=False), fid),
+        )
     await db.commit()
     return fid
 
 
 async def _bake_dims(db, fid, chapter, fact_attr):
     """模拟「提取期已落库的维度」（读路径库值优先，过期不会被自动纠正）。"""
-    await db.execute(
-        "UPDATE global_facts SET chapter=?, fact_attr=? WHERE id=?",
-        (chapter, fact_attr, fid))
+    await db.execute("UPDATE global_facts SET chapter=?, fact_attr=? WHERE id=?", (chapter, fact_attr, fid))
     await db.commit()
 
 
-async def _get(db, fid, cols=("title", "content", "chapter", "fact_attr",
-                              "is_simulated", "is_resolved", "has_conflict",
-                              "conflict_keys", "confidence", "is_stale",
-                              "scheme_id")):
-    cur = await db.execute(
-        "SELECT %s FROM global_facts WHERE id=?" % ",".join(cols), (fid,))
+async def _get(
+    db,
+    fid,
+    cols=(
+        "title",
+        "content",
+        "chapter",
+        "fact_attr",
+        "is_simulated",
+        "is_resolved",
+        "has_conflict",
+        "conflict_keys",
+        "confidence",
+        "is_stale",
+        "scheme_id",
+    ),
+):
+    cur = await db.execute("SELECT %s FROM global_facts WHERE id=?" % ",".join(cols), (fid,))
     r = await cur.fetchone()
     return dict(r) if r else None
 
@@ -117,6 +148,7 @@ async def _count(db, sql, params=()):
 def _ast_call_names(src: str) -> list[str]:
     """按 AST 取函数源码里的**真实调用点**名单（注释/文档字符串不计）。"""
     import ast
+
     names: list[str] = []
     for node in ast.walk(ast.parse(src)):
         if isinstance(node, ast.Call):
@@ -136,6 +168,7 @@ def _module_code_strings(module) -> list[str]:
     """
     import ast
     import inspect as _inspect
+
     tree = ast.parse(_inspect.getsource(module))
     doc_ids: set[int] = set()
     holders = (ast.Module, ast.ClassDef, ast.FunctionDef, ast.AsyncFunctionDef)
@@ -143,14 +176,16 @@ def _module_code_strings(module) -> list[str]:
         if isinstance(node, holders):
             body = getattr(node, "body", [])
             first = body[0] if body else None
-            if (isinstance(first, ast.Expr)
-                    and isinstance(first.value, ast.Constant)
-                    and isinstance(first.value.value, str)):
+            if (
+                isinstance(first, ast.Expr)
+                and isinstance(first.value, ast.Constant)
+                and isinstance(first.value.value, str)
+            ):
                 doc_ids.add(id(first.value))
     return [
-        n.value for n in ast.walk(tree)
-        if isinstance(n, ast.Constant) and isinstance(n.value, str)
-        and id(n) not in doc_ids
+        n.value
+        for n in ast.walk(tree)
+        if isinstance(n, ast.Constant) and isinstance(n.value, str) and id(n) not in doc_ids
     ]
 
 
@@ -158,9 +193,8 @@ def _name_uses(module, sym: str) -> int:
     """模块内某符号的 AST 引用次数（赋值/定义名与读取名都计入）。"""
     import ast
     import inspect as _inspect
-    return sum(
-        1 for n in ast.walk(ast.parse(_inspect.getsource(module)))
-        if isinstance(n, ast.Name) and n.id == sym)
+
+    return sum(1 for n in ast.walk(ast.parse(_inspect.getsource(module))) if isinstance(n, ast.Name) and n.id == sym)
 
 
 # ============================================================================ A
@@ -172,27 +206,28 @@ class TestResolveConflictRederives:
         fid = await _ins(db, pid=pid, sid=sid, value=OLD_Q)
         await _bake_dims(db, fid, STALE_CH, STALE_ATTR)
 
-        out = await gf.resolve_conflict(
-            fact_id=fid, data=gf.ResolveConflictRequest(value=NEW_Q), scheme_id=sid, db=db)
+        out = await gf.resolve_conflict(fact_id=fid, data=gf.ResolveConflictRequest(value=NEW_Q), scheme_id=sid, db=db)
         assert out["ok"] is True
 
         r = await _get(db, fid)
         assert r["fact_attr"] == classify_fact_attr(NAME, NEW_Q) == "quantitative"
-        assert r["chapter"] == classify_chapter_from_text(
-            NAME, NEW_Q, CAT, "", normalize_key(NAME))
+        assert r["chapter"] == classify_chapter_from_text(NAME, NEW_Q, CAT, "", normalize_key(NAME))
         # 旧维度（basis / norm）必须被覆盖，而不是继续「库值优先」
         assert r["fact_attr"] != STALE_ATTR and r["chapter"] != STALE_CH
 
     async def test_keep_current_value_preserves_manual_classification(self, dbf):
         """值未变（前端「保留当前值」）→ 只清矛盾，人工归类不得被重算冲掉。"""
         db, pid, sid = dbf
-        fid = await _ins(db, pid=pid, sid=sid, value=OLD_Q,
-                         conflict=[{"value": "按设计要求", "source": "A.docx",
-                                    "confidence": 0.8, "is_simulated": False}])
+        fid = await _ins(
+            db,
+            pid=pid,
+            sid=sid,
+            value=OLD_Q,
+            conflict=[{"value": "按设计要求", "source": "A.docx", "confidence": 0.8, "is_simulated": False}],
+        )
         await _bake_dims(db, fid, STALE_CH, STALE_ATTR)
 
-        await gf.resolve_conflict(
-            fact_id=fid, data=gf.ResolveConflictRequest(value=OLD_Q), scheme_id=sid, db=db)
+        await gf.resolve_conflict(fact_id=fid, data=gf.ResolveConflictRequest(value=OLD_Q), scheme_id=sid, db=db)
 
         r = await _get(db, fid)
         assert r["chapter"] == STALE_CH and r["fact_attr"] == STALE_ATTR
@@ -203,13 +238,16 @@ class TestResolveConflictRederives:
         但维度仍要按新值重算 —— 两者互不干扰。"""
         db, pid, sid = dbf
         sim_value = "12.5m"
-        fid = await _ins(db, pid=pid, sid=sid, value=OLD_Q,
-                         conflict=[{"value": sim_value, "source": "AI 推测",
-                                    "confidence": 0.3, "is_simulated": True}])
+        fid = await _ins(
+            db,
+            pid=pid,
+            sid=sid,
+            value=OLD_Q,
+            conflict=[{"value": sim_value, "source": "AI 推测", "confidence": 0.3, "is_simulated": True}],
+        )
         await _bake_dims(db, fid, STALE_CH, STALE_ATTR)
 
-        await gf.resolve_conflict(
-            fact_id=fid, data=gf.ResolveConflictRequest(value=sim_value), scheme_id=sid, db=db)
+        await gf.resolve_conflict(fact_id=fid, data=gf.ResolveConflictRequest(value=sim_value), scheme_id=sid, db=db)
 
         r = await _get(db, fid)
         assert r["is_simulated"] == 1 and r["is_resolved"] == 0
@@ -223,15 +261,17 @@ class TestResolveConflictRederives:
         ``is_resolved`` 的值；这条是那次错误的定向判别。）
         """
         db, pid, sid = dbf
-        fid = await _ins(db, pid=pid, sid=sid, value=OLD_Q,
-                         conflict=[{"value": NEW_Q, "source": "B.docx",
-                                    "confidence": 0.9, "is_simulated": False}])
-        await db.execute(
-            "UPDATE global_facts SET is_stale=1, confidence=0.2 WHERE id=?", (fid,))
+        fid = await _ins(
+            db,
+            pid=pid,
+            sid=sid,
+            value=OLD_Q,
+            conflict=[{"value": NEW_Q, "source": "B.docx", "confidence": 0.9, "is_simulated": False}],
+        )
+        await db.execute("UPDATE global_facts SET is_stale=1, confidence=0.2 WHERE id=?", (fid,))
         await db.commit()
 
-        await gf.resolve_conflict(
-            fact_id=fid, data=gf.ResolveConflictRequest(value=NEW_Q), scheme_id=sid, db=db)
+        await gf.resolve_conflict(fact_id=fid, data=gf.ResolveConflictRequest(value=NEW_Q), scheme_id=sid, db=db)
 
         r = await _get(db, fid)
         assert r["content"] == gf._build_fact_content(NAME, NEW_Q, False)
@@ -245,8 +285,7 @@ class TestResolveConflictRederives:
         fid = await _ins(db, pid=pid, sid="", value=OLD_Q)
         await _bake_dims(db, fid, STALE_CH, STALE_ATTR)
 
-        await gf.resolve_conflict(
-            fact_id=fid, data=gf.ResolveConflictRequest(value=NEW_Q), scheme_id=sid, db=db)
+        await gf.resolve_conflict(fact_id=fid, data=gf.ResolveConflictRequest(value=NEW_Q), scheme_id=sid, db=db)
 
         r = await _get(db, fid)
         assert r["scheme_id"] == "" and r["fact_attr"] == "quantitative"
@@ -275,7 +314,7 @@ class TestChapterViewParity:
 
     async def test_fact_attr_matches_list_facts(self, dbf):
         db, pid, sid = dbf
-        await _ins(db, pid=pid, sid=sid, value=NEW_Q)   # 维度列留空 → 读路径派生
+        await _ins(db, pid=pid, sid=sid, value=NEW_Q)  # 维度列留空 → 读路径派生
 
         ch = await gf.list_facts_by_chapters(scheme_id=sid, project_id="", db=db)
         li = await gf.list_facts(scheme_id=sid, project_id="", db=db)
@@ -290,20 +329,17 @@ class TestChapterViewParity:
     async def test_distributions_identical_across_two_read_paths(self, dbf):
         db, pid, sid = dbf
         await _ins(db, pid=pid, sid=sid, value=NEW_Q)
-        await _ins(db, pid=pid, sid=sid, name="工程地点", value="北京市朝阳区",
-                   category="basic")
+        await _ins(db, pid=pid, sid=sid, name="工程地点", value="北京市朝阳区", category="basic")
 
         ch = await gf.list_facts_by_chapters(scheme_id=sid, project_id="", db=db)
         li = await gf.list_facts(scheme_id=sid, project_id="", db=db)
         assert ch["by_fact_attr"] == li["stats"]["by_chapter"]["by_fact_attr"]
-        assert (ch["by_source_kind"]
-                == li["stats"]["by_chapter"]["by_source_kind"])
+        assert ch["by_source_kind"] == li["stats"]["by_chapter"]["by_source_kind"]
 
     async def test_covered_fields_sees_the_fact_name(self, dbf):
         """旧实现行内无 ``name`` 键 → 只写在事实名里的字段永远算「未覆盖」。"""
         db, pid, sid = dbf
-        await _ins(db, pid=pid, sid=sid, name="工程地点", value="北京市朝阳区",
-                   category="basic")
+        await _ins(db, pid=pid, sid=sid, name="工程地点", value="北京市朝阳区", category="basic")
 
         ch = await gf.list_facts_by_chapters(scheme_id=sid, project_id="", db=db)
         item, chapter = _find_item(ch, "工程地点")
@@ -322,8 +358,7 @@ class TestChapterViewParity:
     async def test_shared_facts_appear_in_chapter_view(self, dbf):
         """作用域一致性：章节视图与列表都必须含项目共享事实。"""
         db, pid, sid = dbf
-        await _ins(db, pid=pid, sid="", name="项目经理", value="张伟",
-                   category="personnel")
+        await _ins(db, pid=pid, sid="", name="项目经理", value="张伟", category="personnel")
         ch = await gf.list_facts_by_chapters(scheme_id=sid, project_id="", db=db)
         item, _ = _find_item(ch, "项目经理")
         assert item is not None
@@ -347,42 +382,45 @@ class TestAdjustScopeAndAtomicity:
 
     async def test_shared_fact_is_updateable(self, dbf):
         db, pid, sid = dbf
-        fid = await _ins(db, pid=pid, sid="", value=OLD_Q)   # 项目共享
+        fid = await _ins(db, pid=pid, sid="", value=OLD_Q)  # 项目共享
 
         out = await gf.adjust_facts(
             gf.AdjustRequest(
                 instruction="把基坑开挖深度改成 8.5m",
-                scheme_id=sid, apply=True,
-                operations=[{"op": "update", "fact_id": fid, "value": NEW_Q}]),
-            db=db)
+                scheme_id=sid,
+                apply=True,
+                operations=[{"op": "update", "fact_id": fid, "value": NEW_Q}],
+            ),
+            db=db,
+        )
 
         assert out["applied"]["updated"] == 1
         assert out["ignored_count"] == 0
-        r = await _get(db, fid, cols=("content", "scheme_id", "chapter",
-                                      "fact_attr"))
+        r = await _get(db, fid, cols=("content", "scheme_id", "chapter", "fact_attr"))
         assert NEW_Q in r["content"]
-        assert r["scheme_id"] == ""                    # 没有被「改归属」
-        assert r["fact_attr"] == "quantitative"        # 顺带重派生（同一出口）
+        assert r["scheme_id"] == ""  # 没有被「改归属」
+        assert r["fact_attr"] == "quantitative"  # 顺带重派生（同一出口）
 
     async def test_duplicate_add_is_dropped_with_reason(self, dbf):
         db, pid, sid = dbf
-        fid = await _ins(db, pid=pid, sid="", value=OLD_Q)   # 共享同名事实
+        fid = await _ins(db, pid=pid, sid="", value=OLD_Q)  # 共享同名事实
 
         out = await gf.adjust_facts(
             gf.AdjustRequest(
                 instruction="新增基坑开挖深度",
-                scheme_id=sid, apply=True,
-                operations=[{"op": "add", "name": NAME, "value": "9.9m",
-                             "category": CAT}]),
-            db=db)
+                scheme_id=sid,
+                apply=True,
+                operations=[{"op": "add", "name": NAME, "value": "9.9m", "category": CAT}],
+            ),
+            db=db,
+        )
 
         assert out["applied"]["added"] == 0
         assert out["ignored_count"] == 1
         assert out["ignored"][0]["reason"] == "duplicate_fact_key"
         assert out["ignored"][0]["op"] == "add"
         # 绝不允许出现「共享一份 + 方案私有第二份」双注入
-        n = await _count(db, "SELECT COUNT(*) FROM global_facts WHERE fact_key=?",
-                         (normalize_key(NAME),))
+        n = await _count(db, "SELECT COUNT(*) FROM global_facts WHERE fact_key=?", (normalize_key(NAME),))
         assert n == 1
 
     async def test_hallucinated_id_is_reported_not_silent(self, dbf):
@@ -393,10 +431,12 @@ class TestAdjustScopeAndAtomicity:
         out = await gf.adjust_facts(
             gf.AdjustRequest(
                 instruction="改一条不存在的事实",
-                scheme_id=sid, apply=True,
-                operations=[{"op": "update", "fact_id": ghost, "value": "3m"},
-                            {"op": "delete", "fact_id": ghost}]),
-            db=db)
+                scheme_id=sid,
+                apply=True,
+                operations=[{"op": "update", "fact_id": ghost, "value": "3m"}, {"op": "delete", "fact_id": ghost}],
+            ),
+            db=db,
+        )
 
         assert out["applied"] == {"updated": 0, "added": 0, "deleted": 0}
         reasons = [i["reason"] for i in out["ignored"]]
@@ -418,19 +458,20 @@ class TestAdjustScopeAndAtomicity:
             await gf.adjust_facts(
                 gf.AdjustRequest(
                     instruction="改值并新增",
-                    scheme_id=sid, apply=True,
+                    scheme_id=sid,
+                    apply=True,
                     operations=[
                         {"op": "update", "fact_id": fid, "value": NEW_Q},
-                        {"op": "add", "name": "触发异常项", "value": "1",
-                         "category": CAT},
-                    ]),
-                db=db)
+                        {"op": "add", "name": "触发异常项", "value": "1", "category": CAT},
+                    ],
+                ),
+                db=db,
+            )
 
         r = await _get(db, fid, cols=("content", "chapter", "fact_attr"))
-        assert OLD_Q in r["content"]          # update 已回滚
-        assert r["fact_attr"] == ""           # 派生也未被部分提交
-        n = await _count(db, "SELECT COUNT(*) FROM global_facts WHERE title=?",
-                         ("触发异常项",))
+        assert OLD_Q in r["content"]  # update 已回滚
+        assert r["fact_attr"] == ""  # 派生也未被部分提交
+        n = await _count(db, "SELECT COUNT(*) FROM global_facts WHERE title=?", ("触发异常项",))
         assert n == 0
 
     async def test_response_contract_is_additive(self, dbf):
@@ -439,13 +480,16 @@ class TestAdjustScopeAndAtomicity:
         out = await gf.adjust_facts(
             gf.AdjustRequest(
                 instruction="预览不改库",
-                scheme_id=sid, apply=False,
-                operations=[{"op": "update", "fact_id": fid, "value": NEW_Q}]),
-            db=db)
+                scheme_id=sid,
+                apply=False,
+                operations=[{"op": "update", "fact_id": fid, "value": NEW_Q}],
+            ),
+            db=db,
+        )
         # 旧契约键全部在位（旧前端不消费新键也不报错）
         for k in ("ok", "operations", "summary", "applied"):
             assert k in out
-        assert out["applied"] is None         # apply=False 行为不变
+        assert out["applied"] is None  # apply=False 行为不变
         assert out["ignored"] == [] and out["ignored_count"] == 0
         r = await _get(db, fid, cols=("content",))
         assert OLD_Q in r["content"]
@@ -454,17 +498,19 @@ class TestAdjustScopeAndAtomicity:
         """不传新 kwargs ⇒ 与旧实现逐字一致（不做同名去重、不登记理由）。"""
         fid = "f-legacy"
         ops, _summary = gf._validate_adjust_ops(
-            {"operations": [{"op": "add", "name": NAME, "value": "1",
-                             "category": CAT},
-                            {"op": "update", "fact_id": fid, "value": "2"},
-                            "not-a-dict"]},
-            {fid})
-        assert [o["op"] for o in ops] == ["add", "update"]   # add 未被去重拦下
+            {
+                "operations": [
+                    {"op": "add", "name": NAME, "value": "1", "category": CAT},
+                    {"op": "update", "fact_id": fid, "value": "2"},
+                    "not-a-dict",
+                ]
+            },
+            {fid},
+        )
+        assert [o["op"] for o in ops] == ["add", "update"]  # add 未被去重拦下
 
         with_ignored = []
-        gf._validate_adjust_ops(
-            {"operations": ["still-bad"]}, set(),
-            ignored_out=with_ignored)
+        gf._validate_adjust_ops({"operations": ["still-bad"]}, set(), ignored_out=with_ignored)
         assert with_ignored == [{"op": "unknown", "reason": "op_not_object"}]
 
     def test_adjust_uses_scope_exit(self):
@@ -476,29 +522,44 @@ class TestPersistExtractionCrossNamespace:
     """F5：方案级提取必须与项目共享层同 key 去重，但绝不删共享行。"""
 
     async def _shared_confirmed(self, db, pid):
-        return await _ins(db, pid=pid, sid="", name="项目经理", value="张伟",
-                          category="personnel")
+        return await _ins(db, pid=pid, sid="", name="项目经理", value="张伟", category="personnel")
 
     async def test_conflicting_value_writes_back_to_shared_row(self, dbf):
         db, pid, sid = dbf
         fid = await self._shared_confirmed(db, pid)
 
-        await persist_extraction(ExtractionResult(groups=[FactGroup(
-            title="人员角色", category="personnel",
-            items=[FactItem(name="项目经理", value="李强", key="project_manager",
-                            category="personnel", source="new.docx")],
-        )], total_items=1), db, pid, sid)
+        await persist_extraction(
+            ExtractionResult(
+                groups=[
+                    FactGroup(
+                        title="人员角色",
+                        category="personnel",
+                        items=[
+                            FactItem(
+                                name="项目经理",
+                                value="李强",
+                                key="project_manager",
+                                category="personnel",
+                                source="new.docx",
+                            )
+                        ],
+                    )
+                ],
+                total_items=1,
+            ),
+            db,
+            pid,
+            sid,
+        )
 
         # 不再插第二份方案私有的同名事实
-        n = await _count(
-            db, "SELECT COUNT(*) FROM global_facts WHERE fact_key='project_manager'")
+        n = await _count(db, "SELECT COUNT(*) FROM global_facts WHERE fact_key='project_manager'")
         assert n == 1
-        r = await _get(db, fid, cols=("content", "has_conflict", "is_stale",
-                                      "conflict_keys", "is_resolved"))
+        r = await _get(db, fid, cols=("content", "has_conflict", "is_stale", "conflict_keys", "is_resolved"))
         assert "张伟" in r["content"]
         assert r["has_conflict"] == 1 and r["is_stale"] == 1
         assert "李强" in r["conflict_keys"]
-        assert r["is_resolved"] == 1          # 已确认事实不得被打回待审核
+        assert r["is_resolved"] == 1  # 已确认事实不得被打回待审核
 
     async def test_same_value_clears_stale_without_conflict(self, dbf):
         db, pid, sid = dbf
@@ -506,14 +567,23 @@ class TestPersistExtractionCrossNamespace:
         await db.execute("UPDATE global_facts SET is_stale=1 WHERE id=?", (fid,))
         await db.commit()
 
-        await persist_extraction(ExtractionResult(groups=[FactGroup(
-            title="人员角色", category="personnel",
-            items=[FactItem(name="项目经理", value="张伟", key="project_manager",
-                            category="personnel")],
-        )], total_items=1), db, pid, sid)
+        await persist_extraction(
+            ExtractionResult(
+                groups=[
+                    FactGroup(
+                        title="人员角色",
+                        category="personnel",
+                        items=[FactItem(name="项目经理", value="张伟", key="project_manager", category="personnel")],
+                    )
+                ],
+                total_items=1,
+            ),
+            db,
+            pid,
+            sid,
+        )
 
-        n = await _count(
-            db, "SELECT COUNT(*) FROM global_facts WHERE fact_key='project_manager'")
+        n = await _count(db, "SELECT COUNT(*) FROM global_facts WHERE fact_key='project_manager'")
         assert n == 1
         r = await _get(db, fid, cols=("is_stale", "has_conflict"))
         assert r["is_stale"] == 0 and r["has_conflict"] == 0
@@ -521,33 +591,58 @@ class TestPersistExtractionCrossNamespace:
     async def test_unconfirmed_shared_row_is_never_deleted(self, dbf):
         """共享行只参与去重/冲突登记；删除候选必须仍只来自方案私有行。"""
         db, pid, sid = dbf
-        shared = await _ins(db, pid=pid, sid="", name="项目经理", value="王五",
-                            category="personnel", source_file="AI提取",
-                            is_resolved=False)
+        shared = await _ins(
+            db,
+            pid=pid,
+            sid="",
+            name="项目经理",
+            value="王五",
+            category="personnel",
+            source_file="AI提取",
+            is_resolved=False,
+        )
 
-        await persist_extraction(ExtractionResult(groups=[FactGroup(
-            title="人员角色", category="personnel",
-            items=[FactItem(name="安全员", value="赵六", key="safety_officer",
-                            category="personnel")],
-        )], total_items=1), db, pid, sid)
+        await persist_extraction(
+            ExtractionResult(
+                groups=[
+                    FactGroup(
+                        title="人员角色",
+                        category="personnel",
+                        items=[FactItem(name="安全员", value="赵六", key="safety_officer", category="personnel")],
+                    )
+                ],
+                total_items=1,
+            ),
+            db,
+            pid,
+            sid,
+        )
 
         assert await _get(db, shared, cols=("id",)) is not None
-        assert await _count(db, "SELECT COUNT(*) FROM global_facts WHERE id=?",
-                            (shared,)) == 1
+        assert await _count(db, "SELECT COUNT(*) FROM global_facts WHERE id=?", (shared,)) == 1
 
     async def test_project_scope_extraction_unchanged(self, dbf):
         """scheme_id='' 的项目级提取：走原有单查询分支，行为零变化。"""
         db, pid, sid = dbf
         fid = await self._shared_confirmed(db, pid)
 
-        await persist_extraction(ExtractionResult(groups=[FactGroup(
-            title="人员角色", category="personnel",
-            items=[FactItem(name="项目经理", value="李强", key="project_manager",
-                            category="personnel")],
-        )], total_items=1), db, pid, "")
+        await persist_extraction(
+            ExtractionResult(
+                groups=[
+                    FactGroup(
+                        title="人员角色",
+                        category="personnel",
+                        items=[FactItem(name="项目经理", value="李强", key="project_manager", category="personnel")],
+                    )
+                ],
+                total_items=1,
+            ),
+            db,
+            pid,
+            "",
+        )
 
-        n = await _count(
-            db, "SELECT COUNT(*) FROM global_facts WHERE fact_key='project_manager'")
+        n = await _count(db, "SELECT COUNT(*) FROM global_facts WHERE fact_key='project_manager'")
         assert n == 1
         r = await _get(db, fid, cols=("content", "has_conflict"))
         assert "张伟" in r["content"] and r["has_conflict"] == 1
@@ -555,13 +650,22 @@ class TestPersistExtractionCrossNamespace:
     async def test_scheme_without_project_still_works(self, dbf):
         """project_id 为空（历史/未绑定）时不得因新增共享查询而报错或改行为。"""
         db, pid, sid = dbf
-        await persist_extraction(ExtractionResult(groups=[FactGroup(
-            title="人员角色", category="personnel",
-            items=[FactItem(name="项目经理", value="钱七", key="project_manager",
-                            category="personnel")],
-        )], total_items=1), db, "", sid)
-        assert await _count(
-            db, "SELECT COUNT(*) FROM global_facts WHERE scheme_id=?", (sid,)) == 1
+        await persist_extraction(
+            ExtractionResult(
+                groups=[
+                    FactGroup(
+                        title="人员角色",
+                        category="personnel",
+                        items=[FactItem(name="项目经理", value="钱七", key="project_manager", category="personnel")],
+                    )
+                ],
+                total_items=1,
+            ),
+            db,
+            "",
+            sid,
+        )
+        assert await _count(db, "SELECT COUNT(*) FROM global_facts WHERE scheme_id=?", (sid,)) == 1
 
 
 # ============================================================================ E
@@ -569,25 +673,23 @@ class TestSingleSourceExits:
     """F6：名称/取值解析与作用域谓词各只留一份实现。"""
 
     def test_name_value_three_shapes(self):
-        assert gf._fact_name_value(
-            {"title": "外行名", "content": "- **基坑开挖深度**: 12.5m"}
-        ) == ("基坑开挖深度", "12.5m")
+        assert gf._fact_name_value({"title": "外行名", "content": "- **基坑开挖深度**: 12.5m"}) == (
+            "基坑开挖深度",
+            "12.5m",
+        )
         # 模拟值标记必须整段剥离（含 ⚠ 与变体写法），不残留脏值
         sim = gf._build_fact_content("基坑开挖深度", "12.5m", True)
         name, value = gf._fact_name_value({"title": "x", "content": sim})
         assert name == "基坑开挖深度" and value == "12.5m"
         assert "⚠" not in value and "模拟值" not in value
         # 非粗体但含「名:值」→ 名称仍以 title 列为准，取值按统一出口回解
-        assert gf._fact_name_value({"title": "备注", "content": "基坑深度：12.5m"}) \
-            == ("备注", "12.5m")
+        assert gf._fact_name_value({"title": "备注", "content": "基坑深度：12.5m"}) == ("备注", "12.5m")
         # 整段散文（回解不出取值）→ 不把它当名称，value 为空由调用方兜底 content
-        assert gf._fact_name_value({"title": "备注", "content": "基坑深度 12.5m"}) \
-            == ("备注", "")
+        assert gf._fact_name_value({"title": "备注", "content": "基坑深度 12.5m"}) == ("备注", "")
         assert gf._fact_name_value({"title": "空值", "content": ""}) == ("空值", "")
 
     def test_scope_where_three_branches_byte_equal_legacy(self):
-        legacy = (" WHERE (scheme_id=? OR (project_id=? "
-                  "AND (scheme_id='' OR scheme_id IS NULL)))")
+        legacy = " WHERE (scheme_id=? OR (project_id=? " "AND (scheme_id='' OR scheme_id IS NULL)))"
         assert gf._fact_scope_where("s", "p") == (legacy, ["s", "p"])
         assert gf._fact_scope_where("s", "") == (" WHERE scheme_id=?", ["s"])
         assert gf._fact_scope_where("", "p") == (" WHERE project_id=?", ["p"])
@@ -616,14 +718,12 @@ class TestSingleSourceExits:
         （副本回流即红；仅排除注释行，源码里「不再持有副本」的说明注释引用了反例）。
         """
         from app.services import facts_extractor as _fe
+
         fe_src = inspect.getsource(_fe)
-        assert fe_src.count("_RE_BOLD_FACT_LINE") == 2   # 定义 + 唯一引用
+        assert fe_src.count("_RE_BOLD_FACT_LINE") == 2  # 定义 + 唯一引用
         assert "_RE_BOLD_FACT_LINE" in inspect.getsource(_fe.fact_name_value)
-        gf_code = "\n".join(
-            ln for ln in inspect.getsource(gf).splitlines()
-            if not ln.strip().startswith("#"))
-        assert "_RE_BOLD_FACT_LINE" not in gf_code, (
-            "routers 侧回流了粗体行正则副本 —— 同一判据两份实现复活")
+        gf_code = "\n".join(ln for ln in inspect.getsource(gf).splitlines() if not ln.strip().startswith("#"))
+        assert "_RE_BOLD_FACT_LINE" not in gf_code, "routers 侧回流了粗体行正则副本 —— 同一判据两份实现复活"
         assert "_fact_name_value(" in inspect.getsource(gf.list_facts)
 
     def test_rederive_exit_is_the_only_applier(self):
@@ -634,12 +734,17 @@ class TestSingleSourceExits:
         assert "classify_fact_attr(" in exit_src
 
     def test_rederive_returns_empty_when_inputs_unchanged(self):
-        assert gf._rederive_dimension_columns(
-            old_name=NAME, new_name=NAME, old_value=OLD_Q, new_value=OLD_Q,
-            old_category=CAT, new_category=CAT) == []
-        got = dict(gf._rederive_dimension_columns(
-            old_name=NAME, new_name=NAME, old_value=OLD_Q, new_value=NEW_Q,
-            old_category=CAT, new_category=CAT))
+        assert (
+            gf._rederive_dimension_columns(
+                old_name=NAME, new_name=NAME, old_value=OLD_Q, new_value=OLD_Q, old_category=CAT, new_category=CAT
+            )
+            == []
+        )
+        got = dict(
+            gf._rederive_dimension_columns(
+                old_name=NAME, new_name=NAME, old_value=OLD_Q, new_value=NEW_Q, old_category=CAT, new_category=CAT
+            )
+        )
         assert set(got) == {"chapter", "fact_attr"}
         assert got["fact_attr"] == classify_fact_attr(NAME, NEW_Q)
 
@@ -653,8 +758,7 @@ class TestFrontendContractParity:
     **可用 Python 判定**的契约放到这里锁，而不是留给跑不动的前端用例。
     """
 
-    _PAGE = os.path.join(os.path.dirname(APP), "frontend", "src", "pages",
-                         "SchemeWorkbenchPage.tsx")
+    _PAGE = os.path.join(os.path.dirname(APP), "frontend", "src", "pages", "SchemeWorkbenchPage.tsx")
 
     def _page_src(self) -> str:
         # 大文件拆分后：契约常量迁入 pages/schemeWorkbench/（factsShared.ts 等），
@@ -662,20 +766,30 @@ class TestFrontendContractParity:
         root = os.path.dirname(self._PAGE)
         parts = [open(self._PAGE, encoding="utf-8").read()]
         wb = os.path.join(root, "schemeWorkbench")
-        for fn in sorted(os.listdir(wb)):
-            if fn.endswith((".ts", ".tsx")):
-                with open(os.path.join(wb, fn), encoding="utf-8") as f:
-                    parts.append(f.read())
+        assert os.path.isdir(wb), f"拆分目录缺失：{wb}"
+        # R176：拆分仍在继续，非递归 listdir 会漏掉 tabs/ —— 递归 + 非空兜底。
+        wb_files = []
+        for dirpath, _dirs, fnames in os.walk(wb):
+            wb_files += [os.path.join(dirpath, n) for n in sorted(fnames) if n.endswith((".ts", ".tsx"))]
+        assert wb_files, f"拆分目录未被递归扫描到（0 个 ts/tsx）：{wb}"
+        for p in wb_files:
+            with open(p, encoding="utf-8") as f:
+                parts.append(f.read())
         return "\n".join(parts)
 
     def test_ignore_reason_enum_matches_backend(self):
         import re
+
         backend_reasons = set(
-            re.findall(r'_ignore\(\s*[^,]+,\s*"([a-z_]+)"',
-                       inspect.getsource(gf._validate_adjust_ops)))
+            re.findall(r'_ignore\(\s*[^,]+,\s*"([a-z_]+)"', inspect.getsource(gf._validate_adjust_ops))
+        )
         assert backend_reasons == {
-            "op_not_object", "unknown_fact_id", "no_effective_change",
-            "missing_name_or_value", "duplicate_fact_key", "unknown_op",
+            "op_not_object",
+            "unknown_fact_id",
+            "no_effective_change",
+            "missing_name_or_value",
+            "duplicate_fact_key",
+            "unknown_op",
         }
         src = self._page_src()
         block = src.split("FACTS_ADJUST_IGNORE_REASONS = [", 1)[1].split("]", 1)[0]
@@ -688,10 +802,10 @@ class TestFrontendContractParity:
 
     def test_frontend_consumes_the_new_fields(self):
         src = self._page_src()
-        assert "ignored?: FactsAdjustIgnoredItem[]" in src        # 契约字段在位
-        assert "normalizeFactsAdjustPlan(data)" in src            # 预览走归一出口
-        assert "normalizeFactsAdjustPlan(res)" in src             # 应用回传也归一
-        assert "data?.ignored" in src                             # api 层不再丢弃
+        assert "ignored?: FactsAdjustIgnoredItem[]" in src  # 契约字段在位
+        assert "normalizeFactsAdjustPlan(data)" in src  # 预览走归一出口
+        assert "normalizeFactsAdjustPlan(res)" in src  # 应用回传也归一
+        assert "data?.ignored" in src  # api 层不再丢弃
         # 旧接线（apply 返回 void）必须仍然合法：归一函数要能吞掉 undefined
         assert "Promise<Partial<FactsAdjustPlanShape> | void>" in src
 
@@ -758,6 +872,7 @@ class TestSchemeProjectIdSingleSource:
         import sqlite3
 
         from app.services.facts_extractor import row_field
+
         # Mapping：只认键名（旧 prow[0] 在这一形下必炸）
         assert row_field({"project_id": "p1"}, "project_id") == "p1"
         assert row_field({"project_id": None}, "project_id") == ""
@@ -781,25 +896,26 @@ class TestSchemeProjectIdSingleSource:
     async def test_service_exit_accepts_mapping_rows(self):
         """服务层反查：dict 行必须取到真实 pid（旧实现吞成 ""）。"""
         from app.services.facts_extractor import resolve_scheme_project_id
-        assert await resolve_scheme_project_id(
-            _StubDB([("FROM schemes", [{"project_id": "p1"}])]), "s1") == "p1"
+
+        assert await resolve_scheme_project_id(_StubDB([("FROM schemes", [{"project_id": "p1"}])]), "s1") == "p1"
 
     async def test_service_exit_accepts_sequence_rows(self):
         """序列行不得回退 —— 生产就是这一形（aiosqlite.Row）。"""
         from app.services.facts_extractor import resolve_scheme_project_id
-        assert await resolve_scheme_project_id(
-            _StubDB([("FROM schemes", [("p1",)])]), "s1") == "p1"
+
+        assert await resolve_scheme_project_id(_StubDB([("FROM schemes", [("p1",)])]), "s1") == "p1"
 
     async def test_service_exit_missing_row_and_missing_scheme(self):
         from app.services.facts_extractor import resolve_scheme_project_id
+
         assert await resolve_scheme_project_id(_StubDB([]), "s1") == ""
         assert await resolve_scheme_project_id(_StubDB([]), "") == ""
 
     async def test_service_exit_cursor_none_still_fail_soft(self):
         """R13：游标为空时服务层仍回 ""（不抛），由调用方收窄作用域。"""
         from app.services.facts_extractor import resolve_scheme_project_id
-        assert await resolve_scheme_project_id(
-            _StubDB([], none_cursor=True), "s1") == ""
+
+        assert await resolve_scheme_project_id(_StubDB([], none_cursor=True), "s1") == ""
 
     # ------------------------------------------------------------ 路由层三态
     async def test_router_exit_is_tristate_not_two_in_one(self, dbf):
@@ -808,9 +924,7 @@ class TestSchemeProjectIdSingleSource:
         assert await gf._scheme_project_id(db, sid) == pid
 
         sid_nop = uuid.uuid4().hex
-        await db.execute(
-            "INSERT INTO schemes(id,project_id,name) VALUES(?,?,?)",
-            (sid_nop, "", "未绑定项目的方案"))
+        await db.execute("INSERT INTO schemes(id,project_id,name) VALUES(?,?,?)", (sid_nop, "", "未绑定项目的方案"))
         await db.commit()
         assert await gf._scheme_project_id(db, sid_nop) == ""
         assert await gf._scheme_project_id(db, "no-such-scheme") is None
@@ -818,18 +932,17 @@ class TestSchemeProjectIdSingleSource:
     async def test_router_exit_cursor_none_raises_503_not_404(self):
         """DB 瞬时故障不得被降级成「方案不存在」（本文件既有 R13 口径）。"""
         from fastapi import HTTPException
+
         with pytest.raises(HTTPException) as ei:
             await gf._scheme_project_id(_StubDB([], none_cursor=True), "s1")
         assert ei.value.status_code == 503
 
     async def test_router_exit_on_mapping_rows(self):
         """路由层出口同样不吃行形态（dict 行 → 真实 pid）。"""
-        assert await gf._scheme_project_id(
-            _StubDB([("FROM schemes", [{"project_id": "p9"}])]), "s1") == "p9"
+        assert await gf._scheme_project_id(_StubDB([("FROM schemes", [{"project_id": "p9"}])]), "s1") == "p9"
 
     # ---------------------------- 行为后果：共享事实的缓存失效链不能静默跳过
-    async def test_empty_project_id_invalidates_nothing_at_all(
-            self, dbf, monkeypatch):
+    async def test_empty_project_id_invalidates_nothing_at_all(self, dbf, monkeypatch):
         """反向锁死「为什么空 pid 是真问题」：一次缓存失效都不发生。"""
         db, pid, sid = dbf
         calls: list[str] = []
@@ -845,8 +958,7 @@ class TestSchemeProjectIdSingleSource:
         await gf._invalidate_fact_scope_cache(db, "", pid)
         assert calls == [sid], "同一库同一时刻，有 pid 就该失效到项目下方案"
 
-    async def test_confirm_shared_fact_invalidates_project_scope(
-            self, dbf, monkeypatch):
+    async def test_confirm_shared_fact_invalidates_project_scope(self, dbf, monkeypatch):
         """F7 端到端①：确认一条项目共享事实 → 失效出口必须拿到真实 project_id。"""
         db, pid, sid = dbf
         fid = await _ins(db, pid=pid, sid="", name="项目经理", value="张伟")
@@ -861,33 +973,35 @@ class TestSchemeProjectIdSingleSource:
         # 旧实现：位置索引取值抛错 / 二次查询 → 传 ("", "") → 静默一个都不失效
         assert seen == [("", pid)], seen
 
-    async def test_resolve_conflict_shared_fact_invalidates_project_scope(
-            self, dbf, monkeypatch):
+    async def test_resolve_conflict_shared_fact_invalidates_project_scope(self, dbf, monkeypatch):
         """F7 端到端②：裁决共享事实的冲突，同样要按项目作用域失效。"""
         db, pid, sid = dbf
-        fid = await _ins(db, pid=pid, sid="", value=OLD_Q,
-                         conflict=[{"value": NEW_Q, "source": "B.docx",
-                                    "confidence": 0.9, "is_simulated": False}])
+        fid = await _ins(
+            db,
+            pid=pid,
+            sid="",
+            value=OLD_Q,
+            conflict=[{"value": NEW_Q, "source": "B.docx", "confidence": 0.9, "is_simulated": False}],
+        )
         seen: list[tuple] = []
 
         async def _spy(d, scheme_id, project_id=""):
             seen.append((scheme_id, project_id))
 
         monkeypatch.setattr(gf, "_invalidate_fact_scope_cache", _spy)
-        await gf.resolve_conflict(
-            fact_id=fid, data=gf.ResolveConflictRequest(value=NEW_Q), scheme_id=sid, db=db)
+        await gf.resolve_conflict(fact_id=fid, data=gf.ResolveConflictRequest(value=NEW_Q), scheme_id=sid, db=db)
         assert seen == [("", pid)], seen
 
-    async def test_shared_fact_scope_check_still_rejects_other_project(
-            self, dbf):
+    async def test_shared_fact_scope_check_still_rejects_other_project(self, dbf):
         """换出口不得放宽归属闸门：别的项目的方案仍被 409 拦下。"""
         from fastapi import HTTPException
+
         db, pid, sid = dbf
         fid = await _ins(db, pid=pid, sid="", name="项目经理", value="张伟")
         other_sid = uuid.uuid4().hex
         await db.execute(
-            "INSERT INTO schemes(id,project_id,name) VALUES(?,?,?)",
-            (other_sid, "other-project", "别的项目的方案"))
+            "INSERT INTO schemes(id,project_id,name) VALUES(?,?,?)", (other_sid, "other-project", "别的项目的方案")
+        )
         await db.commit()
         with pytest.raises(HTTPException) as ei:
             await gf._assert_fact_in_scheme_scope(db, fid, other_sid)
@@ -899,18 +1013,19 @@ class TestSchemeProjectIdSingleSource:
     # ---------------------------------------------------------------- 静态锁
     def test_scheme_project_sql_is_single_source(self):
         from app.services import facts_extractor as fe
+
         fe_blob = "\n".join(_module_code_strings(fe))
-        assert fe_blob.count("SELECT project_id FROM schemes") == 1, \
-            "反查 SQL 只允许出现在 SCHEME_PROJECT_ID_SQL 定义处"
+        assert (
+            fe_blob.count("SELECT project_id FROM schemes") == 1
+        ), "反查 SQL 只允许出现在 SCHEME_PROJECT_ID_SQL 定义处"
         gf_blob = "\n".join(_module_code_strings(gf))
-        assert "SELECT project_id FROM schemes" not in gf_blob, \
-            "global_facts 不得再内联反查 SQL 副本"
-        assert "SELECT project_id FROM global_facts" not in gf_blob, \
-            "为取 project_id 而二次查 global_facts 的副本必须消失"
+        assert "SELECT project_id FROM schemes" not in gf_blob, "global_facts 不得再内联反查 SQL 副本"
+        assert (
+            "SELECT project_id FROM global_facts" not in gf_blob
+        ), "为取 project_id 而二次查 global_facts 的副本必须消失"
 
     def test_router_uses_the_single_exit_everywhere(self):
-        assert _name_uses(gf, "_scheme_project_id") >= 7, \
-            "反查出口至少在 7 处作用域/失效路径被消费（副本回退即红）"
+        assert _name_uses(gf, "_scheme_project_id") >= 7, "反查出口至少在 7 处作用域/失效路径被消费（副本回退即红）"
         assert _name_uses(gf, "SCHEME_PROJECT_ID_SQL") >= 1
         assert _name_uses(gf, "row_field") >= 1
 
@@ -918,13 +1033,15 @@ class TestSchemeProjectIdSingleSource:
         """位置索引取 project_id 的写法（``row[0]`` 系）不得在出口之外复发。"""
         import ast
         import inspect as _inspect
+
         bad: list[str] = []
         for node in ast.walk(ast.parse(_inspect.getsource(gf))):
-            if (isinstance(node, ast.Subscript)
-                    and isinstance(node.slice, ast.Constant)
-                    and node.slice.value == 0
-                    and isinstance(node.value, ast.Name)
-                    and node.value.id in {"prow", "srow", "scheme_row",
-                                          "current", "row"}):
+            if (
+                isinstance(node, ast.Subscript)
+                and isinstance(node.slice, ast.Constant)
+                and node.slice.value == 0
+                and isinstance(node.value, ast.Name)
+                and node.value.id in {"prow", "srow", "scheme_row", "current", "row"}
+            ):
                 bad.append(node.value.id)
         assert bad == [], f"残留位置索引取值：{bad}"

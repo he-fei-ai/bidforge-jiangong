@@ -34,6 +34,7 @@ old_text/new_text 定点编辑 → 唯一命中才替换 → 失败回灌重试�
   * 任何异常 fail-soft，绝不阻断正文落库；
   * 无冲突章节零 AI 调用（成本中性）。
 """
+
 from __future__ import annotations
 
 import json
@@ -45,9 +46,9 @@ logger = logging.getLogger("content_fact_autofix")
 #: 口径唯一事实源 = content_standard.standard_report 的 issue type 值域，
 #: 此处只做**筛选**（白名单），不新造判据。
 FACT_CONFLICT_ISSUE_TYPES: tuple[str, ...] = (
-    "value_mismatch",   # 精准模式：正文数值与事实不一致
-    "value_conflict",   # 模糊模式：正文数值与事实偏差超 ±10% 容差
-    "model_conflict",   # 两模式：同系列不同型号且与事实标题语境同现
+    "value_mismatch",  # 精准模式：正文数值与事实不一致
+    "value_conflict",  # 模糊模式：正文数值与事实偏差超 ±10% 容差
+    "model_conflict",  # 两模式：同系列不同型号且与事实标题语境同现
 )
 
 #: 定点修复尝试上限（对齐参考软件 ``CONSISTENCY_REPAIR_MAX_ATTEMPTS = 2``）：
@@ -56,8 +57,7 @@ FACT_CONFLICT_ISSUE_TYPES: tuple[str, ...] = (
 FACT_AUTOFIX_MAX_ATTEMPTS = 2
 
 #: 汇总键序（空汇总工厂与前端消费面共用，防止两端口径漂移）
-FACT_AUTOFIX_SUMMARY_KEYS = (
-    "sections", "fixed_sections", "conflicts", "applied", "rejected")
+FACT_AUTOFIX_SUMMARY_KEYS = ("sections", "fixed_sections", "conflicts", "applied", "rejected")
 
 
 def empty_fact_autofix_summary() -> dict:
@@ -122,8 +122,7 @@ def select_fact_conflicts(report) -> list[dict]:
     for it in issues:
         if not isinstance(it, dict):
             continue
-        if it.get("type") in FACT_CONFLICT_ISSUE_TYPES \
-                and it.get("severity") == "error":
+        if it.get("type") in FACT_CONFLICT_ISSUE_TYPES and it.get("severity") == "error":
             out.append(it)
     return out
 
@@ -159,8 +158,13 @@ def _failure_lines(rejected: list) -> list[str]:
 
 
 async def autofix_section_fact_conflicts(
-    *, content: str, standard: str, fact_rows: list,
-    conflicts: list, section_id: str = "", section_title: str = "",
+    *,
+    content: str,
+    standard: str,
+    fact_rows: list,
+    conflicts: list,
+    section_id: str = "",
+    section_title: str = "",
     chat_fn=None,
 ) -> tuple[str, dict]:
     """对一章已生成正文执行「事实冲突 → 定点替换」自动修复。
@@ -196,14 +200,18 @@ async def autofix_section_fact_conflicts(
         ``attempts``（实际 AI 轮数）。任何失败路径都不抛异常。
     """
     result: dict = {
-        "attempted": False, "applied": 0, "rejected": [],
-        "conflicts": len(conflicts or []), "attempts": 0,
+        "attempted": False,
+        "applied": 0,
+        "rejected": [],
+        "conflicts": len(conflicts or []),
+        "attempts": 0,
     }
     body = content or ""
     if not body or not conflicts:
         return body, result
     # 无事实文本无从修复（调用方已门控 fact_rows_for_section，此处双保险）
     from app.services.facts_builder import _render_facts_text
+
     facts_text = _render_facts_text(list(fact_rows or []))
     if not facts_text:
         return body, result
@@ -220,14 +228,18 @@ async def autofix_section_fact_conflicts(
     result["attempted"] = True
     messages = [
         {"role": "system", "content": render("content_fact_autofix_system")},
-        {"role": "user", "content": render(
-            "content_fact_autofix_user",
-            global_facts=facts_text,
-            section_id=section_id or "-",
-            section_title=section_title or "-",
-            generation_standard=standard or "",
-            conflicts=json.dumps(conflicts, ensure_ascii=False, indent=2),
-        ) + f"\n\n【待修复章节原文】\n{body}"},
+        {
+            "role": "user",
+            "content": render(
+                "content_fact_autofix_user",
+                global_facts=facts_text,
+                section_id=section_id or "-",
+                section_title=section_title or "-",
+                generation_standard=standard or "",
+                conflicts=json.dumps(conflicts, ensure_ascii=False, indent=2),
+            )
+            + f"\n\n【待修复章节原文】\n{body}",
+        },
     ]
 
     failures: list[str] = []
@@ -237,24 +249,28 @@ async def autofix_section_fact_conflicts(
         if failures:
             # 失败原因回灌（对齐易标 buildConsistencyRepairMessages 的
             # 「上次修复应用失败原因」块）：让下一轮带着具体问题定向重试。
-            req.append({"role": "user", "content":
-                        "上次修复应用失败原因：\n"
-                        + "\n".join(f"- {f}" for f in failures)
-                        + "\n请重新返回能够在当前正文中唯一定位的 old_text。"})
+            req.append(
+                {
+                    "role": "user",
+                    "content": "上次修复应用失败原因：\n"
+                    + "\n".join(f"- {f}" for f in failures)
+                    + "\n请重新返回能够在当前正文中唯一定位的 old_text。",
+                }
+            )
         try:
             obj, _raw = await collect_json_response_with_chat(
-                chat_fn, req,
+                chat_fn,
+                req,
                 validate_fn=_validate_edits,
                 max_retries=1,
-                temperature=0.1, timeout=120,
+                temperature=0.1,
+                timeout=120,
                 scene="content_fact_autofix",
                 repair_key=GENERIC_REPAIR_KEY,
             )
         except Exception as e:  # noqa: BLE001 - fail-soft：进下一轮或放弃
             failures = [f"第 {attempt} 次修复调用失败：{e}"]
-            logger.warning(
-                "[事实冲突定点修复] 第 %s 章节第 %d 次调用异常: %s",
-                section_id[:8], attempt, e)
+            logger.warning("[事实冲突定点修复] 第 %s 章节第 %d 次调用异常: %s", section_id[:8], attempt, e)
             continue
 
         if not isinstance(obj, dict):
@@ -264,15 +280,14 @@ async def autofix_section_fact_conflicts(
         if not edits:
             # AI 判定并非真实矛盾 → 宁可不改（安全阀，易标提示词同款纪律）
             logger.info(
-                "[事实冲突定点修复] 第 %s 章节 AI 判定无需修改"
-                "（冲突 %d 条）", section_id[:8], len(conflicts))
+                "[事实冲突定点修复] 第 %s 章节 AI 判定无需修改" "（冲突 %d 条）", section_id[:8], len(conflicts)
+            )
             return body, result
 
         res = apply_unique_edits(body, edits)
         body = res.content
         result["applied"] += res.applied
-        result["rejected"] = [
-            {"old_text": o[:60], "reason": r} for o, r in res.rejected]
+        result["rejected"] = [{"old_text": o[:60], "reason": r} for o, r in res.rejected]
         if res.applied > 0 and not res.rejected:
             return body, result
         # 部分成功 / 全部被拒：把拒绝原因带回下一轮；已应用的结果保留在
@@ -280,5 +295,9 @@ async def autofix_section_fact_conflicts(
         failures = _failure_lines(res.rejected) or ["模型未返回可应用的 edits"]
         logger.info(
             "[事实冲突定点修复] 第 %s 章节第 %d 轮：应用 %d、拒绝 %d",
-            section_id[:8], attempt, res.applied, len(res.rejected))
+            section_id[:8],
+            attempt,
+            res.applied,
+            len(res.rejected),
+        )
     return body, result

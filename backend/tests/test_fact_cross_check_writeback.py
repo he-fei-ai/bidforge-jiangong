@@ -5,6 +5,7 @@ P2：bid_analysis_items（AI 解析项目）与 global_facts（全局事实）�
 P7：run_cross_check 的程序交叉校验冲突应**回写 global_facts.has_conflict**
     （旧实现只写 doc_validation_reports，标记不刷新）。
 """
+
 import json
 import uuid
 
@@ -32,15 +33,15 @@ async def test_p2_cross_source_conflict_flags_global_fact(ctx):
         "INSERT INTO bid_analysis_items "
         "(id, project_id, item_id, label, content, status, output_type, required) "
         "VALUES (?,?,?,?,?,?,?,?)",
-        (uuid.uuid4().hex, pid, "duration", "项目总工期", "365天",
-         "success", "text", 1))
+        (uuid.uuid4().hex, pid, "duration", "项目总工期", "365天", "success", "text", 1),
+    )
     fid = uuid.uuid4().hex
     await db.execute(
         "INSERT INTO global_facts "
         "(id, project_id, group_id, title, content, category, is_resolved, has_conflict) "
         "VALUES (?,?,?,?,?,?,?,?)",
-        (fid, pid, "g1", "项目总工期", "- **项目总工期**: 400天",
-         "schedule", 1, 0))
+        (fid, pid, "g1", "项目总工期", "- **项目总工期**: 400天", "schedule", 1, 0),
+    )
     await db.commit()
 
     report = await pl.run_cross_check(db, project_id=pid, doc_id="")
@@ -48,8 +49,7 @@ async def test_p2_cross_source_conflict_flags_global_fact(ctx):
     assert report["cross_source_conflicts"], "应检出双源同名取值冲突"
     assert report["cross_source_conflicts"][0]["rule_id"] == "XV-SRC-DUP"
     assert fid in report["flagged_fact_ids"]
-    cur = await db.execute(
-        "SELECT has_conflict FROM global_facts WHERE id=?", (fid,))
+    cur = await db.execute("SELECT has_conflict FROM global_facts WHERE id=?", (fid,))
     assert dict(await cur.fetchone())["has_conflict"] == 1
 
 
@@ -60,14 +60,14 @@ async def test_p2_no_false_positive_when_values_match(ctx):
         "INSERT INTO bid_analysis_items "
         "(id, project_id, item_id, label, content, status, output_type, required) "
         "VALUES (?,?,?,?,?,?,?,?)",
-        (uuid.uuid4().hex, pid, "duration", "项目总工期", "365天",
-         "success", "text", 1))
+        (uuid.uuid4().hex, pid, "duration", "项目总工期", "365天", "success", "text", 1),
+    )
     await db.execute(
         "INSERT INTO global_facts "
         "(id, project_id, group_id, title, content, category, is_resolved, has_conflict) "
         "VALUES (?,?,?,?,?,?,?,?)",
-        (uuid.uuid4().hex, pid, "g1", "项目总工期", "- **项目总工期**: 365天",
-         "schedule", 1, 0))
+        (uuid.uuid4().hex, pid, "g1", "项目总工期", "- **项目总工期**: 365天", "schedule", 1, 0),
+    )
     await db.commit()
 
     report = await pl.run_cross_check(db, project_id=pid, doc_id="")
@@ -84,21 +84,29 @@ async def test_p7_within_pool_conflict_writeback(ctx):
         "(id, project_id, group_id, title, content, category, is_resolved, "
         " has_conflict, conflict_keys) "
         "VALUES (?,?,?,?,?,?,?,?,?)",
-        (fa, pid, "g1", "混凝土强度等级", "- **混凝土强度等级**: C30", "material",
-         1, 1,
-         json.dumps([{"value": "C35", "source": "设计文件", "confidence": 1.0}])))
+        (
+            fa,
+            pid,
+            "g1",
+            "混凝土强度等级",
+            "- **混凝土强度等级**: C30",
+            "material",
+            1,
+            1,
+            json.dumps([{"value": "C35", "source": "设计文件", "confidence": 1.0}]),
+        ),
+    )
     await db.execute(
         "INSERT INTO global_facts "
         "(id, project_id, group_id, title, content, category, is_resolved, has_conflict) "
         "VALUES (?,?,?,?,?,?,?,?)",
-        (fb, pid, "g2", "混凝土强度等级", "- **混凝土强度等级**: C35",
-         "design_param", 1, 0))
+        (fb, pid, "g2", "混凝土强度等级", "- **混凝土强度等级**: C35", "design_param", 1, 0),
+    )
     await db.commit()
 
     report = await pl.run_cross_check(db, project_id=pid, doc_id="")
 
     # fb 原本 has_conflict=0，应被回写为 1（P7 修复点）
     assert fb in report["flagged_fact_ids"]
-    cur = await db.execute(
-        "SELECT has_conflict FROM global_facts WHERE id=?", (fb,))
+    cur = await db.execute("SELECT has_conflict FROM global_facts WHERE id=?", (fb,))
     assert dict(await cur.fetchone())["has_conflict"] == 1

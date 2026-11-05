@@ -29,6 +29,7 @@
 3. **全部派生均为确定性规则**（无 AI、无 DB 调用），任何写路径与读路径都可安全调用；
    历史数据在首次「提取/编辑」时补列，读路径同时做了惰性派生兜底（旧行不丢事实）。
 """
+
 from __future__ import annotations
 
 import json
@@ -62,8 +63,8 @@ TITLE_TO_CHAPTER: dict[str, str] = {ch["title"]: ch["key"] for ch in sc.NINE_CHA
 CATEGORY_TO_CHAPTER: dict[str, str] = {
     # 一、工程概况
     "basic": "overview",
-    "tech_param": "overview",   # 基坑深度/支护形式/地下水位/地质参数等专项工程特征
-    "scale": "overview",        # 工程规模与地质参数
+    "tech_param": "overview",  # 基坑深度/支护形式/地下水位/地质参数等专项工程特征
+    "scale": "overview",  # 工程规模与地质参数
     # 二、编制依据
     "basis": "basis",
     # 三、施工计划（进度 / 材料计划 / 设备计划 / 劳动力配置）
@@ -130,33 +131,129 @@ FACT_TYPE_TO_CHAPTER: dict[str, str] = {
 #: (关键词元组, chapter_key)
 CHAPTER_TEXT_RULES: list[tuple[tuple[str, ...], str]] = [
     # 九、计算书及相关施工图纸（最专指，必须最先判）
-    (("计算书", "验算", "内力计算", "稳定性计算", "承载力计算", "受力计算",
-      "图纸清单", "图纸目录", "图纸编号", "平面布置图", "剖面图", "大样图",
-      "节点图", "施工图编号"), "calc_drawings"),
+    (
+        (
+            "计算书",
+            "验算",
+            "内力计算",
+            "稳定性计算",
+            "承载力计算",
+            "受力计算",
+            "图纸清单",
+            "图纸目录",
+            "图纸编号",
+            "平面布置图",
+            "剖面图",
+            "大样图",
+            "节点图",
+            "施工图编号",
+        ),
+        "calc_drawings",
+    ),
     # 五、施工安全保证措施（监测监控 / 风险 / 文明施工与环保 / 季节性施工）
-    (("监测", "报警值", "控制值", "预警值", "巡视检查", "沉降观测", "变形观测",
-      "安全组织机构", "安全措施", "防护", "文明施工", "环境保护", "扬尘", "噪声",
-      "绿色施工", "季节性施工", "危险源", "危大", "风险等级", "风险辨识",
-      "风险管控"), "safety"),
+    (
+        (
+            "监测",
+            "报警值",
+            "控制值",
+            "预警值",
+            "巡视检查",
+            "沉降观测",
+            "变形观测",
+            "安全组织机构",
+            "安全措施",
+            "防护",
+            "文明施工",
+            "环境保护",
+            "扬尘",
+            "噪声",
+            "绿色施工",
+            "季节性施工",
+            "危险源",
+            "危大",
+            "风险等级",
+            "风险辨识",
+            "风险管控",
+        ),
+        "safety",
+    ),
     # 八、应急处置措施
-    (("应急处置", "应急预案", "应急救援", "应急物资", "应急电话", "应急组织",
-      "应急演练", "演练", "抢险", "事故类型", "救援", "急救"), "emergency"),
+    (
+        (
+            "应急处置",
+            "应急预案",
+            "应急救援",
+            "应急物资",
+            "应急电话",
+            "应急组织",
+            "应急演练",
+            "演练",
+            "抢险",
+            "事故类型",
+            "救援",
+            "急救",
+        ),
+        "emergency",
+    ),
     # 七、验收要求
     (("验收", "检验批", "隐蔽"), "acceptance"),
     # 二、编制依据
-    (("编制依据", "依据规范", "执行标准", "标准规范", "法律法规", "设计文件",
-      "勘察报告", "合同编号", "施工组织设计编号"), "basis"),
+    (
+        (
+            "编制依据",
+            "依据规范",
+            "执行标准",
+            "标准规范",
+            "法律法规",
+            "设计文件",
+            "勘察报告",
+            "合同编号",
+            "施工组织设计编号",
+        ),
+        "basis",
+    ),
     # 六、施工管理及作业人员配备和分工
-    (("名单", "职责", "组织机构", "安全员", "质量员", "质检员", "特种作业",
-      "岗位", "管理组织"), "personnel"),
+    (("名单", "职责", "组织机构", "安全员", "质量员", "质检员", "特种作业", "岗位", "管理组织"), "personnel"),
     # 三、施工计划（进度 / 材料计划 / 设备计划 / 劳动力）
-    (("劳动力", "工种", "用工计划", "高峰人数", "工期", "进度", "里程碑",
-      "节点", "材料计划", "材料需求", "材料清单", "进场时间", "设备计划",
-      "设备配置清单", "施工准备"), "plan"),
+    (
+        (
+            "劳动力",
+            "工种",
+            "用工计划",
+            "高峰人数",
+            "工期",
+            "进度",
+            "里程碑",
+            "节点",
+            "材料计划",
+            "材料需求",
+            "材料清单",
+            "进场时间",
+            "设备计划",
+            "设备配置清单",
+            "施工准备",
+        ),
+        "plan",
+    ),
     # 四、施工工艺技术
-    (("施工流程", "工艺流程", "工序", "施工方法", "施工步骤", "工程做法",
-      "技术措施", "临时用电", "临时用水", "临时道路", "临时设施", "施工段划分",
-      "流水段"), "technique"),
+    (
+        (
+            "施工流程",
+            "工艺流程",
+            "工序",
+            "施工方法",
+            "施工步骤",
+            "工程做法",
+            "技术措施",
+            "临时用电",
+            "临时用水",
+            "临时道路",
+            "临时设施",
+            "施工段划分",
+            "流水段",
+        ),
+        "technique",
+    ),
     # 一、工程概况（专项工程特征 / 地质水文 / 周边环境 / 气候 / 参建单位）
     # ✅ 修复（2026-09-30 · 危大判定参数的九大章节归属缺失）：原表只列了
     #    「基坑周长 / 开挖深度 / 搭设高度 / 起升高度 / 起重量」，却漏掉了
@@ -169,21 +266,71 @@ CHAPTER_TEXT_RULES: list[tuple[tuple[str, ...], str]] = [
     #    「工程概况 0 条事实」却不知数据其实已提取。
     #    本次按 NINE_CHAPTERS[0].category_fields 的口径补齐（基坑/模板支撑/
     #    起重/脚手架/其他五类的专项工程特征均属第一章工程概况）。
-    (("地质", "水文", "地层", "地下水", "地形", "周边环境", "周边管线", "气候",
-      "支护形式", "支护安全等级", "设计使用年限", "基坑周长", "开挖深度",
-      "基坑深度", "坑深", "搭设高度", "架体形式", "支撑高度", "支撑架高度",
-      "架体高度", "跨度", "跨距", "施工总荷载", "总荷载", "集中线荷载",
-      "线荷载", "起升高度", "起重量", "起吊重量", "单件起吊重量",
-      "边坡高度", "边坡开挖高度", "安装高度", "承载力", "立杆间距",
-      "立杆步距", "连墙件", "降水方式", "起重机高度", "起重设备高度",
-      # ✅ 2026-10-06：随 DANGER_PARAM_RULES 新增 pile_depth 一并补齐。
-      #    两表**必须同步**——test_danger_param_names_all_classified_to_a_chapter
-      #    静态护栏就是为此存在（只加 DANGER_PARAM_RULES 会让这批事实落空串
-      #    =「未分类」，九大章节视图不显示、且用户看不到它其实已提取）。
-      "挖孔桩深度", "人工挖孔桩深度", "孔深", "桩孔深度",
-      "结构形式", "建设规模",
-      "工程名称", "项目名称", "工程地点", "项目地点", "参建", "建设单位",
-      "设计单位", "监理单位", "施工单位", "施工要求"), "overview"),
+    (
+        (
+            "地质",
+            "水文",
+            "地层",
+            "地下水",
+            "地形",
+            "周边环境",
+            "周边管线",
+            "气候",
+            "支护形式",
+            "支护安全等级",
+            "设计使用年限",
+            "基坑周长",
+            "开挖深度",
+            "基坑深度",
+            "坑深",
+            "搭设高度",
+            "架体形式",
+            "支撑高度",
+            "支撑架高度",
+            "架体高度",
+            "跨度",
+            "跨距",
+            "施工总荷载",
+            "总荷载",
+            "集中线荷载",
+            "线荷载",
+            "起升高度",
+            "起重量",
+            "起吊重量",
+            "单件起吊重量",
+            "边坡高度",
+            "边坡开挖高度",
+            "安装高度",
+            "承载力",
+            "立杆间距",
+            "立杆步距",
+            "连墙件",
+            "降水方式",
+            "起重机高度",
+            "起重设备高度",
+            # ✅ 2026-10-06：随 DANGER_PARAM_RULES 新增 pile_depth 一并补齐。
+            #    两表**必须同步**——test_danger_param_names_all_classified_to_a_chapter
+            #    静态护栏就是为此存在（只加 DANGER_PARAM_RULES 会让这批事实落空串
+            #    =「未分类」，九大章节视图不显示、且用户看不到它其实已提取）。
+            "挖孔桩深度",
+            "人工挖孔桩深度",
+            "孔深",
+            "桩孔深度",
+            "结构形式",
+            "建设规模",
+            "工程名称",
+            "项目名称",
+            "工程地点",
+            "项目地点",
+            "参建",
+            "建设单位",
+            "设计单位",
+            "监理单位",
+            "施工单位",
+            "施工要求",
+        ),
+        "overview",
+    ),
 ]
 
 
@@ -254,30 +401,28 @@ DANGER_PARAM_RULES: list[tuple[tuple[str, ...], str]] = [
 #:        **显式分离**，不再互相冒充。
 _FACT_KEY_CHAPTER_VERIFIED: tuple[str, ...] = (
     # —— normalize_key 别名表实测可产出（每键都经护栏验证）——
-    "foundation_depth",    # 基坑深度 / 开挖深度
-    "support_type",        # 支护形式 / 支护类型
-    "water_table",         # 地下水位 / 地下水位标高
-    "bearing_capacity",    # 地基承载力
-    "slope_ratio",         # 边坡坡度
-    "structure_type",      # 结构形式
-    "scaffold_type",       # 脚手架类型
-    "formwork_type",       # 模板类型
-    "tower_crane_model",   # 塔吊型号 / 塔吊
-    "excavator_model",     # 挖掘机型号
-    "max_lift_weight",     # 最大吊装重量
-    "building_area",       # 建筑面积
-    "building_height",     # 建筑高度
-    "site_area",           # 占地面积
+    "foundation_depth",  # 基坑深度 / 开挖深度
+    "support_type",  # 支护形式 / 支护类型
+    "water_table",  # 地下水位 / 地下水位标高
+    "bearing_capacity",  # 地基承载力
+    "slope_ratio",  # 边坡坡度
+    "structure_type",  # 结构形式
+    "scaffold_type",  # 脚手架类型
+    "formwork_type",  # 模板类型
+    "tower_crane_model",  # 塔吊型号 / 塔吊
+    "excavator_model",  # 挖掘机型号
+    "max_lift_weight",  # 最大吊装重量
+    "building_area",  # 建筑面积
+    "building_height",  # 建筑高度
+    "site_area",  # 占地面积
 )
 
-FACT_KEY_TO_CHAPTER: dict[str, str] = {
-    k: "overview" for k in _FACT_KEY_CHAPTER_VERIFIED
-}
+FACT_KEY_TO_CHAPTER: dict[str, str] = {k: "overview" for k in _FACT_KEY_CHAPTER_VERIFIED}
 
 
-def classify_chapter_from_text(name: str, value: str = "",
-                               category: str = "", fact_type: str = "",
-                               fact_key: str = "") -> str:
+def classify_chapter_from_text(
+    name: str, value: str = "", category: str = "", fact_type: str = "", fact_key: str = ""
+) -> str:
     """判定单条事实的九大章节归属（确定性规则，返回 chapter_key，空串 = 未分类）。
 
     判定优先级（专指 → 泛指）：
@@ -328,8 +473,7 @@ FACT_ATTR_TITLES: dict[str, str] = {
 #: ✅ 故意宽松匹配 —— 事实值常写作 "GB50011-2010"、"JGJ120" 混排，
 #: 过严的正则会漏判，把规范引用错当成定性事实。
 _STD_CODE_RE = re.compile(
-    r"(?i)(?:GB|JGJ|JG|CJJ|GBJ|CECS|DL|DB|DBJ|HG|SH|SY)[\s./-]*[0-9]{2,5}"
-    r"(?:[\s./-]*[12][0-9]{2})?"
+    r"(?i)(?:GB|JGJ|JG|CJJ|GBJ|CECS|DL|DB|DBJ|HG|SH|SY)[\s./-]*[0-9]{2,5}" r"(?:[\s./-]*[12][0-9]{2})?"
 )
 #: 条文/表格编号形态（第 3.1.2 条 / 表 4.1.2 / 图 2-1 / 3.1.2.1）
 #: ✅ BUG 修复：旧实现含 `\d+\.\d+` 分支，会把「4.2」这类**测量值**误判为
@@ -353,8 +497,21 @@ _NUM_UNIT_RE = re.compile(
 _BARE_NUM_RE = re.compile(r"[0-9]+(?:\.[0-9]+)?(?:[/:][0-9]+)*")
 #: 关系类事实关键词（邻近关系 / 隶属关系 / 工序依赖关系）
 _RELATION_KEYWORDS = (
-    "关系", "邻近", "周边", "相邻", "上下游", "工序", "顺序", "搭接", "依赖",
-    "隶属", "相对位置", "距离", "间距", "方位", "位于",
+    "关系",
+    "邻近",
+    "周边",
+    "相邻",
+    "上下游",
+    "工序",
+    "顺序",
+    "搭接",
+    "依赖",
+    "隶属",
+    "相对位置",
+    "距离",
+    "间距",
+    "方位",
+    "位于",
 )
 
 
@@ -463,23 +620,26 @@ def classify_source_kind(source: str = "", source_ref: str = "") -> str:
 #: (关键词元组, 需复用的章节元组)
 SHARED_FACT_RULES: list[tuple[tuple[str, ...], tuple[str, ...]]] = [
     # 工程名称与地点：概况 / 依据 / 应急 / 验收 均需要
-    (("工程名称", "项目名称", "工程地点", "项目地点"),
-     ("overview", "basis", "emergency", "acceptance")),
+    (("工程名称", "项目名称", "工程地点", "项目地点"), ("overview", "basis", "emergency", "acceptance")),
     # 参建单位信息：概况 / 施工管理 / 验收 / 应急 均需要
-    (("参建", "建设单位", "设计单位", "监理单位", "施工单位", "监测单位",
-      "建设规模", "结构形式"),
-     ("overview", "personnel", "acceptance", "emergency")),
+    (
+        ("参建", "建设单位", "设计单位", "监理单位", "施工单位", "监测单位", "建设规模", "结构形式"),
+        ("overview", "personnel", "acceptance", "emergency"),
+    ),
     # 施工工期：施工计划 / 应急 / 季节性施工 均需要
     (("工期", "进度", "里程碑", "节点工期"), ("plan", "emergency", "safety")),
     # 材料规格参数：工艺 / 计算书 / 验收 均需要
-    (("混凝土", "钢筋", "钢材", "材料", "规格", "强度等级", "牌号", "型号"),
-     ("technique", "calc_drawings", "acceptance")),
+    (
+        ("混凝土", "钢筋", "钢材", "材料", "规格", "强度等级", "牌号", "型号"),
+        ("technique", "calc_drawings", "acceptance"),
+    ),
     # 人员配置信息：施工管理 / 应急 / 验收 均需要
-    (("人员", "组织", "名单", "职责", "安全员", "特种作业", "岗位"),
-     ("personnel", "emergency", "acceptance")),
+    (("人员", "组织", "名单", "职责", "安全员", "特种作业", "岗位"), ("personnel", "emergency", "acceptance")),
     # 技术参数：工艺 / 计算书 / 监测监控 均需要
-    (("深度", "高度", "跨度", "荷载", "参数", "起重量", "起升高度", "承载力",
-      "厚度", "间距"), ("technique", "calc_drawings", "safety")),
+    (
+        ("深度", "高度", "跨度", "荷载", "参数", "起重量", "起升高度", "承载力", "厚度", "间距"),
+        ("technique", "calc_drawings", "safety"),
+    ),
 ]
 
 
@@ -512,15 +672,23 @@ def _chapter_order(key: str) -> int:
 #:    长度单位集**取齐**。此前本表只有 6 个单位，而交叉校验器支持
 #:    dm/km —— 同一条「0.5km」事实，冲突检测会做单位归一（认为与 500m 一致），
 #:    危大阈值抽取却取不到数（`pile_depth` 恒缺参）→ **相反的失败方向**。
-_UNIT_TO_METER = {"mm": 0.001, "毫米": 0.001, "cm": 0.01, "厘米": 0.01,
-                  "dm": 0.1, "分米": 0.1,
-                  "m": 1.0, "米": 1.0, "km": 1000.0, "千米": 1000.0}
+_UNIT_TO_METER = {
+    "mm": 0.001,
+    "毫米": 0.001,
+    "cm": 0.01,
+    "厘米": 0.01,
+    "dm": 0.1,
+    "分米": 0.1,
+    "m": 1.0,
+    "米": 1.0,
+    "km": 1000.0,
+    "千米": 1000.0,
+}
 #: 长度类参数键（其余为荷载/重量类，保持原单位 kN/m²、kN/m）
 #: ✅ 2026-10-06 补 pile_depth：人工挖孔桩深度是部文以「m」表述的长度阈值
 #:    （附件二七(三)「开挖深度 16m 及以上」）。漏登记会让 16.5m 原样通过
 #:    而 16500mm 被换算成 16.5m —— 同一条事实因单位写法不同得到相反判定。
-_LENGTH_PARAMS = {"depth", "height", "span", "slope_height",
-                  "install_height", "crane_height", "pile_depth"}
+_LENGTH_PARAMS = {"depth", "height", "span", "slope_height", "install_height", "crane_height", "pile_depth"}
 _NUM_RE = re.compile(r"([0-9]+(?:\.[0-9]+)?)\s*([a-zA-Z\u4e00-\u9fff/²³]*)")
 
 
@@ -602,8 +770,7 @@ def extract_danger_params(facts) -> dict:
                 break
         if not matched:
             continue
-        pair = _extract_number_with_unit(value) or _extract_number_with_unit(
-            f"{value} {unit}")
+        pair = _extract_number_with_unit(value) or _extract_number_with_unit(f"{value} {unit}")
         if not pair:
             continue
         num, got_unit = pair
@@ -666,6 +833,7 @@ def _content_value(content) -> str:
     """
     text = _as_text(content)
     from app.services.facts_extractor import _split_fact_line
+
     return _split_fact_line(text)[1]
 
 
@@ -687,9 +855,15 @@ def _norm_fact_text(v: Any) -> str:
     return str(v or "").strip()
 
 
-def derivation_inputs_changed(*, old_category: Any = "", new_category: Any = "",
-                              old_name: Any = "", new_name: Any = "",
-                              old_value: Any = "", new_value: Any = "") -> bool:
+def derivation_inputs_changed(
+    *,
+    old_category: Any = "",
+    new_category: Any = "",
+    old_name: Any = "",
+    new_name: Any = "",
+    old_value: Any = "",
+    new_value: Any = "",
+) -> bool:
     """判断九大章节的**派生输入**（分类 / 名称 / 值）是否发生变化。
 
     **唯一事实源** —— 两条写路径共用：
@@ -732,9 +906,15 @@ def derivation_inputs_changed(*, old_category: Any = "", new_category: Any = "",
     )
 
 
-def classify_fact_dimensions(name: str, value: str = "", category: str = "",
-                             fact_type: str = "", fact_key: str = "",
-                             source: str = "", source_ref: str = "") -> dict:
+def classify_fact_dimensions(
+    name: str,
+    value: str = "",
+    category: str = "",
+    fact_type: str = "",
+    fact_key: str = "",
+    source: str = "",
+    source_ref: str = "",
+) -> dict:
     """一次性派生全部四个分类维度（确定性、纯函数）。
 
     Returns:
@@ -818,6 +998,7 @@ def dimensions_for_row(row: dict) -> dict:
 # 九、章节聚合与字段完整性校验（差集分析）
 # =========================================================================
 
+
 def chapter_of_row(row: dict) -> str:
     """取单条事实行的章节归属（优先落库列，缺失时惰性派生）。"""
     if not isinstance(row, dict):
@@ -863,17 +1044,17 @@ def chapter_field_completeness(rows: list) -> dict:
     for key in CHAPTER_ORDER:
         fields = sc.required_fields_for_chapter(key)
         text = " ".join(
-            f"{_as_text(r.get('name'))} "
-            f"{_as_text(r.get('value') or _content_value(r.get('content')))}"
+            f"{_as_text(r.get('name'))} " f"{_as_text(r.get('value') or _content_value(r.get('content')))}"
             for r in by_chapter[key]
         )
         blob = sc._norm_text(text)
+
         def _field_present(field: str) -> bool:
             # 与 scheme_classification.validate_chapter_fields 保持同一归一口径：
             # 去空白/标点/大小写，并支持「A/B/C」任一命中，避免 JGJ 120、
             # 英文标点或斜杠字段造成假缺失。
-            return any(sc._norm_text(seg) in blob
-                       for seg in re.split(r"[/、]", field) if seg.strip())
+            return any(sc._norm_text(seg) in blob for seg in re.split(r"[/、]", field) if seg.strip())
+
         present = [f for f in fields if f and _field_present(f)]
         missing = [f for f in fields if not (f and _field_present(f))]
         total_fields += len(fields)
@@ -920,16 +1101,24 @@ def nine_chapter_summary(rows: list) -> dict:
             uncategorized += 1
     for key in CHAPTER_ORDER:
         comp = comps["chapters"][key]
-        items.append({
-            "order": comp["chapter"],
-            "key": key,
-            "title": comp["title"],
-            "count": comp["fact_count"],
-            "coverage": comp["field_coverage"],
-            "total_fields": len(comp["fields"]),
-            "covered_fields": len(comp["covered_fields"]),
-            "missing_fields": comp["missing_fields"],
-        })
+        items.append(
+            {
+                "order": comp["chapter"],
+                "key": key,
+                "title": comp["title"],
+                "count": comp["fact_count"],
+                "coverage": comp["field_coverage"],
+                "total_fields": len(comp["fields"]),
+                # ✅ BUG-05 修复（R175 · 2026-11-03）：同一字段名此前两种形态 ——
+                #    /chapters 覆盖为 string[]（已覆盖字段清单），stats.by_chapter
+                #    此处却是 int（数量），前端 `FactChapterStat.covered_fields?: string[]`
+                #    两处都复用 → 类型与语义分叉。现统一为 string[]（清单）；
+                #    章条目键集合保持不变（R89「既有块键不被改动」零回归约束），
+                #    数量语义仍可由 len(covered_fields) / coverage 得到。
+                "covered_fields": comp["covered_fields"],
+                "missing_fields": comp["missing_fields"],
+            }
+        )
     return {
         "chapters": items,
         "totals": {
@@ -946,10 +1135,7 @@ def nine_chapter_summary(rows: list) -> dict:
 def category_map_payload() -> dict:
     """输出分类映射表（供前端下拉 / 文档化展示，避免前端二次硬编码）。"""
     return {
-        "chapters": [
-            {"order": CHAPTER_NUMBERS[k], "key": k, "title": CHAPTER_TITLES[k]}
-            for k in CHAPTER_ORDER
-        ],
+        "chapters": [{"order": CHAPTER_NUMBERS[k], "key": k, "title": CHAPTER_TITLES[k]} for k in CHAPTER_ORDER],
         "category_to_chapter": dict(CATEGORY_TO_CHAPTER),
         "fact_attr_titles": dict(FACT_ATTR_TITLES),
         "source_kind_titles": dict(SOURCE_KIND_TITLES),

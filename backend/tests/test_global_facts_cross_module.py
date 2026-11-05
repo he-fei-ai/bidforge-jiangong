@@ -7,6 +7,7 @@
   否则已消解的冲突会永久残留 has_conflict=1，导致前端矛盾徽标误报、下游
   (has_conflict=0) 注入门槛误杀事实。
 """
+
 import uuid
 
 import app.db as _appdb
@@ -22,8 +23,7 @@ async def ctx(tmp_path):
     db = await get_conn()
     pid, sid = uuid.uuid4().hex, uuid.uuid4().hex
     await db.execute("INSERT INTO projects(id,name) VALUES(?,?)", (pid, "p"))
-    await db.execute(
-        "INSERT INTO schemes(id,project_id,name) VALUES(?,?,?)", (sid, pid, "s"))
+    await db.execute("INSERT INTO schemes(id,project_id,name) VALUES(?,?,?)", (sid, pid, "s"))
     await db.commit()
     yield db, pid, sid
     await db.execute("DELETE FROM global_facts WHERE project_id=?", (pid,))
@@ -38,19 +38,19 @@ async def _seed_fact(db, pid, sid, fid, title, value):
     await db.execute(
         "INSERT INTO global_facts (id, project_id, scheme_id, title, content, "
         "category, has_conflict, is_resolved) VALUES (?,?,?,?,?,?,?,?)",
-        (fid, pid, sid, title, f"- **{title}**: {value}", "other", 0, 1))
+        (fid, pid, sid, title, f"- **{title}**: {value}", "other", 0, 1),
+    )
 
 
 async def _seed_bid(db, pid, bid_id, label, value):
     await db.execute(
-        "INSERT INTO bid_analysis_items (id, project_id, item_id, label, content, "
-        "status) VALUES (?,?,?,?,?,?)",
-        (bid_id, pid, bid_id, label, f"{label}: {value}", "success"))
+        "INSERT INTO bid_analysis_items (id, project_id, item_id, label, content, " "status) VALUES (?,?,?,?,?,?)",
+        (bid_id, pid, bid_id, label, f"{label}: {value}", "success"),
+    )
 
 
 async def _gf_conflict(db, fid):
-    cur = await db.execute(
-        "SELECT has_conflict FROM global_facts WHERE id=?", (fid,))
+    cur = await db.execute("SELECT has_conflict FROM global_facts WHERE id=?", (fid,))
     row = await cur.fetchone()
     return int(row[0]) if row else None
 
@@ -78,9 +78,7 @@ class TestCrossSourceConflictWritesHasConflict:
         assert await _gf_conflict(db, fid) == 1  # 先确认被标记
 
         # 解析项取值被改一致（冲突消解）→ 再次交叉校验须清零
-        await db.execute(
-            "UPDATE bid_analysis_items SET content=? WHERE id=?",
-            ("混凝土强度等级: C30", "bid_concrete"))
+        await db.execute("UPDATE bid_analysis_items SET content=? WHERE id=?", ("混凝土强度等级: C30", "bid_concrete"))
         await db.commit()
         report = await run_cross_check(db, project_id=pid, doc_id="")
         assert fid not in report["flagged_fact_ids"]

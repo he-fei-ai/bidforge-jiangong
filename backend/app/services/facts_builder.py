@@ -16,12 +16,14 @@
 ``build_facts_text``，sse_handlers 保留 ``_build_facts_text = build_facts_text``
 别名以让旧调用点零改动。
 """
+
 from __future__ import annotations
 
 import logging
 
 from app.config import settings
 from app.services.content_data_contract import (
+    DATA_DICT_MAX_CHARS,
     build_global_data_dictionary,
     render_data_dictionary_block,
 )
@@ -34,16 +36,43 @@ logger = logging.getLogger("facts_builder")
 LOW_CONFIDENCE_THRESHOLD = 0.5
 
 
+def _facts_floor_chars(rows: list) -> int:
+    """事实渲染的最低预算：组标题 + 每条事实至少 2 字符（1 内容 + 换行；0 行时为 0）。
+
+    ✅ L1/BUG-03（R177 · 2026-11-04）：预算分配的统一口径 —— 事实先占保底，
+    数据字典只能使用剩余额度；渲染器据此不再出现「字典把事实挤空」。
+    """
+    groups: list[str] = []
+    n = 0
+    for row in rows or []:
+        try:
+            gt = str(row[0] or "") if len(row) > 0 else ""
+        except (TypeError, IndexError):
+            continue
+        if gt not in groups:
+            groups.append(gt)
+        n += 1
+    # 每行按 2 字符保底（1 字符内容 + 换行）；+1 是渲染器 room 判定的尾部预留。
+    # 只留 1 字符会让「行数多、分配器给首行略多」时最后一行被判超预算而丢弃。
+    return sum(len(f"### {gt}\n") for gt in groups) + 2 * n + (1 if n else 0)
+
+
+def _data_dict_room(max_total: int, rows: list) -> int:
+    """数据字典可占用的额度 = 总预算 - 事实保底 - 1（分隔换行）。"""
+    return max(0, int(max_total) - _facts_floor_chars(rows) - 1)
+
+
 def _facts_keywords(text: str) -> set[str]:
     """从章节标题/描述抽取关键字（中文 2-gram + ASCII 单词≥3），用于事实相关性预筛。"""
     import re
+
     kws: set[str] = set()
     if not text:
         return kws
     # 中文连续段 → 2-gram（最贴近中文切词、零依赖）
     for seg in re.findall(r"[一-鿿]+", text):
         for i in range(0, len(seg) - 1):
-            kws.add(seg[i:i + 2])
+            kws.add(seg[i : i + 2])
     # ASCII 单词（≥3 字母，如 CFG、MJS、HDPE）
     for w in re.findall(r"[A-Za-z]{3,}", text):
         kws.add(w.lower())
@@ -218,12 +247,17 @@ def _row_title(row) -> str:
 
 
 def _render_facts_text(
-    rows: list, *, relevant_to: dict | None = None,
-    max_total: int = 6000, per_fact: int = 300,
+    rows: list,
+    *,
+    relevant_to: dict | None = None,
+    max_total: int = 6000,
+    per_fact: int = 300,
     chapter: str = "",
     audit_out: list | None = None,
     full_titles: list | None = None,
     injected_out: list | None = None,
+    truncated_out: list | None = None,
+    counts_out: dict | None = None,
 ) -> str:
     """把 global_facts 行渲染为「项目关键事实」文本（纯函数，便于单测与逐章精选复用）。
 
@@ -252,7 +286,7 @@ def _render_facts_text(
 
     # ✅ R122-G1：选中事实标题集合（规整 + 去空白，与 resolve_selected_fact_rows 同口径）
     _wanted: set[str] = set()
-    for _t in (full_titles or []):
+    for _t in full_titles or []:
         _s = str(_t or "").strip()
         if _s:
             _wanted.add(_s)
@@ -275,8 +309,7 @@ def _render_facts_text(
     #    无论预筛/分组结果如何都排在最前（全长优先入预算）。无选中时不进入本分支。
     if _wanted:
         _present = {id(r) for r in rows}
-        _back = [r for r in _all_rows
-                 if _row_title(r) in _wanted and id(r) not in _present]
+        _back = [r for r in _all_rows if _row_title(r) in _wanted and id(r) not in _present]
         _sel = [r for r in rows if _row_title(r) in _wanted]
         _others = [r for r in rows if _row_title(r) not in _wanted]
         rows = _back + _sel + _others
@@ -296,6 +329,7 @@ def _render_facts_text(
     # ---------------------------------------------------------------
     prepared: list[tuple[str, str, str, float | None]] = []
     _sel_flags: list[bool] = []  # ✅ R122-G1：与 prepared 同序的「选中行」标记
+    _raw_lens: list[int] = []  # ✅ D-39：与 prepared 同序的事实正文原始字符数
     seen_groups: list[str] = []
     for _row in rows:
         # ✅ 健壮性修复（2026-10-10）：按下标**自适应取值**，与同模块的
@@ -326,7 +360,8 @@ def _render_facts_text(
         #    仍按 per_fact 截断；``_wanted`` 为空时 _is_sel 恒 False ⇒ 逐字节不变。
         _is_sel = bool(_wanted) and str(_title or "").strip() in _wanted
         _sel_flags.append(_is_sel)
-        _body = (content or '') if _is_sel else (content or '')[:per_fact]
+        _body = (content or "") if _is_sel else (content or "")[:per_fact]
+        _raw_lens.append(len(content or ""))
         if _row_value_kind(_row) == "requirement":
             _body = _REQUIREMENT_KIND_PREFIX + _body
         prepared.append((gt, _title, _body, _conf))
@@ -339,6 +374,10 @@ def _render_facts_text(
     #    （正文含全局事实的方案一章都生成不出来）。
     fact_lens = [len(c) + 1 for _g, _ft, c, _cf in prepared]  # +1 换行
     n = len(prepared)
+    # ✅ 账实相符（2026-11-04）：审计调用方可据此拿到「真实进入账本的行数」
+    #    （= prepared 行数，已剔除无法转序列的坏行），三态计数以此对齐。
+    if counts_out is not None:
+        counts_out["prepared"] = n
     allocs = [0] * n
     if n and fact_budget > 0:
         # ✅ R122-G1：选中事实优先预留**全长**，剩余预算再按比例分给其余行。
@@ -392,7 +431,7 @@ def _render_facts_text(
     parts: list[str] = []
     total = 0
     _cur_gt = None
-    for (gt, _ftitle, body, _conf), alloc in zip(prepared, allocs):
+    for (gt, _ftitle, body, _conf), alloc, _raw_len in zip(prepared, allocs, _raw_lens):
         if alloc <= 0:
             # 该条连保底都没拿到：跳过（组标题也不应为此单独出现）
             # ✅ R102（G3）：预算丢行留痕（audit_out 非空时记录标题）。
@@ -405,6 +444,12 @@ def _render_facts_text(
             #    仅在末尾用 `[:max_total]` 切片兜底，于是超预算时**组标题会被截成
             #    "### 基坑支"** 这样的半截文本。超预算时整组跳过（不写半截标题）。
             if total + len(header) >= max_total:
+                # ✅ BUG-11 修复（R176 · 2026-11-04）：组标题超预算时该行同样属于
+                #    「预算丢弃」，必须留痕 —— 旧实现只 `continue` 不记 audit_out，
+                #    导致 `injected + dropped != 输入行数`，账本恒等式被打破，
+                #    被丢的事实既不在文本里也不在「丢了哪些」清单里（静默消失）。
+                if audit_out is not None:
+                    audit_out.append(str(_ftitle or gt or ""))
                 continue
             parts.append(header)
             total += len(header)
@@ -422,7 +467,26 @@ def _render_facts_text(
             if audit_out is not None:
                 audit_out.append(str(_ftitle or gt or ""))
             continue
-        fact = prefix + body[:max(0, min(alloc - 1, room))] + "\n"
+        _keep_n = max(0, min(alloc - 1, room))
+        _body_slice = body[:_keep_n]
+        # ✅ D-39（R176 · 2026-11-04）：per_fact / 预算分配造成的「截断注入」
+        #    必须与「完整注入 / 整条丢弃」区分记账，否则 injected 账本会把
+        #    残缺内容当成完整内容。kept 只算该行原始正文真正进入文本的字符数
+        #    （扣除 requirement 前缀与低置信度前缀，不做估算）。
+        if truncated_out is not None:
+            _req_prefix_len = len(_REQUIREMENT_KIND_PREFIX) if body.startswith(_REQUIREMENT_KIND_PREFIX) else 0
+            _kept_content = max(0, len(_body_slice) - _req_prefix_len)
+            if _kept_content < _raw_len:
+                truncated_out.append(
+                    {
+                        "title": str(_ftitle or gt or ""),
+                        "group": str(gt or ""),
+                        "original_chars": _raw_len,
+                        "kept_chars": _kept_content,
+                        "dropped_chars": _raw_len - _kept_content,
+                    }
+                )
+        fact = prefix + _body_slice + "\n"
         parts.append(fact)
         total += len(fact)
         # ✅ R166（FIX-10）：实际渲染进文本的行标题逐条留痕 —— 与 audit_out
@@ -448,7 +512,7 @@ def chapter_fact_mapping(sections: list, facts_rows: list) -> list:
         （与入参 ``sections`` 同序）。
     """
     out: list[dict] = []
-    for sec in (sections or []):
+    for sec in sections or []:
         if not isinstance(sec, dict):
             continue
         relevant = _filter_facts_rows(list(facts_rows or []), sec)
@@ -460,20 +524,26 @@ def chapter_fact_mapping(sections: list, facts_rows: list) -> list:
                 t = ""
             if t:
                 titles.append(t)
-        out.append({
-            "section_id": str(sec.get("id") or ""),
-            "title": str(sec.get("title") or ""),
-            "fact_titles": titles,
-            "fact_count": len(titles),
-        })
+        out.append(
+            {
+                "section_id": str(sec.get("id") or ""),
+                "title": str(sec.get("title") or ""),
+                "fact_titles": titles,
+                "fact_count": len(titles),
+            }
+        )
     return out
 
 
-def fact_injection_audit(rows: list, *, leaf: dict | None = None,
-                         chapter: str = "",
-                         max_total: int = 6000,
-                         per_fact: int = 300,
-                         full_titles: list | None = None) -> dict:
+def fact_injection_audit(
+    rows: list,
+    *,
+    leaf: dict | None = None,
+    chapter: str = "",
+    max_total: int = 6000,
+    per_fact: int = 300,
+    full_titles: list | None = None,
+) -> dict:
     """单次事实注入的**审计视图**（R102 · G3 留痕的公开出口）。
 
     与 :func:`_render_facts_text` 共用同一次渲染（不重复扫描、不复制判据）：
@@ -488,8 +558,16 @@ def fact_injection_audit(rows: list, *, leaf: dict | None = None,
 
     Returns:
         ``{rows_total, budget_dropped, budget_dropped_count,
-        rendered_chars, rendered_text, selected_titles, injected_titles}``。
+        rendered_chars, rendered_text, selected_titles, injected_titles,
+        truncated_facts, truncated_titles, truncated_count,
+        complete_injected_count, ledger_rows_total, audit_entries}``。
         ``rendered_text`` 与 ``_render_facts_text(...)`` 返回**逐字节一致**。
+
+        ✅ D-39（R176）：新增三态账本字段 —— ``complete_injected_count`` +
+        ``truncated_count`` + ``budget_dropped_count`` == ``ledger_rows_total``
+        （渲染器实际参与账本的行数，逐章预筛后可能小于 ``rows_total``）；
+        ``truncated_facts`` 逐条给出 title/group/original_chars/kept_chars/
+        dropped_chars，``audit_entries`` 用 ``status`` 区分 truncated/dropped。
 
         ✅ R166（FIX-10）：新增 ``injected_titles`` —— **实际渲染进文本**的行标题
         （与 ``budget_dropped`` 合计恰好覆盖输入行集）。此前 sse 侧逐章审计的
@@ -499,15 +577,36 @@ def fact_injection_audit(rows: list, *, leaf: dict | None = None,
     """
     dropped: list[str] = []
     injected: list[str] = []
+    truncated: list[dict] = []
+    _counts: dict = {}
     text = _render_facts_text(
-        list(rows or []), relevant_to=leaf, chapter=chapter,
-        max_total=max_total, per_fact=per_fact, audit_out=dropped,
-        full_titles=full_titles, injected_out=injected)
+        list(rows or []),
+        relevant_to=leaf,
+        chapter=chapter,
+        max_total=max_total,
+        per_fact=per_fact,
+        audit_out=dropped,
+        full_titles=full_titles,
+        injected_out=injected,
+        truncated_out=truncated,
+        counts_out=_counts,
+    )
+    # ✅ D-39（R176 · 2026-11-04）：账本从「注入/丢弃」二元升级为三态：
+    #    完整注入 / 截断注入 / 整条丢弃；三者之和 == 账本输入行数。
+    #    账本输入行数取渲染器 prepared 行数（相关性命中预筛后真实参与渲染的行），
+    #    不是调用方传入的 rows_total —— 逐章预筛会减少行集，用 rows_total 会让
+    #    恒等式在带 leaf 的路径上失真。
+    _ledger_rows = int(_counts.get("prepared") or 0)
+    _truncated_titles = [str(t.get("title") or "") for t in truncated]
+    _complete_count = max(0, len(injected) - len(truncated))
+    _audit_entries = [{**t, "status": "truncated"} for t in truncated] + [
+        {"title": str(t or ""), "status": "dropped"} for t in dropped
+    ]
     # ✅ R122-G1：回显「在本次行集内真命中」的选中标题（与渲染前置同判据）
     _wanted = {str(t or "").strip() for t in (full_titles or []) if str(t or "").strip()}
     _selected_titles: list[str] = []
     if _wanted:
-        for _r in (rows or []):
+        for _r in rows or []:
             _t = _row_title(_r)
             if _t in _wanted and _t not in _selected_titles:
                 _selected_titles.append(_t)
@@ -519,6 +618,14 @@ def fact_injection_audit(rows: list, *, leaf: dict | None = None,
         "rendered_text": text,
         "selected_titles": _selected_titles,
         "injected_titles": injected,
+        # ✅ D-39（R176）：三态账本（完整注入 / 截断注入 / 整条丢弃）。
+        "truncated_facts": truncated,
+        "truncated_titles": _truncated_titles,
+        "truncated_count": len(truncated),
+        "complete_injected_count": _complete_count,
+        # 账本输入行数（prepared）：三态计数之和恒等于它。
+        "ledger_rows_total": _ledger_rows,
+        "audit_entries": _audit_entries,
     }
 
 
@@ -610,15 +717,17 @@ async def _load_facts_rows(db, scheme_id: str) -> list:
                     chapter = str(dimensions_for_row(d).get("chapter") or "")
                 except Exception:
                     chapter = ""
-            out.append((
-                str(d.get("gt") or "其他事实"),
-                str(d.get("title") or ""),
-                str(d.get("content") or ""),
-                d.get("confidence"),
-                chapter,
-                # ✅ R80：要求 vs 事实口径（尾部追加；短行消费方自适应）
-                str(d.get("value_kind") or ""),
-            ))
+            out.append(
+                (
+                    str(d.get("gt") or "其他事实"),
+                    str(d.get("title") or ""),
+                    str(d.get("content") or ""),
+                    d.get("confidence"),
+                    chapter,
+                    # ✅ R80：要求 vs 事实口径（尾部追加；短行消费方自适应）
+                    str(d.get("value_kind") or ""),
+                )
+            )
         return out
     except Exception as e:  # 全局事实表缺失/查询异常不应阻断生成
         logger.warning("构建项目关键事实失败（降级为无）: %s", e)
@@ -631,17 +740,17 @@ def _rank_facts_by_basis(rows: list, basis) -> tuple[list, int]:
     ✅ 兑现 ``config.outline_basis_relevance`` / ``outline_relevance_boost`` 的承诺
        （2026-09-27 之前这两个配置**零读取点**，`scheme_basis.rank_by_relevance`
        也**零调用** —— 属典型「配了不生效 / 死代码」）。
-    为什么必须前置：目录生成注入的事实有 3000 字硬预算，超量即**停止**，
+    为什么必须前置：目录生成注入的事实预算固定（一级 1500 / 子级 1000），超量即**停止**，
     尾部的项目参数（监测、验收…）对目录完全不可见；若不按方案名称排序，
     与本方案强相关的事实可能正好落在被截掉的尾部（顺序即见性）。
     为什么按**组**而不是按行排序：``_render_facts_text`` 以 group_title 分组渲染
     （``### 组名``），按行打散会产生重复组标题，破坏上下文连贯性。
     """
-    if basis is None or not rows or not getattr(
-            settings, "outline_basis_relevance", False):
+    if basis is None or not rows or not getattr(settings, "outline_basis_relevance", False):
         return rows, 0
     try:
         from app.services.scheme_basis import relevance_score
+
         kws = basis.keywords()
         if not kws:
             return rows, 0
@@ -652,8 +761,7 @@ def _rank_facts_by_basis(rows: list, basis) -> tuple[list, int]:
                 scores[gt] = relevance_score(f"{r[0]} {r[1]} {r[2]}", kws)
         if not any(scores.values()):
             return rows, 0
-        order = {g: i for i, g in enumerate(
-            sorted(scores, key=lambda g: -scores[g]))}
+        order = {g: i for i, g in enumerate(sorted(scores, key=lambda g: -scores[g]))}
         out = sorted(rows, key=lambda r: order.get(str(r[0] or ""), 999))
         return out, sum(1 for v in scores.values() if v > 0)
     except Exception:  # pragma: no cover - 纯优化，失败回退原序
@@ -662,8 +770,14 @@ def _rank_facts_by_basis(rows: list, basis) -> tuple[list, int]:
 
 
 async def build_facts_text(
-    db, scheme_id: str, max_total: int = 6000, per_fact: int = 300,
-    relevant_to: dict | None = None, basis=None,
+    db,
+    scheme_id: str,
+    max_total: int = 6000,
+    per_fact: int = 300,
+    relevant_to: dict | None = None,
+    basis=None,
+    audit_out: list | None = None,
+    injected_out: list | None = None,
 ) -> str:
     """从 global_facts 构建结构化「项目关键事实」文本（目录生成 / 正文生成共用）。
 
@@ -683,20 +797,38 @@ async def build_facts_text(
     """
     rows = await _load_facts_rows(db, scheme_id)
     rows, _hit = _rank_facts_by_basis(rows, basis)
-    facts_text = _render_facts_text(
-        rows, relevant_to=relevant_to, max_total=max_total, per_fact=per_fact)
-    # ✅ R52（2026-10-07）：数据字典注入 — 将全局事实的权威取值表
-    #    拼到 facts 文本最前面，供正文/目录提示词消费。
-    #    开关 content_data_dictionary 默认 True；关闭时提示词逐字回到引入前。
+    # ✅ L1/BUG-03（R177 · 2026-11-04）：预算在渲染前统一分配 ——
+    #    事实先算保底（_facts_floor_chars），数据字典只准用剩余额度；
+    #    禁止「先按 max_total 写满事实、再外部切片」的二次腰斩。
+    _budget = int(max_total)
+    _floor_rows = _filter_facts_rows(rows, relevant_to) if relevant_to else rows
+    _dd_block = ""
     if settings.content_data_dictionary:
         try:
             _dd = build_global_data_dictionary(rows)
-            _dd_block = render_data_dictionary_block(_dd)
-            if _dd_block:
-                facts_text = _dd_block + "\n" + facts_text
+            _dd_room = min(DATA_DICT_MAX_CHARS, _data_dict_room(_budget, _floor_rows))
+            if _dd_room > 0:
+                _dd_block = render_data_dictionary_block(_dd, max_chars=_dd_room)
         except Exception:
             logger.warning("数据字典注入失败（忽略，不影响生成）", exc_info=True)
-    return facts_text
+    if _dd_block:
+        _facts_text = _render_facts_text(
+            rows,
+            relevant_to=relevant_to,
+            max_total=max(0, _budget - len(_dd_block) - 1),
+            per_fact=per_fact,
+            audit_out=audit_out,
+            injected_out=injected_out,
+        )
+        return _dd_block + "\n" + _facts_text if _facts_text else _dd_block
+    return _render_facts_text(
+        rows,
+        relevant_to=relevant_to,
+        max_total=_budget,
+        per_fact=per_fact,
+        audit_out=audit_out,
+        injected_out=injected_out,
+    )
 
 
 def relevant_first_rows(rows: list, leaf: dict) -> list:
@@ -742,9 +874,7 @@ def relevant_first_rows(rows: list, leaf: dict) -> list:
     return hit + rest if hit else rows
 
 
-def render_outline_chapter_facts(rows: list, chapter: dict, *,
-                                 max_total: int = 1000,
-                                 dd_block: str = "") -> str:
+def render_outline_chapter_facts(rows: list, chapter: dict, *, max_total: int = 1000, dd_block: str = "") -> str:
     """目录二三级生成专用：按一级章节相关性渲染「项目关键事实」（纯函数）。
 
     ✅ R77（2026-10-14）：与 :func:`build_facts_text` 的分工 —— 那个是
@@ -763,10 +893,15 @@ def render_outline_chapter_facts(rows: list, chapter: dict, *,
         长度 ≤ ``max_total`` 的事实文本（无行/无预算时可能仅含 dd_block）。
     """
     budget = int(max_total)
+    _ordered = relevant_first_rows(rows, chapter) if rows else []
+    # ✅ L1/BUG-03（R177 · 2026-11-04）：与 build_facts_text 同一分配模型 ——
+    #    事实先占保底，数据字典只吃剩余额度；字典超长不会再挤空事实。
+    _dd_text = ""
     if dd_block:
-        budget = max(0, budget - len(dd_block) - 1)
-    text = _render_facts_text(
-        relevant_first_rows(rows, chapter), max_total=budget) if rows else ""
-    if dd_block:
-        return (dd_block + "\n" + text) if text else dd_block
+        _dd_room = _data_dict_room(budget, _ordered)
+        _dd_text = dd_block[:_dd_room] if _dd_room > 0 else ""
+    _facts_budget = max(0, budget - len(_dd_text) - 1) if _dd_text else budget
+    text = _render_facts_text(_ordered, max_total=_facts_budget) if _ordered else ""
+    if _dd_text:
+        return (_dd_text + "\n" + text) if text else _dd_text
     return text

@@ -24,6 +24,7 @@
   * ``extract_value_from_markdown_line(None)`` 不再抛 AttributeError；
   * ``_render_facts_text`` 对长度 < 3 的事实行不再抛 IndexError。
 """
+
 import hashlib
 import re
 
@@ -36,18 +37,18 @@ from app.services.facts_extractor import (
     normalize_key,
 )
 
-ALPHA = chr(0x03B1)      # 希腊字母 alpha
-BETA = chr(0x03B2)       # 希腊字母 beta
-GAMMA = chr(0x03B3)      # 希腊字母 gamma
-CIRC_1 = chr(0x2460)     # 带圈数字 ①
-CIRC_2 = chr(0x2461)     # 带圈数字 ②
-CYR_A = chr(0x0430)      # 西里尔字母 а
-CYR_B = chr(0x0431)      # 西里尔字母 б
+ALPHA = chr(0x03B1)  # 希腊字母 alpha
+BETA = chr(0x03B2)  # 希腊字母 beta
+GAMMA = chr(0x03B3)  # 希腊字母 gamma
+CIRC_1 = chr(0x2460)  # 带圈数字 ①
+CIRC_2 = chr(0x2461)  # 带圈数字 ②
+CYR_A = chr(0x0430)  # 西里尔字母 а
+CYR_B = chr(0x0431)  # 西里尔字母 б
 
 
 def _legacy_seed(name: str) -> str:
     """修复前旧实现的哈希种子口径（逐字复现，用于向后兼容对账）。"""
-    return re.sub(r'[^0-9A-Za-z一-鿿]+', '_', name.strip()).strip('_')
+    return re.sub(r"[^0-9A-Za-z一-鿿]+", "_", name.strip()).strip("_")
 
 
 def _legacy_key(name: str) -> str:
@@ -59,7 +60,7 @@ def _falls_through_to_hash(name: str) -> bool:
     for cn, _en in _NAME_KEY_INDEX:
         if cn in name:
             return False
-    return not re.match(r'^[a-z_]+$', name)
+    return not re.match(r"^[a-z_]+$", name)
 
 
 # ===========================================================================
@@ -70,9 +71,16 @@ def _falls_through_to_hash(name: str) -> bool:
 #: 这些名称的种子必须与旧实现逐字节相同，否则既有库里的 fact_key 会整体漂移，
 #: 连带影响 persist_extraction 的 ``_protected_by_key``（手工事实可能被误删）。
 SEPARATOR_ONLY_NAMES = (
-    "电线规格Z", "风管尺寸A", "桩端持力层B", "降水井数量",
-    "基坑 深度", "基坑-深度", "基坑_深度", "回填土压实系数",
-    "卸料平台限重", "悬挑工字钢型号",
+    "电线规格Z",
+    "风管尺寸A",
+    "桩端持力层B",
+    "降水井数量",
+    "基坑 深度",
+    "基坑-深度",
+    "基坑_深度",
+    "回填土压实系数",
+    "卸料平台限重",
+    "悬挑工字钢型号",
 )
 
 
@@ -153,16 +161,17 @@ def test_key_shape_is_stable():
 
 
 def _item(name, value, conf=0.9):
-    return FactItem(name=name, value=value, key=normalize_key(name),
-                    category="overview", source="doc", confidence=conf)
+    return FactItem(name=name, value=value, key=normalize_key(name), category="overview", source="doc", confidence=conf)
 
 
 def test_two_distinct_symbol_facts_survive_dedupe():
     """C1（核心）：原先会合并成 1 条并伪造矛盾，现在必须两条都活着、且无矛盾。"""
-    out = merge_and_deduplicate([
-        _item("坡角" + ALPHA, "30"),
-        _item("坡角" + BETA, "45"),
-    ])
+    out = merge_and_deduplicate(
+        [
+            _item("坡角" + ALPHA, "30"),
+            _item("坡角" + BETA, "45"),
+        ]
+    )
     assert len(out) == 2, "事实被静默合并"
     assert {i.name for i in out} == {"坡角" + ALPHA, "坡角" + BETA}, "原名丢失"
     assert all(not i.has_conflict for i in out), "凭空产生了假矛盾"
@@ -175,12 +184,12 @@ def test_genuine_same_key_multi_source_still_conflicts():
     这是对 C1 的必须配对：**只看 C1 的红/绿无法区分「碰撞被修复」与
     「矛盾检测整体失效」**。
     """
-    out = merge_and_deduplicate([
-        FactItem(name="总工期那是", value="365", key="duration",
-                 category="overview", source="A", confidence=0.9),
-        FactItem(name="总工期那是", value="400", key="duration",
-                 category="overview", source="B", confidence=0.6),
-    ])
+    out = merge_and_deduplicate(
+        [
+            FactItem(name="总工期那是", value="365", key="duration", category="overview", source="A", confidence=0.9),
+            FactItem(name="总工期那是", value="400", key="duration", category="overview", source="B", confidence=0.6),
+        ]
+    )
     assert len(out) == 1
     assert out[0].has_conflict is True
     assert {c["value"] for c in out[0].conflict_values} == {"400"}
@@ -203,8 +212,7 @@ def test_extract_value_tolerates_none():
 
 def test_extract_value_keeps_existing_behaviour():
     """D2：正常输入的输出逐字不变（不得借健壮性修复改掉既有口径）。"""
-    assert extract_value_from_markdown_line("- **基坑深度**: 12.5m") == (
-        "基坑深度", "12.5m")
+    assert extract_value_from_markdown_line("- **基坑深度**: 12.5m") == ("基坑深度", "12.5m")
     assert extract_value_from_markdown_line("- 名称：值") == ("名称", "值")
 
 
@@ -253,10 +261,12 @@ def test_M1_lossy_seed_reintroduces_collision(monkeypatch):
         # 变异必须真的生效，否则本条只是「看起来像 A/B」的常绿用例
         assert fe._fact_key_seed is _legacy_seed
         assert fe.normalize_key("坡角" + ALPHA) == fe.normalize_key("坡角" + BETA)
-        out = fe.merge_and_deduplicate([
-            _item("坡角" + ALPHA, "30"),
-            _item("坡角" + BETA, "45"),
-        ])
+        out = fe.merge_and_deduplicate(
+            [
+                _item("坡角" + ALPHA, "30"),
+                _item("坡角" + BETA, "45"),
+            ]
+        )
         assert len(out) == 1, "退回旧写法后必须重现「事实被合并」"
         assert out[0].has_conflict is True, "退回旧写法后必须重现「凭空假矛盾」"
     finally:
@@ -278,8 +288,7 @@ def test_M2_dropping_separator_folding_is_detected_by_group_a(monkeypatch):
     fe.normalize_key.cache_clear()
     monkeypatch.setattr(fe, "_fact_key_seed", lambda name: name.strip())
     try:
-        drifted = [n for n in SEPARATOR_ONLY_NAMES
-                   if fe._fact_key_seed(n) != _legacy_seed(n)]
+        drifted = [n for n in SEPARATOR_ONLY_NAMES if fe._fact_key_seed(n) != _legacy_seed(n)]
         assert drifted, "A1 失效：某种会让既有 key 漂移的写法没被 A 组抓住"
         assert fe.normalize_key("基坑 深度") != _legacy_key("基坑 深度")
     finally:

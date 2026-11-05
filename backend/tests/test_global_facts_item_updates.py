@@ -12,6 +12,7 @@
 测试直接调用路由函数（与既有路由测试风格一致），避免 TestClient 跨事件
 循环持有 aiosqlite 连接导致的偶发失败。
 """
+
 import uuid
 
 import app.db as _appdb
@@ -28,8 +29,7 @@ async def ctx(tmp_path):
     db = await get_conn()
     pid, sid = uuid.uuid4().hex, uuid.uuid4().hex
     await db.execute("INSERT INTO projects(id,name) VALUES(?,?)", (pid, "p"))
-    await db.execute(
-        "INSERT INTO schemes(id,project_id,name) VALUES(?,?,?)", (sid, pid, "s"))
+    await db.execute("INSERT INTO schemes(id,project_id,name) VALUES(?,?,?)", (sid, pid, "s"))
     await db.commit()
     yield db, pid, sid
     await db.execute("DELETE FROM global_facts WHERE scheme_id=?", (sid,))
@@ -47,17 +47,32 @@ async def _seed_conflict_fact(db, pid, sid, *, value="365"):
         "group_title, title, content, category, source_ref, is_simulated, "
         "confidence, is_resolved, has_conflict, conflict_keys, fact_key) "
         "VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)",
-        (fid, pid, sid, "g1", "工期安排", "合同工期", content, "schedule",
-         '[{"file":"招标文件","quote":"工期365天"}]', 0, 0.9, 1, 1,
-         "k_a|k_b", "合同工期"))
+        (
+            fid,
+            pid,
+            sid,
+            "g1",
+            "工期安排",
+            "合同工期",
+            content,
+            "schedule",
+            '[{"file":"招标文件","quote":"工期365天"}]',
+            0,
+            0.9,
+            1,
+            1,
+            "k_a|k_b",
+            "合同工期",
+        ),
+    )
     await db.commit()
     return fid
 
 
 async def _row(db, fid):
     cur = await db.execute(
-        "SELECT title, content, category, has_conflict, conflict_keys, fact_key "
-        "FROM global_facts WHERE id=?", (fid,))
+        "SELECT title, content, category, has_conflict, conflict_keys, fact_key " "FROM global_facts WHERE id=?", (fid,)
+    )
     r = await cur.fetchone()
     return dict(r)
 
@@ -66,12 +81,12 @@ async def _row(db, fid):
 # _apply_item_updates：仅在值真正变化时清除矛盾标记
 # ---------------------------------------------------------------------------
 
+
 async def test_value_unchanged_keeps_conflict(ctx):
     """只改分类、value 原样回填 → 矛盾标记必须保留（旧实现会被静默清除）。"""
     db, pid, sid = ctx
     fid = await _seed_conflict_fact(db, pid, sid, value="365")
-    n, _ = await gf._apply_item_updates(
-        db, [{"fact_id": fid, "value": "365", "category": "basic"}])
+    n, _ = await gf._apply_item_updates(db, [{"fact_id": fid, "value": "365", "category": "basic"}])
     assert n == 1
     r = await _row(db, fid)
     assert r["has_conflict"] == 1, "值未变不应清矛盾"
@@ -114,6 +129,7 @@ async def test_rename_only_keeps_conflict(ctx):
 # GET /global-facts/categories：CATEGORY_TITLES 单一事实源
 # ---------------------------------------------------------------------------
 
+
 async def test_list_fact_categories_matches_source():
     res = await gf.list_fact_categories()
     cats = res["categories"]
@@ -132,6 +148,7 @@ async def test_list_fact_categories_matches_source():
 #   收紧后：只有存在以列表标记（-/*/•）开头的非空行才转分组重建。
 # ---------------------------------------------------------------------------
 
+
 async def _seed_plain_fact(db, pid, sid):
     fid = uuid.uuid4().hex
     await db.execute(
@@ -139,15 +156,27 @@ async def _seed_plain_fact(db, pid, sid):
         "group_title, title, content, category, is_simulated, confidence, "
         "is_resolved, has_conflict, fact_key) "
         "VALUES (?,?,?,?,?,?,?,?,?,?,?,0,?)",
-        (fid, pid, sid, "gp1", "工期安排", "实施周期",
-         "实施周期为365天", "schedule", 0, 0.9, 1, fe.normalize_key("实施周期")))
+        (
+            fid,
+            pid,
+            sid,
+            "gp1",
+            "工期安排",
+            "实施周期",
+            "实施周期为365天",
+            "schedule",
+            0,
+            0.9,
+            1,
+            fe.normalize_key("实施周期"),
+        ),
+    )
     await db.commit()
     return fid
 
 
 async def _group_rows(db, gid):
-    cur = await db.execute(
-        "SELECT id FROM global_facts WHERE group_id=?", (gid,))
+    cur = await db.execute("SELECT id FROM global_facts WHERE group_id=?", (gid,))
     return [dict(r) for r in await cur.fetchall()]
 
 
@@ -155,12 +184,7 @@ async def test_multiline_value_with_hyphen_keeps_row_id(ctx):
     """含连字符的多行普通文本 → 行级原地更新，行 id 不变、不触发分组重建。"""
     db, pid, sid = ctx
     fid = await _seed_plain_fact(db, pid, sid)
-    await gf.update_fact(
-        fid,
-        gf.FactGroupUpdate(
-            id=fid,
-            content="实施周期为365天\n（服务期覆盖2024-2025年度）"),
-        db=db)
+    await gf.update_fact(fid, gf.FactGroupUpdate(id=fid, content="实施周期为365天\n（服务期覆盖2024-2025年度）"), db=db)
     rows = await _group_rows(db, "gp1")
     assert [r["id"] for r in rows] == [fid], "含连字符的多行文本不得触发分组重建"
     cur = await db.execute("SELECT content FROM global_facts WHERE id=?", (fid,))
@@ -174,11 +198,9 @@ async def test_real_markdown_list_still_rebuilds_group(ctx):
     fid = await _seed_plain_fact(db, pid, sid)
     await gf.update_fact(
         fid,
-        gf.FactGroupUpdate(
-            id=fid,
-            title="工期安排",
-            content="- **总工期**: 365 日历天\n- **试运行期**: 30 日历天"),
-        db=db)
+        gf.FactGroupUpdate(id=fid, title="工期安排", content="- **总工期**: 365 日历天\n- **试运行期**: 30 日历天"),
+        db=db,
+    )
     rows = await _group_rows(db, "gp1")
     assert len(rows) == 2, "多行列表必须重建为多行（防静默丢行）"
     assert fid not in [r["id"] for r in rows], "旧行应被重建替换"
@@ -195,6 +217,7 @@ async def test_real_markdown_list_still_rebuilds_group(ctx):
 #   修复后：结构化 title / content 统一走 _apply_item_updates。
 # ---------------------------------------------------------------------------
 
+
 async def _seed_structured_fact(db, pid, sid, *, name="合同工期", value="365"):
     fid = uuid.uuid4().hex
     await db.execute(
@@ -202,9 +225,22 @@ async def _seed_structured_fact(db, pid, sid, *, name="合同工期", value="365
         "group_title, title, content, category, is_simulated, confidence, "
         "is_resolved, has_conflict, conflict_keys, fact_key) "
         "VALUES (?,?,?,?,?,?,?,?,?,?,?,0,?,?)",
-        (fid, pid, sid, "g1", "工期安排", name,
-         gf._build_fact_content(name, value, False), "schedule",
-         0, 0.9, 1, "", fe.normalize_key(name)))
+        (
+            fid,
+            pid,
+            sid,
+            "g1",
+            "工期安排",
+            name,
+            gf._build_fact_content(name, value, False),
+            "schedule",
+            0,
+            0.9,
+            1,
+            "",
+            fe.normalize_key(name),
+        ),
+    )
     await db.commit()
     return fid
 
@@ -212,14 +248,14 @@ async def _seed_structured_fact(db, pid, sid, *, name="合同工期", value="365
 async def _full_row(db, fid):
     cur = await db.execute(
         "SELECT title, content, category, fact_key, is_simulated, is_resolved, "
-        "has_conflict, conflict_keys FROM global_facts WHERE id=?", (fid,))
+        "has_conflict, conflict_keys FROM global_facts WHERE id=?",
+        (fid,),
+    )
     return dict(await cur.fetchone())
 
 
 async def _group_content(db, gid):
-    cur = await db.execute(
-        "SELECT id, title, content FROM global_facts WHERE group_id=? "
-        "ORDER BY title", (gid,))
+    cur = await db.execute("SELECT id, title, content FROM global_facts WHERE group_id=? " "ORDER BY title", (gid,))
     return [dict(r) for r in await cur.fetchall()]
 
 
@@ -239,11 +275,7 @@ async def test_row_level_simulated_content_enforces_gate(ctx):
     """行级把 content 改成模拟值 → is_simulated=1 且 is_resolved 回落为 0（闸门）。"""
     db, pid, sid = ctx
     fid = await _seed_structured_fact(db, pid, sid, value="365")
-    await gf.update_fact(
-        fid,
-        gf.FactGroupUpdate(id=fid,
-                           content=f"- **合同工期**: 300{fe.SIMULATED_MARKER}"),
-        db=db)
+    await gf.update_fact(fid, gf.FactGroupUpdate(id=fid, content=f"- **合同工期**: 300{fe.SIMULATED_MARKER}"), db=db)
     r = await _full_row(db, fid)
     assert r["is_simulated"] == 1, "模拟值标记必须回写到 is_simulated 列"
     assert r["is_resolved"] == 0, "模拟值必须回到待审核，不得直接越过注入闸门"
@@ -259,12 +291,24 @@ async def test_row_level_clear_simulated_marker_releases_gate(ctx):
         "group_title, title, content, category, is_simulated, confidence, "
         "is_resolved, has_conflict, conflict_keys, fact_key) "
         "VALUES (?,?,?,?,?,?,?,?,?,?,?,0,?,?)",
-        (fid, pid, sid, "g1", "工期安排", "合同工期",
-         gf._build_fact_content("合同工期", "300", True), "schedule",
-         1, 0.3, 0, "", fe.normalize_key("合同工期")))
+        (
+            fid,
+            pid,
+            sid,
+            "g1",
+            "工期安排",
+            "合同工期",
+            gf._build_fact_content("合同工期", "300", True),
+            "schedule",
+            1,
+            0.3,
+            0,
+            "",
+            fe.normalize_key("合同工期"),
+        ),
+    )
     await db.commit()
-    await gf.update_fact(
-        fid, gf.FactGroupUpdate(id=fid, content="- **合同工期**: 365"), db=db)
+    await gf.update_fact(fid, gf.FactGroupUpdate(id=fid, content="- **合同工期**: 365"), db=db)
     r = await _full_row(db, fid)
     assert r["is_simulated"] == 0, "去掉标记后不得残留模拟值"
     assert "模拟值" not in r["content"]
@@ -275,8 +319,7 @@ async def test_row_level_value_change_clears_conflict(ctx):
     """行级改值即视为裁决 → 清 has_conflict 与 conflict_keys（与条目级同口径）。"""
     db, pid, sid = ctx
     fid = await _seed_conflict_fact(db, pid, sid, value="365")
-    await gf.update_fact(
-        fid, gf.FactGroupUpdate(id=fid, content="- **合同工期**: 400"), db=db)
+    await gf.update_fact(fid, gf.FactGroupUpdate(id=fid, content="- **合同工期**: 400"), db=db)
     r = await _full_row(db, fid)
     assert r["has_conflict"] == 0 and r["conflict_keys"] == ""
     assert "400" in r["content"]
@@ -296,9 +339,8 @@ async def test_row_level_unknown_field_is_ignored(ctx):
     db, pid, sid = ctx
     fid = await _seed_structured_fact(db, pid, sid)
     await gf.update_fact(
-        fid,
-        gf.FactGroupUpdate(id=fid, category="basic", **{"hack": "x'};DROP TABLE global_facts;--"}),
-        db=db)
+        fid, gf.FactGroupUpdate(id=fid, category="basic", **{"hack": "x'};DROP TABLE global_facts;--"}), db=db
+    )
     r = await _full_row(db, fid)
     assert r["category"] == "basic"
 
@@ -313,12 +355,14 @@ async def test_plus_and_dot_bullets_rebuild_group(ctx):
         await gf.update_fact(
             "gp1",
             gf.FactGroupUpdate(
-                id="gp1", title="工期安排",
-                content=f"{bullet} **总工期**: 365 日历天\n{bullet} **试运行期**: 30 日历天"),
-            db=db)
+                id="gp1", title="工期安排", content=f"{bullet} **总工期**: 365 日历天\n{bullet} **试运行期**: 30 日历天"
+            ),
+            db=db,
+        )
         rows = await _group_content(db, "gp1")
         assert len(rows) == 2, f"{bullet} 开头的多行列表必须重建为多行"
         content = "".join(r["content"] for r in rows)
         assert "365" in content and "30" in content, "不得丢失任一行"
-        assert all(not r["content"].lstrip().startswith(bullet) for r in rows), \
-            "列表符必须在入库前剥离，不得混进 content"
+        assert all(
+            not r["content"].lstrip().startswith(bullet) for r in rows
+        ), "列表符必须在入库前剥离，不得混进 content"

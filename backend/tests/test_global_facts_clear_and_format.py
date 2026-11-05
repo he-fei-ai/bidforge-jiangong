@@ -9,6 +9,7 @@
 - facts_classification.CHAPTER_ORDER 的九大章节键是前后端章节标题的唯一事实源，
   须与前端 FACT_CHAPTER_TITLES 键严格一致（漂移护栏）。
 """
+
 import asyncio
 import uuid
 
@@ -22,8 +23,15 @@ from app.services.facts_extractor import ExtractionResult, FactGroup, FactItem
 
 # 前后端约定的九大章节键（与前端 FACT_CHAPTER_TITLES / 建办质〔2018〕31号 对齐）
 CANONICAL_CHAPTER_KEYS = [
-    "overview", "basis", "plan", "technique", "safety",
-    "personnel", "acceptance", "emergency", "calc_drawings",
+    "overview",
+    "basis",
+    "plan",
+    "technique",
+    "safety",
+    "personnel",
+    "acceptance",
+    "emergency",
+    "calc_drawings",
 ]
 
 
@@ -34,8 +42,7 @@ async def ctx(tmp_path):
     db = await get_conn()
     pid, sid = uuid.uuid4().hex, uuid.uuid4().hex
     await db.execute("INSERT INTO projects(id,name) VALUES(?,?)", (pid, "p"))
-    await db.execute(
-        "INSERT INTO schemes(id,project_id,name) VALUES(?,?,?)", (sid, pid, "s"))
+    await db.execute("INSERT INTO schemes(id,project_id,name) VALUES(?,?,?)", (sid, pid, "s"))
     await db.commit()
     yield db, pid, sid
     await db.execute("DELETE FROM facts_extracted_chunks WHERE scheme_id=?", (sid,))
@@ -51,8 +58,7 @@ async def _count_chunks(db, **kw):
     for k, v in kw.items():
         conds.append(f"{k}=?")
         params.append(v)
-    sql = "SELECT count(*) FROM facts_extracted_chunks" + (
-        " WHERE " + " AND ".join(conds) if conds else "")
+    sql = "SELECT count(*) FROM facts_extracted_chunks" + (" WHERE " + " AND ".join(conds) if conds else "")
     cur = await db.execute(sql, params)
     return int((await cur.fetchone())[0] or 0)
 
@@ -61,8 +67,8 @@ class TestClearAllFactsChunkReset:
     async def test_scheme_scoped_chunk_cleared(self, ctx):
         db, pid, sid = ctx
         await db.execute(
-            "INSERT INTO facts_extracted_chunks(project_id,scheme_id,chunk_hash) "
-            "VALUES(?,?,?)", (pid, sid, "h1"))
+            "INSERT INTO facts_extracted_chunks(project_id,scheme_id,chunk_hash) " "VALUES(?,?,?)", (pid, sid, "h1")
+        )
         await db.commit()
         assert await _count_chunks(db, scheme_id=sid) == 1
         await gf.clear_all_facts(gf.ClearFactsRequest(scheme_id=sid), db)
@@ -74,8 +80,8 @@ class TestClearAllFactsChunkReset:
         # （旧实现仅按 (project_id, scheme_id) 删除，scheme_id='' 的共享级指纹残留，
         # 导致项目级重新提取跳过已哈希段落）。
         await db.execute(
-            "INSERT INTO facts_extracted_chunks(project_id,scheme_id,chunk_hash) "
-            "VALUES(?,?,?)", (pid, "", "h2"))
+            "INSERT INTO facts_extracted_chunks(project_id,scheme_id,chunk_hash) " "VALUES(?,?,?)", (pid, "", "h2")
+        )
         await db.commit()
         assert await _count_chunks(db, project_id=pid, scheme_id="") == 1
         await gf.clear_all_facts(gf.ClearFactsRequest(scheme_id=sid), db)
@@ -84,24 +90,26 @@ class TestClearAllFactsChunkReset:
 
 class TestFormatForFrontendScopeStale:
     def test_scope_and_is_stale_present(self):
-        grp = FactGroup(title="人员角色", category="personnel", items=[
-            FactItem(name="项目经理", value="张伟", key="pm",
-                     category="personnel", confidence=0.9)])
+        grp = FactGroup(
+            title="人员角色",
+            category="personnel",
+            items=[FactItem(name="项目经理", value="张伟", key="pm", category="personnel", confidence=0.9)],
+        )
         res = ExtractionResult(groups=[grp], total_items=1)
         out = fe.format_for_frontend(res)
         item = out["groups"][0]["items"][0]
         assert item["scope"] == "scheme", "SSE 提取事实恒为方案级"
         assert item["is_stale"] is False, "刚提取的事实非过期"
         # 与 list_facts 刷新路径关键字段同构
-        for key in ("chapter", "fact_attr", "source_kind", "is_shared",
-                    "is_simulated", "has_conflict", "confidence"):
+        for key in ("chapter", "fact_attr", "source_kind", "is_shared", "is_simulated", "has_conflict", "confidence"):
             assert key in item
 
 
 class TestChapterKeyDriftGuard:
     def test_chapter_order_canonical(self):
-        assert fc.CHAPTER_ORDER == CANONICAL_CHAPTER_KEYS, (
-            "九大章节键是前后端章节标题唯一事实源，须与前端 FACT_CHAPTER_TITLES 严格一致")
+        assert (
+            fc.CHAPTER_ORDER == CANONICAL_CHAPTER_KEYS
+        ), "九大章节键是前后端章节标题唯一事实源，须与前端 FACT_CHAPTER_TITLES 严格一致"
         for k in fc.CHAPTER_ORDER:
             assert fc.CHAPTER_TITLES.get(k), f"章节键 {k} 缺少中文标题"
 
@@ -110,6 +118,7 @@ class TestBatchResolveScopeGuard:
     async def test_fact_ids_without_scheme_id_rejected(self, ctx):
         db, pid, sid = ctx
         from fastapi import HTTPException
+
         with pytest.raises(HTTPException) as exc:
             await gf.batch_resolve(gf.BatchResolveRequest(fact_ids=["x", "y"]), db)
         assert exc.value.status_code == 400
@@ -123,11 +132,10 @@ class TestBatchResolveScopeGuard:
             "group_title, title, content, category, source_ref, is_simulated, "
             "confidence, is_resolved, has_conflict) "
             "VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?)",
-            (fid, pid, sid, "g", "其他事实", "工程名称", "- **工程名称**: 某项目",
-             "other", "[]", 0, 1.0, 0, 0))
+            (fid, pid, sid, "g", "其他事实", "工程名称", "- **工程名称**: 某项目", "other", "[]", 0, 1.0, 0, 0),
+        )
         await db.commit()
         res = await gf.batch_resolve(gf.BatchResolveRequest(scheme_id=sid, fact_ids=[fid]), db)
         assert res["changed"] == 1
-        cur = await db.execute(
-            "SELECT is_resolved FROM global_facts WHERE id=?", (fid,))
+        cur = await db.execute("SELECT is_resolved FROM global_facts WHERE id=?", (fid,))
         assert int((await cur.fetchone())[0]) == 1

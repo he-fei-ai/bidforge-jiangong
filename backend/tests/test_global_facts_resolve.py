@@ -1,4 +1,5 @@
 """全局事实路由：resolve_fact 对不存在的 id 返回 404。"""
+
 import pytest
 from app.routers.global_facts import resolve_fact
 from fastapi import HTTPException
@@ -11,25 +12,37 @@ async def test_resolve_nonexistent_fact_raises_404(db_conn):
 
 
 async def test_resolve_existing_fact_marks_resolved(db_conn):
-    await db_conn.execute(
-        "INSERT INTO projects (id, name) VALUES (?,?)", ("p1", "项目"))
-    await db_conn.execute(
-        "INSERT INTO schemes (id, project_id, name) VALUES (?,?,?)",
-        ("s1", "p1", "方案"))
+    await db_conn.execute("INSERT INTO projects (id, name) VALUES (?,?)", ("p1", "项目"))
+    await db_conn.execute("INSERT INTO schemes (id, project_id, name) VALUES (?,?,?)", ("s1", "p1", "方案"))
     await db_conn.execute(
         "INSERT INTO global_facts (id, project_id, scheme_id, group_id, group_title,"
         " title, content, category, source_ref, is_simulated, confidence,"
         " is_resolved, has_conflict, conflict_keys, fact_key) "
         "VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)",
-        ("f1", "p1", "s1", "g1", "工期", "项目总工期", "- **项目总工期**: 120天",
-         "schedule", "", 0, 0.9, 0, 0, "", "total_duration"))
+        (
+            "f1",
+            "p1",
+            "s1",
+            "g1",
+            "工期",
+            "项目总工期",
+            "- **项目总工期**: 120天",
+            "schedule",
+            "",
+            0,
+            0.9,
+            0,
+            0,
+            "",
+            "total_duration",
+        ),
+    )
     await db_conn.commit()
 
     result = await resolve_fact("f1", db=db_conn)
     assert result == {"ok": True}
 
-    cur = await db_conn.execute(
-        "SELECT is_resolved FROM global_facts WHERE id=?", ("f1",))
+    cur = await db_conn.execute("SELECT is_resolved FROM global_facts WHERE id=?", ("f1",))
     row = await cur.fetchone()
     assert row["is_resolved"] == 1
 
@@ -55,10 +68,24 @@ async def _seed_conflicting(db, *, value="12.5m", candidates, simulated=1):
         "group_title, title, content, category, source_ref, is_simulated, "
         "confidence, is_resolved, has_conflict, conflict_keys, fact_key) "
         "VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)",
-        (fid, "p1", "s1", "g1", "技术参数", "基坑深度",
-         gf._build_fact_content("基坑深度", value, bool(simulated)),
-         "tech_param", "", simulated, 0.6, 0, 1,
-         json.dumps(candidates, ensure_ascii=False), "depth"))
+        (
+            fid,
+            "p1",
+            "s1",
+            "g1",
+            "技术参数",
+            "基坑深度",
+            gf._build_fact_content("基坑深度", value, bool(simulated)),
+            "tech_param",
+            "",
+            simulated,
+            0.6,
+            0,
+            1,
+            json.dumps(candidates, ensure_ascii=False),
+            "depth",
+        ),
+    )
     await db.commit()
     return fid
 
@@ -66,16 +93,19 @@ async def _seed_conflicting(db, *, value="12.5m", candidates, simulated=1):
 async def _row_of(db, fid):
     cur = await db.execute(
         "SELECT title, content, is_simulated, is_resolved, has_conflict, "
-        "conflict_keys, confidence FROM global_facts WHERE id=?", (fid,))
+        "conflict_keys, confidence FROM global_facts WHERE id=?",
+        (fid,),
+    )
     return dict(await cur.fetchone())
 
 
 async def test_conflict_resolved_to_real_value_drops_simulated(db_conn):
     """编造值 → 裁决为文档实值：is_simulated 必须归 0（闸门不再残留）。"""
     fid = await _seed_conflicting(
-        db_conn, value="12.5m",
-        candidates=[{"value": "18.0m", "source": "地质报告.pdf",
-                     "confidence": 0.95, "is_simulated": False}])
+        db_conn,
+        value="12.5m",
+        candidates=[{"value": "18.0m", "source": "地质报告.pdf", "confidence": 0.95, "is_simulated": False}],
+    )
     r = await _row_of(db_conn, fid)
     assert r["is_simulated"] == 1  # 初始状态：模拟值待确认
 
@@ -92,9 +122,10 @@ async def test_conflict_resolved_to_real_value_drops_simulated(db_conn):
 async def test_conflict_resolved_to_simulated_candidate_keeps_gate(db_conn):
     """裁决为另一个模拟值候选：闸门必须继续生效（不得放行编造值）。"""
     fid = await _seed_conflicting(
-        db_conn, value="12.5m",
-        candidates=[{"value": "18.0m", "source": "估算",
-                     "confidence": 0.3, "is_simulated": True}])
+        db_conn,
+        value="12.5m",
+        candidates=[{"value": "18.0m", "source": "估算", "confidence": 0.3, "is_simulated": True}],
+    )
     await gf.resolve_conflict(fid, gf.ResolveConflictRequest(value="18.0m"), db=db_conn)
     r = await _row_of(db_conn, fid)
     assert r["is_simulated"] == 1, "候选本身是模拟值时闸门必须保留"
@@ -104,8 +135,7 @@ async def test_conflict_resolved_to_simulated_candidate_keeps_gate(db_conn):
 
 async def test_conflict_keep_current_value_preserves_simulated(db_conn):
     """「保留当前值」= 值未变 → 只清矛盾，模拟值语义保持原样。"""
-    fid = await _seed_conflicting(db_conn, value="12.5m",
-                                  candidates=[{"value": "18.0m"}])
+    fid = await _seed_conflicting(db_conn, value="12.5m", candidates=[{"value": "18.0m"}])
     await gf.resolve_conflict(fid, gf.ResolveConflictRequest(value="12.5m"), db=db_conn)
     r = await _row_of(db_conn, fid)
     assert r["is_simulated"] == 1, "值未变时不应改写模拟值语义"
@@ -116,8 +146,8 @@ async def test_conflict_keep_current_value_preserves_simulated(db_conn):
 async def test_conflict_legacy_candidates_without_flag_treat_as_real(db_conn):
     """旧数据候选无 is_simulated 字段 → 视为真实证据，闸门归 0。"""
     fid = await _seed_conflicting(
-        db_conn, value="12.5m",
-        candidates=[{"value": "18.0m", "source": "地质报告.pdf", "confidence": 0.95}])
+        db_conn, value="12.5m", candidates=[{"value": "18.0m", "source": "地质报告.pdf", "confidence": 0.95}]
+    )
     await gf.resolve_conflict(fid, gf.ResolveConflictRequest(value="18.0m"), db=db_conn)
     r = await _row_of(db_conn, fid)
     assert r["is_simulated"] == 0, "无标记的旧候选按真实证据处理"
@@ -126,9 +156,8 @@ async def test_conflict_legacy_candidates_without_flag_treat_as_real(db_conn):
 async def test_conflict_resolved_value_marker_stripped(db_conn):
     """传入值自带模拟值标记 → 归一化为纯值（标记由 is_simulated 列承载）。"""
     from app.services.facts_extractor import SIMULATED_MARKER
-    fid = await _seed_conflicting(
-        db_conn, value="12.5m",
-        candidates=[{"value": "18.0m", "is_simulated": False}])
+
+    fid = await _seed_conflicting(db_conn, value="12.5m", candidates=[{"value": "18.0m", "is_simulated": False}])
     await gf.resolve_conflict(fid, gf.ResolveConflictRequest(value=f"18.0m{SIMULATED_MARKER}"), db=db_conn)
     r = await _row_of(db_conn, fid)
     assert r["content"] == "- **基坑深度**: 18.0m"

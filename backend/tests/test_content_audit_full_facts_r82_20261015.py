@@ -14,6 +14,7 @@
   D. 判据单一事实源 + 接线（矛盾判据只一份副本；开关默认 True；两处 standard_report
      都传 conflict_fact_rows；autofix 门控/输入均走 _autofix_rows）。
 """
+
 from __future__ import annotations
 
 import json
@@ -33,17 +34,22 @@ def _issues_of(report: dict, *types: str) -> list[dict]:
 def _dump(report: dict) -> str:
     """稳定性序列化（用于逐字节等价比对）。"""
     return json.dumps(
-        {"standard": report.get("standard"),
-         "passed": report.get("passed"),
-         "error_count": report.get("error_count"),
-         "warning_count": report.get("warning_count"),
-         "issues": report.get("issues")},
-        ensure_ascii=False, sort_keys=True)
+        {
+            "standard": report.get("standard"),
+            "passed": report.get("passed"),
+            "error_count": report.get("error_count"),
+            "warning_count": report.get("warning_count"),
+            "issues": report.get("issues"),
+        },
+        ensure_ascii=False,
+        sort_keys=True,
+    )
 
 
 # ===========================================================================
 # A. 默认行为不变性（conflict_fact_rows=None → 逐字节等于引入前）
 # ===========================================================================
+
 
 class TestDefaultInvariance:
     def test_none_argument_matches_explicit_none(self):
@@ -63,13 +69,15 @@ class TestDefaultInvariance:
     def test_empty_conflict_rows_same_as_none(self):
         content = "本质保期 90 天。"
         rows = [_row("质保期", "- 质保期：90 天")]
-        assert _dump(standard_report(content, "precise", rows, conflict_fact_rows=[])) \
-            == _dump(standard_report(content, "precise", rows))
+        assert _dump(standard_report(content, "precise", rows, conflict_fact_rows=[])) == _dump(
+            standard_report(content, "precise", rows)
+        )
 
 
 # ===========================================================================
 # B. 全量冲突检出行为
 # ===========================================================================
+
 
 class TestFullFactsConflictDetection:
     def test_cross_chapter_value_conflict_detected(self):
@@ -98,17 +106,20 @@ class TestFullFactsConflictDetection:
 
     def test_fuzzy_tolerance_respected_on_full_facts(self):
         # 模糊模式：全量事实 90 天，正文 95 天（±10% 内）→ 不报；
-        big = standard_report("本项目总工期为 120 天。", "fuzzy", [],
-                              conflict_fact_rows=[_row("项目总工期", "- 工期：90 天")])
+        big = standard_report(
+            "本项目总工期为 120 天。", "fuzzy", [], conflict_fact_rows=[_row("项目总工期", "- 工期：90 天")]
+        )
         assert len(_issues_of(big, "value_conflict")) == 1
-        ok = standard_report("本项目总工期为 95 天。", "fuzzy", [],
-                             conflict_fact_rows=[_row("项目总工期", "- 工期：90 天")])
+        ok = standard_report(
+            "本项目总工期为 95 天。", "fuzzy", [], conflict_fact_rows=[_row("项目总工期", "- 工期：90 天")]
+        )
         assert _issues_of(ok, "value_conflict") == []
 
 
 # ===========================================================================
 # C. 覆盖率不受全量污染（fact_value_missing 只按本章注入事实）
 # ===========================================================================
+
 
 class TestCoverageNotPollutedByFullFacts:
     def test_unreferenced_full_fact_does_not_report_missing(self):
@@ -131,13 +142,13 @@ class TestCoverageNotPollutedByFullFacts:
 # D. 去重：本章与全量同 title 的冲突不双计
 # ===========================================================================
 
+
 class TestTitleDedup:
     def test_same_title_not_double_counted(self):
         content = "本项目总工期为 120 天。"
         chapter_fact = _row("项目总工期", "- 项目总工期：90 天")
         full = [chapter_fact, _row("项目总工期", "- 项目总工期：90 天")]
-        r = standard_report(content, "precise", [chapter_fact],
-                            conflict_fact_rows=full)
+        r = standard_report(content, "precise", [chapter_fact], conflict_fact_rows=full)
         # 同 title 已在 fact_groups → 被 _extra_groups 去重跳过；value_mismatch 恰 1 条
         assert len(_issues_of(r, "value_mismatch")) == 1
 
@@ -146,15 +157,18 @@ class TestTitleDedup:
 # E. 判据单一事实源 + 接线（静态锁，防「名字在场但接线被掏空」/副本扩散）
 # ===========================================================================
 
+
 class TestSingleSourceAndWiring:
     def _src(self, mod: str) -> str:
         import importlib
+
         m = importlib.import_module(mod)
         with open(m.__file__, "r", encoding="utf-8") as f:
             return f.read()
 
     def test_config_default_true(self):
         from app.config import Settings
+
         assert Settings.model_fields["content_audit_full_facts"].default is True
 
     def test_conflict_message_literal_appears_once(self):
@@ -169,7 +183,7 @@ class TestSingleSourceAndWiring:
         # _extra_groups 与 fact_groups 都经 _detect_conflicts 调用（不各自内联）
         assert src.count("_detect_conflicts(") >= 3  # def + 2 调用点
         # _extra_groups 循环体只调 _detect_conflicts，不内联重复矛盾判定
-        assert 'for title, g in _extra_groups.items():\n            _detect_conflicts(' in src
+        assert "for title, g in _extra_groups.items():\n            _detect_conflicts(" in src
 
     def test_sse_reads_switch_and_passes_rows(self):
         src = self._src("app.routers.sse_handlers")

@@ -26,6 +26,7 @@ G2  【回归锁】``/adjust`` 的可操作 fact_id 集合必须与「读给 AI 
      （曾出现 valid_ids 只按 scheme 作用域填充、项目级调用时为空集 →
       update/delete 全部被当「幻觉 id」静默丢弃，而 summary 仍声称已修改 N 条）。
 """
+
 from __future__ import annotations
 
 import ast
@@ -40,26 +41,34 @@ sys.path.insert(0, APP)
 
 FRONTEND_SRC = os.path.join(os.path.dirname(APP), "frontend", "src")
 
-NAME = "基坑开挖深度"          # 章节归属 overview（已实测）
-CAT = "tech_param"             # CATEGORY_TITLES 合法键
-OLD_Q = "按设计要求"            # classify_fact_attr → qualitative
-NEW_Q = "8.5"                  # classify_fact_attr → quantitative
+NAME = "基坑开挖深度"  # 章节归属 overview（已实测）
+CAT = "tech_param"  # CATEGORY_TITLES 合法键
+OLD_Q = "按设计要求"  # classify_fact_attr → qualitative
+NEW_Q = "8.5"  # classify_fact_attr → quantitative
 
 
 # ---------------------------------------------------------------- 测试基建 --
-async def _insert_fact(db, *, fid="f1", pid="p1", sid="", gid="g1",
-                       name=NAME, value=OLD_Q, category=CAT):
+async def _insert_fact(db, *, fid="f1", pid="p1", sid="", gid="g1", name=NAME, value=OLD_Q, category=CAT):
     """走模块自身的单一 INSERT 出口建行，避免列清单漂移。"""
     from app.routers import global_facts as gf
+
     await db.execute(
         gf.MANUAL_FACT_INSERT_SQL,
         gf._manual_fact_row(
-            fid=fid, pid=pid, sid=sid, group_id=gid,
-            group_title="技术参数", name=name,
+            fid=fid,
+            pid=pid,
+            sid=sid,
+            group_id=gid,
+            group_title="技术参数",
+            name=name,
             content=gf._build_fact_content(name, value, False),
-            category=category, source_file="测试录入",
-            is_simulated=False, confidence=1.0, is_resolved=True,
-        ))
+            category=category,
+            source_file="测试录入",
+            is_simulated=False,
+            confidence=1.0,
+            is_resolved=True,
+        ),
+    )
     await db.commit()
     return fid
 
@@ -67,19 +76,23 @@ async def _insert_fact(db, *, fid="f1", pid="p1", sid="", gid="g1",
 async def _row(db, fid):
     cur = await db.execute(
         "SELECT title, content, category, fact_key, fact_type, "
-        "chapter, fact_attr, source_kind FROM global_facts WHERE id=?", (fid,))
+        "chapter, fact_attr, source_kind FROM global_facts WHERE id=?",
+        (fid,),
+    )
     r = await cur.fetchone()
     return dict(r) if r else None
 
 
 def _gf():
     from app.routers import global_facts as gf
+
     return gf
 
 
 def _src(name):
     """取 global_facts 模块内某函数的源码（静态锁统一入口）。"""
     import inspect
+
     return inspect.getsource(getattr(_gf(), name))
 
 
@@ -87,8 +100,8 @@ def inspect_module_source(module_name: str, func_name: str) -> str:
     """取任意模块内某函数的源码（跨模块静态锁用）。"""
     import importlib
     import inspect
-    return inspect.getsource(getattr(importlib.import_module(module_name),
-                                     func_name))
+
+    return inspect.getsource(getattr(importlib.import_module(module_name), func_name))
 
 
 def _nested_src(src: str, fn_name: str) -> str:
@@ -99,9 +112,8 @@ def _nested_src(src: str, fn_name: str) -> str:
         if not isinstance(fn, (ast.FunctionDef, ast.AsyncFunctionDef)):
             continue
         for n in ast.walk(fn):
-            if (isinstance(n, (ast.FunctionDef, ast.AsyncFunctionDef))
-                    and n.name == fn_name):
-                return "".join(lines[n.lineno - 1: n.end_lineno])
+            if isinstance(n, (ast.FunctionDef, ast.AsyncFunctionDef)) and n.name == fn_name:
+                return "".join(lines[n.lineno - 1 : n.end_lineno])
     return ""
 
 
@@ -109,18 +121,17 @@ async def _rebuild_value(db, group_id: str, value: str = NEW_Q):
     """按 Markdown 列表重建一个分组（group_id 不存在于行 id，直接命中重建路径）。"""
     from app.models import FactGroupUpdate
     from app.routers import global_facts as gf
+
     await gf.update_fact(
         fact_id=group_id,
-        data=FactGroupUpdate(id=group_id, title="技术参数",
-                             content=f"- **{NAME}**: {value}",
-                             category=CAT),
-        db=db)
+        data=FactGroupUpdate(id=group_id, title="技术参数", content=f"- **{NAME}**: {value}", category=CAT),
+        db=db,
+    )
 
 
 async def _col_by_group(db, group_id: str, col: str):
     """按分组读出重建后唯一行的某一列（重建会换新行 id，故不能按 id 查）。"""
-    cur = await db.execute(
-        f"SELECT {col} FROM global_facts WHERE group_id=?", (group_id,))
+    cur = await db.execute(f"SELECT {col} FROM global_facts WHERE group_id=?", (group_id,))
     rows = await cur.fetchall()
     assert rows, f"重建后库内无 group_id={group_id} 的事实行（结果丢失）"
     return dict(rows[0])[col]
@@ -148,32 +159,29 @@ class TestValueChangeRerendersItemUpdate:
         #    漏写这条，一旦换样本就会静默退化成一视同仁的空断言。
         assert classify_fact_attr(NAME, NEW_Q) != classify_fact_attr(NAME, OLD_Q)
 
-        n, _ = await gf._apply_item_updates(
-            db_conn, [{"fact_id": fid, "value": NEW_Q}])
+        n, _ = await gf._apply_item_updates(db_conn, [{"fact_id": fid, "value": NEW_Q}])
         assert n == 1
         await db_conn.commit()
 
         after = await _row(db_conn, fid)
         assert NEW_Q in after["content"], "值本身没落库"
-        assert after["fact_attr"] == classify_fact_attr(NAME, NEW_Q), (
-            "G1 回归：改值后 fact_attr 仍停在旧值（只认分类/改名，不认改值）")
+        assert after["fact_attr"] == classify_fact_attr(
+            NAME, NEW_Q
+        ), "G1 回归：改值后 fact_attr 仍停在旧值（只认分类/改名，不认改值）"
         assert after["chapter"] == classify_chapter_from_text(
-            NAME, NEW_Q, after["category"], after["fact_type"],
-            after["fact_key"]), "G1 回归：改值后 chapter 未重派生"
+            NAME, NEW_Q, after["category"], after["fact_type"], after["fact_key"]
+        ), "G1 回归：改值后 chapter 未重派生"
 
     async def test_unchanged_value_keeps_stored_dimensions(self, db_conn):
         """回归保护：值未变时不得把库里的四维标注重写一遍（尊重人工归类）。"""
         from app.routers import global_facts as gf
 
         fid = await _insert_fact(db_conn)
-        await db_conn.execute(
-            "UPDATE global_facts SET chapter='manual_marker', "
-            "fact_attr='norm' WHERE id=?", (fid,))
+        await db_conn.execute("UPDATE global_facts SET chapter='manual_marker', " "fact_attr='norm' WHERE id=?", (fid,))
         await db_conn.commit()
 
         # 只提交与库里完全相同的值 → 不属「改值」，四维必须原样保留
-        n, _ = await gf._apply_item_updates(
-            db_conn, [{"fact_id": fid, "value": OLD_Q}])
+        n, _ = await gf._apply_item_updates(db_conn, [{"fact_id": fid, "value": OLD_Q}])
         assert n == 1
         await db_conn.commit()
 
@@ -185,6 +193,7 @@ class TestValueChangeRerendersItemUpdate:
     # 「门控写在本地」这一错误形态。D1 收口后判据收敛为唯一事实源
     # facts_classification.derivation_inputs_changed，静态锁改由
     # TestDerivationGateSingleSource 统一负责（见本文件下方）。
+
 
 # =================================================== G1 · 分组重建（同族第二处）
 class TestValueChangeRerendersGroupRebuild:
@@ -204,23 +213,20 @@ class TestValueChangeRerendersGroupRebuild:
 
         new_attr = await _attr_by_group(db_conn, "grp1")
         assert new_attr == classify_fact_attr(NAME, NEW_Q), (
-            f"G1-b 回归：分组内改值后 fact_attr={new_attr!r}，"
-            f"期望 classify_fact_attr({NAME!r}, {NEW_Q!r})")
-        assert new_attr != old_attr, (
-            "G1-b 回归：分组内改值后 fact_attr 停在旧值（判据漏 value）")
+            f"G1-b 回归：分组内改值后 fact_attr={new_attr!r}，" f"期望 classify_fact_attr({NAME!r}, {NEW_Q!r})"
+        )
+        assert new_attr != old_attr, "G1-b 回归：分组内改值后 fact_attr 停在旧值（判据漏 value）"
 
     async def test_group_rebuild_unchanged_keeps_stored_dimensions(self, db_conn):
         """回归保护：分组内三要素全未变 → 原样保留库里的四维标注。"""
         await _insert_fact(db_conn, fid="r2", gid="grp2")
-        await db_conn.execute(
-            "UPDATE global_facts SET chapter='manual_marker' WHERE id=?", ("r2",))
+        await db_conn.execute("UPDATE global_facts SET chapter='manual_marker' WHERE id=?", ("r2",))
         await db_conn.commit()
 
         await _rebuild_value(db_conn, "grp2", value=OLD_Q)
 
         chapter = await _chapter_by_group(db_conn, "grp2")
-        assert chapter == "manual_marker", (
-            f"回归：三要素未变时不应重派生，chapter 被改写为 {chapter!r}")
+        assert chapter == "manual_marker", f"回归：三要素未变时不应重派生，chapter 被改写为 {chapter!r}"
 
     # 静态锁已升级（同 TestValueChangeRerendersItemUpdate）：判据收敛为唯一
     # 事实源后，「本函数内必须出现 old_val == 比较」这一断言本身固化了错误
@@ -245,17 +251,17 @@ class TestDerivationGateSingleSource:
 
     def test_single_source_exists(self):
         from app.services import facts_classification as fc
+
         assert hasattr(fc, "derivation_inputs_changed")
-        src = inspect_module_source("app.services.facts_classification",
-                                    "derivation_inputs_changed")
+        src = inspect_module_source("app.services.facts_classification", "derivation_inputs_changed")
         assert src, "derivation_inputs_changed 源码取不到"
-        for dim in ("old_category", "new_category", "old_name", "new_name",
-                    "old_value", "new_value"):
+        for dim in ("old_category", "new_category", "old_name", "new_name", "old_value", "new_value"):
             assert dim in src, f"判据未覆盖维度 {dim} —— G1 家族回归"
 
     def test_normalization_is_stable(self):
         """判据的归一化语义：strip + 分类空值兜底 other + None 安全。"""
         from app.services.facts_classification import _norm_fact_category, _norm_fact_text, derivation_inputs_changed
+
         assert _norm_fact_category("") == "other"
         assert _norm_fact_category(None) == "other"
         assert _norm_fact_category("  tech_param  ") == "tech_param"
@@ -263,27 +269,49 @@ class TestDerivationGateSingleSource:
         assert _norm_fact_text(None) == ""
         # 三维全等 → 未变化
         assert not derivation_inputs_changed(
-            old_category="tech_param", new_category="tech_param",
-            old_name=NAME, new_name=NAME, old_value="8.5", new_value="8.5")
+            old_category="tech_param",
+            new_category="tech_param",
+            old_name=NAME,
+            new_name=NAME,
+            old_value="8.5",
+            new_value="8.5",
+        )
         # 仅值变化 → 变化（G1）
         assert derivation_inputs_changed(
-            old_category="tech_param", new_category="tech_param",
-            old_name=NAME, new_name=NAME,
-            old_value=OLD_Q, new_value=NEW_Q)
+            old_category="tech_param",
+            new_category="tech_param",
+            old_name=NAME,
+            new_name=NAME,
+            old_value=OLD_Q,
+            new_value=NEW_Q,
+        )
         # 仅名称变化 → 变化（2026-10-01）
         assert derivation_inputs_changed(
-            old_category="tech_param", new_category="tech_param",
-            old_name=NAME, new_name="混凝土浇筑工艺",
-            old_value="C30", new_value="C30")
+            old_category="tech_param",
+            new_category="tech_param",
+            old_name=NAME,
+            new_name="混凝土浇筑工艺",
+            old_value="C30",
+            new_value="C30",
+        )
         # 仅分类变化 → 变化（2026-09-29）
         assert derivation_inputs_changed(
-            old_category="tech_param", new_category="monitoring",
-            old_name=NAME, new_name=NAME, old_value="C30", new_value="C30")
+            old_category="tech_param",
+            new_category="monitoring",
+            old_name=NAME,
+            new_name=NAME,
+            old_value="C30",
+            new_value="C30",
+        )
         # 空白差异不算变化
         assert not derivation_inputs_changed(
-            old_category=" tech_param", new_category="tech_param",
-            old_name=" 基坑开挖深度", new_name="基坑开挖深度",
-            old_value=" 8.5 ", new_value="8.5")
+            old_category=" tech_param",
+            new_category="tech_param",
+            old_name=" 基坑开挖深度",
+            new_name="基坑开挖深度",
+            old_value=" 8.5 ",
+            new_value="8.5",
+        )
 
     def _call_site_sources(self) -> dict:
         """取两条写路径的源码（_carry_dimensions 是嵌套闭包，需二次切）。"""
@@ -296,18 +324,18 @@ class TestDerivationGateSingleSource:
         # ✅ R57：两条写路径改为调用 _rederive_dimension_columns 单一出口，
         #    derivation_inputs_changed 的调用收敛到该函数内部。
         for fn_name, src in self._call_site_sources().items():
-            assert "_rederive_dimension_columns(" in src, (
-                f"{fn_name} 未调用单一出口 _rederive_dimension_columns —— D1 分叉回流")
+            assert (
+                "_rederive_dimension_columns(" in src
+            ), f"{fn_name} 未调用单一出口 _rederive_dimension_columns —— D1 分叉回流"
 
     def test_no_local_literal_gate_remains(self):
         """两条路径不得再写各自的字面量门控（这是三次漏改的根因形态）。"""
         for fn_name, src in self._call_site_sources().items():
-            assert "if cat_changed or title_changed" not in src, (
-                f"{fn_name} 仍保留本地 `cat_changed or title_changed` 门控")
-            assert re.search(r"if\s+old_cat\s*==", src) is None, (
-                f"{fn_name} 仍保留本地 `old_cat ==` 字面量比较")
-            assert re.search(r"old_val\s*==", src) is None, (
-                f"{fn_name} 仍保留本地 `old_val ==` 字面量比较")
+            assert (
+                "if cat_changed or title_changed" not in src
+            ), f"{fn_name} 仍保留本地 `cat_changed or title_changed` 门控"
+            assert re.search(r"if\s+old_cat\s*==", src) is None, f"{fn_name} 仍保留本地 `old_cat ==` 字面量比较"
+            assert re.search(r"old_val\s*==", src) is None, f"{fn_name} 仍保留本地 `old_val ==` 字面量比较"
 
     def test_group_rebuild_still_reads_old_value_from_stored_content(self):
         """分组重建的旧值必须从库行 content 回解（不能拿新值自比）。
@@ -321,12 +349,12 @@ class TestDerivationGateSingleSource:
         """
         body = self._call_site_sources()["_carry_dimensions"]
         assert re.search(r"_fact_name_value\(\s*old\b", body) or re.search(
-            r"extract_value_from_markdown_line\(\s*old\.get\(\"content\"\)",
-            body), "分组重建未按旧行 content 回解出旧值（读路径唯一出口）"
+            r"extract_value_from_markdown_line\(\s*old\.get\(\"content\"\)", body
+        ), "分组重建未按旧行 content 回解出旧值（读路径唯一出口）"
         # 意图锁：old_val 的赋值右侧不得直接取新值 val（拿新值自比 = 门控失效）
-        assert not re.search(r"old_val\s*=\s*[^\n]*\bval\b(?![_,]\s*\n)", body), \
-            "分组重建用新值自比旧值，派生输入门控失效"
-
+        assert not re.search(
+            r"old_val\s*=\s*[^\n]*\bval\b(?![_,]\s*\n)", body
+        ), "分组重建用新值自比旧值，派生输入门控失效"
 
 
 # ============================================ G3 · batch_resolve 失效作用域
@@ -337,10 +365,12 @@ class TestBatchResolveInvalidationScope:
         src = _src("batch_resolve")
         assert "if prow:" not in src, (
             "G3 回归：失效作用域又改回「if prow → 按项目 / else → 按方案」推导 —— "
-            "schemes.project_id 为空串时退化为双空作用域、静默 no-op")
+            "schemes.project_id 为空串时退化为双空作用域、静默 no-op"
+        )
         assert "real_pid" in src
-        assert "invalidate_export_cache(db, scheme_id" in src, (
-            "缺少项目作用域为空串时的退化分支（必须按方案失效，绝不静默跳过）")
+        assert (
+            "invalidate_export_cache(db, scheme_id" in src
+        ), "缺少项目作用域为空串时的退化分支（必须按方案失效，绝不静默跳过）"
 
     def test_scope_shape_parity_with_ack_stale(self):
         """两个批量端点的项目级失效调用形态必须一致（口径同源）。"""
@@ -349,10 +379,8 @@ class TestBatchResolveInvalidationScope:
         if peer not in dir(_gf()):
             # 批量解除过期与单条入口可能合并为同一函数，按真实名字取
             peer = "ack_fact_stale"
-        assert shape in _src("batch_resolve"), (
-            "batch_resolve 未走统一的项目级失效出口")
-        assert shape in _src(peer), (
-            f"{peer} 未走统一的项目级失效出口")
+        assert shape in _src("batch_resolve"), "batch_resolve 未走统一的项目级失效出口"
+        assert shape in _src(peer), f"{peer} 未走统一的项目级失效出口"
 
     def test_neither_endpoint_guards_on_scheme_row(self):
         """⚠️ 关键对称性：另一批量端点早就不判 prow，batch_resolve 必须跟上。"""
@@ -369,7 +397,8 @@ class TestAdjustScopeRegression:
         assert 'valid_ids = {r["id"] for r in rows}' in src, (
             "G2 回归：valid_ids 不再直接来自 rows —— 一旦重新引入独立的"
             "「按 scheme 作用域查一遍」判据，项目级调用就会得到空集，"
-            "于是 update/delete 全部被当幻觉 id 静默丢弃，而 summary 仍声称已修改")
+            "于是 update/delete 全部被当幻觉 id 静默丢弃，而 summary 仍声称已修改"
+        )
         assert "if scheme_scope:\n        valid_ids" not in src
 
     def test_project_scope_without_scope_is_rejected(self):
@@ -403,14 +432,14 @@ class TestFrontendDialogConvention:
         pat = re.compile(r"window\.prompt\s*\(")
         hits = []
         for p in self._collect():
-            for i, line in enumerate(
-                    io.open(p, encoding="utf-8").read().splitlines(), 1):
+            for i, line in enumerate(io.open(p, encoding="utf-8").read().splitlines(), 1):
                 if pat.search(line) and not line.strip().startswith(("//", "*")):
                     hits.append(f"{os.path.relpath(p, FRONTEND_SRC)}:{i}")
         assert hits == [], (
             "G4 回归：出现阻塞式 window.prompt。它会让整个渲染线程卡死、"
             "在部分容器内被禁用、且无法做二次确认排版；"
-            "请用 antd Modal + 受控 Input（参考 modal.confirm 的口径）")
+            "请用 antd Modal + 受控 Input（参考 modal.confirm 的口径）"
+        )
 
     def test_facts_adjust_entry_is_component_based(self):
         """「AI 调整事实」入口必须是独立的受控状态机组件，而非同步原生对话框。
@@ -426,8 +455,7 @@ class TestFrontendDialogConvention:
         且更严格），行为断言逐条保留不变。
         """
         page = os.path.join(FRONTEND_SRC, "pages", "SchemeWorkbenchPage.tsx")
-        panel = os.path.join(FRONTEND_SRC, "pages", "schemeWorkbench",
-                             "FactsAdjustPanel.tsx")
+        panel = os.path.join(FRONTEND_SRC, "pages", "schemeWorkbench", "FactsAdjustPanel.tsx")
         assert os.path.isfile(page), "未找到 SchemeWorkbenchPage.tsx"
         assert os.path.isfile(panel), "未找到 schemeWorkbench/FactsAdjustPanel.tsx"
         # 组件必须是唯一实现（facade + schemeWorkbench/ 子模块内不得出现第二份定义）：
@@ -438,32 +466,33 @@ class TestFrontendDialogConvention:
             for fn in fnames:
                 if fn.endswith((".ts", ".tsx")):
                     p = os.path.join(dirpath, fn)
-                    if "export function FactsAdjustPanel" in io.open(
-                            p, encoding="utf-8").read():
+                    if "export function FactsAdjustPanel" in io.open(p, encoding="utf-8").read():
                         impls.append(os.path.relpath(p, FRONTEND_SRC))
-        assert impls == [os.path.relpath(panel, FRONTEND_SRC)], (
-            f"FactsAdjustPanel 必须是唯一具名导出实现，实际：{impls}")
+        assert impls == [
+            os.path.relpath(panel, FRONTEND_SRC)
+        ], f"FactsAdjustPanel 必须是唯一具名导出实现，实际：{impls}"
         body = io.open(panel, encoding="utf-8").read()
         # window.prompt 只查代码行：组件说明块里在讲述「原先用过 window.prompt」
         # 这段历史，按整段文本查会误伤注释（整仓代码行的判据见上一条测试）
-        code_lines = [
-            ln for ln in body.splitlines()
-            if not ln.strip().startswith(("//", "*", "/*"))
-        ]
-        assert not any("window.prompt" in ln for ln in code_lines), (
-            "AI 调整事实入口仍在用 window.prompt")
+        code_lines = [ln for ln in body.splitlines() if not ln.strip().startswith(("//", "*", "/*"))]
+        assert not any("window.prompt" in ln for ln in code_lines), "AI 调整事实入口仍在用 window.prompt"
         # 两个受控状态：打开弹层 + 输入文案（缺一即退化为同步对话框形态）
         assert re.search(r"setAsk\s*\(", body), "缺少「打开弹层」受控状态"
         assert re.search(r"setText\s*\(", body), "缺少「输入文案」受控状态"
-        # 页面只能有一处接线：保证状态作用域唯一，切换方案不会串台。
+        # 页面树内只能有一处接线：保证状态作用域唯一，切换方案不会串台。
         # 只数代码行 —— 组件上方的说明行里也在提「<FactsAdjustPanel /> 处的
         # preview/apply」，整段文本计数会把它数成第二处接线。
-        page_src = io.open(page, encoding="utf-8").read()
-        wires = [
-            ln for ln in page_src.splitlines()
-            if "<FactsAdjustPanel" in ln
-            and not ln.strip().startswith(("//", "*", "/*", "{/*"))
-        ]
-        assert len(wires) == 1, (
-            f"FactsAdjustPanel 应恰好一处接线，实际 {len(wires)} 处")
-
+        # R176（2026-11-04）：接线随拆分下沉到 tabs/FactsTab.tsx —— 递归扫描
+        # pages/ 全树（含 tabs/），不再固定读 facade（否则计数恒为 0）。
+        wires = []
+        for dirpath, _d, fnames in os.walk(pages_dir):
+            for fn in fnames:
+                if not fn.endswith((".ts", ".tsx")):
+                    continue
+                page_src = io.open(os.path.join(dirpath, fn), encoding="utf-8").read()
+                wires += [
+                    ln
+                    for ln in page_src.splitlines()
+                    if "<FactsAdjustPanel" in ln and not ln.strip().startswith(("//", "*", "/*", "{/*"))
+                ]
+        assert len(wires) == 1, f"FactsAdjustPanel 应恰好一处接线，实际 {len(wires)} 处"

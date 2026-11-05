@@ -21,7 +21,9 @@ import { TaskControlButtons } from "../pages/schemeWorkbench/TaskControlButtons.
 const RAW: Record<string, string> = Object.fromEntries(
   Object.entries(
     import.meta.glob("../**/*.{ts,tsx}", {
-      query: "?raw", import: "default", eager: true,
+      query: "?raw",
+      import: "default",
+      eager: true,
     }) as Record<string, string>,
   ).map(([k, v]) => [k.replace(/^\.\.\//, "").replace(/^\.\//, "tests/"), v]),
 );
@@ -32,31 +34,49 @@ afterEach(cleanup);
 
 if (!(window as any).matchMedia) {
   (window as any).matchMedia = (query: string) => ({
-    matches: false, media: query, onchange: null,
-    addListener: () => {}, removeListener: () => {},
-    addEventListener: () => {}, removeEventListener: () => {},
+    matches: false,
+    media: query,
+    onchange: null,
+    addListener: () => {},
+    removeListener: () => {},
+    addEventListener: () => {},
+    removeEventListener: () => {},
     dispatchEvent: () => false,
   });
 }
 if (!(globalThis as any).ResizeObserver) {
   (globalThis as any).ResizeObserver = class {
-    observe() {} unobserve() {} disconnect() {}
+    observe() {}
+    unobserve() {}
+    disconnect() {}
   };
 }
 
 // ============================================================
 // A 组 · FFIX-1 分页不再触发挂载 effect 全量重跑（静态接线锁）
 // ============================================================
+/** 解析 loadFacts useCallback 的依赖数组（格式不敏感：允许换行/缩进/尾逗号差异）。 */
+function loadFactsDeps(): string[] {
+  const start = PAGE.indexOf("const loadFacts = useCallback(");
+  expect(start, "loadFacts useCallback 声明必须存在").toBeGreaterThan(-1);
+  const m = PAGE.slice(start).match(/\},\s*\[([^\]]*)\]\s*,?\s*\);/);
+  expect(m, "loadFacts 依赖数组必须可解析").toBeTruthy();
+  return (m?.[1] ?? "")
+    .split(",")
+    .map((s) => s.trim())
+    .filter(Boolean);
+}
+
 describe("loadFacts 分页依赖重构（R166 FFIX-1）", () => {
   it("deps 不含 factsPage，默认页码走 ref 镜像", () => {
     expect(PAGE, "页面源码必须可读（import.meta.glob raw）").toBeTruthy();
     expect(PAGE).toContain("const factsPageRef = useRef(1);");
     expect(PAGE).toContain("factsPageRef.current = wantPage;");
-    expect(PAGE).toContain("}, [id, msg, loadFactsDiagnostics]);");
+    expect(loadFactsDeps()).toEqual(["id", "msg", "loadFactsDiagnostics"]);
   });
 
   it("回退锁：deps 混回 factsPage 必须变红", () => {
-    expect(PAGE.includes("loadFactsDiagnostics, factsPage]);")).toBe(false);
+    expect(loadFactsDeps()).not.toContain("factsPage");
   });
 });
 
@@ -84,13 +104,23 @@ function expandFirstPanel(utils: ReturnType<typeof render>) {
 
 describe("FactsGroupList 过期条目 id 兜底链（R166）", () => {
   it("fact_id 缺失的历史行回落 it.id，不传 undefined", () => {
-    const groups: any = [{
-      id: "g-legacy", title: "编制依据",
-      items: [{
-        id: "row-legacy", name: "旧数据事实", value: "旧值",
-        is_stale: true, is_resolved: false, is_simulated: false, has_conflict: false,
-      }],
-    }];
+    const groups: any = [
+      {
+        id: "g-legacy",
+        title: "编制依据",
+        items: [
+          {
+            id: "row-legacy",
+            name: "旧数据事实",
+            value: "旧值",
+            is_stale: true,
+            is_resolved: false,
+            is_simulated: false,
+            has_conflict: false,
+          },
+        ],
+      },
+    ];
     const props = baseProps({ groups });
     const utils = render(<FactsGroupList {...props} />);
     expandFirstPanel(utils);
@@ -121,8 +151,7 @@ describe("FactsExtractProgressCard 控制区交互（R166）", () => {
     fireEvent.click(utils.getByText("停止"));
     expect(onControl).toHaveBeenCalledWith("stop");
     // antd Button 文本包在 span 内，disabled 在最近的 button 上
-    const btn = (txt: string) =>
-      (utils.getByText(txt).closest("button") as HTMLButtonElement);
+    const btn = (txt: string) => utils.getByText(txt).closest("button") as HTMLButtonElement;
     expect(btn("恢复").disabled).toBe(true);
     expect(btn("暂停").disabled).toBe(false);
   });
@@ -132,16 +161,13 @@ describe("FactsExtractProgressCard 控制区交互（R166）", () => {
     const utils = mkCard(true, false, onControl);
     fireEvent.click(utils.getByText("恢复"));
     expect(onControl).toHaveBeenCalledWith("resume");
-    const btn = (txt: string) =>
-      (utils.getByText(txt).closest("button") as HTMLButtonElement);
+    const btn = (txt: string) => utils.getByText(txt).closest("button") as HTMLButtonElement;
     expect(btn("暂停").disabled).toBe(true);
     expect(utils.getByText(/已暂停/)).toBeTruthy();
   });
 
   it("无 controls 注入时不渲染控制按钮（向后兼容）", () => {
-    const utils = render(
-      <FactsExtractProgressCard progress={0} progressMsg="" logs={[]} />,
-    );
+    const utils = render(<FactsExtractProgressCard progress={0} progressMsg="" logs={[]} />);
     expect(utils.queryByText("停止")).toBeNull();
     expect(utils.getByText("正在连接 AI，准备提取...")).toBeTruthy();
   });

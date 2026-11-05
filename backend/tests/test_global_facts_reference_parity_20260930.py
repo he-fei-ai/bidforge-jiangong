@@ -24,6 +24,7 @@
 
 护栏分三组：与参考软件逐条对齐的语义断言、危大阈值闭区间、静态护栏。
 """
+
 from __future__ import annotations
 
 import ast
@@ -159,8 +160,7 @@ class TestMissingValueMode:
 class TestPatchNormalizeValidate:
     def test_normalize_drops_empty_content(self):
         """参考 :229：``if (!content) return null`` —— 空补丁必须被丢弃。"""
-        got = normalize_patches_response(
-            {"patches": [{"target_group_id": "g1", "content": "A"}, {"content": "   "}]})
+        got = normalize_patches_response({"patches": [{"target_group_id": "g1", "content": "A"}, {"content": "   "}]})
         assert len(got["patches"]) == 1
 
     def test_normalize_accepts_reference_key_aliases(self):
@@ -176,8 +176,8 @@ class TestPatchNormalizeValidate:
     def test_normalize_mode_whitelist_defaults_to_append(self):
         """参考 :230-231：非法 mode 归一为 append。"""
         got = normalize_patches_response(
-            {"patches": [{"content": "A", "mode": "delete-all"},
-                         {"content": "B", "mode": "REPLACE"}]})
+            {"patches": [{"content": "A", "mode": "delete-all"}, {"content": "B", "mode": "REPLACE"}]}
+        )
         assert got["patches"][0].mode == "append"
         assert got["patches"][1].mode == "replace"
 
@@ -186,10 +186,14 @@ class TestPatchNormalizeValidate:
             assert normalize_patches_response(raw)["patches"] == []
 
     def test_create_flag_distinguishes_patch_vs_new(self):
-        got = normalize_patches_response({"patches": [
-            {"target_group_id": "g1", "content": "A"},
-            {"title": "新项", "content": "B"},
-        ]})
+        got = normalize_patches_response(
+            {
+                "patches": [
+                    {"target_group_id": "g1", "content": "A"},
+                    {"title": "新项", "content": "B"},
+                ]
+            }
+        )
         assert got["patches"][0].create is False
         assert got["patches"][1].create is True
 
@@ -200,8 +204,7 @@ class TestPatchNormalizeValidate:
         assert p.to_dict()["target_fact_id"] == "g1"
 
     def test_validate_accepts_valid(self):
-        validate_patches_response(normalize_patches_response(
-            {"patches": [{"content": "A"}]}))
+        validate_patches_response(normalize_patches_response({"patches": [{"content": "A"}]}))
 
     def test_validate_fails_closed_on_missing_patches(self):
         for bad in ({}, {"patches": None}, {"patches": "x"}, None, "x"):
@@ -213,7 +216,6 @@ class TestPatchNormalizeValidate:
             validate_patches_response({"patches": [FactPatch(content="  ")]})
         with pytest.raises(ValueError):
             validate_patches_response({"patches": ["not-a-patch"]})
-
 
 
 # =========================================================================
@@ -243,8 +245,7 @@ class TestMergePatches:
 
     def test_merge_unmatched_creates_new_group(self):
         groups = [{"id": "g1", "title": "T", "content": "base"}]
-        out = merge_fact_patches(groups, [FactPatch(
-            content="A", new_fact_id="g2", title="新项")])
+        out = merge_fact_patches(groups, [FactPatch(content="A", new_fact_id="g2", title="新项")])
         assert len(out) == 2
         assert out[1] == {"id": "g2", "title": "新项", "content": "A"}
 
@@ -260,9 +261,9 @@ class TestMergePatches:
 
     def test_merge_skips_invalid_patches(self):
         groups = [{"id": "g1", "title": "T", "content": "base"}]
-        out = merge_fact_patches(groups, [
-            "junk", None, FactPatch(content="   "),
-            FactPatch(content="ok", target_fact_id="g1")])
+        out = merge_fact_patches(
+            groups, ["junk", None, FactPatch(content="   "), FactPatch(content="ok", target_fact_id="g1")]
+        )
         assert out[0]["content"] == "base\n\nok"
         assert len(out) == 1
 
@@ -292,11 +293,13 @@ class TestBatchAndWait:
     def test_batch_render_failure_does_not_abort(self):
         def boom(_):
             raise RuntimeError("render failed")
+
         assert batch_rendered_items([1, 2], boom, 10) == [[1, 2]]
 
     def test_wait_all_or_throw_returns_results(self):
         async def ok(v):
             return v
+
         assert asyncio.run(wait_all_or_throw([ok(1), ok(2)])) == [1, 2]
 
     def test_wait_all_or_throw_empty(self):
@@ -304,6 +307,7 @@ class TestBatchAndWait:
 
     def test_wait_all_or_throw_raises_first_failure(self):
         """合并阶段失败没有降级语义 → 必须抛出，不得静默返回残缺结果。"""
+
         async def ok():
             return 1
 
@@ -336,13 +340,10 @@ class TestSegmentLimit:
 
     @pytest.mark.parametrize("bad", [None, 0, -1, "abc", float("nan")])
     def test_invalid_context_limit_falls_back(self, bad):
-        assert get_segment_limit(bad, []) == int(
-            fp.DEFAULT_CONTEXT_LENGTH_LIMIT * fp.GLOBAL_FACTS_CONTEXT_LIMIT_RATIO)
+        assert get_segment_limit(bad, []) == int(fp.DEFAULT_CONTEXT_LENGTH_LIMIT * fp.GLOBAL_FACTS_CONTEXT_LIMIT_RATIO)
 
     def test_measure_messages_counts_role_overhead(self):
-        assert fp.measure_messages_length(
-            [{"role": "user", "content": "abc"}]) == len("user") + 3 + 64
-
+        assert fp.measure_messages_length([{"role": "user", "content": "abc"}]) == len("user") + 3 + 64
 
 
 # =========================================================================
@@ -351,14 +352,19 @@ class TestSegmentLimit:
 class TestFactItemAdapter:
     def _items(self):
         from app.services.facts_extractor import FactItem
-        return [FactItem(name="工期", value="450日历天", key="total_duration",
-                         source="orig", confidence=0.9, is_simulated=True)]
+
+        return [
+            FactItem(
+                name="工期", value="450日历天", key="total_duration", source="orig", confidence=0.9, is_simulated=True
+            )
+        ]
 
     def test_patch_updates_value_in_place_preserving_metadata(self):
         """核心不变式：只改 value，溯源 / 置信度 / 模拟值标记全部保留。"""
         items = self._items()
         out = fp.apply_patches_to_fact_items(
-            items, [FactPatch(content="追加：保质保量", target_fact_id="total_duration")])
+            items, [FactPatch(content="追加：保质保量", target_fact_id="total_duration")]
+        )
         assert out[0].value == "450日历天\n\n追加：保质保量"
         assert out[0].source == "orig"
         assert out[0].confidence == 0.9
@@ -366,15 +372,15 @@ class TestFactItemAdapter:
 
     def test_patch_by_title_fallback(self):
         items = self._items()
-        out = fp.apply_patches_to_fact_items(
-            items, [FactPatch(content="X", title="工期")])
+        out = fp.apply_patches_to_fact_items(items, [FactPatch(content="X", title="工期")])
         assert out[0].value == "450日历天\n\nX"
         assert len(out) == 1
 
     def test_new_patch_item_annotated_and_not_simulated(self):
         items = self._items()
         out = fp.apply_patches_to_fact_items(
-            items, [FactPatch(content="- 基坑深度：6.5m", new_fact_id="foundation_depth")])
+            items, [FactPatch(content="- 基坑深度：6.5m", new_fact_id="foundation_depth")]
+        )
         assert len(out) == 2
         new = out[1]
         assert new.is_simulated is False
@@ -390,8 +396,8 @@ class TestFactItemAdapter:
         items[0].has_conflict = True
         items[0].conflict_values = [{"value": "旧值", "source": "s"}]
         out = fp.apply_patches_to_fact_items(
-            items, [FactPatch(content="新值", target_fact_id="total_duration",
-                              mode="replace")])
+            items, [FactPatch(content="新值", target_fact_id="total_duration", mode="replace")]
+        )
         assert out[0].value == "新值"
         assert out[0].has_conflict is False
         assert out[0].conflict_values == []
@@ -401,8 +407,8 @@ class TestFactItemAdapter:
         items[0].has_conflict = True
         items[0].conflict_values = [{"value": "旧值", "source": "s"}]
         out = fp.apply_patches_to_fact_items(
-            items, [FactPatch(content="追加", target_fact_id="total_duration",
-                              mode="append")])
+            items, [FactPatch(content="追加", target_fact_id="total_duration", mode="append")]
+        )
         assert out[0].has_conflict is True
 
     def test_empty_items_returns_empty(self):
@@ -414,40 +420,40 @@ class TestFactItemAdapter:
         assert fp.derive_title_from_content("", 1) == "补充事实项2"
 
 
-
 # =========================================================================
 # 八、危大阈值闭区间（含用户点名的 7 组参数）
 # =========================================================================
 class TestHazardThresholdClosure:
-    @pytest.mark.parametrize("key,params,expect", [
-        # 开挖深度（≥3m / ≥5m）
-        ("fp_support_drain", {"depth": 3.0}, True),
-        ("fp_support_drain", {"depth": 2.9}, False),
-        ("fp_support_drain", {"depth": 5.0}, True),
-        ("fp_earthwork", {"depth": 3.0}, True),
-        # 支撑高度（≥5m / ≥8m）—— 需给全 fw_support 的四个参数，
-        # 否则缺参会走 fail-closed 保守分支（恒判危大），见下方专项用例
-        ("fw_support", {"height": 5.0, "span": 10.0,
-                        "total_load": 10.0, "line_load": 15.0}, True),
-        ("fw_support", {"height": 8.0, "span": 18.0,
-                        "total_load": 15.0, "line_load": 20.0}, True),
-        # 跨度（≥10m / ≥18m）
-        ("fw_support", {"span": 10.0}, True),
-        ("fw_support", {"span": 18.0}, True),
-        # 施工总荷载（≥10 / ≥15 kN/m²）
-        ("fw_support", {"total_load": 10.0}, True),
-        ("fw_support", {"total_load": 15.0}, True),
-        # 集中线荷载（≥15 / ≥20 kN/m）
-        ("fw_support", {"line_load": 15.0}, True),
-        ("fw_support", {"line_load": 20.0}, True),
-        # 起吊重量（≥10kN / ≥100kN）
-        ("ho_lift", {"single_weight": 10.0}, True),
-        ("ho_lift", {"single_weight": 100.0}, True),
-        # 脚手架搭设高度（≥24m / ≥50m）—— 本轮修复项
-        ("sc_ground", {"height": 24.0}, True),
-        ("sc_ground", {"height": 23.9}, False),
-        ("sc_ground", {"height": 50.0}, True),
-    ])
+    @pytest.mark.parametrize(
+        "key,params,expect",
+        [
+            # 开挖深度（≥3m / ≥5m）
+            ("fp_support_drain", {"depth": 3.0}, True),
+            ("fp_support_drain", {"depth": 2.9}, False),
+            ("fp_support_drain", {"depth": 5.0}, True),
+            ("fp_earthwork", {"depth": 3.0}, True),
+            # 支撑高度（≥5m / ≥8m）—— 需给全 fw_support 的四个参数，
+            # 否则缺参会走 fail-closed 保守分支（恒判危大），见下方专项用例
+            ("fw_support", {"height": 5.0, "span": 10.0, "total_load": 10.0, "line_load": 15.0}, True),
+            ("fw_support", {"height": 8.0, "span": 18.0, "total_load": 15.0, "line_load": 20.0}, True),
+            # 跨度（≥10m / ≥18m）
+            ("fw_support", {"span": 10.0}, True),
+            ("fw_support", {"span": 18.0}, True),
+            # 施工总荷载（≥10 / ≥15 kN/m²）
+            ("fw_support", {"total_load": 10.0}, True),
+            ("fw_support", {"total_load": 15.0}, True),
+            # 集中线荷载（≥15 / ≥20 kN/m）
+            ("fw_support", {"line_load": 15.0}, True),
+            ("fw_support", {"line_load": 20.0}, True),
+            # 起吊重量（≥10kN / ≥100kN）
+            ("ho_lift", {"single_weight": 10.0}, True),
+            ("ho_lift", {"single_weight": 100.0}, True),
+            # 脚手架搭设高度（≥24m / ≥50m）—— 本轮修复项
+            ("sc_ground", {"height": 24.0}, True),
+            ("sc_ground", {"height": 23.9}, False),
+            ("sc_ground", {"height": 50.0}, True),
+        ],
+    )
     def test_threshold_boundaries_are_inclusive(self, key, params, expect):
         """建办质〔2018〕31号 附件的「及以上」= 闭区间，临界值必须命中。
 
@@ -505,18 +511,25 @@ class TestHazardThresholdClosure:
         assert rule["oversize_when"] == [("height", ">=", 50)]
 
 
-
 # =========================================================================
 # 九、静态护栏
 # =========================================================================
 class TestStaticGuards:
     def test_module_exports_all_reference_parity_functions(self):
-        for name in ("normalize_fact_id", "ensure_unique_id", "value_to_markdown",
-                     "build_missing_value_rule", "build_completeness_rules",
-                     "normalize_patches_response", "validate_patches_response",
-                     "merge_fact_patches", "batch_rendered_items",
-                     "wait_all_or_throw", "get_segment_limit",
-                     "apply_patches_to_fact_items"):
+        for name in (
+            "normalize_fact_id",
+            "ensure_unique_id",
+            "value_to_markdown",
+            "build_missing_value_rule",
+            "build_completeness_rules",
+            "normalize_patches_response",
+            "validate_patches_response",
+            "merge_fact_patches",
+            "batch_rendered_items",
+            "wait_all_or_throw",
+            "get_segment_limit",
+            "apply_patches_to_fact_items",
+        ):
             assert callable(getattr(fp, name)), name
 
     def test_patch_modes_match_reference_whitelist(self):
@@ -536,10 +549,10 @@ class TestStaticGuards:
         要被消除的分叉），而升级后的断言能防住「又写回一份字面量」的回归。
         """
         src = (APP_DIR / "routers" / "sse_handlers.py").read_text(encoding="utf-8")
-        assert "normalize_missing_value_mode" in src, \
-            "sse_handlers.generate_facts 未走 facts_patches 单一出口"
-        assert '("fabricate", "omit", "placeholder")' not in src, \
-            "sse_handlers 重新写回了缺值模式值域字面量（分叉回归）"
+        assert "normalize_missing_value_mode" in src, "sse_handlers.generate_facts 未走 facts_patches 单一出口"
+        assert (
+            '("fabricate", "omit", "placeholder")' not in src
+        ), "sse_handlers 重新写回了缺值模式值域字面量（分叉回归）"
 
     def test_fact_item_adapter_does_not_rebuild_items(self):
         """静态护栏：适配器只能改 value，不得出现 ``FactItem(`` 重建调用。
@@ -548,19 +561,20 @@ class TestStaticGuards:
         ——这正是本仓 `/global-facts/adjust` 明确拒绝让 AI 重写整库的原因。
         """
         tree = ast.parse(inspect.getsource(fp.apply_patches_to_fact_items))
-        calls = [n.func.id for n in ast.walk(tree)
-                 if isinstance(n, ast.Call) and isinstance(n.func, ast.Name)]
+        calls = [n.func.id for n in ast.walk(tree) if isinstance(n, ast.Call) and isinstance(n.func, ast.Name)]
         assert "FactItem" not in calls
 
     def test_patch_item_construction_is_isolated_in_helper(self):
         """``FactItem(`` 只允许出现在 make_fact_item_from_patch 一处。"""
         tree = ast.parse(inspect.getsource(fp))
         fn_with_call = {
-            n.name for n in ast.walk(tree)
+            n.name
+            for n in ast.walk(tree)
             if isinstance(n, (ast.FunctionDef, ast.AsyncFunctionDef))
-            and any(isinstance(c, ast.Call) and isinstance(c.func, ast.Name)
-                    and c.func.id == "FactItem"
-                    for c in ast.walk(n))
+            and any(
+                isinstance(c, ast.Call) and isinstance(c.func, ast.Name) and c.func.id == "FactItem"
+                for c in ast.walk(n)
+            )
         }
         assert fn_with_call == {"make_fact_item_from_patch"}
 
@@ -580,8 +594,7 @@ class TestStaticGuards:
         for py in (APP_DIR / "services").rglob("*.py"):
             if py.name == "facts_patches.py":
                 continue
-            if "不涉及具体时间、地点、人员、业绩、证书、规格型号" in py.read_text(
-                    encoding="utf-8"):
+            if "不涉及具体时间、地点、人员、业绩、证书、规格型号" in py.read_text(encoding="utf-8"):
                 hits.append(py.name)
         assert hits == [], f"「笼统承诺」措辞在多处重复定义：{hits}"
 
@@ -592,6 +605,7 @@ class TestStaticGuards:
         ``facts_patches`` 内延迟 import 的 FactItem 解析正常。
         """
         from app.services import facts_extractor as fe
+
         assert fe.FactItem is not None
         assert fp.make_fact_item_from_patch(FactPatch(content="X", title="T")) is not None
 
@@ -609,8 +623,10 @@ class TestStaticGuards:
         对英文键强求中文章节归属会把「各层判据各司其职」误判为缺陷。
         """
         from app.services.facts_classification import DANGER_PARAM_RULES, classify_chapter_from_text
+
         unclassified = [
-            kw for keywords, _param in DANGER_PARAM_RULES
+            kw
+            for keywords, _param in DANGER_PARAM_RULES
             for kw in keywords
             if kw and not kw.isascii() and not classify_chapter_from_text(kw, "")
         ]
@@ -619,21 +635,38 @@ class TestStaticGuards:
     def test_canonical_danger_fact_names_are_classified(self):
         """本轮修复的规范名逐一断言已归入第一章工程概况。"""
         from app.services.facts_classification import classify_chapter_from_text
-        for name in ("基坑深度", "坑深", "支撑高度", "支撑架高度", "架体高度",
-                     "跨度", "跨距", "施工总荷载", "总荷载", "集中线荷载",
-                     "线荷载", "单件起吊重量", "起吊重量", "边坡高度",
-                     "安装高度", "承载力"):
+
+        for name in (
+            "基坑深度",
+            "坑深",
+            "支撑高度",
+            "支撑架高度",
+            "架体高度",
+            "跨度",
+            "跨距",
+            "施工总荷载",
+            "总荷载",
+            "集中线荷载",
+            "线荷载",
+            "单件起吊重量",
+            "起吊重量",
+            "边坡高度",
+            "安装高度",
+            "承载力",
+        ):
             assert classify_chapter_from_text(name, "") == "overview", name
 
     def test_danger_facts_counted_in_chapter_coverage(self):
         """危大参数必须计入 ``chapter_field_completeness`` 的工程概况章。"""
         from app.services.facts_classification import chapter_field_completeness
-        rows = [{"name": "基坑深度", "value": "6.5m"},
-                {"name": "支撑高度", "value": "9m"},
-                {"name": "施工总荷载", "value": "16kN/m²"}]
+
+        rows = [
+            {"name": "基坑深度", "value": "6.5m"},
+            {"name": "支撑高度", "value": "9m"},
+            {"name": "施工总荷载", "value": "16kN/m²"},
+        ]
         got = chapter_field_completeness(rows)
         overview = got["chapters"]["overview"]
         assert overview["fact_count"] == 3
         assert overview["has_facts"] is True
         assert got["chapters"]["calc_drawings"]["fact_count"] == 0
-

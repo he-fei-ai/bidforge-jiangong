@@ -5,6 +5,7 @@ value_unit / evidence_kind / page_ref / zone_type / norm_group / chunk_hash。
 此前 list_facts 仅回传部分字段，前端刷新后丢失页码溯源/证据类型/计量单位/语义区，
 造成「流式有、刷新无」的字段漂移（信息调用不完整）。
 """
+
 import uuid
 
 import app.db as _appdb
@@ -24,8 +25,7 @@ async def ctx(tmp_path, monkeypatch):
 
     pid, sid = uuid.uuid4().hex, uuid.uuid4().hex
     await db.execute("INSERT INTO projects(id,name) VALUES(?,?)", (pid, "p"))
-    await db.execute(
-        "INSERT INTO schemes(id,project_id,name) VALUES(?,?,?)", (sid, pid, "s"))
+    await db.execute("INSERT INTO schemes(id,project_id,name) VALUES(?,?,?)", (sid, pid, "s"))
     await db.commit()
     yield db, pid, sid, uploads
 
@@ -38,14 +38,24 @@ async def _insert_fact(db, sid, pid, **extra):
         "value_unit, evidence_kind, page_ref, zone_type, norm_group, chunk_hash, "
         "fact_type, is_resolved) "
         "VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)",
-        (fid, pid, sid, "g1", "项目总工期", "- **项目总工期**: 365 天", "schedule",
-         extra.get("value_unit", "天"),
-         extra.get("evidence_kind", "table"),
-         extra.get("page_ref", 12),
-         extra.get("zone_type", "schedule_zone"),
-         extra.get("norm_group", "schedule"),
-         extra.get("chunk_hash", "abc123"),
-         "schedule", 1))
+        (
+            fid,
+            pid,
+            sid,
+            "g1",
+            "项目总工期",
+            "- **项目总工期**: 365 天",
+            "schedule",
+            extra.get("value_unit", "天"),
+            extra.get("evidence_kind", "table"),
+            extra.get("page_ref", 12),
+            extra.get("zone_type", "schedule_zone"),
+            extra.get("norm_group", "schedule"),
+            extra.get("chunk_hash", "abc123"),
+            "schedule",
+            1,
+        ),
+    )
     await db.commit()
     return fid
 
@@ -78,7 +88,8 @@ async def test_list_facts_missing_columns_default_empty(ctx):
         "INSERT INTO global_facts "
         "(id, project_id, scheme_id, group_id, title, content, category, is_resolved) "
         "VALUES (?,?,?,?,?,?,?,?)",
-        (fid, pid, sid, "g1", "项目经理", "- **项目经理**: 张三", "personnel", 1))
+        (fid, pid, sid, "g1", "项目经理", "- **项目经理**: 张三", "personnel", 1),
+    )
     await db.commit()
 
     res = await gf.list_facts(scheme_id=sid, project_id="", db=db)

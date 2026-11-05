@@ -46,6 +46,7 @@ category/chapter/…），没有 groups/patches 这一层；参考软件的「�
    绝不重建 ``FactItem``——因此 ``source`` / ``confidence`` / ``is_simulated`` /
    ``chapter`` / ``is_shared`` 等标注在补丁后全部保留。
 """
+
 from __future__ import annotations
 
 import asyncio
@@ -74,8 +75,10 @@ def normalize_missing_value_mode(value: Any) -> str:
 
 def _commitment_wording() -> str:
     """omit 模式的「笼统承诺」措辞约束（参考软件三处复用同一句，单点出口）。"""
-    return ("不涉及具体时间、地点、人员、业绩、证书、规格型号、工艺步骤、数量指标的"
-            "正确笼统承诺，表明本方案按设计与合同要求执行该项，但不展开具体做法")
+    return (
+        "不涉及具体时间、地点、人员、业绩、证书、规格型号、工艺步骤、数量指标的"
+        "正确笼统承诺，表明本方案按设计与合同要求执行该项，但不展开具体做法"
+    )
 
 
 def build_missing_value_rule(mode: str) -> str:
@@ -87,14 +90,20 @@ def build_missing_value_rule(mode: str) -> str:
     """
     mode = normalize_missing_value_mode(mode)
     if mode == "omit":
-        return (f"4. 用户资料没有给出具体值，但该信息对全文一致性重要时，该项仍须保留，"
-                f"写成{_commitment_wording()}；严禁省略该项或杜撰具体值。")
+        return (
+            f"4. 用户资料没有给出具体值，但该信息对全文一致性重要时，该项仍须保留，"
+            f"写成{_commitment_wording()}；严禁省略该项或杜撰具体值。"
+        )
     if mode == "placeholder":
-        return ("4. 用户资料没有给出具体值，但该信息会影响后续正文一致写法时，必须保留该项"
-                "并把事实值逐字写成【待填写】，不要改写成“待定”“TBD”或其他说法，"
-                "也不要编造具体值。严禁省略该项。")
-    return ("4. 用户资料没有给出具体值，但该信息对全文一致性重要，且当前任务允许补足时，"
-            "可以根据项目语境模拟生成合理、稳定、不冲突的事实值。")
+        return (
+            "4. 用户资料没有给出具体值，但该信息会影响后续正文一致写法时，必须保留该项"
+            "并把事实值逐字写成【待填写】，不要改写成“待定”“TBD”或其他说法，"
+            "也不要编造具体值。严禁省略该项。"
+        )
+    return (
+        "4. 用户资料没有给出具体值，但该信息对全文一致性重要，且当前任务允许补足时，"
+        "可以根据项目语境模拟生成合理、稳定、不冲突的事实值。"
+    )
 
 
 def build_completeness_rules(mode: str) -> str:
@@ -110,7 +119,8 @@ def build_completeness_rules(mode: str) -> str:
         return ""
     label = "别招欠模式" if mode == "omit" else "放着我来模式"
     missing_note = (
-        f"写成{_commitment_wording()}。" if mode == "omit"
+        f"写成{_commitment_wording()}。"
+        if mode == "omit"
         else "值必须逐字写成【待填写】；【待填写】不是空泛内容，合并与最终整理时不得因不够具体而删除。"
     )
     return f"""事实补全规则（{label}）：
@@ -138,8 +148,7 @@ def normalize_fact_id(value: Any, index: int = 0) -> str:
     保证 id **恒非空**（参考 ``validateGlobalFactsResponse`` 要求 id 必填，
     空 id 会让整轮结果被拒）。
     """
-    normalized = _FACT_ID_EDGE_RE.sub("", _FACT_ID_CLEAN_RE.sub(
-        "_", str(value or "").strip().lower()))
+    normalized = _FACT_ID_EDGE_RE.sub("", _FACT_ID_CLEAN_RE.sub("_", str(value or "").strip().lower()))
     return normalized or f"fact_{int(index) + 1:03d}"
 
 
@@ -184,11 +193,16 @@ def value_to_markdown(value: Any) -> str:
                 continue
             if isinstance(item, dict):
                 name = _single_line(
-                    item.get("name") or item.get("title") or item.get("fact")
-                    or item.get("key") or "事实项")
+                    item.get("name") or item.get("title") or item.get("fact") or item.get("key") or "事实项"
+                )
                 detail = _single_line(
-                    item.get("value") or item.get("content") or item.get("detail")
-                    or item.get("description") or item.get("requirement") or "")
+                    item.get("value")
+                    or item.get("content")
+                    or item.get("detail")
+                    or item.get("description")
+                    or item.get("requirement")
+                    or ""
+                )
                 lines.append(f"- **{name}**" + (f"：{detail}" if detail else ""))
                 continue
             text = _single_line(item)
@@ -196,10 +210,7 @@ def value_to_markdown(value: Any) -> str:
                 lines.append(f"- {text}")
         return "\n".join(lines)
     if isinstance(value, dict):
-        return "\n".join(
-            f"- **{_single_line(k)}**：{_single_line(v)}"
-            for k, v in value.items() if _single_line(v)
-        )
+        return "\n".join(f"- **{_single_line(k)}**：{_single_line(v)}" for k, v in value.items() if _single_line(v))
     return _single_line(value)
 
 
@@ -212,7 +223,12 @@ DEFAULT_PATCH_MODE = "append"
 
 #: 归一化时可接受的顶层键（参考 :214-224 逐级回退，本仓保持同样宽容度）
 _PATCH_LIST_KEYS: tuple[str, ...] = (
-    "patches", "supplements", "additions", "items", "facts", "groups",
+    "patches",
+    "supplements",
+    "additions",
+    "items",
+    "facts",
+    "groups",
 )
 #: ✅ 2026-10-06 补 "text"：facts_enrich._build_patches 收敛到
 #:    normalize_patches_response 后，本表成为内容别名的**唯一**权威。
@@ -221,15 +237,30 @@ _PATCH_LIST_KEYS: tuple[str, ...] = (
 #:    就会**静默丢失** AI 用 text 字段返回的补丁（形状合法、内容被丢，
 #:    最终一条补丁都不产出）。方向必须是「补进权威表」而非「恢复副本」。
 _PATCH_CONTENT_KEYS: tuple[str, ...] = (
-    "content", "markdown", "facts", "items", "details", "description",
-    "value", "text",
+    "content",
+    "markdown",
+    "facts",
+    "items",
+    "details",
+    "description",
+    "value",
+    "text",
 )
 _PATCH_TITLE_KEYS: tuple[str, ...] = ("title", "group_title", "target_group_title", "name")
 _PATCH_TARGET_KEYS: tuple[str, ...] = (
-    "target_fact_id", "target_group_id", "targetGroupId", "group_id", "target_id", "id",
+    "target_fact_id",
+    "target_group_id",
+    "targetGroupId",
+    "group_id",
+    "target_id",
+    "id",
 )
 _PATCH_NEW_ID_KEYS: tuple[str, ...] = (
-    "new_fact_id", "new_group_id", "newGroupId", "id", "key",
+    "new_fact_id",
+    "new_group_id",
+    "newGroupId",
+    "id",
+    "key",
 )
 
 
@@ -314,20 +345,21 @@ def normalize_patches_response(value: Any) -> dict:
         content = _first_content(raw)
         if not content.strip():
             continue
-        raw_mode = _single_line(raw.get("mode") or raw.get("operation")
-                               or DEFAULT_PATCH_MODE).lower()
+        raw_mode = _single_line(raw.get("mode") or raw.get("operation") or DEFAULT_PATCH_MODE).lower()
         mode = raw_mode if raw_mode in PATCH_MODES else DEFAULT_PATCH_MODE
         target = _first_str(raw, _PATCH_TARGET_KEYS)
         new_id = _first_str(raw, _PATCH_NEW_ID_KEYS) or f"patch_{idx + 1}"
-        patches.append(FactPatch(
-            content=content,
-            target_fact_id=target,
-            new_fact_id=normalize_fact_id(new_id, idx),
-            title=_first_str(raw, _PATCH_TITLE_KEYS),
-            mode=mode,
-            # 有明确 target（id 或标题）时视为「补充既有项」，否则「新建」
-            create=not bool(target),
-        ))
+        patches.append(
+            FactPatch(
+                content=content,
+                target_fact_id=target,
+                new_fact_id=normalize_fact_id(new_id, idx),
+                title=_first_str(raw, _PATCH_TITLE_KEYS),
+                mode=mode,
+                # 有明确 target（id 或标题）时视为「补充既有项」，否则「新建」
+                create=not bool(target),
+            )
+        )
     return {"patches": patches}
 
 
@@ -382,29 +414,28 @@ def merge_fact_patches(groups: list, patches: Iterable[FactPatch]) -> list:
                     break
         if target_idx < 0 and patch.title:
             for i, g in enumerate(result):
-                if isinstance(g, dict) and patch.title and str(
-                        g.get("title") or "") == patch.title:
+                if isinstance(g, dict) and patch.title and str(g.get("title") or "") == patch.title:
                     target_idx = i
                     break
 
         if target_idx >= 0:
             current = result[target_idx]
-            current["content"] = apply_patch_mode(
-                str(current.get("content") or ""), content, patch.mode)
+            current["content"] = apply_patch_mode(str(current.get("content") or ""), content, patch.mode)
         else:
-            result.append({
-                "id": patch.new_fact_id or normalize_fact_id(patch.title, len(result)),
-                "title": patch.title or "补充事实项",
-                "content": content,
-            })
+            result.append(
+                {
+                    "id": patch.new_fact_id or normalize_fact_id(patch.title, len(result)),
+                    "title": patch.title or "补充事实项",
+                    "content": content,
+                }
+            )
     return result
 
 
 # =========================================================================
 # 五、分批渲染与并发等待（对齐参考 batchRenderedItems / waitAllOrThrow）
 # =========================================================================
-def batch_rendered_items(items: Sequence, render_item: Callable[[Any], str],
-                         limit: int) -> list[list]:
+def batch_rendered_items(items: Sequence, render_item: Callable[[Any], str], limit: int) -> list[list]:
     """按渲染后长度把条目分批（对齐参考 ``batchRenderedItems``）。
 
     参考软件用它把「分段候选」按上下文预算分批合并，避免单次合并请求超长。
@@ -486,16 +517,14 @@ def measure_messages_length(messages: Sequence[dict]) -> int:
     return total
 
 
-def get_segment_limit(context_length_limit: Any = None,
-                      fixed_messages: Sequence[dict] = ()) -> int:
+def get_segment_limit(context_length_limit: Any = None, fixed_messages: Sequence[dict] = ()) -> int:
     """按上下文预算算出单段可用的正文长度（对齐参考 :363-368）。
 
     ``floor(limit × 0.8) - 固定消息长度``，下限 ``MIN_GLOBAL_FACTS_SEGMENT_CHARS``。
     """
     limit = normalize_positive_int(context_length_limit, DEFAULT_CONTEXT_LENGTH_LIMIT)
     request_budget = int(limit * GLOBAL_FACTS_CONTEXT_LIMIT_RATIO)
-    return max(MIN_GLOBAL_FACTS_SEGMENT_CHARS,
-               request_budget - measure_messages_length(fixed_messages))
+    return max(MIN_GLOBAL_FACTS_SEGMENT_CHARS, request_budget - measure_messages_length(fixed_messages))
 
 
 # =========================================================================
@@ -503,8 +532,7 @@ def get_segment_limit(context_length_limit: Any = None,
 # =========================================================================
 def fact_item_id(item) -> str:
     """取事实行的稳定标识（归一化键优先，退回事实名）。"""
-    return str(getattr(item, "key", "") or getattr(item, "fact_key", "")
-               or getattr(item, "name", "") or "")
+    return str(getattr(item, "key", "") or getattr(item, "fact_key", "") or getattr(item, "name", "") or "")
 
 
 def apply_patches_to_fact_items(items: Sequence, patches: Iterable[FactPatch]) -> list:
@@ -548,8 +576,7 @@ def apply_patches_to_fact_items(items: Sequence, patches: Iterable[FactPatch]) -
                     break
 
         if target is not None:
-            target.value = apply_patch_mode(
-                str(getattr(target, "value", "") or ""), patch.content, patch.mode)
+            target.value = apply_patch_mode(str(getattr(target, "value", "") or ""), patch.content, patch.mode)
             # 补丁 replace 后原有 conflict_values 可能已包含被替换掉的取值，
             # 留着会让前端把已不存在的值渲染成「备选值」。
             if getattr(target, "has_conflict", False) and patch.mode == "replace":
@@ -592,6 +619,7 @@ def make_fact_item_from_patch(patch: FactPatch, index: int = 0):
 
     try:
         from app.services.facts_classification import apply_fact_dimensions
+
         apply_fact_dimensions([item])
     except Exception:  # noqa: BLE001 - 维度标注失败可由读路径惰性派生兜底
         logger.debug("补丁事实项四维标注失败（读路径将惰性派生兜底）", exc_info=True)
@@ -600,8 +628,7 @@ def make_fact_item_from_patch(patch: FactPatch, index: int = 0):
 
 def derive_title_from_content(content: str, index: int = 0) -> str:
     """补丁未给标题时，从内容首行反推一个稳定标题。"""
-    first = next((ln.strip().lstrip("-*").strip()
-                  for ln in str(content or "").splitlines() if ln.strip()), "")
+    first = next((ln.strip().lstrip("-*").strip() for ln in str(content or "").splitlines() if ln.strip()), "")
     if not first:
         return f"补充事实项{index + 1}"
     for sep in ("：", ":"):

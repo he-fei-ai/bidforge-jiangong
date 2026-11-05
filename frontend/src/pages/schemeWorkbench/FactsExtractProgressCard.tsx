@@ -3,7 +3,12 @@ import { Card, Progress, Space } from "antd";
 import { Typography } from "antd";
 const { Title, Text } = Typography;
 
-export function FactsExtractProgressCard({ progress, progressMsg, logs, controls }: {
+export function FactsExtractProgressCard({
+  progress,
+  progressMsg,
+  logs,
+  controls,
+}: {
   progress: number;
   progressMsg: string;
   logs: Array<{ progress: number; message: string; time?: number; [k: string]: unknown }>;
@@ -15,12 +20,16 @@ export function FactsExtractProgressCard({ progress, progressMsg, logs, controls
     <Card size="small" style={{ marginBottom: 12 }}>
       <Space direction="vertical" style={{ width: "100%" }} size={6}>
         <Text strong>📚 正在提取全局事实</Text>
-        <Text type="secondary" style={{ fontSize: 12 }}>{progressMsg}</Text>
+        <Text type="secondary" style={{ fontSize: 12 }}>
+          {progressMsg}
+        </Text>
         <Progress percent={Math.round((progress || 0) * 100)} size="small" />
         {controls}
         <div style={{ maxHeight: 180, overflow: "auto" }}>
           {list.length === 0 ? (
-            <Text type="secondary" style={{ fontSize: 12 }}>正在连接 AI，准备提取...</Text>
+            <Text type="secondary" style={{ fontSize: 12 }}>
+              正在连接 AI，准备提取...
+            </Text>
           ) : (
             list.map((l, i) => (
               <div key={i} style={{ fontSize: 12, lineHeight: "20px" }}>
@@ -31,7 +40,9 @@ export function FactsExtractProgressCard({ progress, progressMsg, logs, controls
           )}
         </div>
         {list.length > 0 && (
-          <Text type="secondary" style={{ fontSize: 12 }}>共 {list.length} 条进度记录</Text>
+          <Text type="secondary" style={{ fontSize: 12 }}>
+            共 {list.length} 条进度记录
+          </Text>
         )}
       </Space>
     </Card>

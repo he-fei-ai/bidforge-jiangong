@@ -16,6 +16,7 @@ R69 收口：在 ``facts_extractor.py`` 新增 ``FACT_SCOPE_PREDICATE``（组合
 docstring 是 ast.Constant，若 docstring 里写了完整 SQL 谓词模式也会被抓
 （期望行为：防 docstring 藏第二份口径）。沿 §5.14 教训。
 """
+
 import ast
 import os
 from pathlib import Path
@@ -99,13 +100,10 @@ class TestFactScopeSingleSource:
         不得再内联自己的作用域判据（R70 收敛的第四份副本）。"""
         sf = APP / "services" / "scheme_fingerprint.py"
         src = sf.read_text(encoding="utf-8")
-        assert "FACT_SCOPE_PREDICATE" in src, (
-            "scheme_fingerprint.py 必须引用 FACT_SCOPE_PREDICATE 单一事实源")
+        assert "FACT_SCOPE_PREDICATE" in src, "scheme_fingerprint.py 必须引用 FACT_SCOPE_PREDICATE 单一事实源"
         for c in _string_constants_in_file(sf):
-            assert FULL_SIG_ALT not in c, (
-                f"scheme_fingerprint.py 仍内联作用域谓词：{c[:80]}")
-            assert SHARED_SIG not in c, (
-                f"scheme_fingerprint.py 仍内联共享半句：{c[:80]}")
+            assert FULL_SIG_ALT not in c, f"scheme_fingerprint.py 仍内联作用域谓词：{c[:80]}"
+            assert SHARED_SIG not in c, f"scheme_fingerprint.py 仍内联共享半句：{c[:80]}"
 
     def test_shared_fragment_literal_only_in_facts_extractor(self):
         """共享半句字面量只允许出现在 ``facts_extractor.py`` 的
@@ -137,12 +135,9 @@ class TestFactScopeSingleSource:
                     if isinstance(tgt, ast.Name) and tgt.id == "FACT_SCOPE_PREDICATE":
                         val_seg = ast.get_source_segment(src, node.value) or ""
                         assert "FACT_SCOPE_SHARED_FRAGMENT" in val_seg, (
-                            f"FACT_SCOPE_PREDICATE 必须组合自 FACT_SCOPE_SHARED_FRAGMENT，"
-                            f"实际：{val_seg}"
+                            f"FACT_SCOPE_PREDICATE 必须组合自 FACT_SCOPE_SHARED_FRAGMENT，" f"实际：{val_seg}"
                         )
-                        assert FULL_SIG not in val_seg, (
-                            f"FACT_SCOPE_PREDICATE 不得内联全范围字面量，实际：{val_seg}"
-                        )
+                        assert FULL_SIG not in val_seg, f"FACT_SCOPE_PREDICATE 不得内联全范围字面量，实际：{val_seg}"
                         return
         pytest.fail("未找到 FACT_SCOPE_PREDICATE 定义")
 
@@ -160,12 +155,10 @@ class TestImportWiring:
                 for tgt in node.targets:
                     if isinstance(tgt, ast.Name) and tgt.id == "_FACT_SCOPE_PREDICATE":
                         assert isinstance(node.value, ast.Name), (
-                            f"_FACT_SCOPE_PREDICATE 必须是 Name（别名），"
-                            f"实际：{type(node.value).__name__}"
+                            f"_FACT_SCOPE_PREDICATE 必须是 Name（别名），" f"实际：{type(node.value).__name__}"
                         )
                         assert node.value.id == "FACT_SCOPE_PREDICATE", (
-                            f"_FACT_SCOPE_PREDICATE 必须指向 FACT_SCOPE_PREDICATE，"
-                            f"实际：{node.value.id}"
+                            f"_FACT_SCOPE_PREDICATE 必须指向 FACT_SCOPE_PREDICATE，" f"实际：{node.value.id}"
                         )
                         return
         pytest.fail("未找到 _FACT_SCOPE_PREDICATE 定义")
@@ -179,9 +172,9 @@ class TestImportWiring:
             if isinstance(node, ast.ImportFrom) and node.module and "facts_extractor" in node.module:
                 for alias in node.names:
                     imported.add(alias.name)
-        assert "FACT_SCOPE_PREDICATE" in imported, (
-            f"global_facts.py 未 import FACT_SCOPE_PREDICATE，已 import：{imported}"
-        )
+        assert (
+            "FACT_SCOPE_PREDICATE" in imported
+        ), f"global_facts.py 未 import FACT_SCOPE_PREDICATE，已 import：{imported}"
 
     def test_export_imports_fact_scope_predicate(self):
         """``export.py`` 必须从 ``facts_extractor`` import ``FACT_SCOPE_PREDICATE``。"""
@@ -192,9 +185,7 @@ class TestImportWiring:
             if isinstance(node, ast.ImportFrom) and node.module and "facts_extractor" in node.module:
                 for alias in node.names:
                     imported.add(alias.name)
-        assert "FACT_SCOPE_PREDICATE" in imported, (
-            f"export.py 未 import FACT_SCOPE_PREDICATE，已 import：{imported}"
-        )
+        assert "FACT_SCOPE_PREDICATE" in imported, f"export.py 未 import FACT_SCOPE_PREDICATE，已 import：{imported}"
 
     def test_export_no_inline_scope_literal(self):
         """``export.py`` 的 ast.Constant 中不得出现全范围或共享半句字面量。"""
@@ -209,9 +200,7 @@ class TestImportWiring:
         """import 链无循环：``facts_extractor``（services 层）不得 import ``export``（routers 层）。"""
         fe = APP / "services" / "facts_extractor.py"
         src = fe.read_text(encoding="utf-8")
-        assert "from app.routers.export" not in src, (
-            "facts_extractor.py 不得 import export.py（循环依赖）"
-        )
+        assert "from app.routers.export" not in src, "facts_extractor.py 不得 import export.py（循环依赖）"
 
 
 class TestRuntimeEquivalence:
@@ -225,18 +214,15 @@ class TestRuntimeEquivalence:
 
         fe_val = facts_extractor.FACT_SCOPE_PREDICATE
         gf_val = global_facts._FACT_SCOPE_PREDICATE
-        assert hasattr(export, "FACT_SCOPE_PREDICATE"), (
-            "export.py 未在模块级暴露 FACT_SCOPE_PREDICATE"
-        )
+        assert hasattr(export, "FACT_SCOPE_PREDICATE"), "export.py 未在模块级暴露 FACT_SCOPE_PREDICATE"
         ep_val = export.FACT_SCOPE_PREDICATE
-        assert fe_val == gf_val == ep_val, (
-            f"三处谓词值不一致：fe={fe_val!r} gf={gf_val!r} ep={ep_val!r}"
-        )
+        assert fe_val == gf_val == ep_val, f"三处谓词值不一致：fe={fe_val!r} gf={gf_val!r} ep={ep_val!r}"
 
     def test_predicate_has_correct_shape(self):
         """运行时验证：谓词值含 ``scheme_id=?`` / ``project_id=?`` / ``OR``，
         且外层括号闭合（SQL 语义正确）。"""
         from app.services import facts_extractor
+
         val = facts_extractor.FACT_SCOPE_PREDICATE
         assert "scheme_id=?" in val, f"缺 scheme_id=?：{val}"
         assert "project_id=?" in val, f"缺 project_id=?：{val}"
@@ -247,8 +233,7 @@ class TestRuntimeEquivalence:
         """运行时验证：共享半句是全范围谓词的子串
         （证明全范围 = ``scheme_id=? OR`` + 共享半句）。"""
         from app.services import facts_extractor
+
         shared = facts_extractor.FACT_SCOPE_SHARED_FRAGMENT
         full = facts_extractor.FACT_SCOPE_PREDICATE
-        assert shared in full, (
-            f"共享半句不是全范围谓词的子串：\n  shared={shared!r}\n  full={full!r}"
-        )
+        assert shared in full, f"共享半句不是全范围谓词的子串：\n  shared={shared!r}\n  full={full!r}"

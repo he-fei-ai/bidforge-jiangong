@@ -37,9 +37,13 @@ afterEach(cleanup);
 
 if (!(window as any).matchMedia) {
   (window as any).matchMedia = (query: string) => ({
-    matches: false, media: query, onchange: null,
-    addListener: () => {}, removeListener: () => {},
-    addEventListener: () => {}, removeEventListener: () => {},
+    matches: false,
+    media: query,
+    onchange: null,
+    addListener: () => {},
+    removeListener: () => {},
+    addEventListener: () => {},
+    removeEventListener: () => {},
     dispatchEvent: () => false,
   });
 }
@@ -58,15 +62,42 @@ if (!(window as any).matchMedia) {
 const REAL_STATS: { by_chapter: FactChapterStatBlock } = {
   by_chapter: {
     chapters: [
-      { order: 1, key: "overview", title: "工程概况", count: 12, coverage: 0.75,
-        missing_fields: ["建设单位", "结构形式"], shared_count: 3 },
-      { order: 2, key: "basis", title: "编制依据", count: 5, coverage: 0.5,
-        missing_fields: ["执行标准"], shared_count: 1 },
-      { order: 3, key: "plan", title: "施工计划", count: 0, coverage: 0,
-        missing_fields: [], shared_count: 0 },
+      {
+        order: 1,
+        key: "overview",
+        title: "工程概况",
+        count: 12,
+        coverage: 0.75,
+        missing_fields: ["建设单位", "结构形式"],
+        shared_count: 3,
+      },
+      {
+        order: 2,
+        key: "basis",
+        title: "编制依据",
+        count: 5,
+        coverage: 0.5,
+        missing_fields: ["执行标准"],
+        shared_count: 1,
+      },
+      {
+        order: 3,
+        key: "plan",
+        title: "施工计划",
+        count: 0,
+        coverage: 0,
+        missing_fields: [],
+        shared_count: 0,
+      },
     ],
-    totals: { facts: 17, uncategorized: 0, total_fields: 12, covered_fields: 9,
-      coverage: 0.75, missing_chapters: 7 },
+    totals: {
+      facts: 17,
+      uncategorized: 0,
+      total_fields: 12,
+      covered_fields: 9,
+      coverage: 0.75,
+      missing_chapters: 7,
+    },
     by_fact_attr: { quantitative: 9, qualitative: 8 },
     by_source_kind: { bid_doc: 12, manual: 5 },
     shared_count: 4,
@@ -111,8 +142,7 @@ describe("buildFactChapterStats · by_chapter 形状契约（BUG-1）", () => {
   });
 
   it("容错：裸数组（旧后端/未来扁平化）仍能解析，不炸", () => {
-    const rows = buildFactChapterStats(
-      { by_chapter: REAL_STATS.by_chapter.chapters as any });
+    const rows = buildFactChapterStats({ by_chapter: REAL_STATS.by_chapter.chapters as any });
     expect(rows).toHaveLength(3);
   });
 
@@ -126,23 +156,23 @@ describe("buildFactChapterStats · by_chapter 形状契约（BUG-1）", () => {
   it("容错：脏字段（order/count 缺失或非数字）归一为 0，不产生 NaN", () => {
     const rows = buildFactChapterStats({
       by_chapter: {
-        chapters: [
-          { key: "overview", count: "7", order: undefined, shared_count: null },
-        ],
+        chapters: [{ key: "overview", count: "7", order: undefined, shared_count: null }],
       } as any,
     });
     expect(rows[0].order).toBe(0);
-    expect(rows[0].count).toBe(7);   // Number("7") = 7
-    expect(rows[0].shared).toBe(0);  // Number(null) = 0
+    expect(rows[0].count).toBe(7); // Number("7") = 7
+    expect(rows[0].shared).toBe(0); // Number(null) = 0
   });
 
   it("title 缺失时用 titles 注入回填，再退到本地兜底表", () => {
     const rows = buildFactChapterStats(
       { by_chapter: { chapters: [{ order: 1, key: "overview", count: 1 }] } } as any,
-      { overview: "注入的工程概况" });
+      { overview: "注入的工程概况" },
+    );
     expect(rows[0].title).toBe("注入的工程概况");
-    const rows2 = buildFactChapterStats(
-      { by_chapter: { chapters: [{ order: 1, key: "basis", count: 1 }] } } as any);
+    const rows2 = buildFactChapterStats({
+      by_chapter: { chapters: [{ order: 1, key: "basis", count: 1 }] },
+    } as any);
     expect(rows2[0].title).toBe("编制依据");
   });
 });
@@ -152,8 +182,7 @@ describe("buildFactChapterStats · by_chapter 形状契约（BUG-1）", () => {
 // ============================================================
 describe("FactsChapterCoveragePanel · 组件级渲染", () => {
   it("【核心回归】真实对象形状下必须渲染出九章行（修复前只有空态）", () => {
-    const { container } = render(
-      <FactsChapterCoveragePanel stats={REAL_STATS} />);
+    const { container } = render(<FactsChapterCoveragePanel stats={REAL_STATS} />);
     const txt = container.textContent || "";
     expect(txt).not.toContain("暂无章节统计");
     expect(txt).toContain("九章事实分布（共 17 条）");
@@ -163,26 +192,29 @@ describe("FactsChapterCoveragePanel · 组件级渲染", () => {
   });
 
   it("每章渲染条数；count=0 显示「无事实」而非「0 条」", () => {
-    const { container } = render(
-      <FactsChapterCoveragePanel stats={REAL_STATS} />);
+    const { container } = render(<FactsChapterCoveragePanel stats={REAL_STATS} />);
     const txt = container.textContent || "";
     expect(txt).toContain("12 条");
     expect(txt).toContain("无事实");
   });
 
   it("shared>0 时渲染「共性 N」（该列修复前恒不显示）", () => {
-    const { container } = render(
-      <FactsChapterCoveragePanel stats={REAL_STATS} />);
+    const { container } = render(<FactsChapterCoveragePanel stats={REAL_STATS} />);
     expect(container.textContent || "").toContain("共性 3");
   });
 
   it("缺字段清单渲染，且超过 4 项截断加省略号", () => {
     const many = {
       by_chapter: {
-        chapters: [{
-          order: 1, key: "overview", title: "工程概况", count: 1,
-          missing_fields: ["f1", "f2", "f3", "f4", "f5", "f6"],
-        }],
+        chapters: [
+          {
+            order: 1,
+            key: "overview",
+            title: "工程概况",
+            count: 1,
+            missing_fields: ["f1", "f2", "f3", "f4", "f5", "f6"],
+          },
+        ],
       },
     } as any;
     const { container } = render(<FactsChapterCoveragePanel stats={many} />);
@@ -202,7 +234,9 @@ describe("FactsChapterCoveragePanel · 组件级渲染", () => {
     const { container } = render(
       <FactsChapterCoveragePanel
         stats={{ by_chapter: { chapters: [{ order: 1, key: "calc_drawings", count: 2 }] } } as any}
-        titles={{ calc_drawings: "计算书及图纸" }} />);
+        titles={{ calc_drawings: "计算书及图纸" }}
+      />,
+    );
     expect(container.textContent || "").toContain("计算书及图纸");
   });
 
@@ -236,8 +270,14 @@ describe("buildFactsPagination · 页码契约（BUG-2）", () => {
   });
 
   it("【核心回归】offset 缺失/非法时不得产出 NaN（Math.min/max 对 NaN 恒 NaN）", () => {
-    for (const bad of [{}, { offset: undefined }, { offset: NaN },
-      { offset: Infinity }, { offset: -5 }, { offset: null }]) {
+    for (const bad of [
+      {},
+      { offset: undefined },
+      { offset: NaN },
+      { offset: Infinity },
+      { offset: -5 },
+      { offset: null },
+    ]) {
       const r = buildFactsPagination({ total_groups: 60, ...(bad as any) }, 20);
       expect(Number.isFinite(r.page)).toBe(true);
       expect(r.page).toBe(1);
@@ -284,7 +324,9 @@ describe("buildFactsPagination · 页码契约（BUG-2）", () => {
     // loadFacts 用 (page-1)*FACTS_PAGE_SIZE 作为 offset ⇒ 必须能被页码整除还原
     for (const page of [1, 2, 3, 7]) {
       const r = buildFactsPagination(
-        { total_groups: 200, offset: (page - 1) * FACTS_PAGE_SIZE }, FACTS_PAGE_SIZE);
+        { total_groups: 200, offset: (page - 1) * FACTS_PAGE_SIZE },
+        FACTS_PAGE_SIZE,
+      );
       expect(r.page).toBe(page);
     }
   });
@@ -305,8 +347,14 @@ describe("buildFactsSummary · 门控计数口径（零回归锁）", () => {
   });
 
   it("仍保留后端原样下发的统计维度（by_chapter 不得被归一过程丢弃）", () => {
-    const s = buildFactsSummary({ total: 17, simulated: 0, unresolved: 0, conflicts: 0, stale: 0,
-      by_chapter: REAL_STATS.by_chapter } as any);
+    const s = buildFactsSummary({
+      total: 17,
+      simulated: 0,
+      unresolved: 0,
+      conflicts: 0,
+      stale: 0,
+      by_chapter: REAL_STATS.by_chapter,
+    } as any);
     expect((s as any).by_chapter.chapters).toHaveLength(3);
   });
 });

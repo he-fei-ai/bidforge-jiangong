@@ -86,8 +86,9 @@ describe("factsApi 契约", () => {
       config: { params: { scheme_id: "s1" }, signal: ctrl.signal },
     });
 
-    await factsApi.dangerCheck(
-      { scheme_name: "深基坑支护专项施工方案" }, "s1", { signal: ctrl.signal });
+    await factsApi.dangerCheck({ scheme_name: "深基坑支护专项施工方案" }, "s1", {
+      signal: ctrl.signal,
+    });
     expect(last()).toMatchObject({
       method: "post",
       url: "/global-facts/danger-check",
@@ -126,25 +127,29 @@ describe("factsApi 契约", () => {
   it("update / resolve / resolveConflict / delete：写入时透传当前 scheme 作用域", async () => {
     await factsApi.update("f1", { title: "x" }, "s1");
     expect(last()).toMatchObject({
-      method: "patch", url: "/global-facts/f1",
+      method: "patch",
+      url: "/global-facts/f1",
       config: { params: { scheme_id: "s1" } },
     });
 
     await factsApi.resolve("f1", "s1");
     expect(last()).toMatchObject({
-      method: "patch", url: "/global-facts/f1/resolve",
+      method: "patch",
+      url: "/global-facts/f1/resolve",
       config: { params: { scheme_id: "s1" } },
     });
 
     await factsApi.resolveConflict("f1", "C35", "s1");
     expect(last()).toMatchObject({
-      method: "patch", url: "/global-facts/f1/resolve-conflict",
+      method: "patch",
+      url: "/global-facts/f1/resolve-conflict",
       config: { params: { scheme_id: "s1" } },
     });
 
     await factsApi.delete("g1", "s1");
     expect(last()).toMatchObject({
-      method: "delete", url: "/global-facts/g1",
+      method: "delete",
+      url: "/global-facts/g1",
       config: { params: { scheme_id: "s1" } },
     });
   });
@@ -163,7 +168,8 @@ describe("factsApi 契约", () => {
   it("ackStale：PATCH 单条，scheme_id 走 query", async () => {
     await factsApi.ackStale("f1", "s1");
     expect(last()).toMatchObject({
-      method: "patch", url: "/global-facts/f1/ack-stale",
+      method: "patch",
+      url: "/global-facts/f1/ack-stale",
       config: { params: { scheme_id: "s1" } },
     });
   });
@@ -171,7 +177,8 @@ describe("factsApi 契约", () => {
   it("batchAckStale：POST 批量，scheme_id 与 fact_ids 放 body", async () => {
     await factsApi.batchAckStale("s1", ["f1", "f2"]);
     expect(last()).toMatchObject({
-      method: "post", url: "/global-facts/ack-stale",
+      method: "post",
+      url: "/global-facts/ack-stale",
       data: { scheme_id: "s1", fact_ids: ["f1", "f2"] },
     });
   });
@@ -462,7 +469,12 @@ describe("API Token 注入链路", () => {
       seen.push(init?.headers || {});
       return {
         ok: true,
-        body: { getReader: () => ({ read: async () => ({ done: true, value: undefined }), cancel: async () => {} }) },
+        body: {
+          getReader: () => ({
+            read: async () => ({ done: true, value: undefined }),
+            cancel: async () => {},
+          }),
+        },
       };
     });
     try {

@@ -1,4 +1,12 @@
-import { FACTS_ADJUST_PREVIEW_LIMIT, factsAdjustIgnoreText, formatFactsAdjustOperation, normalizeFactsAdjustPlan, type FactsAdjustIgnoredItem, type FactsAdjustOperation, type FactsAdjustPlanShape } from "./factsShared.ts";
+import {
+  FACTS_ADJUST_PREVIEW_LIMIT,
+  factsAdjustIgnoreText,
+  formatFactsAdjustOperation,
+  normalizeFactsAdjustPlan,
+  type FactsAdjustIgnoredItem,
+  type FactsAdjustOperation,
+  type FactsAdjustPlanShape,
+} from "./factsShared.ts";
 import { ThunderboltOutlined } from "@ant-design/icons";
 import { Alert, App, Button, Input, Modal } from "antd";
 import { useEffect, useRef, useState } from "react";
@@ -28,8 +36,10 @@ export function FactsAdjustPanel({
    * 组件拿不到 `ignored` —— 而「要求改 3 条只落 2 条」恰恰只在应用后才知道。
    * 返回 void 仍然合法（旧接线零改动），此时按「无丢弃」处理。
    */
-  apply: (operations: FactsAdjustOperation[], instruction: string) =>
-    Promise<Partial<FactsAdjustPlanShape> | void>;
+  apply: (
+    operations: FactsAdjustOperation[],
+    instruction: string,
+  ) => Promise<Partial<FactsAdjustPlanShape> | void>;
   /** 业务失败回调（透传后端 detail），缺省时静默降级 */
   onError?: (fallback: string, e: unknown) => void;
   /**
@@ -38,9 +48,7 @@ export function FactsAdjustPanel({
    * ⚠️ 注入是为了组件级可测 —— 静态方法在测试里也可用，但注入后
    * 用例可以用 mock 直接断言「确认了什么、调用了什么」，无需触碰 DOM。
    */
-  confirmDialog?: (
-    options: Parameters<typeof Modal.confirm>[0],
-  ) => void;
+  confirmDialog?: (options: Parameters<typeof Modal.confirm>[0]) => void;
 }) {
   const [ask, setAsk] = useState(false);
   const [text, setText] = useState("");
@@ -80,11 +88,11 @@ export function FactsAdjustPanel({
   const confirmAsk = async () => {
     const instruction = text.trim();
     setAsk(false);
-    if (!schemeId || !instruction) return;   // 空指令不下发
+    if (!schemeId || !instruction) return; // 空指令不下发
     setAdjusting(true);
     try {
       const data = await preview(instruction);
-      if (schemeRef.current !== schemeId) return;   // 已切方案 → 丢弃
+      if (schemeRef.current !== schemeId) return; // 已切方案 → 丢弃
       setPlan(normalizeFactsAdjustPlan(data));
       setApplyNotice(null);
     } catch (e) {
@@ -103,9 +111,7 @@ export function FactsAdjustPanel({
           <div>{plan?.summary || `将执行 ${operations.length} 项调整`}</div>
           <ul>
             {operations.slice(0, FACTS_ADJUST_PREVIEW_LIMIT).map((op, i) => (
-              <li key={`${op.op}-${op.fact_id || i}`}>
-                {formatFactsAdjustOperation(op, i)}
-              </li>
+              <li key={`${op.op}-${op.fact_id || i}`}>{formatFactsAdjustOperation(op, i)}</li>
             ))}
           </ul>
           {operations.length > FACTS_ADJUST_PREVIEW_LIMIT && (
@@ -136,7 +142,7 @@ export function FactsAdjustPanel({
           setPlan(null);
         } catch (e) {
           submitError("应用调整失败", e);
-          throw e;   // 抛出 → 弹窗保持打开，用户可重试或取消
+          throw e; // 抛出 → 弹窗保持打开，用户可重试或取消
         }
       },
     });
@@ -146,7 +152,10 @@ export function FactsAdjustPanel({
     <>
       <Button
         icon={<ThunderboltOutlined />}
-        onClick={() => { setText(""); setAsk(true); }}
+        onClick={() => {
+          setText("");
+          setAsk(true);
+        }}
         loading={adjusting}
         disabled={!ready}
       >
@@ -154,8 +163,8 @@ export function FactsAdjustPanel({
       </Button>
       {operations.length > 0 && (
         <Button danger onClick={requestApply} disabled={!ready}>
-          应用调整计划{operations.length > FACTS_ADJUST_PREVIEW_LIMIT
-            ? `（${operations.length} 项）` : ""}
+          应用调整计划
+          {operations.length > FACTS_ADJUST_PREVIEW_LIMIT ? `（${operations.length} 项）` : ""}
         </Button>
       )}
       {/*
@@ -171,16 +180,14 @@ export function FactsAdjustPanel({
           showIcon
           style={{ marginTop: 8 }}
           message={`${ignoredShown.length} 项调整未纳入（${ignoredApply.length > 0 ? "应用时" : "预览时"}被安全校验丢弃）`}
-          description={(
+          description={
             <div style={{ fontSize: 12 }}>
               {ignoredShown.slice(0, 6).map((it, i) => (
                 <div key={i}>· {factsAdjustIgnoreText(it)}</div>
               ))}
-              {ignoredShown.length > 6 && (
-                <div>· ……其余 {ignoredShown.length - 6} 条明细略</div>
-              )}
+              {ignoredShown.length > 6 && <div>· ……其余 {ignoredShown.length - 6} 条明细略</div>}
             </div>
-          )}
+          }
         />
       )}
       <Modal

@@ -13,6 +13,7 @@ P2-3（R77 §11.3 递延项）正式落地。设计要点：
 
 运行：pytest tests/test_facts_value_kind_r80_20261015.py -q
 """
+
 import ast
 import os
 import textwrap
@@ -28,16 +29,11 @@ from app.services.facts_extractor import (
     normalize_value_kind,
 )
 
-_FE_PATH = os.path.abspath(
-    os.path.join(os.path.dirname(__file__), "..", "app", "services", "facts_extractor.py"))
-_GF_PATH = os.path.abspath(
-    os.path.join(os.path.dirname(__file__), "..", "app", "routers", "global_facts.py"))
-_SCHEMES_PATH = os.path.abspath(
-    os.path.join(os.path.dirname(__file__), "..", "app", "routers", "schemes.py"))
-_DB_PATH_FILE = os.path.abspath(
-    os.path.join(os.path.dirname(__file__), "..", "app", "db.py"))
-_SCHEMA_PATH = os.path.abspath(
-    os.path.join(os.path.dirname(__file__), "..", "app", "schema_sql.py"))
+_FE_PATH = os.path.abspath(os.path.join(os.path.dirname(__file__), "..", "app", "services", "facts_extractor.py"))
+_GF_PATH = os.path.abspath(os.path.join(os.path.dirname(__file__), "..", "app", "routers", "global_facts.py"))
+_SCHEMES_PATH = os.path.abspath(os.path.join(os.path.dirname(__file__), "..", "app", "routers", "schemes.py"))
+_DB_PATH_FILE = os.path.abspath(os.path.join(os.path.dirname(__file__), "..", "app", "db.py"))
+_SCHEMA_PATH = os.path.abspath(os.path.join(os.path.dirname(__file__), "..", "app", "schema_sql.py"))
 
 
 def _read(path: str) -> str:
@@ -76,11 +72,9 @@ class TestNormalizeValueKind:
 # ---------------------------------------------------------------------------
 class TestDbRowAlignment:
     def test_row_len_matches_cols(self):
-        it = FactItem(name="建设工期", value="450", key="total_duration",
-                      category="schedule", value_kind="requirement")
+        it = FactItem(name="建设工期", value="450", key="total_duration", category="schedule", value_kind="requirement")
         row = it.to_db_row("g", "p", "s", "t")
-        assert len(row) == len(GLOBAL_FACTS_INSERT_COLS), (
-            "to_db_row 列数必须与 GLOBAL_FACTS_INSERT_COLS 一一对应")
+        assert len(row) == len(GLOBAL_FACTS_INSERT_COLS), "to_db_row 列数必须与 GLOBAL_FACTS_INSERT_COLS 一一对应"
 
     def test_value_kind_position_and_value(self):
         it = FactItem(name="质保期", value="2", value_kind="REQUIREMENT")
@@ -96,8 +90,9 @@ class TestDbRowAlignment:
 
     def test_existing_tail_contract_not_broken(self):
         """既有契约回归：to_db_row()[-4:] 仍是九大章节四维、is_stale 先于四维。"""
-        it = FactItem(name="x", value="y", chapter="plan", fact_attr="quantitative",
-                      source_kind="bid_doc", is_shared=True)
+        it = FactItem(
+            name="x", value="y", chapter="plan", fact_attr="quantitative", source_kind="bid_doc", is_shared=True
+        )
         row = it.to_db_row("g", "p", "s", "t")
         assert row[-4:] == ("plan", "quantitative", "bid_doc", 1)
         stale_idx = GLOBAL_FACTS_INSERT_COLS.index("is_stale")
@@ -105,9 +100,10 @@ class TestDbRowAlignment:
         assert vk_idx == stale_idx - 1, "value_kind 必须紧邻 is_stale 之前（契约位）"
 
     def test_cols_registered_in_schema(self):
-        assert 'value_kind TEXT DEFAULT' in _read(_SCHEMA_PATH)
-        assert '("global_facts", "value_kind", "TEXT DEFAULT \'\'")' in _read(_DB_PATH_FILE), (
-            "db._migrate 补列清单必须登记 value_kind（旧库幂等补列）")
+        assert "value_kind TEXT DEFAULT" in _read(_SCHEMA_PATH)
+        assert '("global_facts", "value_kind", "TEXT DEFAULT \'\'")' in _read(
+            _DB_PATH_FILE
+        ), "db._migrate 补列清单必须登记 value_kind（旧库幂等补列）"
 
 
 # ---------------------------------------------------------------------------
@@ -115,9 +111,7 @@ class TestDbRowAlignment:
 # ---------------------------------------------------------------------------
 class TestParseFactDict:
     def test_requirement_kind_parsed(self):
-        it = _parse_fact_dict({
-            "name": "监测报警值", "value": "累计沉降30mm",
-            "value_kind": "requirement"})
+        it = _parse_fact_dict({"name": "监测报警值", "value": "累计沉降30mm", "value_kind": "requirement"})
         assert it is not None and it.value_kind == "requirement"
 
     def test_illegal_kind_becomes_empty(self):
@@ -130,9 +124,8 @@ class TestParseFactDict:
 
     def test_legacy_dict_kind_parsed(self):
         from app.services.facts_extractor import _parse_legacy_fact_dict
-        it = _parse_legacy_fact_dict(
-            {"name": "验收标准", "value": "GB 50300-2013",
-             "value_kind": "requirement"})
+
+        it = _parse_legacy_fact_dict({"name": "验收标准", "value": "GB 50300-2013", "value_kind": "requirement"})
         assert it is not None and it.value_kind == "requirement"
 
 
@@ -142,6 +135,7 @@ class TestParseFactDict:
 class TestManualFactRow:
     def _row(self, **kw):
         from app.routers.global_facts import _manual_fact_row
+
         kw.setdefault("fid", "f")
         kw.setdefault("pid", "p")
         kw.setdefault("sid", "s")
@@ -154,8 +148,9 @@ class TestManualFactRow:
         return _manual_fact_row(**kw)
 
     def test_row_len_matches_cols(self):
-        assert len(self._row()) == len(GLOBAL_FACTS_INSERT_COLS), (
-            "_manual_fact_row 列数必须与列清单一一对应（占位符由列数派生）")
+        assert len(self._row()) == len(
+            GLOBAL_FACTS_INSERT_COLS
+        ), "_manual_fact_row 列数必须与列清单一一对应（占位符由列数派生）"
 
     def test_value_kind_default_empty(self):
         idx = GLOBAL_FACTS_INSERT_COLS.index("value_kind")
@@ -176,11 +171,11 @@ _REQUIREMENT_PREFIX = "（要求口径：正文引用时须写为「满足/响�
 class TestRenderFactsText:
     def _render(self, rows, **kw):
         from app.services.facts_builder import _render_facts_text
+
         return _render_facts_text(rows, **kw)
 
     def test_requirement_row_gets_prefix(self):
-        rows = [("工期", "建设工期", "- **建设工期**: 不超过450日历天", 1.0, "plan",
-                 "requirement")]
+        rows = [("工期", "建设工期", "- **建设工期**: 不超过450日历天", 1.0, "plan", "requirement")]
         out = self._render(rows, max_total=6000, per_fact=300)
         assert _REQUIREMENT_PREFIX in out
         assert "不超过450日历天" in out
@@ -195,9 +190,26 @@ class TestRenderFactsText:
 
     def test_legacy_short_rows_still_render(self):
         """历史 3/4/5 元组行（测试 mock / 旧调用方）必须继续可用。"""
-        for row in (("g", "t", "- **x**: 1",),
-                    ("g", "t", "- **x**: 1", 1.0,),
-                    ("g", "t", "- **x**: 1", 1.0, "plan",)):
+        for row in (
+            (
+                "g",
+                "t",
+                "- **x**: 1",
+            ),
+            (
+                "g",
+                "t",
+                "- **x**: 1",
+                1.0,
+            ),
+            (
+                "g",
+                "t",
+                "- **x**: 1",
+                1.0,
+                "plan",
+            ),
+        ):
             out = self._render([row])
             assert "- **x**: 1" in out
             assert "要求口径" not in out
@@ -219,13 +231,13 @@ class TestLoadFactsRowsIntegration:
     @pytest_asyncio.fixture
     async def ctx(self, tmp_path, monkeypatch):
         import app.db as appdb
+
         appdb.DB_PATH = tmp_path / "vk.sqlite"
         await appdb.init_db()
         db = await appdb.get_conn()
         pid, sid = uuid.uuid4().hex, uuid.uuid4().hex
         await db.execute("INSERT INTO projects(id,name) VALUES(?,?)", (pid, "p"))
-        await db.execute(
-            "INSERT INTO schemes(id,project_id,name) VALUES(?,?,?)", (sid, pid, "s"))
+        await db.execute("INSERT INTO schemes(id,project_id,name) VALUES(?,?,?)", (sid, pid, "s"))
         rows = [
             # (name, content, value_kind) —— 均过注入门控
             ("建设工期", "- **建设工期**: 不超过450日历天", "requirement"),
@@ -237,14 +249,15 @@ class TestLoadFactsRowsIntegration:
                 "INSERT INTO global_facts(id,project_id,scheme_id,group_id,"
                 "group_title,title,content,category,is_resolved,value_kind) "
                 "VALUES(?,?,?,?,?,?,?,?,1,?)",
-                (uuid.uuid4().hex, pid, sid, "g1", "工期", nm, content,
-                 "schedule", vk))
+                (uuid.uuid4().hex, pid, sid, "g1", "工期", nm, content, "schedule", vk),
+            )
         await db.commit()
         yield db, sid, dict(zip(["工期", "项目经理", "塔吊型号"], rows))
         await appdb.close_db()
 
     async def test_rows_carry_value_kind(self, ctx):
         from app.services.facts_builder import _load_facts_rows
+
         db, sid, _ = ctx
         rows = await _load_facts_rows(db, sid)
         assert len(rows) == 3
@@ -260,9 +273,11 @@ class TestLoadFactsRowsIntegration:
             "INSERT INTO global_facts(id,project_id,scheme_id,group_id,"
             "group_title,title,content,category,is_resolved,value_kind) "
             "VALUES(?,?,?,?,?,?,?,?,0,'fact')",  # is_resolved=0 → 必须被门控剔除
-            (uuid.uuid4().hex, "", sid, "g1", "工期", "编造值", "- **编造值**: 999", "other"))
+            (uuid.uuid4().hex, "", sid, "g1", "工期", "编造值", "- **编造值**: 999", "other"),
+        )
         await db.commit()
         from app.services.facts_builder import _load_facts_rows
+
         rows = await _load_facts_rows(db, sid)
         assert all(r[1] != "编造值" for r in rows)
 
@@ -272,43 +287,35 @@ class TestLoadFactsRowsIntegration:
 # ---------------------------------------------------------------------------
 class TestStaticWiring:
     def test_load_select_includes_value_kind(self):
-        src = _read(os.path.join(os.path.dirname(_GF_PATH), "..",
-                                 "services", "facts_builder.py"))
-        assert "COALESCE(value_kind,'') AS value_kind" in src, (
-            "_load_facts_rows 的 SELECT 必须读取 value_kind 列")
-        assert "_row_value_kind(_row) == \"requirement\"" in src, (
-            "_render_facts_text 必须按 value_kind 分支拼接口径前缀")
+        src = _read(os.path.join(os.path.dirname(_GF_PATH), "..", "services", "facts_builder.py"))
+        assert "COALESCE(value_kind,'') AS value_kind" in src, "_load_facts_rows 的 SELECT 必须读取 value_kind 列"
+        assert '_row_value_kind(_row) == "requirement"' in src, "_render_facts_text 必须按 value_kind 分支拼接口径前缀"
 
     def test_schemes_copy_keeps_value_kind(self):
         """方案复制路径：列清单含 value_kind 且占位符数 == 列数。"""
         src = _read(_SCHEMES_PATH)
-        seg = src[src.index("INSERT INTO global_facts"):]
-        head = seg[:seg.index("VALUES")]
-        cols = head[head.index("(") + 1:head.rindex(")")]
+        seg = src[src.index("INSERT INTO global_facts") :]
+        head = seg[: seg.index("VALUES")]
+        cols = head[head.index("(") + 1 : head.rindex(")")]
         # 源码是 Python 相邻字符串字面量拼接（含引号/换行/缩进），剥掉再切分
         cols = cols.replace('"', "").replace("\n", " ")
         col_names = [c.strip() for c in cols.split(",") if c.strip()]
         assert "value_kind" in col_names, "方案复制必须保留 value_kind 口径"
         assert col_names.index("value_kind") == col_names.index("norm_group") + 1
         # 占位符数与列数一致（防手写占位符错位复发）
-        vals = seg[seg.index("VALUES"):]
-        ph = vals[:vals.index(")")]
+        vals = seg[seg.index("VALUES") :]
+        ph = vals[: vals.index(")")]
         assert ph.count("?") == len(col_names)
 
     def test_list_facts_returns_value_kind(self):
         src = _read(_GF_PATH)
-        assert '"value_kind": r.get("value_kind") or ""' in src, (
-            "list_facts 行构造必须回传 value_kind（前端徽标消费）")
+        assert '"value_kind": r.get("value_kind") or ""' in src, "list_facts 行构造必须回传 value_kind（前端徽标消费）"
 
     def test_manual_row_normalizes_value_kind(self):
         src = _read(_GF_PATH)
-        assert "normalize_value_kind(value_kind)" in src, (
-            "_manual_fact_row 必须经白名单归一，不得直落客户端脏值")
+        assert "normalize_value_kind(value_kind)" in src, "_manual_fact_row 必须经白名单归一，不得直落客户端脏值"
 
     def test_prompt_schema_declares_value_kind(self):
-        src = _read(os.path.join(os.path.dirname(_GF_PATH), "..",
-                                 "services", "ai", "prompts", "analysis.py"))
-        assert src.count('"value_kind"') >= 2, (
-            "主提取与 JSON 修复两处输出 Schema 都必须声明 value_kind")
-        assert "value_kind 口径标注" in src, (
-            "转写纪律段必须说明 fact/requirement 两档语义")
+        src = _read(os.path.join(os.path.dirname(_GF_PATH), "..", "services", "ai", "prompts", "analysis.py"))
+        assert src.count('"value_kind"') >= 2, "主提取与 JSON 修复两处输出 Schema 都必须声明 value_kind"
+        assert "value_kind 口径标注" in src, "转写纪律段必须说明 fact/requirement 两档语义"

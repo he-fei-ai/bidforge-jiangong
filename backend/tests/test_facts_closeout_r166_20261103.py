@@ -13,6 +13,7 @@
   I 组  卫生项（prepared 4 元组标注 / 孤儿函数摘除 / 判据静默吞留痕）
   K 组  字节体检（CRLF 保持 / 无 BOM / 无孤立 CR）
 """
+
 import ast
 import json
 import sqlite3
@@ -45,41 +46,47 @@ def _src(rel: str) -> str:
 # A 组 · 三链互斥对称化
 # ---------------------------------------------------------------------------
 
+
 class TestMutexSymmetryR166:
     def test_outline_registry_conflicts_include_facts(self):
         src = _src("app/routers/sse_handlers.py")
-        assert '("content_generation", "facts_generation")' in src, \
-            "目录链注册冲突元组必须含 facts_generation（R166 对称化）"
+        assert (
+            '("content_generation", "facts_generation")' in src
+        ), "目录链注册冲突元组必须含 facts_generation（R166 对称化）"
 
     def test_content_registry_conflicts_include_facts(self):
         src = _src("app/routers/sse_handlers.py")
-        assert '("outline_generation", "facts_generation")' in src, \
-            "正文链注册冲突元组必须含 facts_generation（R166 对称化）"
+        assert (
+            '("outline_generation", "facts_generation")' in src
+        ), "正文链注册冲突元组必须含 facts_generation（R166 对称化）"
 
     def test_both_pre_guards_check_facts(self):
         # 事件流是闭包，无法 inspect —— 用源码计数锁：outline/content/facts
         # 三个入口的 pre-guard 都检查 facts_generation_in_progress（≥3 处）。
         src = _src("app/routers/sse_handlers.py")
-        assert src.count("facts_generation_in_progress(scheme_id)") >= 3, \
-            "generate_outline / generate_content / generate_facts 的 pre-guard 都必须检查事实提取在跑"
+        assert (
+            src.count("facts_generation_in_progress(scheme_id)") >= 3
+        ), "generate_outline / generate_content / generate_facts 的 pre-guard 都必须检查事实提取在跑"
 
     async def test_register_content_conflicts_with_running_facts(self, db_conn):
         """行为实证：facts_generation 在跑时，content/outline 注册必须被拒。"""
         from app.services.ai import task_registry as tr
+
         await tr.register_task("facts_generation", "p1", "s1")
         with pytest.raises(tr.TaskTypeConflict):
             await tr.register_task(
-                "content_generation", "p1", "s1",
-                conflict_types=("outline_generation", "facts_generation"))
+                "content_generation", "p1", "s1", conflict_types=("outline_generation", "facts_generation")
+            )
         with pytest.raises(tr.TaskTypeConflict):
             await tr.register_task(
-                "outline_generation", "p1", "s1",
-                conflict_types=("content_generation", "facts_generation"))
+                "outline_generation", "p1", "s1", conflict_types=("content_generation", "facts_generation")
+            )
 
 
 # ---------------------------------------------------------------------------
 # B 组 · R13 读路径判空守卫
 # ---------------------------------------------------------------------------
+
 
 class _NoneCursorDB:
     """db.execute 恒返回 None 的故障替身（R13 形态）。"""
@@ -120,18 +127,17 @@ class TestR13ReadGuardsR166:
 # C 组 · 事实链三写点 retry_db_op
 # ---------------------------------------------------------------------------
 
+
 class TestDbLockRetryR166:
     def test_three_retry_sites_present(self):
         src = _src("app/services/facts_extractor.py")
         assert src.count("retry_db_op(") >= 3
-        for fn_name in ("persist_extraction", "invalidate_export_cache",
-                        "save_extracted_chunks"):
+        for fn_name in ("persist_extraction", "invalidate_export_cache", "save_extracted_chunks"):
             fn = getattr(fe, fn_name)
-            assert "retry_db_op" in ast.unparse(ast.parse(
-                _src("app/services/facts_extractor.py"))) or True
+            assert "retry_db_op" in ast.unparse(ast.parse(_src("app/services/facts_extractor.py"))) or True
             body = ast.get_source_segment(
-                _src("app/services/facts_extractor.py"),
-                _fn_node(_src("app/services/facts_extractor.py"), fn_name))
+                _src("app/services/facts_extractor.py"), _fn_node(_src("app/services/facts_extractor.py"), fn_name)
+            )
             assert body and "retry_db_op(" in body, f"{fn_name} 必须接 retry_db_op"
 
     async def test_persist_retries_on_locked_commit(self):
@@ -159,11 +165,11 @@ class TestDbLockRetryR166:
             async def rollback(self):
                 calls["rollback"] += 1
 
-        item = FactItem(name="总工期", value="360天", key="total_duration",
-                        category="schedule", source="doc.docx", chunk_hash="NEW")
+        item = FactItem(
+            name="总工期", value="360天", key="total_duration", category="schedule", source="doc.docx", chunk_hash="NEW"
+        )
         result = ExtractionResult()
-        result.groups = [FactGroup(title="工期安排", category="schedule",
-                                   items=[item])]
+        result.groups = [FactGroup(title="工期安排", category="schedule", items=[item])]
         result.total_items = 1
         result.chunk_hashes_all = {"NEW"}
         await persist_extraction(result, _DB(), "p1", "s1")
@@ -200,8 +206,7 @@ class TestDbLockRetryR166:
 def _fn_node(src: str, name: str):
     tree = ast.parse(src)
     for node in ast.walk(tree):
-        if isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef)) and \
-                node.name == name:
+        if isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef)) and node.name == name:
             return node
     return None
 
@@ -209,6 +214,7 @@ def _fn_node(src: str, name: str):
 # ---------------------------------------------------------------------------
 # D 组 · DELETE 空值口径对称（COALESCE）
 # ---------------------------------------------------------------------------
+
 
 class TestDeleteScopeCoalesceR166:
     async def test_group_rebuild_deletes_null_scheme_rows(self, db_conn):
@@ -219,18 +225,35 @@ class TestDeleteScopeCoalesceR166:
             "group_title, title, content, category, is_simulated, confidence, "
             "is_resolved, has_conflict, conflict_keys, fact_key, chunk_hash) "
             "VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)",
-            (fid, "p1", None, "G1", "工期", "总工期", "- **总工期**: 300天",
-             "schedule", 0, 1.0, 0, 0, "", "total_duration", ""))
+            (
+                fid,
+                "p1",
+                None,
+                "G1",
+                "工期",
+                "总工期",
+                "- **总工期**: 300天",
+                "schedule",
+                0,
+                1.0,
+                0,
+                0,
+                "",
+                "total_duration",
+                "",
+            ),
+        )
         await db_conn.commit()
         resp = await gf.update_fact(
             "G1",
-            FactGroupUpdate(id="G1", title="工期安排",
-                            content="- **总工期**: 320天\n- **计量周期**: 按月",
-                            category="schedule"),
-            scheme_id="", db=db_conn)
+            FactGroupUpdate(
+                id="G1", title="工期安排", content="- **总工期**: 320天\n- **计量周期**: 按月", category="schedule"
+            ),
+            scheme_id="",
+            db=db_conn,
+        )
         assert resp == {"ok": True}
-        cur = await db_conn.execute(
-            "SELECT id FROM global_facts WHERE group_id='G1'")
+        cur = await db_conn.execute("SELECT id FROM global_facts WHERE group_id='G1'")
         rows = [dict(r) for r in await cur.fetchall()]
         assert len(rows) == 2, f"分组重建后应恰 2 行（旧行已删），实际 {len(rows)}"
         assert fid not in {r["id"] for r in rows}, "NULL scheme_id 旧行未被删除"
@@ -238,14 +261,15 @@ class TestDeleteScopeCoalesceR166:
     def test_delete_sql_coalesce_parity(self):
         src = _src("app/routers/global_facts.py")
         # 两处组作用域 DELETE 都必须与归属回查 SELECT 的 COALESCE 口径对称
-        assert src.count(
-            "AND COALESCE(scheme_id,'')=?") >= 3, \
-            "分组重建 SELECT / 分组重建 DELETE / delete_fact DELETE 至少三处 COALESCE"
+        assert (
+            src.count("AND COALESCE(scheme_id,'')=?") >= 3
+        ), "分组重建 SELECT / 分组重建 DELETE / delete_fact DELETE 至少三处 COALESCE"
 
 
 # ---------------------------------------------------------------------------
 # E 组 · AI 调整 add 分支 R13 守卫
 # ---------------------------------------------------------------------------
+
 
 class TestAdjustAddGuardR166:
     def test_add_branch_asserts_write_applied(self):
@@ -255,35 +279,32 @@ class TestAdjustAddGuardR166:
         j = src.find('applied["added"] += 1', i)
         assert j > 0
         seg = src[i:j]
-        assert "_assert_fact_write_applied(" in seg, \
-            "INSERT 游标必须过 R13 守卫后才允许计数（杜绝假成功）"
+        assert "_assert_fact_write_applied(" in seg, "INSERT 游标必须过 R13 守卫后才允许计数（杜绝假成功）"
 
 
 # ---------------------------------------------------------------------------
 # F 组 · clear_all_facts 实删行数
 # ---------------------------------------------------------------------------
 
+
 class TestClearActualDeletedR166:
     async def test_clear_returns_actual_rowcount(self, db_conn):
         sid, pid = "s1", "p1"
-        await db_conn.execute(
-            "INSERT INTO schemes(id,project_id,name) VALUES(?,?,?)",
-            (sid, pid, "s"))
+        await db_conn.execute("INSERT INTO schemes(id,project_id,name) VALUES(?,?,?)", (sid, pid, "s"))
         for i in range(2):
             await db_conn.execute(
                 "INSERT INTO global_facts (id, project_id, scheme_id, group_id, "
                 "group_title, title, content, category) VALUES (?,?,?,?,?,?,?,?)",
-                (uuid.uuid4().hex, pid, sid, f"g{i}", "工期", f"事实{i}",
-                 f"- **事实{i}**: v", "schedule"))
+                (uuid.uuid4().hex, pid, sid, f"g{i}", "工期", f"事实{i}", f"- **事实{i}**: v", "schedule"),
+            )
         await db_conn.commit()
-        resp = await gf.clear_all_facts(
-            ClearFactsRequest(scheme_id=sid), db=db_conn)
+        resp = await gf.clear_all_facts(ClearFactsRequest(scheme_id=sid), db=db_conn)
         assert resp["ok"] is True
         assert resp["deleted"] == 2
 
     def test_clear_uses_safe_rowcount(self):
         src = _src("app/routers/global_facts.py")
-        i = src.find('async def clear_all_facts')
+        i = src.find("async def clear_all_facts")
         j = src.find('return {"ok": True, "deleted"', i)
         seg = src[i:j]
         assert "safe_rowcount(cur" in seg, "deleted 必须取 DELETE 实际影响行数"
@@ -293,23 +314,20 @@ class TestClearActualDeletedR166:
 # G 组 · XV-NUM-UNIT 分组键同源化
 # ---------------------------------------------------------------------------
 
+
 def _item(name, value, key=""):
-    return FactItem(name=name, value=value, key=key, category="other",
-                    source="doc.docx", chunk_hash="h")
+    return FactItem(name=name, value=value, key=key, category="other", source="doc.docx", chunk_hash="h")
 
 
 class TestNumUnitGroupingR166:
     def test_same_key_diff_names_compared(self):
         """同 fact_key 异名（跨来源措辞差异）必须进入量纲比对。"""
-        merged = [_item("基坑深度", "12m", key="pit_depth"),
-                  _item("基坑开挖深度", "1200cm", key="pit_depth")]
+        merged = [_item("基坑深度", "12m", key="pit_depth"), _item("基坑开挖深度", "1200cm", key="pit_depth")]
         out = fcv._check_numeric_unit_consistency(merged)
-        assert any(c.rule_id == "XV-NUM-UNIT" for c in out), \
-            "fact_key 分组下 12m vs 1200cm 应检出单位不一致"
+        assert any(c.rule_id == "XV-NUM-UNIT" for c in out), "fact_key 分组下 12m vs 1200cm 应检出单位不一致"
 
     def test_diff_key_diff_names_not_compared(self):
-        merged = [_item("甲深度", "12m", key="k_a"),
-                  _item("乙深度", "1200cm", key="k_b")]
+        merged = [_item("甲深度", "12m", key="k_a"), _item("乙深度", "1200cm", key="k_b")]
         out = fcv._check_numeric_unit_consistency(merged)
         assert not any(c.rule_id == "XV-NUM-UNIT" for c in out)
 
@@ -354,13 +372,15 @@ class TestAuditExactnessR166:
     def test_sse_uses_audit_union_for_injected_facts(self):
         src = _src("app/routers/sse_handlers.py")
         assert 'injected_facts": _injected_facts' in src
-        assert src.count('.get("injected_titles")') >= 1, \
-            "逐章审计 injected_facts 必须取三段审计的 injected_titles 并集"
+        assert (
+            src.count('.get("injected_titles")') >= 1
+        ), "逐章审计 injected_facts 必须取三段审计的 injected_titles 并集"
 
 
 # ---------------------------------------------------------------------------
 # I 组 · 卫生项
 # ---------------------------------------------------------------------------
+
 
 class TestHygieneR166:
     def test_prepared_annotation_is_4_tuple(self):
@@ -369,20 +389,19 @@ class TestHygieneR166:
 
     def test_orphan_flow_helper_removed(self):
         src = _src("app/services/facts_cross_validators.py")
-        assert "_has_flow_content" not in src, \
-            "零调用孤儿函数不得回流"
+        assert "_has_flow_content" not in src, "零调用孤儿函数不得回流"
 
     def test_predicate_self_failure_logged(self):
         src = _src("app/services/facts_extractor.py")
         i = src.find("_permanent = is_non_retryable_error(e)")
         assert i > 0
-        assert "按可重试错误处理" in src[i:i + 400], \
-            "判据自身故障的静默吞必须有 DEBUG 留痕"
+        assert "按可重试错误处理" in src[i : i + 400], "判据自身故障的静默吞必须有 DEBUG 留痕"
 
 
 # ---------------------------------------------------------------------------
 # K 组 · 字节体检
 # ---------------------------------------------------------------------------
+
 
 class TestByteHygieneR166:
     FILES = [

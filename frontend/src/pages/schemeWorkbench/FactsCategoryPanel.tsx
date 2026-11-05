@@ -41,13 +41,20 @@ export function FactsCategoryPanel({
       >
         <Space size={6}>
           <AppstoreOutlined style={{ color: "#1677ff" }} />
-          <Text strong style={{ fontSize: 13 }}>事实分类</Text>
+          <Text strong style={{ fontSize: 13 }}>
+            事实分类
+          </Text>
         </Space>
         {totalItems > 0 && (
-          <Tag color="blue" style={{ margin: 0 }}>{totalItems} 项</Tag>
+          <Tag color="blue" style={{ margin: 0 }}>
+            {totalItems} 项
+          </Tag>
         )}
       </div>
-      <div className="scroll-area" style={{ flex: 1, overflow: "auto", padding: "8px 8px", minHeight: 0 }}>
+      <div
+        className="scroll-area"
+        style={{ flex: 1, overflow: "auto", padding: "8px 8px", minHeight: 0 }}
+      >
         {entries.length === 0 ? (
           <div style={{ textAlign: "center", padding: "24px 8px", color: "#999", fontSize: 13 }}>
             暂无提取结果
@@ -69,19 +76,38 @@ export function FactsCategoryPanel({
                 }}
               >
                 <div style={{ display: "flex", alignItems: "center", gap: 6 }}>
-                  <span style={{
-                    flex: 1, minWidth: 0, fontWeight: active ? 600 : 400,
-                    overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap",
-                  }} title={e.title}>
+                  <span
+                    style={{
+                      flex: 1,
+                      minWidth: 0,
+                      fontWeight: active ? 600 : 400,
+                      overflow: "hidden",
+                      textOverflow: "ellipsis",
+                      whiteSpace: "nowrap",
+                    }}
+                    title={e.title}
+                  >
                     {e.title}
                   </span>
                   <Tag style={{ margin: 0 }}>{e.itemCount} 项</Tag>
                 </div>
                 {(e.simulated > 0 || e.conflicts > 0 || e.unresolved > 0) && (
                   <div style={{ display: "flex", gap: 4, marginTop: 4, flexWrap: "wrap" }}>
-                    {e.simulated > 0 && <Tag color="orange" style={{ margin: 0 }}>⚠️{e.simulated}</Tag>}
-                    {e.conflicts > 0 && <Tag color="red" style={{ margin: 0 }}>🔸{e.conflicts}</Tag>}
-                    {e.unresolved > 0 && <Tag color="blue" style={{ margin: 0 }}>📝{e.unresolved}</Tag>}
+                    {e.simulated > 0 && (
+                      <Tag color="orange" style={{ margin: 0 }}>
+                        ⚠️{e.simulated}
+                      </Tag>
+                    )}
+                    {e.conflicts > 0 && (
+                      <Tag color="red" style={{ margin: 0 }}>
+                        🔸{e.conflicts}
+                      </Tag>
+                    )}
+                    {e.unresolved > 0 && (
+                      <Tag color="blue" style={{ margin: 0 }}>
+                        📝{e.unresolved}
+                      </Tag>
+                    )}
                   </div>
                 )}
               </div>

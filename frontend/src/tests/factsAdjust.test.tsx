@@ -66,17 +66,13 @@ if (!(globalThis as any).ResizeObserver) {
 const PLACEHOLDER = "例如：新增一条「项目经理=张伟」；把开挖深度统一改为 8.5m";
 // 四、应用流程：二次确认 → apply
 // ================================================================
-async function reachPlan(
-  operations: FactsAdjustOperation[],
-  summary?: string,
-) {
+async function reachPlan(operations: FactsAdjustOperation[], summary?: string) {
   const handles = renderPanel({
     preview: vi.fn(async () => ({ summary, operations })),
   });
   await openAsk("统一改为 8.5m");
   clickOk();
-  await waitFor(() =>
-    expect(screen.getByRole("button", { name: /应用调整计划/ })));
+  await waitFor(() => expect(screen.getByRole("button", { name: /应用调整计划/ })));
   return handles;
 }
 
@@ -128,12 +124,15 @@ describe("FactsAdjustPanel · 应用", () => {
   it("确认弹窗 OK 失败 → onError「应用调整失败」且计划保留可重试", async () => {
     // ⚠️ apply 必须真正 reject：reachPlan 里的默认 apply 是 no-op，
     //    不主动换掉就是「断言不会失败」的空转守栏。
-    const apply = vi.fn(async () => { throw "boom"; });
+    const apply = vi.fn(async () => {
+      throw "boom";
+    });
     const onError = vi.fn();
     const confirmDialog = vi.fn();
     renderPanel({
       preview: vi.fn(async () => ({ operations: OPS(1) })),
-      apply: apply as any, onError: onError as any,
+      apply: apply as any,
+      onError: onError as any,
       confirmDialog: confirmDialog as any,
     });
     await openAsk("改深度");
@@ -183,8 +182,7 @@ describe("FactsAdjustPanel · 应用", () => {
     fireEvent.click(screen.getByRole("button", { name: /应用调整计划/ }));
     const opts = (confirmDialog as any).mock.calls[0][0] as ConfirmOptions;
     await opts.onOk();
-    expect(apply).toHaveBeenCalledWith(
-      expect.any(Array), "按已确认计划调整（2 项）");
+    expect(apply).toHaveBeenCalledWith(expect.any(Array), "按已确认计划调整（2 项）");
   });
 });
 
@@ -193,25 +191,26 @@ describe("FactsAdjustPanel · 应用", () => {
 // ================================================================
 describe("formatFactsAdjustOperation（操作明细单行）", () => {
   it("有 name 时优先用 name，并把 value 以空格追加", () => {
-    expect(formatFactsAdjustOperation({ op: "update", name: "开挖深度", value: "8.5m" }, 0))
-      .toBe("update · 开挖深度 8.5m");
+    expect(formatFactsAdjustOperation({ op: "update", name: "开挖深度", value: "8.5m" }, 0)).toBe(
+      "update · 开挖深度 8.5m",
+    );
   });
 
   it("无 name 回退 fact_id", () => {
-    expect(formatFactsAdjustOperation({ op: "delete", fact_id: "f-9" }, 0))
-      .toBe("delete · f-9");
+    expect(formatFactsAdjustOperation({ op: "delete", fact_id: "f-9" }, 0)).toBe("delete · f-9");
   });
 
   it("name / fact_id 都没有时回退「第 N 条」（1 基）", () => {
-    expect(formatFactsAdjustOperation({ op: "insert" }, 3))
-      .toBe("insert · 第 4 条");
+    expect(formatFactsAdjustOperation({ op: "insert" }, 3)).toBe("insert · 第 4 条");
   });
 
   it("value 为空时不补多余空格", () => {
-    expect(formatFactsAdjustOperation({ op: "delete", name: "基坑深度" }, 0))
-      .toBe("delete · 基坑深度");
-    expect(formatFactsAdjustOperation({ op: "delete", name: "基坑深度", value: "" }, 0))
-      .toBe("delete · 基坑深度");
+    expect(formatFactsAdjustOperation({ op: "delete", name: "基坑深度" }, 0)).toBe(
+      "delete · 基坑深度",
+    );
+    expect(formatFactsAdjustOperation({ op: "delete", name: "基坑深度", value: "" }, 0)).toBe(
+      "delete · 基坑深度",
+    );
   });
 });
 
@@ -221,17 +220,23 @@ describe("formatFactsAdjustOperation（操作明细单行）", () => {
 describe("FactsAdjustPanel · 可用性门控", () => {
   it("无 schemeId 时禁用", () => {
     renderPanel({ schemeId: undefined });
-    expect((screen.getByRole("button", { name: /AI 调整事实/ }) as HTMLButtonElement).disabled).toBe(true);
+    expect(
+      (screen.getByRole("button", { name: /AI 调整事实/ }) as HTMLButtonElement).disabled,
+    ).toBe(true);
   });
 
   it("方案尚无事实（disabled）时禁用", () => {
     renderPanel({ disabled: true });
-    expect((screen.getByRole("button", { name: /AI 调整事实/ }) as HTMLButtonElement).disabled).toBe(true);
+    expect(
+      (screen.getByRole("button", { name: /AI 调整事实/ }) as HTMLButtonElement).disabled,
+    ).toBe(true);
   });
 
   it("外部忙碌（busy）时禁用", () => {
     renderPanel({ busy: true });
-    expect((screen.getByRole("button", { name: /AI 调整事实/ }) as HTMLButtonElement).disabled).toBe(true);
+    expect(
+      (screen.getByRole("button", { name: /AI 调整事实/ }) as HTMLButtonElement).disabled,
+    ).toBe(true);
   });
 
   it("默认（有方案、无事实、不忙）不显示「应用调整计划」按钮", () => {
@@ -247,7 +252,9 @@ describe("FactsAdjustPanel · 预览", () => {
   it("空输入时 OK 禁用，且不会下发请求", async () => {
     const { preview } = renderPanel({});
     await openAsk("");
-    expect((screen.getByRole("button", { name: "生成调整计划" }) as HTMLButtonElement).disabled).toBe(true);
+    expect(
+      (screen.getByRole("button", { name: "生成调整计划" }) as HTMLButtonElement).disabled,
+    ).toBe(true);
     fireEvent.click(screen.getByRole("button", { name: "生成调整计划" }));
     expect(preview).not.toHaveBeenCalled();
   });
@@ -255,7 +262,9 @@ describe("FactsAdjustPanel · 预览", () => {
   it("纯空白输入同样不下发（trim 判空）", async () => {
     const { preview } = renderPanel({});
     await openAsk("   ");
-    expect((screen.getByRole("button", { name: "生成调整计划" }) as HTMLButtonElement).disabled).toBe(true);
+    expect(
+      (screen.getByRole("button", { name: "生成调整计划" }) as HTMLButtonElement).disabled,
+    ).toBe(true);
     fireEvent.click(screen.getByRole("button", { name: "生成调整计划" }));
     expect(preview).not.toHaveBeenCalled();
   });
@@ -294,30 +303,43 @@ describe("FactsAdjustPanel · 预览", () => {
 
   it("preview 失败 → onError 收到「生成调整计划失败」", async () => {
     const { onError } = renderPanel({
-      preview: vi.fn(async () => { throw { response: { data: { detail: "AI 服务异常" } } }; }),
+      preview: vi.fn(async () => {
+        throw { response: { data: { detail: "AI 服务异常" } } };
+      }),
     });
     await openAsk("改深度");
     clickOk();
-    await waitFor(() => expect(onError).toHaveBeenCalledWith(
-      "生成调整计划失败", expect.anything()));
+    await waitFor(() =>
+      expect(onError).toHaveBeenCalledWith("生成调整计划失败", expect.anything()),
+    );
   });
 
   it("preview 期间切换方案 → 丢弃结果，不渲染计划", async () => {
     let resolveIt!: (v?: unknown) => void;
-    const gate: Promise<any> = new Promise((r) => { resolveIt = r as any; });
+    const gate: Promise<any> = new Promise((r) => {
+      resolveIt = r as any;
+    });
     const preview = vi.fn(async () => gate.then(() => ({ operations: OPS(3) })));
     const view = render(
-      <FactsAdjustPanel schemeId="scheme-1" preview={preview as any}
-        apply={vi.fn(async () => {}) as any} onError={vi.fn() as any}
-        confirmDialog={vi.fn() as any} />,
+      <FactsAdjustPanel
+        schemeId="scheme-1"
+        preview={preview as any}
+        apply={vi.fn(async () => {}) as any}
+        onError={vi.fn() as any}
+        confirmDialog={vi.fn() as any}
+      />,
     );
     await openAsk("改深度");
     clickOk();
     // 请求在途时切方案 → 旧方案的计划必须丢弃
     view.rerender(
-      <FactsAdjustPanel schemeId="scheme-2" preview={preview as any}
-        apply={vi.fn(async () => {}) as any} onError={vi.fn() as any}
-        confirmDialog={vi.fn() as any} />,
+      <FactsAdjustPanel
+        schemeId="scheme-2"
+        preview={preview as any}
+        apply={vi.fn(async () => {}) as any}
+        onError={vi.fn() as any}
+        confirmDialog={vi.fn() as any}
+      />,
     );
     resolveIt();
     await waitFor(() => expect(preview).toHaveBeenCalledTimes(1));
@@ -325,7 +347,6 @@ describe("FactsAdjustPanel · 预览", () => {
     expect(screen.queryByRole("button", { name: /应用调整计划/ })).toBeNull();
   });
 });
-
 
 type ConfirmOptions = {
   title: string;
@@ -338,7 +359,8 @@ type ConfirmOptions = {
 
 /** 渲染一个默认参数齐备的面板；返回注入的 spy 句柄 */
 function renderPanel(props: Partial<Parameters<typeof FactsAdjustPanel>[0]> = {}) {
-  const preview = props.preview ?? vi.fn(async () => ({ operations: [] as FactsAdjustOperation[] }));
+  const preview =
+    props.preview ?? vi.fn(async () => ({ operations: [] as FactsAdjustOperation[] }));
   const apply = props.apply ?? vi.fn(async () => {});
   const onError = props.onError ?? vi.fn();
   const confirmDialog = props.confirmDialog ?? vi.fn();
@@ -404,7 +426,9 @@ const IGN = (n: number, reason = "unknown_fact_id"): FactsAdjustIgnoredItem[] =>
 describe("normalizeFactsAdjustPlan（后端响应归一）", () => {
   it("正常载荷：operations / ignored 原样保留", () => {
     const p = normalizeFactsAdjustPlan({
-      summary: "共 2 项", operations: OPS(2), ignored: IGN(1, "duplicate_fact_key"),
+      summary: "共 2 项",
+      operations: OPS(2),
+      ignored: IGN(1, "duplicate_fact_key"),
     });
     expect(p.summary).toBe("共 2 项");
     expect(p.operations).toHaveLength(2);
@@ -421,7 +445,9 @@ describe("normalizeFactsAdjustPlan（后端响应归一）", () => {
     expect(normalizeFactsAdjustPlan(null).operations).toEqual([]);
     expect(normalizeFactsAdjustPlan(undefined).ignored).toEqual([]);
     const dirty = normalizeFactsAdjustPlan({
-      summary: 123, operations: "nope", ignored: { a: 1 },
+      summary: 123,
+      operations: "nope",
+      ignored: { a: 1 },
     });
     expect(dirty.summary).toBe("");
     expect(dirty.operations).toEqual([]);
@@ -446,15 +472,18 @@ describe("normalizeFactsAdjustPlan（后端响应归一）", () => {
 
 describe("factsAdjustIgnoreText（丢弃理由中文化）", () => {
   it("已知理由 → 中文标签，并带上 op 与名称/ID", () => {
-    expect(factsAdjustIgnoreText({ op: "add", name: "基坑深度", reason: "duplicate_fact_key" }))
-      .toBe(`add · 基坑深度：${FACTS_ADJUST_IGNORE_REASON_LABELS.duplicate_fact_key}`);
-    expect(factsAdjustIgnoreText({ op: "delete", fact_id: "f-9", reason: "unknown_fact_id" }))
-      .toContain("f-9");
+    expect(
+      factsAdjustIgnoreText({ op: "add", name: "基坑深度", reason: "duplicate_fact_key" }),
+    ).toBe(`add · 基坑深度：${FACTS_ADJUST_IGNORE_REASON_LABELS.duplicate_fact_key}`);
+    expect(
+      factsAdjustIgnoreText({ op: "delete", fact_id: "f-9", reason: "unknown_fact_id" }),
+    ).toContain("f-9");
   });
 
   it("未知理由 → 原样回显英文键名（后端加枚举值时能立刻被发现，而不是显示空白）", () => {
-    expect(factsAdjustIgnoreText({ op: "update", reason: "brand_new_reason" }))
-      .toContain("brand_new_reason");
+    expect(factsAdjustIgnoreText({ op: "update", reason: "brand_new_reason" })).toContain(
+      "brand_new_reason",
+    );
   });
 
   it("缺 op / 缺 reason 都有兜底文案，绝不返回空串", () => {
@@ -463,8 +492,9 @@ describe("factsAdjustIgnoreText（丢弃理由中文化）", () => {
   });
 
   it("前端理由枚举与标签表键完全一致（漏一项就会静默显示英文）", () => {
-    expect(Object.keys(FACTS_ADJUST_IGNORE_REASON_LABELS).sort())
-      .toEqual([...FACTS_ADJUST_IGNORE_REASONS].sort());
+    expect(Object.keys(FACTS_ADJUST_IGNORE_REASON_LABELS).sort()).toEqual(
+      [...FACTS_ADJUST_IGNORE_REASONS].sort(),
+    );
     expect(FACTS_ADJUST_IGNORE_REASONS).toHaveLength(6);
   });
 });
@@ -473,7 +503,9 @@ describe("FactsAdjustPanel · 丢弃操作可观测", () => {
   it("预览返回 ignored → 面板渲染警示（预览时）+ 确认弹窗预告条数", async () => {
     const { confirmDialog } = renderPanel({
       preview: vi.fn(async () => ({
-        summary: "共 2 项", operations: OPS(2), ignored: IGN(2, "unknown_fact_id"),
+        summary: "共 2 项",
+        operations: OPS(2),
+        ignored: IGN(2, "unknown_fact_id"),
       })),
     });
     await openAsk("统一改为 8.5m");
@@ -485,8 +517,9 @@ describe("FactsAdjustPanel · 丢弃操作可观测", () => {
     // （合并成一条就丢掉「到底是哪两个操作被丢弃」）—— 用 getAllByText 锁条数：
     // getByText 遇多重命中直接抛 TestingLibrary 错，本用例 R54 写入后因本机无
     // Node 从未执行，R57 首跑即在此红。
-    expect(screen.getAllByText(new RegExp(FACTS_ADJUST_IGNORE_REASON_LABELS.unknown_fact_id)))
-      .toHaveLength(2);
+    expect(
+      screen.getAllByText(new RegExp(FACTS_ADJUST_IGNORE_REASON_LABELS.unknown_fact_id)),
+    ).toHaveLength(2);
 
     fireEvent.click(screen.getByRole("button", { name: /应用调整计划/ }));
     const opts = (confirmDialog as any).mock.calls[0][0] as ConfirmOptions;
@@ -515,10 +548,10 @@ describe("FactsAdjustPanel · 丢弃操作可观测", () => {
 
     await opts.onOk();
 
-    await waitFor(() =>
-      expect(screen.getByText(/1 项调整未纳入（应用时被安全校验丢弃）/)));
-    expect(screen.getByText(new RegExp(FACTS_ADJUST_IGNORE_REASON_LABELS.duplicate_fact_key)))
-      .toBeTruthy();
+    await waitFor(() => expect(screen.getByText(/1 项调整未纳入（应用时被安全校验丢弃）/)));
+    expect(
+      screen.getByText(new RegExp(FACTS_ADJUST_IGNORE_REASON_LABELS.duplicate_fact_key)),
+    ).toBeTruthy();
     // 计划已清空 → 「应用调整计划」按钮消失，但提示留在原位
     expect(screen.queryByRole("button", { name: /应用调整计划/ })).toBeNull();
   });

@@ -3,7 +3,8 @@
 
 背景：本模块当前存在三项**已识别但未修**的债：
 
-  · #2  15 条路由原全部用裸 ``data: dict`` 收 body —— 换成 Pydantic 模型会把
+  · #2  15 条路由（现 16 条，R175 新增 ``GET /cross-conflicts``）原全部用裸
+        ``data: dict`` 收 body —— 换成 Pydantic 模型会把
         现有 400 + 中文文案改成 422 + Pydantic JSON，牵动 922 个用例与前端
         ``factsApi`` 的错误展示，属**契约变更**（保持：需连同前端一起改）。
         2026-10-11 已将收 body 的 6 个写/诊断端点全部迁到 Pydantic 请求体
@@ -26,7 +27,9 @@
         理由）—— 新增写端点时忘记校验会立即红（这是 #4 那条缺陷的疫苗）；
   C 组：前缀一致性 + 豁免清单不过期。
 """
+
 import inspect
+import pathlib
 import re
 
 import pytest
@@ -61,38 +64,54 @@ def _endpoints(router):
         for m in methods:
             if m in {"HEAD", "OPTIONS"}:
                 continue
-            out.append((
-                m,
-                getattr(route, "path", ""),
-                getattr(route, "name", ""),
-                getattr(route, "endpoint", None),
-            ))
+            out.append(
+                (
+                    m,
+                    getattr(route, "path", ""),
+                    getattr(route, "name", ""),
+                    getattr(route, "endpoint", None),
+                )
+            )
     return out
 
 
 ALL_ROUTES = _endpoints(gf.router) + _endpoints(gfd.router)
 
+#: 路由清单的唯一文档源（A3 与文档同源，新增/删除路由只改一处登记）。
+_ROUTE_DOC = pathlib.Path(__file__).resolve().parents[2] / "docs" / "全局事实模块审计_R175_20261103.md"
+
+
+def _documented_route_counts() -> dict[str, int]:
+    """从审计文档「路由清单」解析登记条数（形如 ``global_facts.py`` 16 个）。"""
+    src = _ROUTE_DOC.read_text(encoding="utf-8")
+
+    def _count(module: str) -> int:
+        m = re.search(rf"`{module}`\s*(\d+)\s*个", src)
+        assert m, f"文档路由清单缺少 {module} 条数登记：{_ROUTE_DOC}"
+        return int(m.group(1))
+
+    return {
+        "main": _count("global_facts.py"),
+        "docs": _count("global_facts_docs.py"),
+    }
+
 
 def _fact_write_routes():
-    return [
-        (m, p, name, fn)
-        for (m, p, name, fn) in _endpoints(gf.router)
-        if m in WRITE_METHODS and fn is not None
-    ]
+    return [(m, p, name, fn) for (m, p, name, fn) in _endpoints(gf.router) if m in WRITE_METHODS and fn is not None]
 
 
 #: ✅ 豁免清单（必须带理由）：这两条虽然也是写方法，但语义上不是「改事实」。
 #:   danger-check 是**只读诊断**（不落库），adjust 是 AI 辅助调整但有各自的
 #:   scheme_id 必填校验与独立作用域；二者均不在 #4 的缺陷面上。
 EXEMPT_WRITE_ROUTES: dict[str, str] = {
-    "POST /api/v1/global-facts/danger-check":
-        "只读诊断端点：做类型识别与阈值判定，不写任何表",
+    "POST /api/v1/global-facts/danger-check": "只读诊断端点：做类型识别与阈值判定，不写任何表",
 }
 
 
 # ===========================================================================
 # A 组 · 两条路由不得互相遮影（遗留项 #6 的可执行护栏）
 # ===========================================================================
+
 
 def test_A1_both_routers_share_the_same_prefix():
     """A1：两个 router 必须继续共用同一 prefix（隐性耦合，先把它钉成显式契约）。"""
@@ -118,21 +137,30 @@ def test_A2_no_duplicate_method_plus_path():
 
 
 def test_A3_route_inventory_size_is_as_documented():
-    """A3：路由总数（含豁免前提）—— 防止某天 15 条变成 20 条却没人更新本文件的
-    豁免清单/校验口径（数字变化本身提示"需要过一遍本文件"）。"""
+    """A3：路由总数必须与审计文档「路由清单」登记同源，不写死数字。
+
+    新增/删除路由时，文档与断言同步变化；只改代码不改文档会因计数不符而红，
+    只改断言不改文档则会因解析不到登记而红 —— 两处不可能再各自手改。
+    """
     main_routes = [r for r in _endpoints(gf.router)]
     docs_routes = [r for r in _endpoints(gfd.router)]
     # 逆序去重后的 (method, path) 计数，避免因 method 集合拆分导致口径漂移
     main_keys = {(m, p) for m, p, _, _ in main_routes}
     docs_keys = {(m, p) for m, p, _, _ in docs_routes}
-    assert len(main_keys) == 15, f"主路由数量变化：{len(main_keys)}"
-    assert len(docs_keys) == 8, f"docs 子路由数量变化：{len(docs_keys)}"
+    documented = _documented_route_counts()
+    assert (
+        len(main_keys) == documented["main"]
+    ), f"主路由数量与文档不符：实际 {len(main_keys)} / 文档 {documented['main']}"
+    assert (
+        len(docs_keys) == documented["docs"]
+    ), f"docs 子路由数量与文档不符：实际 {len(docs_keys)} / 文档 {documented['docs']}"
     assert not (main_keys & docs_keys), "两组路由出现同 (method, path)"
 
 
 # ===========================================================================
 # B 组 · 每条改数据的 fact 写路由都必须做作用域校验（遗留项 #4 的疫苗）
 # ===========================================================================
+
 
 def _handler_source(fn) -> str:
     try:
@@ -206,6 +234,7 @@ def test_B3_write_routes_count_is_stable():
 # ===========================================================================
 # C 组 · 反向锚：证明上面的护栏真能抓东西
 # ===========================================================================
+
 
 def test_C1_scope_patterns_are_the_real_ones():
     """C1：B 组用的关键字必须与各写路由的真实实现同源（防"改了实现、护栏失明"）。"""
@@ -290,9 +319,8 @@ def test_D1_no_bare_dict_body_endpoints():
     for m, p, name, fn in _endpoints(gf.router):
         if _handler_has_bare_dict_body(fn):
             offenders.append(f"{m} {p} ({name})")
-    assert offenders == [], (
-        "发现裸 data: dict 收 body 的端点（应改用 Pydantic 请求体）：\n"
-        + "\n".join(f"  - {o}" for o in offenders)
+    assert offenders == [], "发现裸 data: dict 收 body 的端点（应改用 Pydantic 请求体）：\n" + "\n".join(
+        f"  - {o}" for o in offenders
     )
 
 
@@ -317,6 +345,4 @@ def test_D2_migrated_endpoints_use_pydantic_body():
         ann = hints.get("data")
         if not (isinstance(ann, type) and issubclass(ann, BaseModel)):
             missing.append(f"{key}（data 未声明为 Pydantic 模型：{ann!r}）")
-    assert missing == [], (
-        "以下端点未保持 Pydantic 请求体：\n" + "\n".join(f"  - {m}" for m in missing)
-    )
+    assert missing == [], "以下端点未保持 Pydantic 请求体：\n" + "\n".join(f"  - {m}" for m in missing)

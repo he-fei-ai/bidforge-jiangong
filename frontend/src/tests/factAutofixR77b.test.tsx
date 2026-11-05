@@ -16,15 +16,14 @@
  * 读源码文本，不引 node:fs（本项目没装 @types/node，tests 在 tsc 范围内）。
  */
 import { describe, it, expect } from "vitest";
-import {
-  normalizeFactAutofixSummary,
-  factAutofixHint,
-} from "../utils/contentEvents";
+import { normalizeFactAutofixSummary, factAutofixHint } from "../utils/contentEvents";
 
 const RAW: Record<string, string> = Object.fromEntries(
   Object.entries(
     import.meta.glob("../**/*.{ts,tsx}", {
-      query: "?raw", import: "default", eager: true,
+      query: "?raw",
+      import: "default",
+      eager: true,
     }) as Record<string, string>,
   ).map(([k, v]) => [k.replace(/^\.\.\//, "").replace(/^\.\//, "tests/"), v]),
 );
@@ -34,24 +33,48 @@ const PAGE = RAW["pages/SchemeWorkbenchPage.tsx"];
 
 describe("normalizeFactAutofixSummary（防御式归一）", () => {
   it("全 0 空汇总", () => {
-    expect(normalizeFactAutofixSummary({
-      sections: 0, fixed_sections: 0, conflicts: 0, applied: 0, rejected: 0,
-    })).toEqual({
-      sections: 0, fixed_sections: 0, conflicts: 0, applied: 0, rejected: 0,
+    expect(
+      normalizeFactAutofixSummary({
+        sections: 0,
+        fixed_sections: 0,
+        conflicts: 0,
+        applied: 0,
+        rejected: 0,
+      }),
+    ).toEqual({
+      sections: 0,
+      fixed_sections: 0,
+      conflicts: 0,
+      applied: 0,
+      rejected: 0,
     });
   });
 
   it("正常值透传（含取整）", () => {
-    expect(normalizeFactAutofixSummary({
-      sections: 3, fixed_sections: 2, conflicts: 5, applied: 4, rejected: 1.9,
-    })).toEqual({
-      sections: 3, fixed_sections: 2, conflicts: 5, applied: 4, rejected: 1,
+    expect(
+      normalizeFactAutofixSummary({
+        sections: 3,
+        fixed_sections: 2,
+        conflicts: 5,
+        applied: 4,
+        rejected: 1.9,
+      }),
+    ).toEqual({
+      sections: 3,
+      fixed_sections: 2,
+      conflicts: 5,
+      applied: 4,
+      rejected: 1,
     });
   });
 
   it("坏形状一律回退全 0（绝不抛异常）", () => {
     const zero = {
-      sections: 0, fixed_sections: 0, conflicts: 0, applied: 0, rejected: 0,
+      sections: 0,
+      fixed_sections: 0,
+      conflicts: 0,
+      applied: 0,
+      rejected: 0,
     };
     expect(normalizeFactAutofixSummary(undefined)).toEqual(zero);
     expect(normalizeFactAutofixSummary(null)).toEqual(zero);
@@ -69,39 +92,73 @@ describe("factAutofixHint（完成消息提示语值域）", () => {
     expect(factAutofixHint(undefined)).toBe("");
     expect(factAutofixHint(null)).toBe("");
     expect(factAutofixHint({})).toBe("");
-    expect(factAutofixHint({
-      sections: 0, fixed_sections: 0, conflicts: 0, applied: 0, rejected: 0,
-    })).toBe("");
+    expect(
+      factAutofixHint({
+        sections: 0,
+        fixed_sections: 0,
+        conflicts: 0,
+        applied: 0,
+        rejected: 0,
+      }),
+    ).toBe("");
     // 旧后端未下发该键时的完整终态载荷也不得炸出提示
     expect(factAutofixHint({ standard_summary: {}, word_audit: {} })).toBe("");
   });
 
   it("全部修复成功", () => {
-    expect(factAutofixHint({
-      sections: 2, fixed_sections: 2, conflicts: 3, applied: 3, rejected: 0,
-    })).toBe("事实一致性：2 章检出 3 处与全局事实的冲突，已自动修复 3 处");
+    expect(
+      factAutofixHint({
+        sections: 2,
+        fixed_sections: 2,
+        conflicts: 3,
+        applied: 3,
+        rejected: 0,
+      }),
+    ).toBe("事实一致性：2 章检出 3 处与全局事实的冲突，已自动修复 3 处");
   });
 
   it("部分定位失败 → 明示留待人工核对", () => {
-    expect(factAutofixHint({
-      sections: 3, fixed_sections: 2, conflicts: 5, applied: 4, rejected: 1,
-    })).toBe("事实一致性：3 章检出 5 处与全局事实的冲突，已自动修复 4 处，1 处定位失败留待人工核对");
+    expect(
+      factAutofixHint({
+        sections: 3,
+        fixed_sections: 2,
+        conflicts: 5,
+        applied: 4,
+        rejected: 1,
+      }),
+    ).toBe("事实一致性：3 章检出 5 处与全局事实的冲突，已自动修复 4 处，1 处定位失败留待人工核对");
   });
 
   it("attempted 但完全未修复 → 不静默", () => {
-    expect(factAutofixHint({
-      sections: 1, fixed_sections: 0, conflicts: 2, applied: 0, rejected: 2,
-    })).toBe("事实一致性：1 章检出 2 处与全局事实的冲突，未能自动修复，留待人工核对");
+    expect(
+      factAutofixHint({
+        sections: 1,
+        fixed_sections: 0,
+        conflicts: 2,
+        applied: 0,
+        rejected: 2,
+      }),
+    ).toBe("事实一致性：1 章检出 2 处与全局事实的冲突，未能自动修复，留待人工核对");
     // AI 判定「并非真实矛盾」返回空 edits（applied=0 rejected=0）同样要说话
-    expect(factAutofixHint({
-      sections: 1, fixed_sections: 0, conflicts: 1, applied: 0, rejected: 0,
-    })).toBe("事实一致性：1 章检出 1 处与全局事实的冲突，未能自动修复，留待人工核对");
+    expect(
+      factAutofixHint({
+        sections: 1,
+        fixed_sections: 0,
+        conflicts: 1,
+        applied: 0,
+        rejected: 0,
+      }),
+    ).toBe("事实一致性：1 章检出 1 处与全局事实的冲突，未能自动修复，留待人工核对");
   });
 
   it("脏值（字符串数字）不抛", () => {
-    expect(factAutofixHint({
-      sections: "2", conflicts: "3", applied: "3",
-    })).toBe("事实一致性：2 章检出 3 处与全局事实的冲突，已自动修复 3 处");
+    expect(
+      factAutofixHint({
+        sections: "2",
+        conflicts: "3",
+        applied: "3",
+      }),
+    ).toBe("事实一致性：2 章检出 3 处与全局事实的冲突，已自动修复 3 处");
   });
 });
 
@@ -112,8 +169,10 @@ describe("R77b 静态接线锁（payload → 用户可见）", () => {
   });
 
   it("两个 SSE 消费点都调用 factAutofixHint", () => {
-    for (const [name, src] of [["useContentGeneration", HOOK],
-                               ["SchemeWorkbenchPage", PAGE]] as const) {
+    for (const [name, src] of [
+      ["useContentGeneration", HOOK],
+      ["SchemeWorkbenchPage", PAGE],
+    ] as const) {
       expect(src).toContain("factAutofixHint(evt.fact_autofix_summary)");
       expect(name.length).toBeGreaterThan(0);
     }
@@ -127,7 +186,6 @@ describe("R77b 静态接线锁（payload → 用户可见）", () => {
   });
 
   it("checkpointSchema.ts 已含 fact_autofix_summary（断线重挂同构）", () => {
-    expect(RAW["types/checkpointSchema.ts"])
-      .toContain("fact_autofix_summary");
+    expect(RAW["types/checkpointSchema.ts"]).toContain("fact_autofix_summary");
   });
 });

@@ -12,6 +12,7 @@
 本文件锁死新增的 ``PATCH /{fact_id}/ack-stale`` 与 ``POST /ack-stale``：
 既验「能解」，也验「不得借机绕过既有安全闸门」。
 """
+
 import uuid
 
 import app.db as _appdb
@@ -30,30 +31,27 @@ OTHER_SID = "scheme-other"
 async def _seed(db):
     await db.execute("INSERT INTO projects(id,name) VALUES(?,?)", (MAIN_PID, "主项目"))
     await db.execute("INSERT INTO projects(id,name) VALUES(?,?)", (OTHER_PID, "他项目"))
-    await db.execute("INSERT INTO schemes(id,project_id,name) VALUES(?,?,?)",
-                     (MAIN_SID, MAIN_PID, "主方案"))
-    await db.execute("INSERT INTO schemes(id,project_id,name) VALUES(?,?,?)",
-                     (OTHER_SID, OTHER_PID, "他方案"))
+    await db.execute("INSERT INTO schemes(id,project_id,name) VALUES(?,?,?)", (MAIN_SID, MAIN_PID, "主方案"))
+    await db.execute("INSERT INTO schemes(id,project_id,name) VALUES(?,?,?)", (OTHER_SID, OTHER_PID, "他方案"))
     await db.commit()
 
 
-async def _fact(db, *, pid=MAIN_PID, sid=MAIN_SID, stale=1, resolved=1,
-                simulated=0, conflict=0, title="基坑开挖深度"):
+async def _fact(db, *, pid=MAIN_PID, sid=MAIN_SID, stale=1, resolved=1, simulated=0, conflict=0, title="基坑开挖深度"):
     fid = "f-" + uuid.uuid4().hex[:10]
     await db.execute(
         "INSERT INTO global_facts(id, project_id, scheme_id, group_id, title,"
         " content, is_resolved, is_stale, is_simulated, has_conflict)"
         " VALUES(?,?,?,?,?,?,?,?,?,?)",
-        (fid, pid, sid, "g1", title, "5.6m", int(resolved), int(stale),
-         int(simulated), int(conflict)))
+        (fid, pid, sid, "g1", title, "5.6m", int(resolved), int(stale), int(simulated), int(conflict)),
+    )
     await db.commit()
     return fid
 
 
 async def _get(db, fid):
     cur = await db.execute(
-        "SELECT is_stale, is_resolved, is_simulated, has_conflict"
-        " FROM global_facts WHERE id=?", (fid,))
+        "SELECT is_stale, is_resolved, is_simulated, has_conflict" " FROM global_facts WHERE id=?", (fid,)
+    )
     row = await cur.fetchone()
     return dict(row) if row else None
 
@@ -150,8 +148,9 @@ class TestAckBatch:
         assert res["gated"] == 2, f"应回传 2 条仍被闸门挡住，实际 {res['gated']}"
 
         cur = await db_conn.execute(
-            "SELECT is_stale, is_resolved, is_simulated, has_conflict"
-            " FROM global_facts WHERE project_id=?", (MAIN_PID,))
+            "SELECT is_stale, is_resolved, is_simulated, has_conflict" " FROM global_facts WHERE project_id=?",
+            (MAIN_PID,),
+        )
         rows = [dict(r) for r in await cur.fetchall()]
         for r in rows:
             assert r["is_stale"] == 0
@@ -219,31 +218,22 @@ class TestAckStaleHttpWiring:
     async def test_single_endpoint_over_http(self, db_path_only):
         [fid] = await self._seed_rows({"stale": 1, "resolved": 0})
         transport = httpx.ASGITransport(app=app)
-        async with httpx.AsyncClient(
-                transport=transport, base_url="http://testserver",
-                timeout=30.0) as client:
-            resp = await client.patch(
-                f"/api/v1/global-facts/{fid}/ack-stale",
-                params={"scheme_id": MAIN_SID})
+        async with httpx.AsyncClient(transport=transport, base_url="http://testserver", timeout=30.0) as client:
+            resp = await client.patch(f"/api/v1/global-facts/{fid}/ack-stale", params={"scheme_id": MAIN_SID})
         assert resp.status_code == 200, f"{resp.status_code}: {resp.text[:200]}"
         assert resp.json().get("changed") is True
 
     async def test_batch_endpoint_over_http(self, db_path_only):
         [fid] = await self._seed_rows({"stale": 1, "resolved": 0})
         transport = httpx.ASGITransport(app=app)
-        async with httpx.AsyncClient(
-                transport=transport, base_url="http://testserver",
-                timeout=30.0) as client:
-            resp = await client.post("/api/v1/global-facts/ack-stale",
-                                     json={"scheme_id": MAIN_SID})
+        async with httpx.AsyncClient(transport=transport, base_url="http://testserver", timeout=30.0) as client:
+            resp = await client.post("/api/v1/global-facts/ack-stale", json={"scheme_id": MAIN_SID})
         assert resp.status_code == 200, f"{resp.status_code}: {resp.text[:200]}"
         assert resp.json().get("changed") == 1
 
     async def test_batch_without_scope_is_400_over_http(self, db_path_only):
         transport = httpx.ASGITransport(app=app)
-        async with httpx.AsyncClient(
-                transport=transport, base_url="http://testserver",
-                timeout=30.0) as client:
+        async with httpx.AsyncClient(transport=transport, base_url="http://testserver", timeout=30.0) as client:
             resp = await client.post("/api/v1/global-facts/ack-stale", json={})
         assert resp.status_code == 400, f"缺作用域应 400，实际 {resp.status_code}"
 
@@ -251,24 +241,16 @@ class TestAckStaleHttpWiring:
     #     这里补路由接线 + 404/幂等/闸门回传字段经 HTTP 的实际表现） ---
     async def test_single_missing_fact_is_404_over_http(self, db_path_only):
         transport = httpx.ASGITransport(app=app)
-        async with httpx.AsyncClient(
-                transport=transport, base_url="http://testserver",
-                timeout=30.0) as client:
-            resp = await client.patch(
-                "/api/v1/global-facts/f-not-exist/ack-stale",
-                params={"scheme_id": MAIN_SID})
+        async with httpx.AsyncClient(transport=transport, base_url="http://testserver", timeout=30.0) as client:
+            resp = await client.patch("/api/v1/global-facts/f-not-exist/ack-stale", params={"scheme_id": MAIN_SID})
         assert resp.status_code == 404, f"不存在的 fact 应 404，实际 {resp.status_code}"
 
     async def test_single_idempotent_unchanged_over_http(self, db_path_only):
         """已过期=0 的行再次点确认：HTTP 层返回 200 + changed=False，不抛错。"""
         [fid] = await self._seed_rows({"stale": 0, "resolved": 1})
         transport = httpx.ASGITransport(app=app)
-        async with httpx.AsyncClient(
-                transport=transport, base_url="http://testserver",
-                timeout=30.0) as client:
-            resp = await client.patch(
-                f"/api/v1/global-facts/{fid}/ack-stale",
-                params={"scheme_id": MAIN_SID})
+        async with httpx.AsyncClient(transport=transport, base_url="http://testserver", timeout=30.0) as client:
+            resp = await client.patch(f"/api/v1/global-facts/{fid}/ack-stale", params={"scheme_id": MAIN_SID})
         assert resp.status_code == 200, resp.text[:200]
         body = resp.json()
         assert body.get("changed") is False, f"幂等场景 changed 必须为 False，实际 {body}"
@@ -278,12 +260,8 @@ class TestAckStaleHttpWiring:
         """HTTP 层也必须把 blocked_reason 透给前端（模拟值闸门）。"""
         [fid] = await self._seed_rows({"stale": 1, "resolved": 0, "simulated": 1})
         transport = httpx.ASGITransport(app=app)
-        async with httpx.AsyncClient(
-                transport=transport, base_url="http://testserver",
-                timeout=30.0) as client:
-            resp = await client.patch(
-                f"/api/v1/global-facts/{fid}/ack-stale",
-                params={"scheme_id": MAIN_SID})
+        async with httpx.AsyncClient(transport=transport, base_url="http://testserver", timeout=30.0) as client:
+            resp = await client.patch(f"/api/v1/global-facts/{fid}/ack-stale", params={"scheme_id": MAIN_SID})
         assert resp.status_code == 200, resp.text[:200]
         body = resp.json()
         assert body.get("changed") is True
@@ -293,12 +271,8 @@ class TestAckStaleHttpWiring:
     async def test_single_conflict_returns_blocked_reason_over_http(self, db_path_only):
         [fid] = await self._seed_rows({"stale": 1, "resolved": 0, "conflict": 1})
         transport = httpx.ASGITransport(app=app)
-        async with httpx.AsyncClient(
-                transport=transport, base_url="http://testserver",
-                timeout=30.0) as client:
-            resp = await client.patch(
-                f"/api/v1/global-facts/{fid}/ack-stale",
-                params={"scheme_id": MAIN_SID})
+        async with httpx.AsyncClient(transport=transport, base_url="http://testserver", timeout=30.0) as client:
+            resp = await client.patch(f"/api/v1/global-facts/{fid}/ack-stale", params={"scheme_id": MAIN_SID})
         assert resp.status_code == 200, resp.text[:200]
         body = resp.json()
         assert body.get("changed") is True
@@ -308,24 +282,16 @@ class TestAckStaleHttpWiring:
     # --- 批量：多场景经 HTTP 走一遍 ---
     async def test_batch_unknown_scheme_is_404_over_http(self, db_path_only):
         transport = httpx.ASGITransport(app=app)
-        async with httpx.AsyncClient(
-                transport=transport, base_url="http://testserver",
-                timeout=30.0) as client:
-            resp = await client.post("/api/v1/global-facts/ack-stale",
-                                     json={"scheme_id": "nope"})
+        async with httpx.AsyncClient(transport=transport, base_url="http://testserver", timeout=30.0) as client:
+            resp = await client.post("/api/v1/global-facts/ack-stale", json={"scheme_id": "nope"})
         assert resp.status_code == 404, f"未知 scheme 应 404，实际 {resp.status_code}"
 
     async def test_batch_fact_ids_narrows_over_http(self, db_path_only):
         """HTTP 层 fact_ids 收窄与函数层一致：只处理显式点名的行。"""
-        [a, b] = await self._seed_rows(
-            {"stale": 1, "resolved": 0}, {"stale": 1, "resolved": 0})
+        [a, b] = await self._seed_rows({"stale": 1, "resolved": 0}, {"stale": 1, "resolved": 0})
         transport = httpx.ASGITransport(app=app)
-        async with httpx.AsyncClient(
-                transport=transport, base_url="http://testserver",
-                timeout=30.0) as client:
-            resp = await client.post("/api/v1/global-facts/ack-stale",
-                                     json={"scheme_id": MAIN_SID,
-                                           "fact_ids": [a]})
+        async with httpx.AsyncClient(transport=transport, base_url="http://testserver", timeout=30.0) as client:
+            resp = await client.post("/api/v1/global-facts/ack-stale", json={"scheme_id": MAIN_SID, "fact_ids": [a]})
         assert resp.status_code == 200, resp.text[:200]
         body = resp.json()
         assert body.get("changed") == 1, f"应只解 1 条，实际 {body}"
@@ -343,11 +309,8 @@ class TestAckStaleHttpWiring:
             {"stale": 1, "resolved": 0},
         )
         transport = httpx.ASGITransport(app=app)
-        async with httpx.AsyncClient(
-                transport=transport, base_url="http://testserver",
-                timeout=30.0) as client:
-            resp = await client.post("/api/v1/global-facts/ack-stale",
-                                     json={"scheme_id": MAIN_SID})
+        async with httpx.AsyncClient(transport=transport, base_url="http://testserver", timeout=30.0) as client:
+            resp = await client.post("/api/v1/global-facts/ack-stale", json={"scheme_id": MAIN_SID})
         assert resp.status_code == 200, resp.text[:200]
         body = resp.json()
         assert body.get("changed") == 3, f"3 行 stale 全部解除，实际 {body}"
@@ -361,11 +324,8 @@ class TestAckStaleHttpWiring:
             {"pid": OTHER_PID, "sid": OTHER_SID, "stale": 1, "resolved": 0},
         )
         transport = httpx.ASGITransport(app=app)
-        async with httpx.AsyncClient(
-                transport=transport, base_url="http://testserver",
-                timeout=30.0) as client:
-            resp = await client.post("/api/v1/global-facts/ack-stale",
-                                     json={"scheme_id": MAIN_SID})
+        async with httpx.AsyncClient(transport=transport, base_url="http://testserver", timeout=30.0) as client:
+            resp = await client.post("/api/v1/global-facts/ack-stale", json={"scheme_id": MAIN_SID})
         assert resp.status_code == 200, resp.text[:200]
         body = resp.json()
         assert body.get("changed") == 2, f"本方案可见范围 2 条，实际 {body}"

@@ -11,6 +11,7 @@
 设计原则：全部程序判定 → 100% 可复现、可测试、零边际成本；
 所有规则输出统一进入"⚠ 待裁决冲突"，自动裁决恒为 false（裁决权在人工）。
 """
+
 from __future__ import annotations
 
 import logging
@@ -53,9 +54,9 @@ _TAPOSTRING_KEYWORDS = ("封顶", "主体结构封顶", "主体封顶")
 @dataclass
 class CrossConflict:
     rule_id: str
-    severity: str            # low / medium / high
+    severity: str  # low / medium / high
     conflict_type: str
-    side_a: dict             # {"name","value","source","confidence"}
+    side_a: dict  # {"name","value","source","confidence"}
     side_b: dict
     resolution_hint: str
     auto_resolvable: bool = False  # 恒为 False，裁决权在人工
@@ -83,8 +84,7 @@ def parse_date_flexible(text: str) -> date | None:
         m = pat.match(t)
         if m:
             try:
-                return date(int(m.group(idx[0])), int(m.group(idx[1])),
-                            int(m.group(idx[2])))
+                return date(int(m.group(idx[0])), int(m.group(idx[1])), int(m.group(idx[2])))
             except ValueError:
                 return None
     return None
@@ -150,13 +150,18 @@ def _check_material_vs_design(merged) -> tuple[list[CrossConflict], list]:
             if rng_main or rng_other:
                 if rng_main and rng_other:
                     # 两侧均为范围值，无法单向判定（如 C30及以上 vs C35及以上）
-                    conflicts.append(CrossConflict(
-                        rule_id="XV-MAT-DESIGN", severity="low",
-                        conflict_type="material_range_ambiguous",
-                        side_a=_side(it), side_b=_side(it, other_v),
-                        resolution_hint="两侧均为范围值，无法程序判定，请人工确认取用口径"))
+                    conflicts.append(
+                        CrossConflict(
+                            rule_id="XV-MAT-DESIGN",
+                            severity="low",
+                            conflict_type="material_range_ambiguous",
+                            side_a=_side(it),
+                            side_b=_side(it, other_v),
+                            resolution_hint="两侧均为范围值，无法程序判定，请人工确认取用口径",
+                        )
+                    )
                     continue
-                floor_str = rng_main or rng_other       # 范围侧基准等级
+                floor_str = rng_main or rng_other  # 范围侧基准等级
                 actual_str = other_v if rng_main else str(it.value)  # 实际取用值
                 floor_rank = grade_rank(floor_str)
                 actual_rank = grade_rank(actual_str)
@@ -165,12 +170,16 @@ def _check_material_vs_design(merged) -> tuple[list[CrossConflict], list]:
                         # 实际值满足"不低于"约束 → 合并，不判冲突
                         range_merged.append(it)
                     else:
-                        conflicts.append(CrossConflict(
-                            rule_id="XV-MAT-DESIGN", severity="high",
-                            conflict_type="material_below_range_floor",
-                            side_a=_side(it), side_b=_side(it, other_v),
-                            resolution_hint="实际取用值低于范围约束下限，"
-                                            "疑似笔误或取值错误"))
+                        conflicts.append(
+                            CrossConflict(
+                                rule_id="XV-MAT-DESIGN",
+                                severity="high",
+                                conflict_type="material_below_range_floor",
+                                side_a=_side(it),
+                                side_b=_side(it, other_v),
+                                resolution_hint="实际取用值低于范围约束下限，" "疑似笔误或取值错误",
+                            )
+                        )
                     continue
 
             # ③ 同类可比 → 档位差分档
@@ -179,24 +188,33 @@ def _check_material_vs_design(merged) -> tuple[list[CrossConflict], list]:
                 if dist == 0:
                     continue  # 同档不同写法（已归一不应出现，防御）
                 sev = "medium" if dist == 1 else "high"
-                hint = ("疑似笔误或规格替代，需确认" if dist == 1 else
-                        "等级差 ≥2 档，禁止自动取舍")
-                conflicts.append(CrossConflict(
-                    rule_id="XV-MAT-DESIGN", severity=sev,
-                    conflict_type="material_vs_design_param",
-                    side_a=_side(it), side_b=_side(it, other_v),
-                    resolution_hint=f"{hint}；设计文件值优先，请核对施工方案材料等级"))
+                hint = "疑似笔误或规格替代，需确认" if dist == 1 else "等级差 ≥2 档，禁止自动取舍"
+                conflicts.append(
+                    CrossConflict(
+                        rule_id="XV-MAT-DESIGN",
+                        severity=sev,
+                        conflict_type="material_vs_design_param",
+                        side_a=_side(it),
+                        side_b=_side(it, other_v),
+                        resolution_hint=f"{hint}；设计文件值优先，请核对施工方案材料等级",
+                    )
+                )
                 continue
 
             # ④ 不可比（如 C30 vs HRB400）→ 名称归一疑似错误，转人工复核。
             #    仅当至少一侧形似规格等级才进入本规则（防止流程字符串等
             #    普通同值冲突被误报）。
             if best_rank or other_rank or rng_main or rng_other:
-                conflicts.append(CrossConflict(
-                    rule_id="XV-MAT-DESIGN", severity="low",
-                    conflict_type="material_name_normalize_review",
-                    side_a=_side(it), side_b=_side(it, other_v),
-                    resolution_hint="两值不同类且无法比对，疑似名称归一错误，转人工复核"))
+                conflicts.append(
+                    CrossConflict(
+                        rule_id="XV-MAT-DESIGN",
+                        severity="low",
+                        conflict_type="material_name_normalize_review",
+                        side_a=_side(it),
+                        side_b=_side(it, other_v),
+                        resolution_hint="两值不同类且无法比对，疑似名称归一错误，转人工复核",
+                    )
+                )
     return conflicts, range_merged
 
 
@@ -235,8 +253,7 @@ def _check_machinery_vs_schedule(merged) -> list[CrossConflict]:
     for it in mach_items:
         d = parse_date_flexible(it.value)
         if d is None:
-            logger.info("机械日期 %s=%s 归一失败，标记 needs_review",
-                        it.name, it.value)
+            logger.info("机械日期 %s=%s 归一失败，标记 needs_review", it.name, it.value)
             continue
         is_entry = bool(_ENTRY_PAT.search(it.name))
         is_tower = "塔吊" in normalize_machinery_name(it.name)
@@ -249,47 +266,62 @@ def _check_machinery_vs_schedule(merged) -> list[CrossConflict]:
             od = parse_date_flexible(other.value)
             if od is None:
                 continue
-            if other.name.startswith(pair_name) and \
-                    is_entry != bool(_ENTRY_PAT.search(other.name)):
+            if other.name.startswith(pair_name) and is_entry != bool(_ENTRY_PAT.search(other.name)):
                 if is_entry and d > od:
-                    conflicts.append(CrossConflict(
-                        rule_id="XV-MACH-SCHED", severity="high",
-                        conflict_type="machinery_entry_after_exit",
-                        side_a=_side(it), side_b=_side(other),
-                        resolution_hint="单台机械进场晚于退场，自身时序矛盾"))
+                    conflicts.append(
+                        CrossConflict(
+                            rule_id="XV-MACH-SCHED",
+                            severity="high",
+                            conflict_type="machinery_entry_after_exit",
+                            side_a=_side(it),
+                            side_b=_side(other),
+                            resolution_hint="单台机械进场晚于退场，自身时序矛盾",
+                        )
+                    )
                 break
 
         if is_entry:
             # C1：进场 ≥ 开工日期
             if start_dt and d < start_dt:
                 days = (start_dt - d).days
-                conflicts.append(CrossConflict(
-                    rule_id="XV-MACH-SCHED",
-                    severity=_severity_by_days(days),
-                    conflict_type="machinery_entry_vs_schedule",
-                    side_a=_side(it), side_b=_side(start_item),
-                    resolution_hint=f"进场时间早于开工日期 {days} 天，"
-                                    "核对进退场计划或工期取值"))
+                conflicts.append(
+                    CrossConflict(
+                        rule_id="XV-MACH-SCHED",
+                        severity=_severity_by_days(days),
+                        conflict_type="machinery_entry_vs_schedule",
+                        side_a=_side(it),
+                        side_b=_side(start_item),
+                        resolution_hint=f"进场时间早于开工日期 {days} 天，" "核对进退场计划或工期取值",
+                    )
+                )
         else:
             # C2：退场 ≤ 竣工日期
             if end_dt and d > end_dt:
                 days = (d - end_dt).days
                 sev = _severity_by_days(days)
-                hint = f"退场时间晚于竣工日期 {days} 天。" if days > 0 \
-                    else "退场时间不早于竣工日期。"
-                conflicts.append(CrossConflict(
-                    rule_id="XV-MACH-SCHED", severity=sev,
-                    conflict_type="machinery_exit_vs_schedule",
-                    side_a=_side(it), side_b=_side(end_item),
-                    resolution_hint=hint + "核对进退场计划或工期取值"))
+                hint = f"退场时间晚于竣工日期 {days} 天。" if days > 0 else "退场时间不早于竣工日期。"
+                conflicts.append(
+                    CrossConflict(
+                        rule_id="XV-MACH-SCHED",
+                        severity=sev,
+                        conflict_type="machinery_exit_vs_schedule",
+                        side_a=_side(it),
+                        side_b=_side(end_item),
+                        resolution_hint=hint + "核对进退场计划或工期取值",
+                    )
+                )
             # C5：塔吊退场不得早于主体封顶节点（安全相关，独立判定）
             if is_tower and topout_dt and d < topout_dt:
-                conflicts.append(CrossConflict(
-                    rule_id="XV-MACH-SCHED", severity="high",
-                    conflict_type="machinery_exit_before_topout",
-                    side_a=_side(it), side_b=_side(topout_item),
-                    resolution_hint="塔吊退场早于主体结构封顶节点，"
-                                    "属安全相关时序冲突，必须人工裁决"))
+                conflicts.append(
+                    CrossConflict(
+                        rule_id="XV-MACH-SCHED",
+                        severity="high",
+                        conflict_type="machinery_exit_before_topout",
+                        side_a=_side(it),
+                        side_b=_side(topout_item),
+                        resolution_hint="塔吊退场早于主体结构封顶节点，" "属安全相关时序冲突，必须人工裁决",
+                    )
+                )
     return conflicts
 
 
@@ -320,8 +352,7 @@ def _lcs_len(a: list[str], b: list[str]) -> int:
     dp = [[0] * (len(b) + 1) for _ in range(len(a) + 1)]
     for i in range(1, len(a) + 1):
         for j in range(1, len(b) + 1):
-            dp[i][j] = (dp[i - 1][j - 1] + 1 if a[i - 1] == b[j - 1]
-                        else max(dp[i - 1][j], dp[i][j - 1]))
+            dp[i][j] = dp[i - 1][j - 1] + 1 if a[i - 1] == b[j - 1] else max(dp[i - 1][j], dp[i][j - 1])
     return dp[-1][-1]
 
 
@@ -351,9 +382,7 @@ def _check_flow_sequence(merged) -> list[CrossConflict]:
         if not it.has_conflict or not it.conflict_values:
             continue
         # ✅ 升级：新格式 list value 和旧格式箭头链都能识别
-        if not _value_is_flow(it.value) and not any(
-                _value_is_flow(c.get("value", ""))
-                for c in it.conflict_values):
+        if not _value_is_flow(it.value) and not any(_value_is_flow(c.get("value", "")) for c in it.conflict_values):
             continue
         seq_a = norm_seq(_split_flow(it.value))
         for cand in it.conflict_values:
@@ -369,25 +398,33 @@ def _check_flow_sequence(merged) -> list[CrossConflict]:
             sim = _lcs_len(seq_a, seq_b) / max(len(seq_a), len(seq_b))
             if _has_adjacent_swap(seq_a, seq_b):
                 # 换位专项：工艺顺序颠倒属安全敏感矛盾，无视 sim 直接 high
-                conflicts.append(CrossConflict(
-                    rule_id="XV-FLOW-SEQ", severity="high",
-                    conflict_type="flow_adjacent_swap",
-                    side_a=_side(it), side_b=_side(it, cand.get("value")),
-                    resolution_hint="工序先后关系冲突，工序顺序直接影响"
-                                    "施工质量与安全，必须人工裁决"))
+                conflicts.append(
+                    CrossConflict(
+                        rule_id="XV-FLOW-SEQ",
+                        severity="high",
+                        conflict_type="flow_adjacent_swap",
+                        side_a=_side(it),
+                        side_b=_side(it, cand.get("value")),
+                        resolution_hint="工序先后关系冲突，工序顺序直接影响" "施工质量与安全，必须人工裁决",
+                    )
+                )
                 continue
             if sim >= 0.85:
                 sev, hint = "low", "可能是详略差异，确认是否为同一流程的粗/细两级描述"
             elif sim >= 0.6:
-                sev, hint = "medium", "可能为不同深度流程（总体流程 vs 工序级流程），" \
-                                      "确认是否为粒度差异而非矛盾"
+                sev, hint = "medium", "可能为不同深度流程（总体流程 vs 工序级流程），" "确认是否为粒度差异而非矛盾"
             else:
                 sev, hint = "high", "序列相似度过低，属真矛盾（流程名归一请一并复核）"
-            conflicts.append(CrossConflict(
-                rule_id="XV-FLOW-SEQ", severity=sev,
-                conflict_type="flow_sequence_divergence",
-                side_a=_side(it), side_b=_side(it, cand.get("value")),
-                resolution_hint=f"LCS 相似度 {sim:.0%}；{hint}"))
+            conflicts.append(
+                CrossConflict(
+                    rule_id="XV-FLOW-SEQ",
+                    severity=sev,
+                    conflict_type="flow_sequence_divergence",
+                    side_a=_side(it),
+                    side_b=_side(it, cand.get("value")),
+                    resolution_hint=f"LCS 相似度 {sim:.0%}；{hint}",
+                )
+            )
     return conflicts
 
 
@@ -458,11 +495,16 @@ def _check_same_name_conflicts(merged, initial_had_candidate: dict) -> list[Cros
             for j in range(i + 1, len(reps)):
                 a, _ = reps[i]
                 b, _ = reps[j]
-                conflicts.append(CrossConflict(
-                    rule_id="XV-SAME-NAME", severity="medium",
-                    conflict_type="same_name_value_mismatch",
-                    side_a=_side(a), side_b=_side(b),
-                    resolution_hint="同名事实存在多个不同取值，需人工核对权威来源"))
+                conflicts.append(
+                    CrossConflict(
+                        rule_id="XV-SAME-NAME",
+                        severity="medium",
+                        conflict_type="same_name_value_mismatch",
+                        side_a=_side(a),
+                        side_b=_side(b),
+                        resolution_hint="同名事实存在多个不同取值，需人工核对权威来源",
+                    )
+                )
     return conflicts
 
 
@@ -504,50 +546,77 @@ def _norm_text_value(v) -> str:
 #: 等价与量级比判定。
 _UNIT_SPEC: dict[str, tuple[str, float]] = {
     # ---- 长度（基准 m）----
-    "m": ("length", 1.0), "米": ("length", 1.0),
-    "dm": ("length", 0.1), "分米": ("length", 0.1),
-    "cm": ("length", 0.01), "厘米": ("length", 0.01),
-    "mm": ("length", 0.001), "毫米": ("length", 0.001),
-    "km": ("length", 1000.0), "千米": ("length", 1000.0),
+    "m": ("length", 1.0),
+    "米": ("length", 1.0),
+    "dm": ("length", 0.1),
+    "分米": ("length", 0.1),
+    "cm": ("length", 0.01),
+    "厘米": ("length", 0.01),
+    "mm": ("length", 0.001),
+    "毫米": ("length", 0.001),
+    "km": ("length", 1000.0),
+    "千米": ("length", 1000.0),
     # ---- 质量（基准 kg）----
-    "kg": ("mass", 1.0), "千克": ("mass", 1.0), "公斤": ("mass", 1.0),
-    "g": ("mass", 0.001), "克": ("mass", 0.001),
-    "mg": ("mass", 1e-6), "毫克": ("mass", 1e-6),
-    "t": ("mass", 1000.0), "吨": ("mass", 1000.0),
+    "kg": ("mass", 1.0),
+    "千克": ("mass", 1.0),
+    "公斤": ("mass", 1.0),
+    "g": ("mass", 0.001),
+    "克": ("mass", 0.001),
+    "mg": ("mass", 1e-6),
+    "毫克": ("mass", 1e-6),
+    "t": ("mass", 1000.0),
+    "吨": ("mass", 1000.0),
     # ---- 力（基准 N）----
-    "n": ("force", 1.0), "牛": ("force", 1.0),
-    "kn": ("force", 1000.0), "千牛": ("force", 1000.0),
+    "n": ("force", 1.0),
+    "牛": ("force", 1.0),
+    "kn": ("force", 1000.0),
+    "千牛": ("force", 1000.0),
     "mn": ("force", 1e-3),
     # ---- 线荷载（基准 N/m）----
-    "n/m": ("line_load", 1.0), "kn/m": ("line_load", 1000.0),
+    "n/m": ("line_load", 1.0),
+    "kn/m": ("line_load", 1000.0),
     # ---- 面荷载 / 压强（基准 Pa）----
-    "pa": ("pressure", 1.0), "帕": ("pressure", 1.0),
-    "kpa": ("pressure", 1000.0), "千帕": ("pressure", 1000.0),
-    "mpa": ("pressure", 1e6), "兆帕": ("pressure", 1e6),
-    "n/m2": ("pressure", 1.0), "kn/m2": ("pressure", 1000.0),
+    "pa": ("pressure", 1.0),
+    "帕": ("pressure", 1.0),
+    "kpa": ("pressure", 1000.0),
+    "千帕": ("pressure", 1000.0),
+    "mpa": ("pressure", 1e6),
+    "兆帕": ("pressure", 1e6),
+    "n/m2": ("pressure", 1.0),
+    "kn/m2": ("pressure", 1000.0),
     # ---- 面积（基准 m²）----
-    "m2": ("area", 1.0), "平方米": ("area", 1.0),
-    "cm2": ("area", 1e-4), "平方厘米": ("area", 1e-4),
-    "mm2": ("area", 1e-6), "平方毫米": ("area", 1e-6),
+    "m2": ("area", 1.0),
+    "平方米": ("area", 1.0),
+    "cm2": ("area", 1e-4),
+    "平方厘米": ("area", 1e-4),
+    "mm2": ("area", 1e-6),
+    "平方毫米": ("area", 1e-6),
     # ---- 体积（基准 m³）----
-    "m3": ("volume", 1.0), "立方米": ("volume", 1.0),
-    "cm3": ("volume", 1e-6), "立方厘米": ("volume", 1e-6),
-    "l": ("volume", 1e-3), "升": ("volume", 1e-3),
+    "m3": ("volume", 1.0),
+    "立方米": ("volume", 1.0),
+    "cm3": ("volume", 1e-6),
+    "立方厘米": ("volume", 1e-6),
+    "l": ("volume", 1e-3),
+    "升": ("volume", 1e-3),
     # ---- 时间（基准 天）----
-    "d": ("duration", 1.0), "天": ("duration", 1.0),
+    "d": ("duration", 1.0),
+    "天": ("duration", 1.0),
     "日历天": ("duration", 1.0),
-    "月": ("duration", 30.0), "个月": ("duration", 30.0),
+    "月": ("duration", 30.0),
+    "个月": ("duration", 30.0),
     # ---- 温度（仿射，仅判「同数值不同单位」）----
-    "℃": ("temperature", 1.0), "°c": ("temperature", 1.0),
-    "℉": ("temperature", 1.0), "°f": ("temperature", 1.0),
+    "℃": ("temperature", 1.0),
+    "°c": ("temperature", 1.0),
+    "℉": ("temperature", 1.0),
+    "°f": ("temperature", 1.0),
     # ---- 百分比 ----
-    "%": ("ratio", 1.0), "％": ("ratio", 1.0),
+    "%": ("ratio", 1.0),
+    "％": ("ratio", 1.0),
 }
 _UNIT_TO_BASE = {u: b for u, (_d, b) in _UNIT_SPEC.items()}
 _UNIT_DIM = {u: d for u, (d, _b) in _UNIT_SPEC.items()}
 #: 长度单位集（供 facts_classification._UNIT_TO_METER 做跨模块 parity）
-LENGTH_UNITS: tuple[str, ...] = tuple(
-    u for u, (d, _b) in _UNIT_SPEC.items() if d == "length")
+LENGTH_UNITS: tuple[str, ...] = tuple(u for u, (d, _b) in _UNIT_SPEC.items() if d == "length")
 #: 仿射量纲：比值换算无意义，不参与「等价 / 量级比」判定
 _AFFINE_DIMS: frozenset[str] = frozenset({"temperature"})
 
@@ -560,16 +629,24 @@ _SUSPECT_FACTORS = (100.0, 1000.0, 0.01, 0.001)
 #:   ② 不含 `²`   → ``120m²`` 只取到 ``m``，被误判成长度；
 #:   ③ **不含数字** → ``2.0m3`` 只取到 ``m``，体积被误判成长度（最隐蔽，
 #:      因为 ``m`` 恰好是合法单位，解析「成功」但量纲全错）。
-_QUANTITY_RE = re.compile(
-    r"(-?\d+(?:\.\d+)?)\s*"
-    r"([A-Za-z\u4e00-\u9fff°%℃℉㎡/²³0-9]+)")
+_QUANTITY_RE = re.compile(r"(-?\d+(?:\.\d+)?)\s*" r"([A-Za-z\u4e00-\u9fff°%℃℉㎡/²³0-9]+)")
 
 #: 单位写法归一（全角/上标/空白 → 表内键）
 _UNIT_ALIASES: dict[str, str] = {
-    "㎡": "m2", "m²": "m2", "M2": "m2", "M²": "m2",
-    "㎥": "m3", "m³": "m3", "M3": "m3", "M³": "m3",
-    "KN": "kn", "Kn": "kn", "kN": "kn",
-    "KN/M2": "kn/m2", "KN/M²": "kn/m2", "kN/m²": "kn/m2",
+    "㎡": "m2",
+    "m²": "m2",
+    "M2": "m2",
+    "M²": "m2",
+    "㎥": "m3",
+    "m³": "m3",
+    "M3": "m3",
+    "M³": "m3",
+    "KN": "kn",
+    "Kn": "kn",
+    "kN": "kn",
+    "KN/M2": "kn/m2",
+    "KN/M²": "kn/m2",
+    "kN/m²": "kn/m2",
     "％": "%",
 }
 
@@ -619,18 +696,19 @@ def _extract_quantity(value) -> tuple[float, str, str] | None:
     return best
 
 
-def _add_num_candidate(it, other_val: str, other_source: str,
-                       other_conf: float) -> None:
+def _add_num_candidate(it, other_val: str, other_source: str, other_conf: float) -> None:
     """把对侧数值登记为矛盾候选（去重），并保持 has_conflict 标记。"""
     it.has_conflict = True
     for c in it.conflict_values:
         if str(c.get("value", "")) == other_val:
             return
-    it.conflict_values.append({
-        "value": other_val,
-        "source": other_source,
-        "confidence": _safe_confidence(other_conf, 1.0),
-    })
+    it.conflict_values.append(
+        {
+            "value": other_val,
+            "source": other_source,
+            "confidence": _safe_confidence(other_conf, 1.0),
+        }
+    )
 
 
 def _check_numeric_unit_consistency(merged) -> list[CrossConflict]:
@@ -687,17 +765,20 @@ def _check_numeric_unit_consistency(merged) -> list[CrossConflict]:
                     if affine:
                         # 只判「同数值不同单位」；不同数值无法据单位判断对错
                         if abs(qa[0] - qb[0]) <= 1e-9:
-                            conflicts.append(CrossConflict(
-                                rule_id="XV-NUM-UNIT", severity="medium",
-                                conflict_type="numeric_unit_inconsistent",
-                                side_a=_side(it_a), side_b=_side(it_b),
-                                resolution_hint="两值数值相同但温度单位不同"
-                                                "（如 30℃ 与 30℉），"
-                                                "至少有一处写错，需人工核对"))
-                            _add_num_candidate(it_a, str(it_b.value),
-                                               it_b.source, it_b.confidence)
-                            _add_num_candidate(it_b, str(it_a.value),
-                                               it_a.source, it_a.confidence)
+                            conflicts.append(
+                                CrossConflict(
+                                    rule_id="XV-NUM-UNIT",
+                                    severity="medium",
+                                    conflict_type="numeric_unit_inconsistent",
+                                    side_a=_side(it_a),
+                                    side_b=_side(it_b),
+                                    resolution_hint="两值数值相同但温度单位不同"
+                                    "（如 30℃ 与 30℉），"
+                                    "至少有一处写错，需人工核对",
+                                )
+                            )
+                            _add_num_candidate(it_a, str(it_b.value), it_b.source, it_b.confidence)
+                            _add_num_candidate(it_b, str(it_a.value), it_a.source, it_a.confidence)
                         continue
                     base_a = qa[0] * _UNIT_TO_BASE[qa[1]]
                     base_b = qb[0] * _UNIT_TO_BASE[qb[1]]
@@ -706,16 +787,18 @@ def _check_numeric_unit_consistency(merged) -> list[CrossConflict]:
                     rel = abs(base_a - base_b) / max(abs(base_a), abs(base_b))
                     if rel <= 1e-6:
                         # 数值等价、仅单位不同
-                        conflicts.append(CrossConflict(
-                            rule_id="XV-NUM-UNIT", severity="low",
-                            conflict_type="numeric_unit_inconsistent",
-                            side_a=_side(it_a), side_b=_side(it_b),
-                            resolution_hint="两值数值等价但单位写法不一致"
-                                            "（如 12.5m 与 1250cm），建议统一单位"))
-                        _add_num_candidate(it_a, str(it_b.value),
-                                           it_b.source, it_b.confidence)
-                        _add_num_candidate(it_b, str(it_a.value),
-                                           it_a.source, it_a.confidence)
+                        conflicts.append(
+                            CrossConflict(
+                                rule_id="XV-NUM-UNIT",
+                                severity="low",
+                                conflict_type="numeric_unit_inconsistent",
+                                side_a=_side(it_a),
+                                side_b=_side(it_b),
+                                resolution_hint="两值数值等价但单位写法不一致" "（如 12.5m 与 1250cm），建议统一单位",
+                            )
+                        )
+                        _add_num_candidate(it_a, str(it_b.value), it_b.source, it_b.confidence)
+                        _add_num_candidate(it_b, str(it_a.value), it_a.source, it_a.confidence)
                     else:
                         ratio = base_a / base_b
                         # ⚠️ 相对容差，**不得**用减法容差。
@@ -725,20 +808,21 @@ def _check_numeric_unit_consistency(merged) -> list[CrossConflict]:
                         # 「恰好 1000 倍的单位换算错误」。本轮把单位表扩到
                         # mN/MPa/㎥ 后该误报从「理论可能」变成「随手可触发」。
                         # 改为相对判据 ``|x/f - 1| <= 1e-3``。
-                        if (any(abs(ratio / f - 1.0) <= 1e-3
-                                for f in _SUSPECT_FACTORS)
-                                or any(abs((1.0 / ratio) / f - 1.0) <= 1e-3
-                                       for f in _SUSPECT_FACTORS)):
-                            conflicts.append(CrossConflict(
-                                rule_id="XV-NUM-UNIT", severity="medium",
-                                conflict_type="numeric_scale_suspect",
-                                side_a=_side(it_a), side_b=_side(it_b),
-                                resolution_hint="两值量级差恰为常见单位换算比"
-                                                "（100/1000），疑似单位换算错误"))
-                            _add_num_candidate(it_a, str(it_b.value),
-                                               it_b.source, it_b.confidence)
-                            _add_num_candidate(it_b, str(it_a.value),
-                                               it_a.source, it_a.confidence)
+                        if any(abs(ratio / f - 1.0) <= 1e-3 for f in _SUSPECT_FACTORS) or any(
+                            abs((1.0 / ratio) / f - 1.0) <= 1e-3 for f in _SUSPECT_FACTORS
+                        ):
+                            conflicts.append(
+                                CrossConflict(
+                                    rule_id="XV-NUM-UNIT",
+                                    severity="medium",
+                                    conflict_type="numeric_scale_suspect",
+                                    side_a=_side(it_a),
+                                    side_b=_side(it_b),
+                                    resolution_hint="两值量级差恰为常见单位换算比" "（100/1000），疑似单位换算错误",
+                                )
+                            )
+                            _add_num_candidate(it_a, str(it_b.value), it_b.source, it_b.confidence)
+                            _add_num_candidate(it_b, str(it_a.value), it_a.source, it_a.confidence)
     return conflicts
 
 
@@ -765,8 +849,7 @@ def _is_adjudicable(item) -> bool:
     缺属性（历史 shim / 测试替身）按**可裁决**处理（fail-open 到旧行为），
     保证既有调用方零行为变化。
     """
-    return not (bool(getattr(item, "is_simulated", False))
-                or bool(getattr(item, "is_stale", False)))
+    return not (bool(getattr(item, "is_simulated", False)) or bool(getattr(item, "is_stale", False)))
 
 
 def run_cross_validations(merged) -> list[dict]:
@@ -784,7 +867,9 @@ def run_cross_validations(merged) -> list[dict]:
         logger.info(
             "交叉校验跳过 %d/%d 条非可裁决事实（is_simulated / is_stale，"
             "与注入门控同口径：这类事实本就不会进入生成链路）",
-            skipped, len(merged))
+            skipped,
+            len(merged),
+        )
     if not eligible:
         # 全池不可裁决 → 无可产出冲突，也不得回写任何 has_conflict
         return []
@@ -793,8 +878,7 @@ def run_cross_validations(merged) -> list[dict]:
 
     # 进入校验前快照每个条目是否携带候选。XV-SAME-NAME 据此识别「初始无候选」
     # 条目，必须在 material 规则可能清空 conflict_values（范围兼容撤销）之前记录。
-    initial_had_candidate = {
-        id(it): bool(it.conflict_values) for it in eligible}
+    initial_had_candidate = {id(it): bool(it.conflict_values) for it in eligible}
 
     mat_conflicts, range_merged = _check_material_vs_design(eligible)
     conflicts.extend(mat_conflicts)
@@ -813,8 +897,7 @@ def run_cross_validations(merged) -> list[dict]:
     # 跨条目冲突（机械↔工期）回写两侧事实的冲突标记，供前端并排展示裁决
     _mark_cross_conflicts_on_items(eligible, conflicts)
 
-    logger.info("交叉校验完成：%d 处（high=%d）", len(conflicts),
-                sum(1 for c in conflicts if c.severity == "high"))
+    logger.info("交叉校验完成：%d 处（high=%d）", len(conflicts), sum(1 for c in conflicts if c.severity == "high"))
     return [c.to_dict() for c in conflicts]
 
 
@@ -829,13 +912,14 @@ def _mark_cross_conflicts_on_items(merged, conflicts: list[CrossConflict]) -> No
             if it.value != side_self.get("value"):
                 continue
             it.has_conflict = True
-            if not any(c.get("value") == side_other.get("value")
-                       for c in it.conflict_values):
-                it.conflict_values.append({
-                    "value": side_other.get("value"),
-                    "source": side_other.get("source", ""),
-                    "confidence": side_other.get("confidence", 1.0),
-                })
+            if not any(c.get("value") == side_other.get("value") for c in it.conflict_values):
+                it.conflict_values.append(
+                    {
+                        "value": side_other.get("value"),
+                        "source": side_other.get("source", ""),
+                        "confidence": side_other.get("confidence", 1.0),
+                    }
+                )
 
     for c in conflicts:
         if c.rule_id == "XV-MACH-SCHED":

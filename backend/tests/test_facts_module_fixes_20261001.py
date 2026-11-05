@@ -11,6 +11,7 @@ A/B 反向验证：临时还原任一修复点（例如去掉 1318 行门控、�
 ``continue`` 改回 ``break``、删掉 ``_carry_dimensions`` 的 ``old_name`` 比较、
 把三处调用改回手写 15 列 INSERT），本文件相应用例必须定向失败；恢复后全绿。
 """
+
 from __future__ import annotations
 
 import ast
@@ -52,10 +53,8 @@ class TestChapterInjectSwitch:
     def _rows(self) -> list:
         return [
             ("基本信息", "基坑深度", "- **基坑深度**: 6.0m", 0.9, "overview"),
-            ("工艺参数", "混凝土强度等级", "- **混凝土强度等级**: C30",
-             0.9, "technique"),
-            ("基本信息", "基坑平面尺寸", "- **基坑平面尺寸**: 30m×20m",
-             0.9, "overview"),
+            ("工艺参数", "混凝土强度等级", "- **混凝土强度等级**: C30", 0.9, "technique"),
+            ("基本信息", "基坑平面尺寸", "- **基坑平面尺寸**: 30m×20m", 0.9, "overview"),
         ]
 
     @staticmethod
@@ -111,21 +110,24 @@ class TestChapterInjectSwitch:
         helper_calls = 0
         settings_reads: list[str] = []
         for node in ast.walk(tree):
-            if isinstance(node, ast.Call) and isinstance(node.func, ast.Name) \
-                    and node.func.id == "_chapter_inject_enabled":
+            if (
+                isinstance(node, ast.Call)
+                and isinstance(node.func, ast.Name)
+                and node.func.id == "_chapter_inject_enabled"
+            ):
                 helper_calls += 1
-            if isinstance(node, ast.Attribute) and isinstance(node.value, ast.Name) \
-                    and node.value.id == "settings":
+            if isinstance(node, ast.Attribute) and isinstance(node.value, ast.Name) and node.value.id == "settings":
                 settings_reads.append(node.attr)
         assert helper_calls >= 1, "渲染侧不再经 _chapter_inject_enabled() 门控"
         # 裸读 settings.facts_chapter_inject / getattr(settings, ...) 都是死开关形态
         assert "facts_chapter_inject" not in settings_reads
         assert not any(
-            isinstance(n, ast.Call) and isinstance(n.func, ast.Name)
+            isinstance(n, ast.Call)
+            and isinstance(n.func, ast.Name)
             and n.func.id == "getattr"
-            and any(isinstance(a, ast.Constant)
-                    and a.value == "facts_chapter_inject" for a in n.args)
-            for n in ast.walk(tree)), "渲染侧绕过了单一出口直接读配置"
+            and any(isinstance(a, ast.Constant) and a.value == "facts_chapter_inject" for a in n.args)
+            for n in ast.walk(tree)
+        ), "渲染侧绕过了单一出口直接读配置"
 
     def test_switch_helper_reads_named_config(self):
         """单一出口本身必须读的是这个配置项（改名即护栏失败）。"""
@@ -147,12 +149,11 @@ class TestProjectScopeCacheInvalidationNotTruncated:
     """schemes.id 虽是主键，但 TEXT 主键不禁止 NULL：脏数据下必须跳过而非终止。"""
 
     async def _insert_scheme(self, db_conn, project_id: str, scheme_id):
-        await db_conn.execute(
-            "INSERT OR IGNORE INTO projects (id, name) VALUES (?, ?)",
-            (project_id, "测试项目"))
+        await db_conn.execute("INSERT OR IGNORE INTO projects (id, name) VALUES (?, ?)", (project_id, "测试项目"))
         await db_conn.execute(
             "INSERT INTO schemes (id, project_id, name) VALUES (?, ?, ?)",
-            (scheme_id, project_id, f"方案-{scheme_id or 'NULL'}"))
+            (scheme_id, project_id, f"方案-{scheme_id or 'NULL'}"),
+        )
         await db_conn.commit()
 
     async def _fake_counter(self, monkeypatch, calls):
@@ -167,7 +168,7 @@ class TestProjectScopeCacheInvalidationNotTruncated:
         await self._fake_counter(monkeypatch, calls)
         pid = "proj-1"
         await self._insert_scheme(db_conn, pid, "s1")
-        await self._insert_scheme(db_conn, pid, None)   # 脏数据
+        await self._insert_scheme(db_conn, pid, None)  # 脏数据
         await self._insert_scheme(db_conn, pid, "s2")
 
         await gf._invalidate_fact_scope_cache(db_conn, "", pid)
@@ -243,11 +244,19 @@ class TestRenameRefreshesChapter:
     OLD_NAME = "混凝土强度等级"
     NEW_NAME = "监测频率"
 
-    async def _seed_fact(self, db_conn, *, title=OLD_NAME,
-                         content="- **混凝土强度等级**：C30",
-                         category="tech_param", fact_type="parameter",
-                         chapter="overview", fact_attr="qualitative",
-                         scheme_id="", project_id="proj-x") -> str:
+    async def _seed_fact(
+        self,
+        db_conn,
+        *,
+        title=OLD_NAME,
+        content="- **混凝土强度等级**：C30",
+        category="tech_param",
+        fact_type="parameter",
+        chapter="overview",
+        fact_attr="qualitative",
+        scheme_id="",
+        project_id="proj-x",
+    ) -> str:
         """插入一条带历史章节标注的事实行，返回行 id。
 
         fact_attr 故意写成与当前派生结果不一致的 "qualitative"（实际派生为
@@ -255,18 +264,30 @@ class TestRenameRefreshesChapter:
         旧列值而重派生，断言即可区分。
         """
         fid = "f-rename-1"
-        await db_conn.execute(
-            "INSERT OR IGNORE INTO projects (id, name) VALUES (?, ?)",
-            (project_id, "测试项目"))
+        await db_conn.execute("INSERT OR IGNORE INTO projects (id, name) VALUES (?, ?)", (project_id, "测试项目"))
         await db_conn.execute(
             "INSERT INTO global_facts (id, project_id, scheme_id, group_id, group_title,"
             " title, content, category, source_ref, is_simulated, confidence,"
             " is_resolved, has_conflict, conflict_keys, fact_key,"
             " chapter, fact_attr, fact_type) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, 0,"
             " 1.0, 1, 0, ?, ?, ?, ?, ?)",
-            (fid, project_id, scheme_id, "g1", "工艺参数", title, content,
-             category, json.dumps([{"file": "手动录入", "quote": ""}]),
-             "", normalize_key(title), chapter, fact_attr, fact_type))
+            (
+                fid,
+                project_id,
+                scheme_id,
+                "g1",
+                "工艺参数",
+                title,
+                content,
+                category,
+                json.dumps([{"file": "手动录入", "quote": ""}]),
+                "",
+                normalize_key(title),
+                chapter,
+                fact_attr,
+                fact_type,
+            ),
+        )
         await db_conn.commit()
         return fid
 
@@ -279,12 +300,11 @@ class TestRenameRefreshesChapter:
         """条目级更新：只改名（分类未变）也必须重算章节归属。"""
         fid = await self._seed_fact(db_conn)
         expected = classify_chapter_from_text(
-            self.NEW_NAME, "C30", "tech_param", "parameter",
-            normalize_key(self.NEW_NAME))
+            self.NEW_NAME, "C30", "tech_param", "parameter", normalize_key(self.NEW_NAME)
+        )
         assert expected != "overview", "用例名对必须让派生结果真正变化"
 
-        n, _sid = await gf._apply_item_updates(
-            db_conn, [{"fact_id": fid, "name": self.NEW_NAME}])
+        n, _sid = await gf._apply_item_updates(db_conn, [{"fact_id": fid, "name": self.NEW_NAME}])
         assert n == 1
         row = await self._get_row(db_conn, fid)
         assert row["title"] == self.NEW_NAME
@@ -301,8 +321,7 @@ class TestRenameRefreshesChapter:
         改值即派生输入变化。真正的「全未变」必须把值写成与库中一致的 C30。
         """
         fid = await self._seed_fact(db_conn, chapter="technique")
-        n, _ = await gf._apply_item_updates(
-            db_conn, [{"fact_id": fid, "value": "C30"}])
+        n, _ = await gf._apply_item_updates(db_conn, [{"fact_id": fid, "value": "C30"}])
         assert n == 1
         row = await self._get_row(db_conn, fid)
         assert row["content"] == "- **混凝土强度等级**: C30"
@@ -318,30 +337,27 @@ class TestRenameRefreshesChapter:
         回到派生值，否则会带着历史错标一直用到下一次重新提取。
         """
         fid = await self._seed_fact(db_conn, chapter="technique")
-        n, _ = await gf._apply_item_updates(
-            db_conn, [{"fact_id": fid, "value": "C35"}])
+        n, _ = await gf._apply_item_updates(db_conn, [{"fact_id": fid, "value": "C35"}])
         assert n == 1
         row = await self._get_row(db_conn, fid)
         assert row["content"] == "- **混凝土强度等级**: C35"
         expected = classify_chapter_from_text(
-            self.OLD_NAME, "C35", "tech_param", "parameter",
-            normalize_key(self.OLD_NAME))
+            self.OLD_NAME, "C35", "tech_param", "parameter", normalize_key(self.OLD_NAME)
+        )
         assert row["chapter"] == expected, "改值后章节归属停在旧值"
-        assert row["fact_attr"] == classify_fact_attr(self.OLD_NAME, "C35"), (
-            "改值后事实属性停在旧值")
+        assert row["fact_attr"] == classify_fact_attr(self.OLD_NAME, "C35"), "改值后事实属性停在旧值"
         assert row["fact_key"] == normalize_key(self.OLD_NAME)
 
     async def test_item_update_category_only_also_reclassifies(self, db_conn):
         """分类变化（既有能力）不能因本轮改名修复而退化。"""
         fid = await self._seed_fact(db_conn)
-        n, _ = await gf._apply_item_updates(
-            db_conn, [{"fact_id": fid, "category": "monitoring"}])
+        n, _ = await gf._apply_item_updates(db_conn, [{"fact_id": fid, "category": "monitoring"}])
         assert n == 1
         row = await self._get_row(db_conn, fid)
         assert row["category"] == "monitoring"
         expected = classify_chapter_from_text(
-            self.OLD_NAME, "C30", "monitoring", "parameter",
-            normalize_key(self.OLD_NAME))
+            self.OLD_NAME, "C30", "monitoring", "parameter", normalize_key(self.OLD_NAME)
+        )
         assert expected == "safety", "用例前提：该分类应改变章节归属"
         assert row["chapter"] == expected
 
@@ -353,16 +369,13 @@ class TestRenameRefreshesChapter:
         assert row["fact_key"] == normalize_key(self.NEW_NAME)
         # 若实现误用旧键派生，结果会不同 —— 直接比对以新键为输入的派生值
         assert row["chapter"] == classify_chapter_from_text(
-            self.NEW_NAME, "C30", "tech_param", "parameter",
-            normalize_key(self.NEW_NAME))
+            self.NEW_NAME, "C30", "tech_param", "parameter", normalize_key(self.NEW_NAME)
+        )
 
     async def test_patch_rename_end_to_end(self, db_conn):
         """行级 PATCH 改标题（前端单条编辑弹窗）→ 章节归属端到端刷新。"""
         fid = await self._seed_fact(db_conn)
-        out = await gf.update_fact(
-            fid,
-            FactGroupUpdate(id=fid, title=self.NEW_NAME),
-            scheme_id="", db=db_conn)
+        out = await gf.update_fact(fid, FactGroupUpdate(id=fid, title=self.NEW_NAME), scheme_id="", db=db_conn)
         assert out.get("ok") is True
         row = await self._get_row(db_conn, fid)
         assert row["title"] == self.NEW_NAME
@@ -374,13 +387,15 @@ class TestRenameRefreshesChapter:
         await self._seed_fact(db_conn)
         out = await gf.update_fact(
             "g1",
-            FactGroupUpdate(id="g1", content="- **混凝土强度等级**：C30",
-                            category="monitoring"),
-            scheme_id="", db=db_conn)
+            FactGroupUpdate(id="g1", content="- **混凝土强度等级**：C30", category="monitoring"),
+            scheme_id="",
+            db=db_conn,
+        )
         assert out.get("ok") is True
         cur = await db_conn.execute(
-            "SELECT title, category, chapter, fact_attr, fact_key, source_ref"
-            " FROM global_facts WHERE group_id=?", ("g1",))
+            "SELECT title, category, chapter, fact_attr, fact_key, source_ref" " FROM global_facts WHERE group_id=?",
+            ("g1",),
+        )
         rows = [dict(r) for r in await cur.fetchall()]
         assert len(rows) == 1
         row = rows[0]
@@ -407,20 +422,17 @@ class TestRenameRefreshesChapter:
         # ✅ R57：update_fact 不再直接调用 derivation_inputs_changed，
         #    判据 + 应用收敛到 _rederive_dimension_columns 单一出口。
         src = inspect.getsource(gf._rederive_dimension_columns)
-        assert "derivation_inputs_changed(" in src, (
-            "派生维度重算未调用唯一事实源 —— D1 分叉回流")
+        assert "derivation_inputs_changed(" in src, "派生维度重算未调用唯一事实源 —— D1 分叉回流"
         # 判据本身必须覆盖三维（唯一出口只有一处，锁这一处即可全仓生效）
         gate_src = inspect.getsource(derivation_inputs_changed)
-        for dim in ("old_category", "new_category", "old_name", "new_name",
-                    "old_value", "new_value"):
+        for dim in ("old_category", "new_category", "old_name", "new_name", "old_value", "new_value"):
             assert dim in gate_src, f"判据缺 {dim} 维度"
         # 旧值必须从库行 content 回解，而不是拿新值自比
         # ✅ R57：extract_value_from_markdown_line 调用在 _rederive_dimension_columns
         #    的调用方（update_fact / _apply_item_updates / resolve_conflict），
         #    而非 _rederive_dimension_columns 本身（它只接收 old_value 参数）。
         update_src = inspect.getsource(gf.update_fact)
-        assert "extract_value_from_markdown_line(" in update_src, (
-            "update_fact 未按旧行 content 回解出旧值")
+        assert "extract_value_from_markdown_line(" in update_src, "update_fact 未按旧行 content 回解出旧值"
 
 
 # =============================================================================
@@ -443,9 +455,17 @@ class TestManualFactInsertSingleSource:
 
     def test_manual_fact_row_positional_contract(self):
         row = gf._manual_fact_row(
-            fid="id-1", pid="p-1", sid="s-1", group_id="g-1",
-            group_title="组标题", name="基坑深度", content="- **基坑深度**: 6.0m",
-            category="tech_param", source_file="招标文件", source_quote="深度6米")
+            fid="id-1",
+            pid="p-1",
+            sid="s-1",
+            group_id="g-1",
+            group_title="组标题",
+            name="基坑深度",
+            content="- **基坑深度**: 6.0m",
+            category="tech_param",
+            source_file="招标文件",
+            source_quote="深度6米",
+        )
         assert len(row) == len(gf.MANUAL_FACT_INSERT_COLS)
         got = dict(zip(gf.MANUAL_FACT_INSERT_COLS, row))
         assert got["id"] == "id-1" and got["project_id"] == "p-1"
@@ -456,15 +476,23 @@ class TestManualFactInsertSingleSource:
         assert got["category"] == "tech_param"
         assert got["has_conflict"] == 0 and got["conflict_keys"] == ""
         assert got["fact_key"] == normalize_key("基坑深度")
-        assert json.loads(got["source_ref"]) == [
-            {"file": "招标文件", "quote": "深度6米"}]
+        assert json.loads(got["source_ref"]) == [{"file": "招标文件", "quote": "深度6米"}]
 
     def test_manual_fact_row_defaults_and_clamps(self):
         """类别兜底 other、置信度夹取、空名不产生空键。"""
         row = gf._manual_fact_row(
-            fid="i", pid="p", sid="", group_id="g", group_title="t",
-            name="基坑深度", content="c", category="   ",
-            source_file="", source_quote="", confidence=9.0)
+            fid="i",
+            pid="p",
+            sid="",
+            group_id="g",
+            group_title="t",
+            name="基坑深度",
+            content="c",
+            category="   ",
+            source_file="",
+            source_quote="",
+            confidence=9.0,
+        )
         got = dict(zip(gf.MANUAL_FACT_INSERT_COLS, row))
         assert got["category"] == "other"
         assert got["is_simulated"] == 0 and got["is_resolved"] == 1
@@ -473,27 +501,36 @@ class TestManualFactInsertSingleSource:
 
     def test_manual_fact_row_explicit_fact_key_wins(self):
         row = gf._manual_fact_row(
-            fid="i", pid="p", sid="", group_id="g", group_title="t",
-            name="基坑深度", content="c", category="tech_param",
-            source_file="", fact_key="explicit_key")
+            fid="i",
+            pid="p",
+            sid="",
+            group_id="g",
+            group_title="t",
+            name="基坑深度",
+            content="c",
+            category="tech_param",
+            source_file="",
+            fact_key="explicit_key",
+        )
         assert dict(zip(gf.MANUAL_FACT_INSERT_COLS, row))["fact_key"] == "explicit_key"
 
     async def test_create_fact_persists_manual_source_and_gate(self, db_conn):
         """端到端：手工新增写入「手动录入」来源标记，且模拟值闸门不变式成立。"""
-        await db_conn.execute(
-            "INSERT INTO projects (id, name) VALUES (?, ?)", ("p-1", "测试项目"))
+        await db_conn.execute("INSERT INTO projects (id, name) VALUES (?, ?)", ("p-1", "测试项目"))
         await db_conn.commit()
         gid = await gf.create_fact(
-            FactGroupIn(title="施工参数", content="", items=[
-                FactItem(name="基坑深度", value="6.0m", category="tech_param",
-                         is_simulated=True, confidence=0.8),
-            ]),
+            FactGroupIn(
+                title="施工参数",
+                content="",
+                items=[
+                    FactItem(name="基坑深度", value="6.0m", category="tech_param", is_simulated=True, confidence=0.8),
+                ],
+            ),
             project_id="p-1",
             db=db_conn,
         )
         assert gid["ok"] is True
-        cur = await db_conn.execute(
-            "SELECT * FROM global_facts WHERE group_id=?", (gid["id"],))
+        cur = await db_conn.execute("SELECT * FROM global_facts WHERE group_id=?", (gid["id"],))
         rows = [dict(r) for r in await cur.fetchall()]
         assert len(rows) == 1
         row = rows[0]
@@ -506,19 +543,16 @@ class TestManualFactInsertSingleSource:
 
     async def test_create_fact_legacy_single_line_splits_and_gates(self, db_conn):
         """旧版单条路径：多行 Markdown 逐行入库，模拟值闸门同样成立。"""
-        await db_conn.execute(
-            "INSERT INTO projects (id, name) VALUES (?, ?)", ("p-2", "测试项目"))
+        await db_conn.execute("INSERT INTO projects (id, name) VALUES (?, ?)", ("p-2", "测试项目"))
         await db_conn.commit()
         gid = await gf.create_fact(
-            FactGroupIn(title="参数",
-                        content="- **基坑深度**：6.0m\n- **混凝土强度等级**：C30",
-                        category="tech_param"),
+            FactGroupIn(title="参数", content="- **基坑深度**：6.0m\n- **混凝土强度等级**：C30", category="tech_param"),
             project_id="p-2",
             db=db_conn,
         )
         cur = await db_conn.execute(
-            "SELECT title, is_simulated, is_resolved, fact_key FROM global_facts"
-            " WHERE group_id=?", (gid["id"],))
+            "SELECT title, is_simulated, is_resolved, fact_key FROM global_facts" " WHERE group_id=?", (gid["id"],)
+        )
         rows = [dict(r) for r in await cur.fetchall()]
         assert sorted(r["title"] for r in rows) == ["基坑深度", "混凝土强度等级"]
         for r in rows:
@@ -534,22 +568,16 @@ class TestManualFactInsertSingleSource:
                 continue
             val = node.value if isinstance(node.value, str) else ""
             # 手写 INSERT 必然同时出现列名清单与占位符串
-            if ("INSERT INTO global_facts" in val and "conflict_keys" in val
-                    and "?" in val):
+            if "INSERT INTO global_facts" in val and "conflict_keys" in val and "?" in val:
                 offenders.append(node.lineno)
-        assert offenders == [], (
-            f"仍存在手写手工新增 INSERT（应改走 MANUAL_FACT_INSERT_SQL）: 行 {offenders}")
+        assert offenders == [], f"仍存在手写手工新增 INSERT（应改走 MANUAL_FACT_INSERT_SQL）: 行 {offenders}"
 
     def test_all_three_creation_paths_use_single_sql(self):
         """create_fact 两条分支 + adjust_facts 的 add 分支都走单一出口。"""
         src = inspect.getsource(gf)
         assert src.count("MANUAL_FACT_INSERT_SQL") >= 4, (
-            "SQL 常量定义 1 次 + 三处调用 3 次，实际 "
-            f"{src.count('MANUAL_FACT_INSERT_SQL')} 次")
+            "SQL 常量定义 1 次 + 三处调用 3 次，实际 " f"{src.count('MANUAL_FACT_INSERT_SQL')} 次"
+        )
         assert src.count("_manual_fact_row(") >= 4, (
-            "函数定义 1 次 + 三处调用 3 次，实际 "
-            f"{src.count('_manual_fact_row(')} 次")
-
-
-
-
+            "函数定义 1 次 + 三处调用 3 次，实际 " f"{src.count('_manual_fact_row(')} 次"
+        )

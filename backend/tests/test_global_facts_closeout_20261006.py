@@ -12,6 +12,7 @@
   H  generate_facts 跨类型任务互斥
   I  facts_enrich / facts_patches 二次实现收敛
 """
+
 from __future__ import annotations
 
 import ast
@@ -58,25 +59,30 @@ class TestFactLineSplit:
     下游是审核 / 预检 / 符合性 / 自动修复四条链路的提示词装配。
     """
 
-    @pytest.mark.parametrize("line,expect", [
-        # 修复前：先试全角 → 在「地点：北京」处切开 → name 被污染
-        ("- **时间**: 9:00，地点：北京", ("时间", "9:00，地点：北京")),
-        ("- **备注**: 见附件：第3页", ("备注", "见附件：第3页")),
-        # 全角分隔符在前（书写者本意）—— 修复前后都应正确
-        ("- **备注**：见附件：第3页", ("备注", "见附件：第3页")),
-        # 常规形态零回归
-        ("- **基坑深度**: 12.5m", ("基坑深度", "12.5m")),
-        ("- 名称：值", ("名称", "值")),
-        ("- **无冒号**", ("无冒号", "")),
-        ("", ("", "")),
-    ])
+    @pytest.mark.parametrize(
+        "line,expect",
+        [
+            # 修复前：先试全角 → 在「地点：北京」处切开 → name 被污染
+            ("- **时间**: 9:00，地点：北京", ("时间", "9:00，地点：北京")),
+            ("- **备注**: 见附件：第3页", ("备注", "见附件：第3页")),
+            # 全角分隔符在前（书写者本意）—— 修复前后都应正确
+            ("- **备注**：见附件：第3页", ("备注", "见附件：第3页")),
+            # 常规形态零回归
+            ("- **基坑深度**: 12.5m", ("基坑深度", "12.5m")),
+            ("- 名称：值", ("名称", "值")),
+            ("- **无冒号**", ("无冒号", "")),
+            ("", ("", "")),
+        ],
+    )
     def test_split_uses_earliest_separator(self, line, expect):
         from app.services.facts_extractor import extract_value_from_markdown_line
+
         assert extract_value_from_markdown_line(line) == expect
 
     def test_value_containing_fullwidth_colon_is_not_truncated(self):
         """反向用例：修复前 value 会被截成「北京」。"""
         from app.services.facts_extractor import extract_value_from_markdown_line
+
         name, value = extract_value_from_markdown_line("- **施工部位**: 主体：三层")
         assert name == "施工部位"
         assert value == "主体：三层"
@@ -85,6 +91,7 @@ class TestFactLineSplit:
     def test_ascii_colon_inside_value_survives(self):
         """值内多个半角冒号（时间 9:00:00）不得被切。"""
         from app.services.facts_extractor import extract_value_from_markdown_line
+
         name, value = extract_value_from_markdown_line("- **浇筑时间**: 9:00:00 开始")
         assert name == "浇筑时间"
         assert value == "9:00:00 开始"
@@ -92,16 +99,14 @@ class TestFactLineSplit:
     def test_simulated_marker_still_stripped_first(self):
         """P0-1 修复不得回归 2026-09-21 的模拟值标记剥离顺序。"""
         from app.services.facts_extractor import SIMULATED_MARKER, extract_value_from_markdown_line
-        name, value = extract_value_from_markdown_line(
-            f"- **基坑深度**: 12.5m{SIMULATED_MARKER}")
+
+        name, value = extract_value_from_markdown_line(f"- **基坑深度**: 12.5m{SIMULATED_MARKER}")
         assert name == "基坑深度"
         assert value == "12.5m"
 
     def test_separator_constant_is_single_source(self):
         """半角/全角分隔符收敛为单一常量，禁止再出现字面量双写。"""
-        src = io.open(
-            os.path.join(APP, "app", "services", "facts_extractor.py"),
-            encoding="utf-8").read()
+        src = io.open(os.path.join(APP, "app", "services", "facts_extractor.py"), encoding="utf-8").read()
         assert "_FACT_LINE_SEPARATORS" in src
         # 旧实现 for sep in ["：", ":"] 已被 _split_fact_line 取代
         assert 'for sep in ["：", ":"]' not in src
@@ -114,24 +119,22 @@ class TestFactLineSplit:
         非静默错误，会在**运行期**才炸。A/B 反向验证（A2：同时摘掉两处
         import）实测本例一度全绿，正是这个缺口。
         """
-        tree = ast.parse(io.open(
-            os.path.join(APP, "app", "services", "doc_pipeline", "pipeline.py"),
-            encoding="utf-8").read())
-        calls = {_call_name(n) for n in ast.walk(tree)
-                 if isinstance(n, ast.Call)}
-        assert "extract_value_from_markdown_line" in calls, \
-            "shim 未复用 name/value 单一出口"
+        tree = ast.parse(
+            io.open(os.path.join(APP, "app", "services", "doc_pipeline", "pipeline.py"), encoding="utf-8").read()
+        )
+        calls = {_call_name(n) for n in ast.walk(tree) if isinstance(n, ast.Call)}
+        assert "extract_value_from_markdown_line" in calls, "shim 未复用 name/value 单一出口"
         # AST 判定：注释/docstring 里提到 c.split 不算（§5.14 锚点纪律）
         assert "c.split" not in calls, "仍存在第二套 name/value 切分"
         assert "split" not in calls, "仍存在裸 split 切分"
         # 名字必须真的被绑定（否则运行期 NameError）
         bound = set()
         for n in ast.walk(tree):
-            if isinstance(n, ast.ImportFrom) and n.module and \
-                    n.module.endswith("facts_extractor"):
+            if isinstance(n, ast.ImportFrom) and n.module and n.module.endswith("facts_extractor"):
                 bound.update(a.name for a in n.names)
-        assert "extract_value_from_markdown_line" in bound, \
-            "调用了 extract_value_from_markdown_line 却未 import（运行期 NameError）"
+        assert (
+            "extract_value_from_markdown_line" in bound
+        ), "调用了 extract_value_from_markdown_line 却未 import（运行期 NameError）"
 
 
 # =========================================================================
@@ -147,18 +150,23 @@ class TestSegmentFailedVisible:
 
     def test_result_has_declared_failed_fields(self):
         from app.services.facts_extractor import ExtractionResult
+
         r = ExtractionResult()
         assert r.declared_failed_chunks == 0
         assert r.declared_failed_details == []
 
     def test_segment_stats_carries_declared_failed(self):
         from app.services.facts_extractor import ExtractionResult
+
         r = ExtractionResult()
-        r.segment_stats = {"total": 3, "ok": 2, "failed": 0,
-                           "declared_failed": 1,
-                           "declared_failed_details": [{"index": 2}]}
-        payload = __import__(
-            "app.services.facts_extractor", fromlist=["x"]).format_for_frontend(r)
+        r.segment_stats = {
+            "total": 3,
+            "ok": 2,
+            "failed": 0,
+            "declared_failed": 1,
+            "declared_failed_details": [{"index": 2}],
+        }
+        payload = __import__("app.services.facts_extractor", fromlist=["x"]).format_for_frontend(r)
         # 加法式契约：segment_stats 整体透传，前端无需改契约即可读到
         assert payload["segment_stats"]["declared_failed"] == 1
 
@@ -173,8 +181,9 @@ class TestSegmentFailedVisible:
 
         monkeypatch.setattr(fx, "collect_json_response", fake_collect)
         err: dict = {}
-        items = asyncio.run(fx.extract_from_single_chunk(
-            text="x" * 300, context_summary="", chunk_index=0, error_out=err))
+        items = asyncio.run(
+            fx.extract_from_single_chunk(text="x" * 300, context_summary="", chunk_index=0, error_out=err)
+        )
         assert items == []
         assert err.get("segment_failed") is True
         assert "error" not in err, "模型声明失败不得伪装成「真正报错」"
@@ -185,16 +194,16 @@ class TestSegmentFailedVisible:
 
         from app.services import facts_extractor as fx
 
-        payload = {"facts": [{"name": "基坑深度", "value": "12.5m"}],
-                   "segment_failed": True}
+        payload = {"facts": [{"name": "基坑深度", "value": "12.5m"}], "segment_failed": True}
 
         async def fake_collect(messages, validate_fn, **kw):
             return payload, {}
 
         monkeypatch.setattr(fx, "collect_json_response", fake_collect)
         err: dict = {}
-        items = asyncio.run(fx.extract_from_single_chunk(
-            text="x" * 300, context_summary="", chunk_index=0, error_out=err))
+        items = asyncio.run(
+            fx.extract_from_single_chunk(text="x" * 300, context_summary="", chunk_index=0, error_out=err)
+        )
         assert len(items) == 1
         assert "segment_failed" not in err
 
@@ -209,16 +218,15 @@ class TestSegmentFailedVisible:
 
         monkeypatch.setattr(fx, "collect_json_response", fake_collect)
         err: dict = {}
-        items = asyncio.run(fx.extract_from_single_chunk(
-            text="x" * 300, context_summary="", chunk_index=0, error_out=err))
+        items = asyncio.run(
+            fx.extract_from_single_chunk(text="x" * 300, context_summary="", chunk_index=0, error_out=err)
+        )
         assert items == []
         assert err == {}, "合法空段既非失败也非模型声明失败"
 
     def test_pipeline_surfaces_declared_failed(self):
         """静态锁：编排层必须登记 declared_failed 并给「重新提取」恢复入口。"""
-        src = io.open(
-            os.path.join(APP, "app", "services", "facts_extractor.py"),
-            encoding="utf-8").read()
+        src = io.open(os.path.join(APP, "app", "services", "facts_extractor.py"), encoding="utf-8").read()
         assert "declared_failed" in src
         assert '"declared_failed": len(declared_failed)' in src
         # 告警必须给出恢复入口（普通重跑会跳过这些段）
@@ -226,16 +234,13 @@ class TestSegmentFailedVisible:
 
     def test_declared_failed_not_counted_as_failed(self):
         """反向用例：declared_failed 与 failed 是两个独立计数，不得混用。"""
-        src = io.open(
-            os.path.join(APP, "app", "services", "facts_extractor.py"),
-            encoding="utf-8").read()
+        src = io.open(os.path.join(APP, "app", "services", "facts_extractor.py"), encoding="utf-8").read()
         # AST 判定：扫 segment_stats 字典字面量的键值对（§5.14 锚点纪律）
         seg_pairs = {}
         for n in ast.walk(ast.parse(src)):
             if not isinstance(n, ast.Dict):
                 continue
-            keys = [k.value for k in n.keys
-                    if isinstance(k, ast.Constant) and isinstance(k.value, str)]
+            keys = [k.value for k in n.keys if isinstance(k, ast.Constant) and isinstance(k.value, str)]
             if "declared_failed" not in keys:
                 continue
             for k, v in zip(n.keys, n.values):
@@ -246,11 +251,9 @@ class TestSegmentFailedVisible:
                 elif k.value == "declared_failed":
                     seg_pairs["declared_failed"] = ast.dump(v)
         assert seg_pairs, "未找到 segment_stats 字典字面量"
-        assert "fail_count" in seg_pairs["failed"], \
-            f"failed 键应取 fail_count，实际：{seg_pairs['failed']}"
+        assert "fail_count" in seg_pairs["failed"], f"failed 键应取 fail_count，实际：{seg_pairs['failed']}"
         assert "declared_failed" in seg_pairs["declared_failed"]
-        assert seg_pairs["failed"] != seg_pairs["declared_failed"], \
-            "failed 与 declared_failed 不得取同一个计数"
+        assert seg_pairs["failed"] != seg_pairs["declared_failed"], "failed 与 declared_failed 不得取同一个计数"
 
 
 # =========================================================================
@@ -265,12 +268,14 @@ class TestFactWriteR13:
 
     def test_helpers_exist(self):
         from app.routers import global_facts as gf
+
         assert callable(gf._require_fact_write_cursor)
         assert callable(gf._assert_fact_write_applied)
 
     def test_none_cursor_raises_503(self):
         from app.routers.global_facts import _assert_fact_write_applied, _require_fact_write_cursor
         from fastapi import HTTPException
+
         with pytest.raises(HTTPException) as ei:
             _require_fact_write_cursor(None, "测试写")
         assert ei.value.status_code == 503
@@ -303,33 +308,41 @@ class TestFactWriteR13:
 
         assert _assert_fact_write_applied(_Cur(), "批量", expect=0) == 0
 
-    @pytest.mark.parametrize("fn_name", [
-        "resolve_fact", "resolve_conflict", "delete_fact",
-        "batch_resolve", "ack_fact_stale", "ack_fact_stale_batch",
-    ])
+    @pytest.mark.parametrize(
+        "fn_name",
+        [
+            "resolve_fact",
+            "resolve_conflict",
+            "delete_fact",
+            "batch_resolve",
+            "ack_fact_stale",
+            "ack_fact_stale_batch",
+        ],
+    )
     def test_every_mutating_route_uses_guard(self, fn_name):
         """每个会写 global_facts 的端点函数体必须出现守卫调用。"""
         from app.routers import global_facts as gf
+
         fn = getattr(gf, fn_name, None)
         if fn is None:
             pytest.skip(f"{fn_name} 不存在")
         src = inspect.getsource(fn)
-        assert ("_assert_fact_write_applied" in src
-                or "_require_fact_write_cursor" in src), \
-            f"{fn_name} 未接入 R13 守卫"
+        assert "_assert_fact_write_applied" in src or "_require_fact_write_cursor" in src, f"{fn_name} 未接入 R13 守卫"
 
     def test_item_update_path_uses_guard(self):
         from app.routers import global_facts as gf
-        assert "_assert_fact_write_applied" in inspect.getsource(
-            gf._apply_item_updates)
+
+        assert "_assert_fact_write_applied" in inspect.getsource(gf._apply_item_updates)
 
     def test_group_rebuild_delete_uses_guard(self):
         from app.routers import global_facts as gf
+
         assert "_require_fact_write_cursor" in inspect.getsource(gf.update_fact)
 
     def test_batch_resolve_reports_actual_rowcount(self):
         """batch-resolve 必须回实际影响行数，而非 len(changed_ids) 意图数。"""
         from app.routers import global_facts as gf
+
         src = inspect.getsource(gf.batch_resolve)
         assert '"changed": changed_applied' in src
         assert '"changed": len(changed_ids)' not in src
@@ -340,15 +353,17 @@ class TestFactWriteR13:
         src = io.open(p, encoding="utf-8").read()
         # AST 判定：只禁真实属性/取值访问，注释与 docstring 天然豁免（§5.14）
         tree = ast.parse(src)
-        bare = [n.attr for n in ast.walk(tree)
-                if isinstance(n, ast.Attribute) and n.attr == "rowcount"]
+        bare = [n.attr for n in ast.walk(tree) if isinstance(n, ast.Attribute) and n.attr == "rowcount"]
         assert bare == [], "出现裸 cur.rowcount，应走 safe_rowcount"
         getters = []
         for n in ast.walk(tree):
-            if (isinstance(n, ast.Call) and _call_name(n) == "getattr"
-                    and len(n.args) >= 2
-                    and isinstance(n.args[1], ast.Constant)
-                    and n.args[1].value == "rowcount"):
+            if (
+                isinstance(n, ast.Call)
+                and _call_name(n) == "getattr"
+                and len(n.args) >= 2
+                and isinstance(n.args[1], ast.Constant)
+                and n.args[1].value == "rowcount"
+            ):
                 getters.append(n.lineno)
         assert getters == [], f"出现 getattr(cur,'rowcount') 绕过：行 {getters}"
 
@@ -365,9 +380,18 @@ class TestCrossValidatorAdjudicableGate:
     """
 
     class _It:
-        def __init__(self, name, value, is_simulated=False, is_stale=False,
-                     confidence=1.0, source="s", has_conflict=False,
-                     conflict_values=None, key=""):
+        def __init__(
+            self,
+            name,
+            value,
+            is_simulated=False,
+            is_stale=False,
+            confidence=1.0,
+            source="s",
+            has_conflict=False,
+            conflict_values=None,
+            key="",
+        ):
             self.name = name
             self.value = value
             self.is_simulated = is_simulated
@@ -380,6 +404,7 @@ class TestCrossValidatorAdjudicableGate:
 
     def test_simulated_does_not_generate_conflict(self):
         from app.services.facts_cross_validators import run_cross_validations
+
         items = [
             self._It("总工期", "90日历天"),
             self._It("总工期", "120日历天", is_simulated=True),
@@ -391,6 +416,7 @@ class TestCrossValidatorAdjudicableGate:
 
     def test_stale_does_not_generate_conflict(self):
         from app.services.facts_cross_validators import run_cross_validations
+
         items = [
             self._It("总工期", "90日历天"),
             self._It("总工期", "120日历天", is_stale=True),
@@ -399,9 +425,12 @@ class TestCrossValidatorAdjudicableGate:
         for it in items:
             assert it.has_conflict is False
 
-    def test_real_facts_still_conflict(self, ):
+    def test_real_facts_still_conflict(
+        self,
+    ):
         """反向用例：真实值之间的矛盾必须仍被报出（不得过度门控）。"""
         from app.services.facts_cross_validators import run_cross_validations
+
         items = [
             self._It("总工期", "90日历天"),
             self._It("总工期", "120日历天"),
@@ -412,8 +441,8 @@ class TestCrossValidatorAdjudicableGate:
 
     def test_all_ineligible_returns_empty(self):
         from app.services.facts_cross_validators import run_cross_validations
-        items = [self._It("总工期", "90日历天", is_simulated=True),
-                 self._It("总工期", "120日历天", is_stale=True)]
+
+        items = [self._It("总工期", "90日历天", is_simulated=True), self._It("总工期", "120日历天", is_stale=True)]
         assert run_cross_validations(items) == []
 
     def test_missing_attributes_default_to_adjudicable(self):
@@ -423,14 +452,15 @@ class TestCrossValidatorAdjudicableGate:
         class _Bare:
             name = "x"
             value = "y"
+
         assert _is_adjudicable(_Bare()) is True
 
     def test_pipeline_shim_exposes_both_dimensions(self):
         """doc_pipeline 的 _Item 必须暴露 is_simulated / is_stale。"""
         p = os.path.join(APP, "app", "services", "doc_pipeline", "pipeline.py")
         src = io.open(p, encoding="utf-8").read()
-        assert "self.is_simulated = bool(row.get(\"is_simulated\"))" in src
-        assert "self.is_stale = bool(row.get(\"is_stale\"))" in src
+        assert 'self.is_simulated = bool(row.get("is_simulated"))' in src
+        assert 'self.is_stale = bool(row.get("is_stale"))' in src
         assert "is_simulated, is_stale, has_conflict" in src, "SELECT 未取 is_stale"
 
 
@@ -443,6 +473,7 @@ class TestDangerParamReachability:
     def test_every_threshold_param_is_producible(self):
         from app.services import scheme_classification as sc
         from app.services.facts_classification import DANGER_PARAM_RULES
+
         producible = {p for _kw, p in DANGER_PARAM_RULES}
         declared = set()
         for _name, spec in sc.HAZARD_THRESHOLDS.items():
@@ -487,8 +518,7 @@ class TestDangerParamReachability:
         """反向用例：立杆步距是「间距」，映射到 height 会漏判脚手架超规模。"""
         from app.services.facts_classification import DANGER_PARAM_RULES, extract_danger_params
 
-        targets = {p for kws, p in DANGER_PARAM_RULES for k in kws
-                   if k == "立杆步距"}
+        targets = {p for kws, p in DANGER_PARAM_RULES for k in kws if k == "立杆步距"}
         assert targets == set(), "立杆步距不得映射到任何高度类阈值参数"
 
         class _F:
@@ -504,6 +534,7 @@ class TestDangerParamReachability:
         （两表语义耦合但结构独立；只改其一会让事实落「未分类」空串。）
         """
         from app.services.facts_classification import DANGER_PARAM_RULES, classify_chapter_from_text
+
         unclassified = []
         for kws, _p in DANGER_PARAM_RULES:
             for kw in kws:
@@ -524,6 +555,7 @@ class TestDangerParamReachability:
         """
         from app.services import facts_classification as fc
         from app.services import facts_cross_validators as fv
+
         assert fv.LENGTH_UNITS, "校验器未声明长度单位集（parity 判据失效）"
         missing = set(fv.LENGTH_UNITS) - set(fc._UNIT_TO_METER)
         assert missing == set(), f"危大阈值长度单位缺口：{sorted(missing)}"
@@ -533,10 +565,10 @@ class TestDangerParamReachability:
         import ast as _ast
 
         from app.services import facts_cross_validators as fv
+
         assert set(fv._UNIT_TO_BASE) == set(fv._UNIT_SPEC)
         assert set(fv._UNIT_DIM) == set(fv._UNIT_SPEC)
-        assert set(fv.LENGTH_UNITS) == {
-            u for u, (d, _b) in fv._UNIT_SPEC.items() if d == "length"}
+        assert set(fv.LENGTH_UNITS) == {u for u, (d, _b) in fv._UNIT_SPEC.items() if d == "length"}
         # 仿射量纲不得混入长度集（温度比值换算无意义）
         assert "temperature" not in set(fv.LENGTH_UNITS)
         # 每个单位都必须有非零基准系数
@@ -549,35 +581,45 @@ class TestDangerParamReachability:
             targets = None
             if isinstance(n, _ast.Assign) and len(n.targets) == 1:
                 targets, value = n.targets, n.value
-            elif isinstance(n, _ast.AnnAssign):      # LENGTH_UNITS 带类型标注
+            elif isinstance(n, _ast.AnnAssign):  # LENGTH_UNITS 带类型标注
                 targets, value = [n.target], n.value
             if targets is None or not isinstance(targets[0], _ast.Name):
                 continue
-            if targets[0].id in ("_UNIT_TO_BASE", "_UNIT_DIM", "LENGTH_UNITS") \
-                    and value is not None and _has_comprehension(value):
+            if (
+                targets[0].id in ("_UNIT_TO_BASE", "_UNIT_DIM", "LENGTH_UNITS")
+                and value is not None
+                and _has_comprehension(value)
+            ):
                 derived.add(targets[0].id)
-        assert derived == {"_UNIT_TO_BASE", "_UNIT_DIM", "LENGTH_UNITS"}, (
-            f"单位视图未由 _UNIT_SPEC 推导（手写副本会漂移）：缺 {sorted(
-                {'_UNIT_TO_BASE', '_UNIT_DIM', 'LENGTH_UNITS'} - derived)}")
+        assert derived == {
+            "_UNIT_TO_BASE",
+            "_UNIT_DIM",
+            "LENGTH_UNITS",
+        }, f"单位视图未由 _UNIT_SPEC 推导（手写副本会漂移）：缺 {sorted(
+                {'_UNIT_TO_BASE', '_UNIT_DIM', 'LENGTH_UNITS'} - derived)}"
 
-    @pytest.mark.parametrize("text,dim,unit", [
-        ("12.5kN", "force", "kn"),
-        ("12.5kN/m²", "pressure", "kn/m2"),
-        ("3.5 kN/m", "line_load", "kn/m"),
-        ("500㎡", "area", "m2"),
-        ("120m²", "area", "m2"),
-        ("2.0m3", "volume", "m3"),
-        ("500L", "volume", "l"),
-        ("90日历天", "duration", "日历天"),
-        ("3个月", "duration", "个月"),
-        ("30℃", "temperature", "℃"),
-        ("80%", "ratio", "%"),
-        ("20kPa", "pressure", "kpa"),
-        ("2.5MPa", "pressure", "mpa"),
-    ])
+    @pytest.mark.parametrize(
+        "text,dim,unit",
+        [
+            ("12.5kN", "force", "kn"),
+            ("12.5kN/m²", "pressure", "kn/m2"),
+            ("3.5 kN/m", "line_load", "kn/m"),
+            ("500㎡", "area", "m2"),
+            ("120m²", "area", "m2"),
+            ("2.0m3", "volume", "m3"),
+            ("500L", "volume", "l"),
+            ("90日历天", "duration", "日历天"),
+            ("3个月", "duration", "个月"),
+            ("30℃", "temperature", "℃"),
+            ("80%", "ratio", "%"),
+            ("20kPa", "pressure", "kpa"),
+            ("2.5MPa", "pressure", "mpa"),
+        ],
+    )
     def test_quantity_dimension_detection(self, text, dim, unit):
         """量纲必须判对 —— 「解析成功但量纲全错」比不解析更危险。"""
         from app.services.facts_cross_validators import _extract_quantity
+
         q = _extract_quantity(text)
         assert q is not None, f"{text!r} 未解析出量纲"
         assert q[1] == unit, f"{text!r} 单位归一错：{q[1]} != {unit}"
@@ -587,6 +629,7 @@ class TestDangerParamReachability:
     def test_no_unit_text_yields_none(self, text):
         """无单位文本不得被误判出量纲（否则纯数字/纯文本全被卷进冲突判定）。"""
         from app.services.facts_cross_validators import _extract_quantity
+
         assert _extract_quantity(text) is None
 
     def test_suspect_factor_uses_relative_tolerance(self):
@@ -596,10 +639,10 @@ class TestDangerParamReachability:
         都会被误判成「恰好 1000 倍的单位换算错误」。本例 ratio = 1e9。
         """
         from app.services.facts_cross_validators import _SUSPECT_FACTORS
+
         ratio = 1e9
         additive = any(abs(1.0 / ratio - f) <= 1e-3 for f in _SUSPECT_FACTORS)
-        relative = any(abs((1.0 / ratio) / f - 1.0) <= 1e-3
-                       for f in _SUSPECT_FACTORS)
+        relative = any(abs((1.0 / ratio) / f - 1.0) <= 1e-3 for f in _SUSPECT_FACTORS)
         assert additive is True, "前置条件失效：加法容差本就不误报"
         assert relative is False, "相对容差仍在误报"
 
@@ -616,14 +659,15 @@ class TestDangerParamReachability:
                 s.confidence = 1.0
                 s.source = "s"
 
-        cs = run_cross_validations([
-            _It("施工总荷载", "12500N", "total_load"),
-            _It("施工总荷载", "0.0125mN", "total_load"),
-        ])
-        assert not [c for c in cs
-                    if c["rule_id"] == "XV-NUM-UNIT"
-                    and c["conflict_type"] == "numeric_scale_suspect"], \
-            "ratio=1e9 被误判成单位换算错误"
+        cs = run_cross_validations(
+            [
+                _It("施工总荷载", "12500N", "total_load"),
+                _It("施工总荷载", "0.0125mN", "total_load"),
+            ]
+        )
+        assert not [
+            c for c in cs if c["rule_id"] == "XV-NUM-UNIT" and c["conflict_type"] == "numeric_scale_suspect"
+        ], "ratio=1e9 被误判成单位换算错误"
 
     def test_force_scale_typo_detected(self):
         """正向：kN↔N 的 1000 倍换算笔误必须被点出。
@@ -644,14 +688,15 @@ class TestDangerParamReachability:
                 s.source = "s"
 
         for a, b in (("12.5kN", "12.5N"), ("12.5m", "12.5cm")):
-            cs = run_cross_validations([
-                _It("施工总荷载", a, "total_load"),
-                _It("施工总荷载", b, "total_load"),
-            ])
-            assert [c for c in cs
-                    if c["rule_id"] == "XV-NUM-UNIT"
-                    and c["conflict_type"] == "numeric_scale_suspect"], \
-                f"{a} vs {b} 的换算比笔误未被检出"
+            cs = run_cross_validations(
+                [
+                    _It("施工总荷载", a, "total_load"),
+                    _It("施工总荷载", b, "total_load"),
+                ]
+            )
+            assert [
+                c for c in cs if c["rule_id"] == "XV-NUM-UNIT" and c["conflict_type"] == "numeric_scale_suspect"
+            ], f"{a} vs {b} 的换算比笔误未被检出"
 
     def test_same_unit_scale_difference_not_called_unit_typo(self):
         """反向：同单位的量级差**不得**被标成「单位换算错误」（会误导用户）。"""
@@ -666,12 +711,15 @@ class TestDangerParamReachability:
                 s.confidence = 1.0
                 s.source = "s"
 
-        cs = run_cross_validations([
-            _It("开挖深度", "12.5m", "depth"),
-            _It("开挖深度", "0.125m", "depth"),
-        ])
-        assert not [c for c in cs if c["rule_id"] == "XV-NUM-UNIT"], \
-            "同单位量级差被误标成单位换算错误（口径应只比不同单位）"
+        cs = run_cross_validations(
+            [
+                _It("开挖深度", "12.5m", "depth"),
+                _It("开挖深度", "0.125m", "depth"),
+            ]
+        )
+        assert not [
+            c for c in cs if c["rule_id"] == "XV-NUM-UNIT"
+        ], "同单位量级差被误标成单位换算错误（口径应只比不同单位）"
 
     def test_affine_dimension_only_flags_same_number(self):
         """温度是仿射量纲：只判「同数值不同单位」，不按比值判等价。"""
@@ -686,18 +734,20 @@ class TestDangerParamReachability:
                 s.confidence = 1.0
                 s.source = "s"
 
-        same = run_cross_validations([
-            _It("养护温度", "30℃", "curing_temp"),
-            _It("养护温度", "30℉", "curing_temp"),
-        ])
-        assert [c for c in same if c["rule_id"] == "XV-NUM-UNIT"], \
-            "30℃/30℉ 必有一处写错，应报出"
-        diff = run_cross_validations([
-            _It("养护温度", "30℃", "curing_temp"),
-            _It("养护温度", "40℉", "curing_temp"),
-        ])
-        assert not [c for c in diff if c["rule_id"] == "XV-NUM-UNIT"], \
-            "仿射量纲不得按比值换算（30℃ 与 40℉ 无换算关系）"
+        same = run_cross_validations(
+            [
+                _It("养护温度", "30℃", "curing_temp"),
+                _It("养护温度", "30℉", "curing_temp"),
+            ]
+        )
+        assert [c for c in same if c["rule_id"] == "XV-NUM-UNIT"], "30℃/30℉ 必有一处写错，应报出"
+        diff = run_cross_validations(
+            [
+                _It("养护温度", "30℃", "curing_temp"),
+                _It("养护温度", "40℉", "curing_temp"),
+            ]
+        )
+        assert not [c for c in diff if c["rule_id"] == "XV-NUM-UNIT"], "仿射量纲不得按比值换算（30℃ 与 40℉ 无换算关系）"
 
     def test_same_name_groups_by_fact_key(self):
         """✅ 不同显示名 + 同一 fact_key 的事实必须被比对（旧实现漏报）。"""
@@ -712,12 +762,13 @@ class TestDangerParamReachability:
                 s.confidence = 1.0
                 s.source = "s"
 
-        cs = run_cross_validations([
-            _It("总工期", "90日历天", "total_duration"),
-            _It("施工总工期", "120日历天", "total_duration"),
-        ])
-        assert [c for c in cs if c["rule_id"] == "XV-SAME-NAME"], \
-            "同一 fact_key、不同显示名的取值分歧未被检出"
+        cs = run_cross_validations(
+            [
+                _It("总工期", "90日历天", "total_duration"),
+                _It("施工总工期", "120日历天", "total_duration"),
+            ]
+        )
+        assert [c for c in cs if c["rule_id"] == "XV-SAME-NAME"], "同一 fact_key、不同显示名的取值分歧未被检出"
 
     def test_same_name_marks_conflict_on_key_group(self):
         """按 key 分组时，「初始无候选」的条目必须被打上 has_conflict。"""
@@ -735,8 +786,7 @@ class TestDangerParamReachability:
         a = _It("总工期", "90日历天", "total_duration")
         b = _It("施工总工期", "120日历天", "total_duration")
         run_cross_validations([a, b])
-        assert a.has_conflict is True and b.has_conflict is True, \
-            "key 分组未回写 has_conflict"
+        assert a.has_conflict is True and b.has_conflict is True, "key 分组未回写 has_conflict"
 
     def test_missing_key_falls_back_to_name(self):
         """缺 fact_key 的条目（历史 shim / 手工替身）仍按 name 分组，行为不变。"""
@@ -744,18 +794,20 @@ class TestDangerParamReachability:
 
         class _It:
             def __init__(s, n, v):
-                s.name, s.value, s.key = n, v, ""   # 无 key 属性语义的替身
+                s.name, s.value, s.key = n, v, ""  # 无 key 属性语义的替身
                 s.is_simulated = s.is_stale = False
                 s.has_conflict = False
                 s.conflict_values = []
                 s.confidence = 1.0
                 s.source = "s"
 
-        cs = run_cross_validations([
-            _It("总工期", "90日历天"), _It("总工期", "120日历天"),
-        ])
-        assert [c for c in cs if c["rule_id"] == "XV-SAME-NAME"], \
-            "无 key 时应回落按 name 分组（旧行为不得丢）"
+        cs = run_cross_validations(
+            [
+                _It("总工期", "90日历天"),
+                _It("总工期", "120日历天"),
+            ]
+        )
+        assert [c for c in cs if c["rule_id"] == "XV-SAME-NAME"], "无 key 时应回落按 name 分组（旧行为不得丢）"
 
     def test_different_keys_not_merged(self):
         """反向：不同 fact_key 即使显示名相同也不得跨 key 合并判定。"""
@@ -770,12 +822,13 @@ class TestDangerParamReachability:
                 s.confidence = 1.0
                 s.source = "s"
 
-        cs = run_cross_validations([
-            _It("总工期", "90日历天", "total_duration"),
-            _It("总工期", "120日历天", "other_thing"),
-        ])
-        assert not [c for c in cs if c["rule_id"] == "XV-SAME-NAME"], \
-            "不同 fact_key 被错误合并"
+        cs = run_cross_validations(
+            [
+                _It("总工期", "90日历天", "total_duration"),
+                _It("总工期", "120日历天", "other_thing"),
+            ]
+        )
+        assert not [c for c in cs if c["rule_id"] == "XV-SAME-NAME"], "不同 fact_key 被错误合并"
 
     def test_dm_km_convertible(self):
         from app.services.facts_classification import extract_danger_params
@@ -784,8 +837,7 @@ class TestDangerParamReachability:
             def __init__(s, n, v):
                 s.name, s.value, s.key = n, v, ""
 
-        assert extract_danger_params(
-            [_F("人工挖孔桩深度", "0.5km")]).get("pile_depth") == pytest.approx(500.0)
+        assert extract_danger_params([_F("人工挖孔桩深度", "0.5km")]).get("pile_depth") == pytest.approx(500.0)
 
 
 # =========================================================================
@@ -802,6 +854,7 @@ class TestChunkHashNoCollision:
         import hashlib
 
         from app.services.facts_extractor import _chunk_hash
+
         a, b = "a\udce9b", "ab"
         old = hashlib.sha1(a.encode("utf-8", errors="ignore")).hexdigest()[:16]
         assert old == _chunk_hash(b), "前置条件失效：旧口径本就不碰撞"
@@ -812,15 +865,13 @@ class TestChunkHashNoCollision:
         import hashlib
 
         from app.services.facts_extractor import _chunk_hash
-        for s in ["", "普通中文段落", "基坑深度 12.5m\nC30 混凝土",
-                  "工期 90 日历天\n| 项目 | 值 |", "⚠️(模拟值) 标记"]:
+
+        for s in ["", "普通中文段落", "基坑深度 12.5m\nC30 混凝土", "工期 90 日历天\n| 项目 | 值 |", "⚠️(模拟值) 标记"]:
             old = hashlib.sha1(s.encode("utf-8", errors="ignore")).hexdigest()[:16]
             assert _chunk_hash(s) == old, f"正常文本指纹漂移：{s!r}"
 
     def test_uses_surrogatepass(self):
-        src = io.open(
-            os.path.join(APP, "app", "services", "facts_extractor.py"),
-            encoding="utf-8").read()
+        src = io.open(os.path.join(APP, "app", "services", "facts_extractor.py"), encoding="utf-8").read()
         # AST 判定：只看 encode() 的 errors 关键字实参（docstring 说明不算，§5.14）
         err_modes = []
         for n in ast.walk(ast.parse(src)):
@@ -829,10 +880,8 @@ class TestChunkHashNoCollision:
             for kw in n.keywords:
                 if kw.arg == "errors" and isinstance(kw.value, ast.Constant):
                     err_modes.append((n.lineno, kw.value.value))
-        assert ("surrogatepass" in {m for _l, m in err_modes}), \
-            "_chunk_hash 未使用 surrogatepass"
-        assert "ignore" not in {m for _l, m in err_modes}, \
-            f"仍存在 errors='ignore'（会丢孤立代理字符）：{err_modes}"
+        assert "surrogatepass" in {m for _l, m in err_modes}, "_chunk_hash 未使用 surrogatepass"
+        assert "ignore" not in {m for _l, m in err_modes}, f"仍存在 errors='ignore'（会丢孤立代理字符）：{err_modes}"
 
 
 # =========================================================================
@@ -843,6 +892,7 @@ class TestMergeEmptyKeyNoCollapse:
 
     def _mk(self, name, value, key=""):
         from app.services.facts_extractor import FactItem
+
         it = FactItem(name=name, value=value)
         it.key = key
         it.is_simulated = False
@@ -855,6 +905,7 @@ class TestMergeEmptyKeyNoCollapse:
 
     def test_distinct_empty_key_items_stay_distinct(self):
         from app.services.facts_extractor import merge_and_deduplicate
+
         items = [self._mk("甲", "1"), self._mk("乙", "2"), self._mk("丙", "3")]
         out = merge_and_deduplicate(items)
         assert len(out) == 3, "空 key 条目被塌缩"
@@ -864,6 +915,7 @@ class TestMergeEmptyKeyNoCollapse:
     def test_same_name_empty_key_still_dedups(self):
         """同名空 key 仍应聚类去重（守卫不能把去重能力一并关掉）。"""
         from app.services.facts_extractor import merge_and_deduplicate
+
         items = [self._mk("基坑深度", "12.5m"), self._mk("基坑深度", "12.5 m")]
         out = merge_and_deduplicate(items)
         assert len(out) == 1
@@ -871,6 +923,7 @@ class TestMergeEmptyKeyNoCollapse:
 
     def test_same_name_empty_key_conflict_still_detected(self):
         from app.services.facts_extractor import merge_and_deduplicate
+
         items = [self._mk("总工期", "90日历天"), self._mk("总工期", "120日历天")]
         out = merge_and_deduplicate(items)
         assert len(out) == 1
@@ -878,12 +931,14 @@ class TestMergeEmptyKeyNoCollapse:
 
     def test_real_key_dedup_unaffected(self):
         from app.services.facts_extractor import merge_and_deduplicate
+
         a, b = self._mk("基坑深度", "12.5m", "k1"), self._mk("基坑深度", "12.5m", "k1")
         out = merge_and_deduplicate([a, b])
         assert len(out) == 1
 
     def test_orphan_without_key_and_name_preserved(self):
         from app.services.facts_extractor import merge_and_deduplicate
+
         items = [self._mk("", ""), self._mk("", ""), self._mk("甲", "1")]
         out = merge_and_deduplicate(items)
         assert len(out) == 3
@@ -903,19 +958,18 @@ class TestFactsTaskExclusivity:
     """
 
     def _src(self):
-        return io.open(os.path.join(APP, "app", "routers", "sse_handlers.py"),
-                       encoding="utf-8").read()
+        return io.open(os.path.join(APP, "app", "routers", "sse_handlers.py"), encoding="utf-8").read()
 
     def test_all_three_sse_chains_use_exclusive_registration(self):
         src = self._src()
-        assert src.count("_register_task_exclusive(") >= 3, \
-            "三条生成链路未全部接入跨类型互斥"
+        assert src.count("_register_task_exclusive(") >= 3, "三条生成链路未全部接入跨类型互斥"
         assert "outline_generation" in src
         assert "content_generation" in src
         assert "facts_generation" in src
 
     def test_facts_conflicts_with_both_other_kinds(self):
         from app.routers import sse_handlers as sh
+
         src = inspect.getsource(sh.generate_facts)
         assert "_register_task_exclusive" in src
         assert "outline_generation" in src and "content_generation" in src
@@ -923,21 +977,27 @@ class TestFactsTaskExclusivity:
     def test_facts_no_longer_uses_plain_register(self):
         """事实链路不得再走无 conflict_types 的裸 register_task。"""
         from app.routers import sse_handlers as sh
+
         src = inspect.getsource(sh.generate_facts)
         assert not re.search(
-            r"=\s*await register_task\(\s*\"facts_generation\"", src), \
-            "仍存在无跨类型互斥的裸 register_task 调用"
+            r"=\s*await register_task\(\s*\"facts_generation\"", src
+        ), "仍存在无跨类型互斥的裸 register_task 调用"
 
     def test_conflict_path_yields_error_event(self):
         from app.routers import sse_handlers as sh
+
         src = inspect.getsource(sh.generate_facts)
         assert "_conflict is not None" in src
         assert "'event': 'error'" in src
 
     def test_task_registry_supports_facts_kind(self):
         from app.services.ai import task_registry as tr
-        src = io.open(tr.__file__.replace(".pyc", ".py"), encoding="utf-8").read() \
-            if tr.__file__.endswith(".pyc") else io.open(tr.__file__, encoding="utf-8").read()
+
+        src = (
+            io.open(tr.__file__.replace(".pyc", ".py"), encoding="utf-8").read()
+            if tr.__file__.endswith(".pyc")
+            else io.open(tr.__file__, encoding="utf-8").read()
+        )
         assert "conflict_types" in src
         assert "TaskTypeConflict" in src
 
@@ -953,10 +1013,15 @@ def _frontend_src() -> str:
     # 聚合 facade + 子模块读取，字面量提取与 parity 断言语义不变。
     parts = [io.open(p, encoding="utf-8").read()]
     wb = os.path.join(root, "frontend", "src", "pages", "schemeWorkbench")
-    if os.path.isdir(wb):
-        for fn in sorted(os.listdir(wb)):
-            if fn.endswith((".ts", ".tsx")):
-                parts.append(io.open(os.path.join(wb, fn), encoding="utf-8").read())
+    assert os.path.isdir(wb), f"拆分目录缺失：{wb}"
+    # R176（2026-11-04）：拆分仍在继续，非递归 listdir 会漏掉 tabs/ ——
+    # 递归扫描（os.walk）+ 非空兜底，下一次下沉时不会静默失锚。
+    files = []
+    for dirpath, _dirs, fnames in os.walk(wb):
+        files += [os.path.join(dirpath, n) for n in sorted(fnames) if n.endswith((".ts", ".tsx"))]
+    assert files, f"拆分目录未被递归扫描到（0 个 ts/tsx）：{wb}"
+    for fn_path in files:
+        parts.append(io.open(fn_path, encoding="utf-8").read())
     return "\n".join(parts)
 
 
@@ -976,9 +1041,9 @@ def _ts_record_literal(src: str, name: str) -> dict:
 
     out: dict = {}
     depth = 1
-    token = ""          # 当前顶层键累积缓冲
+    token = ""  # 当前顶层键累积缓冲
     key: str | None = None
-    val = ""            # 当前顶层值累积缓冲
+    val = ""  # 当前顶层值累积缓冲
     line_comment = False
     block_comment = False
     in_str = False
@@ -1070,33 +1135,38 @@ class TestFrontendFallbackParity:
 
     def test_chapter_titles_match_backend(self):
         from app.services.facts_classification import CHAPTER_ORDER, CHAPTER_TITLES
+
         fe = _ts_record_literal(_frontend_src(), "FACT_CHAPTER_TITLES")
         assert set(fe) == set(CHAPTER_ORDER), (
             f"前端兜底章节键与后端不一致："
             f"缺 {sorted(set(CHAPTER_ORDER) - set(fe))} / "
-            f"多 {sorted(set(fe) - set(CHAPTER_ORDER))}")
+            f"多 {sorted(set(fe) - set(CHAPTER_ORDER))}"
+        )
         for k in CHAPTER_ORDER:
             assert fe[k] == CHAPTER_TITLES[k], f"章节 {k} 标题不一致"
 
     def test_fact_attr_titles_match_backend(self):
         from app.services.facts_classification import FACT_ATTR_TITLES
+
         fe = _ts_record_literal(_frontend_src(), "FALLBACK_FACT_ATTR_TITLES")
-        assert set(fe) == set(FACT_ATTR_TITLES), (
-            f"前端兜底事实属性键不一致：{sorted(set(FACT_ATTR_TITLES) ^ set(fe))}")
+        assert set(fe) == set(FACT_ATTR_TITLES), f"前端兜底事实属性键不一致：{sorted(set(FACT_ATTR_TITLES) ^ set(fe))}"
         for k, v in FACT_ATTR_TITLES.items():
             assert fe[k] == v, f"事实属性 {k} 标题不一致"
 
     def test_source_kind_titles_match_backend(self):
         from app.services.facts_classification import SOURCE_KIND_TITLES
+
         fe = _ts_record_literal(_frontend_src(), "FALLBACK_SOURCE_KIND_TITLES")
-        assert set(fe) == set(SOURCE_KIND_TITLES), (
-            f"前端兜底来源类型键不一致：{sorted(set(SOURCE_KIND_TITLES) ^ set(fe))}")
+        assert set(fe) == set(
+            SOURCE_KIND_TITLES
+        ), f"前端兜底来源类型键不一致：{sorted(set(SOURCE_KIND_TITLES) ^ set(fe))}"
         for k, v in SOURCE_KIND_TITLES.items():
             assert fe[k] == v, f"来源类型 {k} 标题不一致"
 
     def test_category_map_payload_covers_all_three(self):
         """category-map 必须真的下发三套枚举（前端据此覆盖兜底表）。"""
         from app.services.facts_classification import category_map_payload
+
         p = category_map_payload()
         assert len(p["chapters"]) == 9
         assert p["fact_attr_titles"]
@@ -1105,19 +1175,17 @@ class TestFrontendFallbackParity:
     def test_frontend_actually_calls_category_map(self):
         """反向用例：兜底表不得又变成唯一来源（categoryMap 必须被页面调用）。"""
         src = _frontend_src()
-        assert "factsApi.categoryMap()" in src, "页面未消费 /category-map"
+        assert re.search(r"factsApi\s*\.\s*categoryMap\(\)", src), "页面未消费 /category-map"
         assert "setFactChapterTitles" in src
 
     def test_bid_analysis_tab_chapter_labels_parity(self):
         """BidAnalysisTab 的 CHAPTER_LABELS 兜底表同样必须与后端一致。"""
         from app.services.facts_classification import CHAPTER_ORDER, CHAPTER_TITLES
-        p = os.path.join(
-            os.path.dirname(APP),
-            "frontend", "src", "components", "BidAnalysisTab.tsx")
+
+        p = os.path.join(os.path.dirname(APP), "frontend", "src", "components", "BidAnalysisTab.tsx")
         assert os.path.exists(p)
         fe = _ts_record_literal(io.open(p, encoding="utf-8").read(), "CHAPTER_LABELS")
-        assert set(fe) == set(CHAPTER_ORDER), (
-            f"BidAnalysisTab 章节键不一致：{sorted(set(CHAPTER_ORDER) ^ set(fe))}")
+        assert set(fe) == set(CHAPTER_ORDER), f"BidAnalysisTab 章节键不一致：{sorted(set(CHAPTER_ORDER) ^ set(fe))}"
         for k in CHAPTER_ORDER:
             assert fe[k] == CHAPTER_TITLES[k], f"BidAnalysisTab 章节 {k} 标题不一致"
 
@@ -1137,12 +1205,14 @@ class TestContextBudgetSplit:
     def test_default_config_is_off(self):
         """默认关闭 → 行为与引入前逐字节一致。"""
         from app.config import settings
+
         assert settings.facts_context_budget_split is False
         assert settings.facts_context_length_limit == 0
 
     def test_switch_off_returns_baseline(self, monkeypatch):
         from app.config import settings
         from app.services import facts_extractor as fx
+
         monkeypatch.setattr(settings, "facts_context_budget_split", False)
         assert fx.resolve_chunk_size(fx.CHUNK_SIZE) == fx.CHUNK_SIZE
 
@@ -1150,18 +1220,19 @@ class TestContextBudgetSplit:
         """开启后不得再出现 30 万字级单段。"""
         from app.config import settings
         from app.services import facts_extractor as fx
+
         monkeypatch.setattr(settings, "facts_context_budget_split", True)
         monkeypatch.setattr(settings, "facts_context_length_limit", 0)
         monkeypatch.setattr(settings, "context_length_limit", 0)
         got = fx.resolve_chunk_size(fx.CHUNK_SIZE)
         assert got > fx.CHUNK_SIZE, "窗口够大时仍应放宽（该函数的意义所在）"
-        assert got <= fx.FACTS_SEGMENT_HARD_CEILING, \
-            f"单段 {got} 超过硬天花板，32k 窗口模型会直接超限"
+        assert got <= fx.FACTS_SEGMENT_HARD_CEILING, f"单段 {got} 超过硬天花板，32k 窗口模型会直接超限"
 
     def test_never_returns_the_old_optimistic_value(self, monkeypatch):
         """反向用例：不得再回落 400k 乐观默认（307930 量级）。"""
         from app.config import settings
         from app.services import facts_extractor as fx
+
         monkeypatch.setattr(settings, "facts_context_budget_split", True)
         monkeypatch.setattr(settings, "facts_context_length_limit", 0)
         monkeypatch.setattr(settings, "context_length_limit", 0)
@@ -1172,6 +1243,7 @@ class TestContextBudgetSplit:
         """facts 专属 > 全局 context_length_limit > 保守自动默认。"""
         from app.config import settings
         from app.services import facts_extractor as fx
+
         # ⚠️ 期望值必须取**硬天花板以下**：64000 会被夹到 60000，
         #    那是设计行为（单段过大会显著提高超时/限流风险），不是缺陷。
         monkeypatch.setattr(settings, "facts_context_length_limit", 0)
@@ -1187,6 +1259,7 @@ class TestContextBudgetSplit:
     def test_hard_ceiling_always_applies(self, monkeypatch):
         from app.config import settings
         from app.services import facts_extractor as fx
+
         monkeypatch.setattr(settings, "facts_context_length_limit", 10_000_000)
         assert fx.resolve_fact_context_chars() == fx.FACTS_SEGMENT_HARD_CEILING
 
@@ -1194,13 +1267,14 @@ class TestContextBudgetSplit:
         """自动默认必须小于旧的 400k 乐观默认（该仓不持久化模型窗口）。"""
         from app.services import facts_extractor as fx
         from app.services.facts_patches import DEFAULT_CONTEXT_LENGTH_LIMIT
-        assert fx.FACTS_AUTO_CONTEXT_CHARS < DEFAULT_CONTEXT_LENGTH_LIMIT, \
-            "自动默认不应继续沿用 400k 乐观假设"
+
+        assert fx.FACTS_AUTO_CONTEXT_CHARS < DEFAULT_CONTEXT_LENGTH_LIMIT, "自动默认不应继续沿用 400k 乐观假设"
 
     def test_invalid_config_falls_back(self, monkeypatch):
         """非法配置（非数字/负数/None）必须回落，不得抛。"""
         from app.config import settings
         from app.services import facts_extractor as fx
+
         for bad in ("abc", -1, None, 0):
             monkeypatch.setattr(settings, "facts_context_length_limit", bad)
             got = fx.resolve_fact_context_chars()
@@ -1212,19 +1286,32 @@ class TestUnitModelSingleSource:
 
     def test_covers_engineering_dimensions(self):
         from app.services.facts_cross_validators import _UNIT_DIM
+
         dims = set(_UNIT_DIM.values())
-        for want in ("length", "mass", "force", "line_load", "pressure",
-                     "area", "volume", "duration", "temperature", "ratio"):
+        for want in (
+            "length",
+            "mass",
+            "force",
+            "line_load",
+            "pressure",
+            "area",
+            "volume",
+            "duration",
+            "temperature",
+            "ratio",
+        ):
             assert want in dims, f"缺少量纲 {want}"
 
     def test_line_and_area_load_parsed(self):
         """复合单位此前只取到前缀（kN），线/面荷载永远解析不全。"""
         from app.services.facts_cross_validators import _extract_quantity
+
         assert _extract_quantity("12.5kN/m²")[2] == "pressure"
         assert _extract_quantity("3.5 kN/m")[2] == "line_load"
 
     def test_superscript_and_fullwidth_area(self):
         from app.services.facts_cross_validators import _extract_quantity
+
         for text in ("500㎡", "120m²", "120m2"):
             q = _extract_quantity(text)
             assert q is not None and q[2] == "area", f"{text} 面积解析错：{q}"
@@ -1232,6 +1319,7 @@ class TestUnitModelSingleSource:
     def test_volume_not_mistaken_for_length(self):
         """反向：``2.0m3`` 此前只取到 ``m`` → 体积被误判成长度（解析成功但量纲全错）。"""
         from app.services.facts_cross_validators import _extract_quantity
+
         q = _extract_quantity("2.0m3")
         assert q is not None and q[2] == "volume", f"体积量纲错：{q}"
 
@@ -1242,46 +1330,55 @@ class TestInsertColumnsSingleSource:
     def test_columns_defined_once(self):
         from app.routers import global_facts as gf
         from app.services import facts_extractor as fx
-        assert gf.MANUAL_FACT_INSERT_COLS is fx.GLOBAL_FACTS_INSERT_COLS, \
-            "路由侧必须是服务层列清单的**别名**，不得本地维护"
+
+        assert (
+            gf.MANUAL_FACT_INSERT_COLS is fx.GLOBAL_FACTS_INSERT_COLS
+        ), "路由侧必须是服务层列清单的**别名**，不得本地维护"
         assert gf.MANUAL_FACT_INSERT_SQL is fx.GLOBAL_FACTS_INSERT_SQL
 
     def test_row_width_matches_columns(self):
         """to_db_row / _manual_fact_row 的返回值个数必须等于列数。"""
         from app.services.facts_extractor import GLOBAL_FACTS_INSERT_COLS, FactItem
+
         it = FactItem(name="x", value="y")
         row = it.to_db_row("g", "p", "s", "T")
-        assert len(row) == len(GLOBAL_FACTS_INSERT_COLS), \
-            f"to_db_row {len(row)} 值 vs {len(GLOBAL_FACTS_INSERT_COLS)} 列"
+        assert len(row) == len(
+            GLOBAL_FACTS_INSERT_COLS
+        ), f"to_db_row {len(row)} 值 vs {len(GLOBAL_FACTS_INSERT_COLS)} 列"
 
     def test_placeholder_count_derived(self):
         from app.services.facts_extractor import GLOBAL_FACTS_INSERT_COLS, GLOBAL_FACTS_INSERT_SQL
+
         sql = GLOBAL_FACTS_INSERT_SQL
         assert sql.count("?") == len(GLOBAL_FACTS_INSERT_COLS)
         # 断言 VALUES 段（SQL 以 ")" 结尾，不能用 endswith 整串）
         values = sql.split("VALUES", 1)[1].strip()
-        assert values == "(" + ",".join("?" for _ in GLOBAL_FACTS_INSERT_COLS) + ")", \
-            "占位符必须由列数派生，且无多余空格（与既有 SQL 逐字一致）"
+        assert (
+            values == "(" + ",".join("?" for _ in GLOBAL_FACTS_INSERT_COLS) + ")"
+        ), "占位符必须由列数派生，且无多余空格（与既有 SQL 逐字一致）"
 
     def test_no_inline_column_list_in_persist(self):
         """persist_extraction 不得再内联列字面量（漂移源）。"""
         from app.services import facts_extractor as fx
+
         src = io.open(fx.__file__, encoding="utf-8").read()
         assert "GLOBAL_FACTS_INSERT_SQL, insert_buf" in src
         # 内联 INSERT 只应剩 GLOBAL_FACTS_INSERT_SQL 的定义处
-        assert src.count("INSERT INTO global_facts") == 1, \
-            "persist_extraction 仍在内联 INSERT 语句"
+        assert src.count("INSERT INTO global_facts") == 1, "persist_extraction 仍在内联 INSERT 语句"
 
     def test_dimension_columns_stay_last_four(self):
         """既有契约：to_db_row()[-4:] 是九大章节四维。"""
         from app.services.facts_extractor import FactItem
-        it = FactItem(name="x", value="y", chapter="plan", fact_attr="quantitative",
-                      source_kind="bid_doc", is_shared=True)
+
+        it = FactItem(
+            name="x", value="y", chapter="plan", fact_attr="quantitative", source_kind="bid_doc", is_shared=True
+        )
         row = it.to_db_row("g", "p", "s", "T")
         assert row[-4:] == ("plan", "quantitative", "bid_doc", 1)
 
     def test_is_stale_present_in_columns(self):
         from app.services.facts_extractor import GLOBAL_FACTS_INSERT_COLS
+
         assert "is_stale" in GLOBAL_FACTS_INSERT_COLS
 
 
@@ -1299,13 +1396,15 @@ class TestResolveSchemeProjectIdObservable:
                 class _C:
                     async def fetchone(self_inner):
                         return None
+
                 return _C()
 
         with caplog.at_level(logging.WARNING, logger="facts_extractor"):
             got = await resolve_scheme_project_id(_Db(), "no-such-scheme")
         assert got == ""
-        assert any("no-such-scheme" in r.getMessage() for r in caplog.records), \
-            "方案查不到必须留 WARNING（否则静默收窄作用域）"
+        assert any(
+            "no-such-scheme" in r.getMessage() for r in caplog.records
+        ), "方案查不到必须留 WARNING（否则静默收窄作用域）"
 
     @pytest.mark.asyncio
     async def test_logs_on_exception(self, caplog):
@@ -1320,8 +1419,7 @@ class TestResolveSchemeProjectIdObservable:
         with caplog.at_level(logging.WARNING, logger="facts_extractor"):
             got = await resolve_scheme_project_id(_Db(), "s1")
         assert got == ""
-        assert any("db down" in r.getMessage() for r in caplog.records), \
-            "DB 异常必须留 WARNING"
+        assert any("db down" in r.getMessage() for r in caplog.records), "DB 异常必须留 WARNING"
 
     @pytest.mark.asyncio
     async def test_empty_scheme_id_is_quiet(self, caplog):
@@ -1344,6 +1442,7 @@ class TestPlaceholderInventoryScope:
 
     def test_uses_canonical_query_builder(self):
         from app.services import placeholder_inventory as pi
+
         src = io.open(pi.__file__, encoding="utf-8").read()
         assert "build_injectable_facts_query" in src, "未复用统一作用域出口"
         # 必须带 gt 别名，否则 ORDER BY gt 报错 → 语料整体为空（假不可重跑）
@@ -1351,20 +1450,25 @@ class TestPlaceholderInventoryScope:
 
     def test_no_local_scheme_only_where(self):
         from app.services import placeholder_inventory as pi
+
         tree = ast.parse(io.open(pi.__file__, encoding="utf-8").read())
         # 只允许降级分支里保留 scheme_id-only SQL，且必须有中文告警注释说明
         # ⚠️ 锚点必须同时含 global_facts：裸 "WHERE scheme_id=?" 还会命中
         #    sections / bid_analysis_items 查询（§5.14 锚点过宽）。
         hits = []
         for n in ast.walk(tree):
-            if isinstance(n, ast.Constant) and isinstance(n.value, str) \
-                    and "global_facts" in n.value and "WHERE scheme_id=?" in n.value:
+            if (
+                isinstance(n, ast.Constant)
+                and isinstance(n.value, str)
+                and "global_facts" in n.value
+                and "WHERE scheme_id=?" in n.value
+            ):
                 hits.append(n.lineno)
-        assert len(hits) <= 1, (
-            f"仍有 {len(hits)} 处本地 global_facts scheme_id-only 查询：行 {hits}")
+        assert len(hits) <= 1, f"仍有 {len(hits)} 处本地 global_facts scheme_id-only 查询：行 {hits}"
 
     def test_resolves_project_id(self):
         from app.services import placeholder_inventory as pi
+
         assert hasattr(pi, "_resolve_project_id_for_scope")
 
 
@@ -1380,6 +1484,7 @@ class TestFactKeyChapterNoDeadKeys:
     def test_every_key_producible(self):
         from app.services.facts_classification import FACT_KEY_TO_CHAPTER
         from app.services.facts_extractor import _NAME_KEY_INDEX
+
         producible = {k for _frag, k in _NAME_KEY_INDEX}
         dead = sorted(k for k in FACT_KEY_TO_CHAPTER if k not in producible)
         assert dead == [], f"含产不出的死键：{dead}"
@@ -1387,6 +1492,7 @@ class TestFactKeyChapterNoDeadKeys:
     def test_no_threshold_param_leakage(self):
         """危大阈值参数不得混入 fact_key 表（范畴错误）。"""
         from app.services.facts_classification import DANGER_PARAM_RULES, FACT_KEY_TO_CHAPTER
+
         params = {p for _kws, p in DANGER_PARAM_RULES}
         overlap = params & set(FACT_KEY_TO_CHAPTER)
         assert overlap == set(), f"阈值参数混入 fact_key 表：{sorted(overlap)}"
@@ -1394,23 +1500,24 @@ class TestFactKeyChapterNoDeadKeys:
     def test_docstring_no_false_derivation_claim(self):
         """注释不得再宣称「从 DANGER_PARAM_RULES 派生」（已证明是假声明）。"""
         from app.services import facts_classification as fc
+
         src = io.open(fc.__file__, encoding="utf-8").read()
         # 定位 FACT_KEY_TO_CHAPTER 的注释块（表格定义之前）
         i = src.find("FACT_KEY_TO_CHAPTER")
         j = src.rfind("英文归一化键", 0, i)
-        block = src[j:i] if j > 0 else src[max(0, i - 2000):i]
+        block = src[j:i] if j > 0 else src[max(0, i - 2000) : i]
         # ⚠️ 不能断言「旧字串消失」：新注释**有意引用**那句假声明并加以纠正
         #    （「旧注释声称…然而实现却是…」）。正确定性是「纠正说明存在」。
-        assert ("不是同一套词表" in block or "范畴错误" in block
-                or "假声明" in block), \
-            "注释必须写明两套词表（DANGER_PARAM_RULES vs normalize_key）的关系"
-        assert "实现却是 24 键手写字面量" in block, \
-            "注释必须记录「曾谎称派生」这一事实，便于后人不再被误导"
+        assert (
+            "不是同一套词表" in block or "范畴错误" in block or "假声明" in block
+        ), "注释必须写明两套词表（DANGER_PARAM_RULES vs normalize_key）的关系"
+        assert "实现却是 24 键手写字面量" in block, "注释必须记录「曾谎称派生」这一事实，便于后人不再被误导"
 
     def test_danger_params_still_complete(self):
         """回归：清理死键不得影响危大阈值参数字汇自身的完整性。"""
         from app.services import scheme_classification as sc
         from app.services.facts_classification import DANGER_PARAM_RULES
+
         producible = {p for _kws, p in DANGER_PARAM_RULES}
         declared = set()
         for _n, spec in sc.HAZARD_THRESHOLDS.items():
@@ -1422,17 +1529,14 @@ class TestFrontendConsumesByChapterAndPagination:
     """L8：后端每次下发的 stats.by_chapter / pagination 曾被前端整体丢弃。"""
 
     def _src(self):
-        root = os.path.dirname(APP)
-        return io.open(os.path.join(
-            root, "frontend", "src", "pages", "SchemeWorkbenchPage.tsx"),
-            encoding="utf-8").read()
+        # R176：pagination / 九章分布面板已随拆分下沉（factsShared.ts、tabs/FactsTab.tsx），
+        # 与 _frontend_src() 同口径递归聚合，断言阈值不变。
+        return _frontend_src()
 
     def test_api_sends_limit_offset(self):
         root = os.path.dirname(APP)
-        src = io.open(os.path.join(
-            root, "frontend", "src", "api", "index.ts"), encoding="utf-8").read()
-        assert "options?.limit" in src and "options?.offset" in src, \
-            "factsApi.list 未下发分页参数"
+        src = io.open(os.path.join(root, "frontend", "src", "api", "index.ts"), encoding="utf-8").read()
+        assert "options?.limit" in src and "options?.offset" in src, "factsApi.list 未下发分页参数"
         assert "limit: options?.limit" in src or "options?.limit ?" in src
 
     def test_page_consumes_pagination(self):
@@ -1447,8 +1551,7 @@ class TestFrontendConsumesByChapterAndPagination:
         # ⚠️ 必须锚定 **JSX 挂载**而非函数名：函数定义本身就叫
         # FactsChapterCoveragePanel，只判名字存在的话「删掉挂载」也能过
         # （A/B L8b 首跑实测全绿）。
-        assert "<FactsChapterCoveragePanel" in src, \
-            "九章事实分布面板未挂载到事实 Tab"
+        assert "<FactsChapterCoveragePanel" in src, "九章事实分布面板未挂载到事实 Tab"
         assert "by_chapter" in src
 
     def test_types_declare_new_fields(self):
@@ -1463,12 +1566,11 @@ class TestFrontendConsumesByChapterAndPagination:
         #    九章事实分布面板自 2026-10-06 引入起永久空转（B-1）。
         #    本用例的**原意图**（类型必须覆盖新下发字段）保持不变，只把错误的
         #    形状字面量换成真实契约，并补一条反向锁防止错误形状回流。
-        assert "by_chapter?: FactChapterStatBlock" in src, \
-            "FactStats.by_chapter 必须声明为对象块 FactChapterStatBlock"
-        assert "export interface FactChapterStatBlock" in src, \
-            "缺 FactChapterStatBlock 定义"
-        assert "by_chapter?: FactChapterStat[]" not in src, \
-            "by_chapter 不得再声明为裸数组 —— 那正是 B-1 的根因（契约与实现同错）"
+        assert "by_chapter?: FactChapterStatBlock" in src, "FactStats.by_chapter 必须声明为对象块 FactChapterStatBlock"
+        assert "export interface FactChapterStatBlock" in src, "缺 FactChapterStatBlock 定义"
+        assert (
+            "by_chapter?: FactChapterStat[]" not in src
+        ), "by_chapter 不得再声明为裸数组 —— 那正是 B-1 的根因（契约与实现同错）"
         assert "interface FactPagination" in src
 
 
@@ -1480,17 +1582,17 @@ class TestEnrichSingleSource:
 
     def test_enrich_reuses_patch_modes_constant(self):
         from app.services import facts_enrich as fe
+
         src = inspect.getsource(fe)
         assert "from app.services.facts_patches import" in src
         assert "PATCH_MODES" in src, "未复用 facts_patches.PATCH_MODES"
-        assert '("append", "prepend", "replace")' not in src, \
-            "facts_enrich 仍在内联 PATCH_MODES 字面量"
+        assert '("append", "prepend", "replace")' not in src, "facts_enrich 仍在内联 PATCH_MODES 字面量"
 
     def test_enrich_reuses_normalize_patches_response(self):
         from app.services import facts_enrich as fe
+
         src = inspect.getsource(fe)
-        assert "normalize_patches_response" in src, \
-            "_build_patches 未复用 facts_patches.normalize_patches_response"
+        assert "normalize_patches_response" in src, "_build_patches 未复用 facts_patches.normalize_patches_response"
 
     def test_new_fact_id_prefix_consistent(self):
         """kb_{n} / patch_{n} 两套前缀应收敛为同一约定。
@@ -1502,13 +1604,15 @@ class TestEnrichSingleSource:
         """
         from app.services import facts_enrich as fe
         from app.services import facts_patches as fp
+
         assert "fact_{" in inspect.getsource(fp.normalize_fact_id)
         tree = ast.parse(inspect.getsource(fe))
         # docstring = 裸字符串表达式（模块/类/函数首句），整体排除
-        docstrings = {id(n.value) for n in ast.walk(tree)
-                      if isinstance(n, ast.Expr)
-                      and isinstance(n.value, ast.Constant)
-                      and isinstance(n.value.value, str)}
+        docstrings = {
+            id(n.value)
+            for n in ast.walk(tree)
+            if isinstance(n, ast.Expr) and isinstance(n.value, ast.Constant) and isinstance(n.value.value, str)
+        }
         literals = set()
         for n in ast.walk(tree):
             if not (isinstance(n, ast.Constant) and isinstance(n.value, str)):
@@ -1530,25 +1634,30 @@ class TestEnrichSingleSource:
         import ast as _ast
 
         from app.services import facts_enrich as fe
+
         tree = _ast.parse(inspect.getsource(fe))
         read_attrs = set()
         for node in _ast.walk(tree):
             if isinstance(node, _ast.Attribute) and node.attr in (
-                    "facts_knowledge_patch_enabled", "facts_finalize_enabled"):
+                "facts_knowledge_patch_enabled",
+                "facts_finalize_enabled",
+            ):
                 read_attrs.add(node.attr)
         assert read_attrs == set(), (
-            f"开关读点散落在 facts_enrich（应只在编排层 facts_extractor）："
-            f"{sorted(read_attrs)}")
+            f"开关读点散落在 facts_enrich（应只在编排层 facts_extractor）：" f"{sorted(read_attrs)}"
+        )
 
     def test_replace_mode_conflict_semantics_documented(self):
         """replace 模式会清 has_conflict —— 必须与 auto_resolvable=False 并存说明。"""
         from app.services import facts_patches as fp
+
         src = inspect.getsource(fp.apply_patches_to_fact_items)
         assert "has_conflict" in src
         assert "replace" in src
 
     def test_scenes_registered(self):
         from app.services.ai import provider_factory as pf
+
         assert "facts_knowledge_patch" in pf.KNOWN_SCENES
         assert "facts_finalize" in pf.KNOWN_SCENES
         assert "facts_extract" in pf.KNOWN_SCENES

@@ -5,27 +5,47 @@ import { Typography } from "antd";
 import type { FactChapterStatBlock } from "../../types/facts";
 const { Title, Text } = Typography;
 
-export function FactsChapterCoveragePanel({ stats, titles }: {
-  stats: { by_chapter?: FactChapterStatBlock } | null | undefined; titles?: Record<string, string>;
+export function FactsChapterCoveragePanel({
+  stats,
+  titles,
+}: {
+  stats: { by_chapter?: FactChapterStatBlock } | null | undefined;
+  titles?: Record<string, string>;
 }) {
   const rows = buildFactChapterStats(stats, titles);
   if (rows.length === 0) {
     return (
-      <Card size="small" style={{ marginBottom: 8 }}
-        title={<span><BarChartOutlined /> 九章事实分布</span>}>
+      <Card
+        size="small"
+        style={{ marginBottom: 8 }}
+        title={
+          <span>
+            <BarChartOutlined /> 九章事实分布
+          </span>
+        }
+      >
         <Text type="secondary">暂无章节统计</Text>
       </Card>
     );
   }
   const totalFacts = rows.reduce((s, r) => s + r.count, 0);
   return (
-    <Card size="small" style={{ marginBottom: 8 }}
-      title={<span><BarChartOutlined /> 九章事实分布（共 {totalFacts} 条）</span>}>
+    <Card
+      size="small"
+      style={{ marginBottom: 8 }}
+      title={
+        <span>
+          <BarChartOutlined /> 九章事实分布（共 {totalFacts} 条）
+        </span>
+      }
+    >
       <div style={{ display: "flex", flexDirection: "column", gap: 4 }}>
         {rows.map((r) => (
           <div key={r.key || r.order}>
             <div style={{ display: "flex", justifyContent: "space-between", fontSize: 12 }}>
-              <span>{r.order}. {r.title || r.key}</span>
+              <span>
+                {r.order}. {r.title || r.key}
+              </span>
               <span style={{ color: r.count === 0 ? "#ff4d4f" : "#888" }}>
                 {r.count === 0 ? "无事实" : `${r.count} 条`}
                 {r.shared > 0 ? ` · 共性 ${r.shared}` : ""}

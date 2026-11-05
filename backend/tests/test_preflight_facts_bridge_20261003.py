@@ -7,6 +7,7 @@
 - 只报真实阈值命中（缺参保守分支不计入）；关键词通道已危大不重复报；
 - 事实签名并入预检/总检的**进程内**缓存键（落库 content_fingerprint 语义不变）。
 """
+
 import inspect
 import uuid
 
@@ -34,24 +35,23 @@ async def db_ctx(tmp_path):
     await db.execute("INSERT INTO projects(id,name) VALUES(?,?)", (pid, "p"))
     await db.execute(
         "INSERT INTO schemes(id,project_id,name,type,word_budget) VALUES(?,?,?,?,?)",
-        (sid, pid, "综合楼项目专项施工方案", "", 0))
+        (sid, pid, "综合楼项目专项施工方案", "", 0),
+    )
     await db.commit()
     yield db, pid, sid
     await close_db()
 
 
-async def _insert_section(db, sid, title="工程概况", content="正文内容",
-                          sort_order=0):
+async def _insert_section(db, sid, title="工程概况", content="正文内容", sort_order=0):
     await db.execute(
         "INSERT INTO sections (id, scheme_id, project_id, parent_id, title,"
         " description, level, status, word_count, word_budget, content,"
         " review_status, sort_order) VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?)",
-        (uuid.uuid4().hex, sid, "", "", title, "", 1, "done",
-         len(content), 0, content, "", sort_order))
+        (uuid.uuid4().hex, sid, "", "", title, "", 1, "done", len(content), 0, content, "", sort_order),
+    )
 
 
-async def _insert_fact(db, pid, sid, *, name, value, unit="",
-                       simulated=0, resolved=1, conflict=0, stale=0):
+async def _insert_fact(db, pid, sid, *, name, value, unit="", simulated=0, resolved=1, conflict=0, stale=0):
     fid = uuid.uuid4().hex
     content = f"- **{name}**: {value}"
     await db.execute(
@@ -59,9 +59,26 @@ async def _insert_fact(db, pid, sid, *, name, value, unit="",
         "group_title, title, content, category, source_ref, is_simulated, "
         "confidence, is_resolved, has_conflict, conflict_keys, fact_key, "
         "value_unit, is_stale) VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)",
-        (fid, pid, sid, "g1", "工期安排", name, content, "schedule",
-         '[{"file":"招标文件","quote":"x"}]', simulated, 0.95, resolved,
-         conflict, "", name, unit, stale))
+        (
+            fid,
+            pid,
+            sid,
+            "g1",
+            "工期安排",
+            name,
+            content,
+            "schedule",
+            '[{"file":"招标文件","quote":"x"}]',
+            simulated,
+            0.95,
+            resolved,
+            conflict,
+            "",
+            name,
+            unit,
+            stale,
+        ),
+    )
     await db.commit()
     return fid
 
@@ -88,12 +105,10 @@ _HAZARD_FACTS = [{"name": "基坑开挖深度", "value": "16m", "fact_key": "exc
 
 def _precondition_guards():
     """防空转：样本名称确实不被关键词判危大、事实参数确实达到阈值。"""
-    assert not is_hazardous_by_keywords(_NO_KEYWORD_NAME), \
-        "样本名称被关键词判为危大，用例前提失效"
+    assert not is_hazardous_by_keywords(_NO_KEYWORD_NAME), "样本名称被关键词判为危大，用例前提失效"
     params = extract_danger_params(_HAZARD_FACTS)
     assert params.get("depth") == 16.0, "样本事实参数未抽出 depth=16"
-    probe = danger_check(_NO_KEYWORD_NAME, _HAZARD_FACTS,
-                         extra_text="基坑开挖深度 16m")
+    probe = danger_check(_NO_KEYWORD_NAME, _HAZARD_FACTS, extra_text="基坑开挖深度 16m")
     assert probe["classification"]["is_hazardous"], "样本在 danger_check 下不判危大"
 
 
@@ -106,8 +121,7 @@ def test_saf08_fires_on_real_threshold_hit():
     assert f["rule_id"] == "SAF-08"
     assert f["dimension"] == "safety"
     assert f["severity"] == "high"
-    assert any(e.startswith("depth=") for e in f["evidence"]), \
-        "证据应包含达到阈值的参数（depth=…）"
+    assert any(e.startswith("depth=") for e in f["evidence"]), "证据应包含达到阈值的参数（depth=…）"
 
 
 def test_saf08_silent_when_keyword_channel_already_hazardous():
@@ -126,8 +140,8 @@ def test_saf08_silent_on_facts_empty():
 def test_saf08_silent_below_threshold():
     """参数低于阈值（2m < 3m）→ 不报。"""
     ctx = PreflightContext(
-        scheme_name=_NO_KEYWORD_NAME,
-        facts=[{"name": "基坑开挖深度", "value": "2m", "fact_key": "excavation_depth"}])
+        scheme_name=_NO_KEYWORD_NAME, facts=[{"name": "基坑开挖深度", "value": "2m", "fact_key": "excavation_depth"}]
+    )
     assert check_hazard_params(ctx) == []
 
 
@@ -139,13 +153,12 @@ def test_saf08_silent_on_missing_param_conservative_branch():
     样本「基坑支护形式」命中基坑支护类目关键词，但不在 DANGER_PARAM_RULES
     参数关键词内 → 缺参保守分支（前提在下方断言锁定）。
     """
-    facts = [{"name": "基坑支护形式", "value": "灌注桩+内支撑",
-              "fact_key": "support_type"}]
-    probe = danger_check(_NO_KEYWORD_NAME, facts,
-                         extra_text="基坑支护形式 灌注桩+内支撑")
+    facts = [{"name": "基坑支护形式", "value": "灌注桩+内支撑", "fact_key": "support_type"}]
+    probe = danger_check(_NO_KEYWORD_NAME, facts, extra_text="基坑支护形式 灌注桩+内支撑")
     assert probe["classification"]["is_hazardous"], "缺参保守分支应判危大（前提失效）"
-    assert not probe["classification"]["hazards"][0].get("hazard_reasons"), \
-        "样本应落在缺参保守分支而非真实阈值命中（前提失效）"
+    assert not probe["classification"]["hazards"][0].get(
+        "hazard_reasons"
+    ), "样本应落在缺参保守分支而非真实阈值命中（前提失效）"
     ctx = PreflightContext(scheme_name=_NO_KEYWORD_NAME, facts=facts)
     assert check_hazard_params(ctx) == []
 
@@ -168,8 +181,8 @@ def test_run_preflight_without_facts_no_saf08():
     """无 facts（既有直接构造 ctx 的调用方）→ 行为逐字不变，无 SAF-08。"""
     ctx = PreflightContext(
         scheme_name=_NO_KEYWORD_NAME,
-        sections=[{"id": "s1", "title": "工程概况", "content": "正文",
-                   "word_count": 10, "parent_id": ""}])
+        sections=[{"id": "s1", "title": "工程概况", "content": "正文", "word_count": 10, "parent_id": ""}],
+    )
     assert "SAF-08" not in [f["rule_id"] for f in run_preflight(ctx)]
 
 
@@ -184,10 +197,8 @@ async def test_facts_signature_scope_and_gate(db_ctx):
     with_fact = await _facts_signature(db, sid)
     assert with_fact != base, "新增已确认事实后签名必须变化"
     # 模拟值（未确认）被 fail-closed 门控排除：不改变签名
-    await _insert_fact(db, pid, sid, name="质保期", value="两年", simulated=1,
-                       resolved=0)
-    assert await _facts_signature(db, sid) == with_fact, \
-        "未确认模拟值不得进入签名（与注入门控同口径）"
+    await _insert_fact(db, pid, sid, name="质保期", value="两年", simulated=1, resolved=0)
+    assert await _facts_signature(db, sid) == with_fact, "未确认模拟值不得进入签名（与注入门控同口径）"
     # 矛盾值同样被排除
     await _insert_fact(db, pid, sid, name="总工期", value="300天", conflict=1)
     assert await _facts_signature(db, sid) == with_fact
@@ -206,5 +217,6 @@ def test_wiring_static_locks():
     src_overview = inspect.getsource(compliance.readiness_overview)
     assert "_facts_signature" in src_overview
     import app.services.preflight_engine as pe
+
     src_engine = inspect.getsource(pe.run_preflight)
     assert "check_hazard_params" in src_engine

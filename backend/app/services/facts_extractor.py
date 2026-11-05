@@ -19,7 +19,7 @@ import logging
 import re
 import uuid
 from dataclasses import dataclass, field
-from datetime import datetime
+from datetime import datetime, timedelta
 from functools import lru_cache
 from typing import Any
 
@@ -39,7 +39,11 @@ from app.services.ai.prompts._registry import render
 from app.services.ai.prompts.analysis import SAFETY_CRITICAL_FACT_KEYS
 
 # ✅ 2026-09-24：九大章节分类体系（纯函数、零 AI、零 DB 依赖，无循环引用）
-from app.services.facts_classification import apply_fact_dimensions
+from app.services.facts_classification import (
+    CHAPTER_TITLES,
+    apply_fact_dimensions,
+    classify_fact_dimensions,
+)
 from app.services.facts_cross_validators import run_cross_validations
 
 # ✅ 2026-09-30 第十三轮：缺值模式值域的单一出口（对齐参考软件 globalFactsMode）
@@ -51,11 +55,11 @@ logger = logging.getLogger("facts_extractor")
 # 配置参数
 # ---------------------------------------------------------------------------
 
-CHUNK_SIZE = 8000              # 每段最大字符数
-CHUNK_OVERLAP = 500            # 段间重叠字符数
-MAX_SOURCE_EXCERPT = 120       # 溯源摘录最大字符（旧值 30 会把手册/条文引句截成残句且无任何提示，
-                               #   导致溯源与人工复核价值归零；放宽到 120 并在截断时补省略号）
-SIMULATED_RATIO_WARN = 0.30    # 模拟值占比告警阈值
+CHUNK_SIZE = 8000  # 每段最大字符数
+CHUNK_OVERLAP = 500  # 段间重叠字符数
+MAX_SOURCE_EXCERPT = 120  # 溯源摘录最大字符（旧值 30 会把手册/条文引句截成残句且无任何提示，
+#   导致溯源与人工复核价值归零；放宽到 120 并在截断时补省略号）
+SIMULATED_RATIO_WARN = 0.30  # 模拟值占比告警阈值
 SAFETY_CRITICAL_MAX_SIMULATED = 0  # 安全关键项允许的模拟值数量上限
 # ✅ 完整性：单次提取允许处理的最大段数。
 #    旧值 20 → 8000 字/段，即超过 16 万字的长招标文件会被静默截断、后续章节不提取。
@@ -71,6 +75,15 @@ FACTS_CHUNK_RETRIES = 2
 FACTS_RETRY_BACKOFF = 5.0
 # 触发 429 限流时使用更长的退避基数（等对方限流窗口恢复）
 FACTS_RETRY_BACKOFF_RATE_LIMIT = 20.0
+# ✅ BUG-02 修复（R175 · 2026-11-03）：失败段的**跨轮次**重试退避。
+#    旧实现把模型 `segment_failed=true` 的段写入 `facts_extracted_chunks`
+#    （= 已完成），下次增量提取永久跳过，只能靠 force 全量重提取恢复。
+#    新口径：失败段**不写完成表**（下次必重试），但连续失败时按指数退避
+#    短暂延后，避免每轮都对同一段重复烧 AI 计费：
+#      · 第 1 次失败 → 延迟 0（下一次运行立即重试，保证可恢复）；
+#      · 第 2 次失败 → 60s；第 3 次 → 120s；… 上限 3600s。
+RETRY_BACKOFF_BASE_SECONDS = 60
+RETRY_BACKOFF_MAX_SECONDS = 3600
 # ✅ 结构化提取请求超时（秒）：事实提取提示词长、输出结构化，lite 类模型常需 60s+。
 #    线上日志显示配置 timeout=60 时大量分段以 ~62s 超时失败 → 这里显式放宽。
 FACTS_REQUEST_TIMEOUT = 240
@@ -115,6 +128,7 @@ def _clip_excerpt(text: str, limit: int) -> str:
 # 数据结构
 # ---------------------------------------------------------------------------
 
+
 @dataclass
 class FactItem:
     """单条结构化事实
@@ -127,24 +141,25 @@ class FactItem:
     - zone_type: 语义区域类型（machinery_stat/construction_practice_zone/...）
     - norm_group: 归一化字典命中组（material/machinery/process/schedule/None）
     """
-    name: str                    # 事实名称（如 "项目总工期"）
-    value: str | list            # 事实值（序列类为有序数组；单值为 str）
-    key: str = ""                # 归一化键（如 total_duration）
-    category: str = "other"      # 类别（personnel/schedule/machinery/...）
-    source: str = ""             # 来源描述（文件名/章节）
-    source_ref: str = ""         # 原文完整引用（source_text，用于溯源比对）
-    is_simulated: bool = False   # 是否模拟生成
-    confidence: float = 1.0      # 置信度 0-1
-    has_conflict: bool = False   # 是否存在矛盾
+
+    name: str  # 事实名称（如 "项目总工期"）
+    value: str | list  # 事实值（序列类为有序数组；单值为 str）
+    key: str = ""  # 归一化键（如 total_duration）
+    category: str = "other"  # 类别（personnel/schedule/machinery/...）
+    source: str = ""  # 来源描述（文件名/章节）
+    source_ref: str = ""  # 原文完整引用（source_text，用于溯源比对）
+    is_simulated: bool = False  # 是否模拟生成
+    confidence: float = 1.0  # 置信度 0-1
+    has_conflict: bool = False  # 是否存在矛盾
     conflict_values: list = field(default_factory=list)
     # --- ✅ 以下为研究报告 v2.0 扩展字段 ---
-    value_unit: str | None = None       # 计量单位（"台"/"kW"/"天"/"页"）
-    fact_type: str = ""                 # 细粒度类型枚举（construction_practice/deployment/process_flow/material/machinery/basic/personnel/schedule/design_param/safety/...）
-    evidence_kind: str = ""             # 证据来源（table/text/figure_ocr/header_footer）
-    page_ref: int | None = None         # 页码
-    zone_type: str = ""                 # 语义区域类型（分段时 zone_type 标记）
-    is_safety_critical: bool = False    # 是否属于 17 类白名单（禁止模拟）
-    norm_group: str | None = None        # 归一化字典命中组名（"material"/"machinery"/"process"/"schedule"/None）
+    value_unit: str | None = None  # 计量单位（"台"/"kW"/"天"/"页"）
+    fact_type: str = ""  # 细粒度类型枚举（construction_practice/deployment/process_flow/material/machinery/basic/personnel/schedule/design_param/safety/...）
+    evidence_kind: str = ""  # 证据来源（table/text/figure_ocr/header_footer）
+    page_ref: int | None = None  # 页码
+    zone_type: str = ""  # 语义区域类型（分段时 zone_type 标记）
+    is_safety_critical: bool = False  # 是否属于 17 类白名单（禁止模拟）
+    norm_group: str | None = None  # 归一化字典命中组名（"material"/"machinery"/"process"/"schedule"/None）
     # ✅ 增量提取（2026-09-17）：该事实产自分段的 sha1 指纹。跳过已完成段时，
     #    persist_extraction 靠它识别「上次段的事实」并保留，不误删。
     chunk_hash: str = ""
@@ -153,32 +168,45 @@ class FactItem:
     # 视角，与九大章节并非一对一。以下四维由 facts_classification 确定性派生
     # （无 AI、无 DB 往返），支撑：按章节精选事实注入正文、章节视图统计、
     # 字段完整性校验、跨章节共性事实识别。
-    chapter: str = ""          # 九大章节归属（overview/basis/plan/technique/safety/
-                              #   personnel/acceptance/emergency/calc_drawings，空串=未分类）
-    fact_attr: str = ""        # 事实属性（quantitative 定量/qualitative 定性/
-                              #   relation 关系/norm 规范）
-    source_kind: str = ""      # 数据来源（bid_doc/drawing/survey/overall_plan/manual）
-    is_shared: bool = False    # 跨章节共性事实（多章节复用，避免重复提取）
+    chapter: str = ""  # 九大章节归属（overview/basis/plan/technique/safety/
+    #   personnel/acceptance/emergency/calc_drawings，空串=未分类）
+    fact_attr: str = ""  # 事实属性（quantitative 定量/qualitative 定性/
+    #   relation 关系/norm 规范）
+    source_kind: str = ""  # 数据来源（bid_doc/drawing/survey/overall_plan/manual）
+    is_shared: bool = False  # 跨章节共性事实（多章节复用，避免重复提取）
     # --- ✅ R80（2026-10-15）：要求 vs 事实口径类型（P2-3 · 正式落地）---
     # 'fact'=本方案口径（实值或已按要求转写）；'requirement'=要求原文口径
     # （无法安全转写而保留，正文引用须写"满足/响应要求"口径）；''=未区分
     # （历史行，读侧按 fact 处理）。非法值在解析入口归一为 ''。
     value_kind: str = ""
+    # --- ✅ L3/BUG-07（R177 · 2026-11-04）：SSE completed payload 契约字段 ---
+    # persist_extraction 时回填：插入行 = 新 uuid；命中去重行 = 既有行 id。
+    # `persisted_is_resolved` 同步记录落库裁决态，供 format_for_frontend 原样下发，
+    # 使 `fact_id` / `is_resolved` 与 FactItem 前端契约逐字段对齐。
+    persisted_id: str = ""
+    persisted_is_resolved: bool = False
 
-    def to_db_row(self, group_id: str, pid: str, sid: str,
-                  group_title: str = "") -> tuple:
+    def to_db_row(self, group_id: str, pid: str, sid: str, group_title: str = "") -> tuple:
         """转为数据库插入行
 
         ✅ 新增 group_title：分组标题（如"人员角色"）此前未落库，导致
         重新查询后只能拿单条事实名（如"项目经理"）当分组标题展示。
         """
-        source_json = json.dumps(
-            [{"file": self.source,
-              # ✅ 修复（数据流审计 2026-09-23）：旧实现静默截到 30 字、无截断标记，
-              #    用户无从得知引句不完整。现放宽到 MAX_SOURCE_EXCERPT 并截断时补省略号。
-              "quote": _clip_excerpt(self.source_ref, MAX_SOURCE_EXCERPT)}],
-            ensure_ascii=False
-        ) if self.source or self.source_ref else ""
+        source_json = (
+            json.dumps(
+                [
+                    {
+                        "file": self.source,
+                        # ✅ 修复（数据流审计 2026-09-23）：旧实现静默截到 30 字、无截断标记，
+                        #    用户无从得知引句不完整。现放宽到 MAX_SOURCE_EXCERPT 并截断时补省略号。
+                        "quote": _clip_excerpt(self.source_ref, MAX_SOURCE_EXCERPT),
+                    }
+                ],
+                ensure_ascii=False,
+            )
+            if self.source or self.source_ref
+            else ""
+        )
         # value 序列化：数组 → 逗号+顿号连接（如 "垫层浇筑、防水施工、钢筋绑扎"）
         if isinstance(self.value, list):
             display_val = "、".join(str(v) for v in self.value if v is not None)
@@ -193,20 +221,29 @@ class FactItem:
         content_line = f"- **{self.name}**: {append_simulated_marker(display_val, self.is_simulated)}"
         # ✅ 序列类候选值序列化为字符串再落库，避免前端把数组当 React 子节点渲染
         conflicts = [
-            {"value": _as_text(c.get("value")), "source": c.get("source", ""),
-             # ✅ 修复：候选值置信度也可能来自跨条目回写（非 FactItem），
-             #    直接用裸值落库，查询端 float() 遇脏值会抛 500。
-             "confidence": _safe_confidence(c.get("confidence"), 1.0),
-             # ✅ 候选值自带的模拟值语义随值落库：resolve_conflict 裁决换值时
-             #    据此重算该行的 is_simulated（否则编造值被裁决为文档实值后，
-             #    行上仍残留模拟值标记，stats.simulated 永远不归零）。
-             "is_simulated": bool(c.get("is_simulated"))}
+            {
+                "value": _as_text(c.get("value")),
+                "source": c.get("source", ""),
+                # ✅ 修复：候选值置信度也可能来自跨条目回写（非 FactItem），
+                #    直接用裸值落库，查询端 float() 遇脏值会抛 500。
+                "confidence": _safe_confidence(c.get("confidence"), 1.0),
+                # ✅ 候选值自带的模拟值语义随值落库：resolve_conflict 裁决换值时
+                #    据此重算该行的 is_simulated（否则编造值被裁决为文档实值后，
+                #    行上仍残留模拟值标记，stats.simulated 永远不归零）。
+                "is_simulated": bool(c.get("is_simulated")),
+            }
             for c in (self.conflict_values or [])
         ]
         return (
-            str(uuid.uuid4()), pid, sid, group_id, group_title,
-            self.name, content_line,
-            self.category, source_json,
+            str(uuid.uuid4()),
+            pid,
+            sid,
+            group_id,
+            group_title,
+            self.name,
+            content_line,
+            self.category,
+            source_json,
             1 if self.is_simulated else 0,
             self.confidence,
             0,  # is_resolved=0 表示待审核
@@ -266,19 +303,40 @@ class FactItem:
 #: 的返回值必须与之**逐一对应**（护栏 ``test_insert_column_lists_single_source``
 #: 锁定列数与逐列名一致）。
 GLOBAL_FACTS_INSERT_COLS: tuple[str, ...] = (
-    "id", "project_id", "scheme_id", "group_id", "group_title", "title", "content",
-    "category", "source_ref", "is_simulated", "confidence", "is_resolved",
-    "has_conflict", "conflict_keys", "fact_key",
+    "id",
+    "project_id",
+    "scheme_id",
+    "group_id",
+    "group_title",
+    "title",
+    "content",
+    "category",
+    "source_ref",
+    "is_simulated",
+    "confidence",
+    "is_resolved",
+    "has_conflict",
+    "conflict_keys",
+    "fact_key",
     # 溯源/单位列（提取管线写入；手工新增走默认值）
-    "chunk_hash", "value_unit", "fact_type", "evidence_kind", "page_ref",
-    "zone_type", "is_safety_critical", "norm_group",
+    "chunk_hash",
+    "value_unit",
+    "fact_type",
+    "evidence_kind",
+    "page_ref",
+    "zone_type",
+    "is_safety_critical",
+    "norm_group",
     # ✅ R80（2026-10-15）：要求 vs 事实口径（须与 to_db_row 取值位一一对应：
     #    插在 is_stale 之前，保住「[-4:] == 九大章节四维」与「is_stale 先于
     #    四维」两个既有契约不被破坏）
     "value_kind",
     "is_stale",
     # 九大章节四维标注（apply_fact_dimensions 派生；手工新增走默认值）
-    "chapter", "fact_attr", "source_kind", "is_shared",
+    "chapter",
+    "fact_attr",
+    "source_kind",
+    "is_shared",
 )
 
 #: INSERT 语句（占位符**由列数派生**，不再手写 —— 手写占位符是历史错位主因）
@@ -286,10 +344,9 @@ GLOBAL_FACTS_INSERT_COLS: tuple[str, ...] = (
 #:   既有护栏 ``test_placeholder_count_derived_from_columns`` 断言
 #:   ``SQL.endswith(",".join("?" for _ in cols))``；格式不一致会让该护栏假失败，
 #:   久而久之就会有人把它改松（AGENTS.md §5.14「锚点过宽比不写护栏更糟」）。
-GLOBAL_FACTS_INSERT_SQL = (
-    "INSERT INTO global_facts (%s) VALUES (%s)"
-    % (", ".join(GLOBAL_FACTS_INSERT_COLS),
-       ",".join("?" for _ in GLOBAL_FACTS_INSERT_COLS))
+GLOBAL_FACTS_INSERT_SQL = "INSERT INTO global_facts (%s) VALUES (%s)" % (
+    ", ".join(GLOBAL_FACTS_INSERT_COLS),
+    ",".join("?" for _ in GLOBAL_FACTS_INSERT_COLS),
 )
 
 
@@ -319,6 +376,7 @@ class FactGroup:
     uuid，与 DB 落库的 group_id 不一致；前端拿事件数据直接编辑分组
     （PATCH 按 group_id 匹配）会 404「事实不存在」。
     """
+
     title: str
     category: str = "other"
     items: list[FactItem] = field(default_factory=list)
@@ -328,6 +386,7 @@ class FactGroup:
 @dataclass
 class ExtractionResult:
     """提取结果汇总"""
+
     groups: list[FactGroup] = field(default_factory=list)
     total_items: int = 0
     simulated_count: int = 0
@@ -350,8 +409,16 @@ class ExtractionResult:
     chunk_hashes_ok: set = field(default_factory=set)
     chunk_hashes_all: set = field(default_factory=set)
     chunk_hashes_run: set = field(default_factory=set)
+    # ✅ BUG-02 修复（R175）：本轮**失败**（报错 / 模型声明 segment_failed）的段指纹。
+    #    与 chunk_hashes_ok 互斥；落库后写入 facts_chunk_failures 做连续失败退避，
+    #    但**绝不**写入 facts_extracted_chunks（保证下次运行可重试）。
+    chunk_hashes_failed: set = field(default_factory=set)
     skipped_chunks: int = 0
     all_skipped: bool = False
+    # ✅ BUG-03 修复（R175）：交叉校验（run_cross_validations）抛异常时为 True。
+    #    此时冲突状态未知，persist_extraction 必须放弃 auto_resolve 自动裁决
+    #    （否则未校验事实会被直接置 is_resolved=1 进入生成链路）。
+    cross_validation_failed: bool = False
     # ✅ 2026-10-06：模型**主动声明**未能提取的段（模型回 ``segment_failed=true``）。
     #    该标志此前只在 _validate 里被读一次就丢弃，导致三处静默失真：
     #      ① 不进 segment_stats.failed / failed_details → 前端「N 段失败」永不提示；
@@ -372,45 +439,69 @@ class ExtractionResult:
 # 事实名称 → 归一化 key 的映射表（人工维护，持续扩展）
 _NAME_TO_KEY: dict[str, str] = {
     # 工期
-    "项目总工期": "total_duration", "总工期": "total_duration",
-    "工期": "total_duration", "施工工期": "total_duration",
-    "运维期": "maintenance_period", "保质期": "warranty_period",
+    "项目总工期": "total_duration",
+    "总工期": "total_duration",
+    "工期": "total_duration",
+    "施工工期": "total_duration",
+    "运维期": "maintenance_period",
+    "保质期": "warranty_period",
     "交货期": "delivery_period",
     # 人员
-    "项目经理": "project_manager", "项目负责人": "project_manager",
-    "技术负责人": "tech_leader", "总工": "chief_engineer",
-    "安全员": "safety_officer", "质量员": "quality_officer",
+    "项目经理": "project_manager",
+    "项目负责人": "project_manager",
+    "技术负责人": "tech_leader",
+    "总工": "chief_engineer",
+    "安全员": "safety_officer",
+    "质量员": "quality_officer",
     "施工队长": "foreman",
     # 设备
-    "塔吊数量": "tower_crane_count", "塔吊型号": "tower_crane_model",
+    "塔吊数量": "tower_crane_count",
+    "塔吊型号": "tower_crane_model",
     "塔吊": "tower_crane_model",
-    "施工电梯型号": "elevator_model", "施工电梯": "construction_elevator",
+    "施工电梯型号": "elevator_model",
+    "施工电梯": "construction_elevator",
     "挖掘机型号": "excavator_model",
     "起重机型号": "crane_model",
     # 机械统计（新增分组）
-    "挖掘机数量": "excavator_count", "汽车吊数量": "truck_crane_count",
-    "自卸车数量": "dump_truck_count", "推土机数量": "bulldozer_count",
-    "压路机数量": "roller_count", "装载机数量": "loader_count",
-    "发电机数量": "generator_count", "汽车泵数量": "concrete_pump_count",
+    "挖掘机数量": "excavator_count",
+    "汽车吊数量": "truck_crane_count",
+    "自卸车数量": "dump_truck_count",
+    "推土机数量": "bulldozer_count",
+    "压路机数量": "roller_count",
+    "装载机数量": "loader_count",
+    "发电机数量": "generator_count",
+    "汽车泵数量": "concrete_pump_count",
     # 材料管理（新增分组）
-    "水泥强度等级": "cement_grade", "钢筋用量": "rebar_usage",
-    "混凝土用量": "concrete_usage", "砂浆强度等级": "mortar_grade",
-    "防水材料": "waterproof_material", "保温材料": "insulation_material",
-    "材料堆场": "material_yard", "材料进场验收": "material_acceptance",
+    "水泥强度等级": "cement_grade",
+    "钢筋用量": "rebar_usage",
+    "混凝土用量": "concrete_usage",
+    "砂浆强度等级": "mortar_grade",
+    "防水材料": "waterproof_material",
+    "保温材料": "insulation_material",
+    "材料堆场": "material_yard",
+    "材料进场验收": "material_acceptance",
     # 施工部署 / 施工流程（新增分组）
-    "施工段划分": "work_segmentation", "流水段划分": "flow_segmentation",
-    "施工顺序": "construction_sequence", "施工总体部署": "overall_deployment",
-    "施工目标": "construction_objectives", "施工准备": "construction_preparation",
+    "施工段划分": "work_segmentation",
+    "流水段划分": "flow_segmentation",
+    "施工顺序": "construction_sequence",
+    "施工总体部署": "overall_deployment",
+    "施工目标": "construction_objectives",
+    "施工准备": "construction_preparation",
     # 地质/工程
-    "基坑深度": "foundation_depth", "开挖深度": "foundation_depth",
-    "支护形式": "support_type", "支护类型": "support_type",
+    "基坑深度": "foundation_depth",
+    "开挖深度": "foundation_depth",
+    "支护形式": "support_type",
+    "支护类型": "support_type",
     "地基承载力": "bearing_capacity",
-    "地下水位": "water_table", "地下水位标高": "water_table",
+    "地下水位": "water_table",
+    "地下水位标高": "water_table",
     "边坡坡度": "slope_ratio",
     # 材料
-    "混凝土强度等级": "concrete_grade", "混凝土标号": "concrete_grade",
+    "混凝土强度等级": "concrete_grade",
+    "混凝土标号": "concrete_grade",
     "钢筋等级": "rebar_grade",
-    "钢材型号": "steel_model", "型钢型号": "steel_model",
+    "钢材型号": "steel_model",
+    "型钢型号": "steel_model",
     # 安全关键
     "脚手架类型": "scaffold_type",
     "模板类型": "formwork_type",
@@ -422,40 +513,61 @@ _NAME_TO_KEY: dict[str, str] = {
     "结构形式": "structure_type",
     "建筑高度": "building_height",
     # 其他
-    "建设单位": "owner", "业主": "owner",
+    "建设单位": "owner",
+    "业主": "owner",
     "设计单位": "designer",
     "监理单位": "supervisor",
     "施工单位": "contractor",
     "项目地点": "project_location",
     "项目名称": "project_name",
     # 编制依据（新增分组）
-    "编制依据": "compilation_basis", "验收规范": "acceptance_code",
-    "执行标准": "execution_standard", "技术标准": "tech_standard",
+    "编制依据": "compilation_basis",
+    "验收规范": "acceptance_code",
+    "执行标准": "execution_standard",
+    "技术标准": "tech_standard",
     # ✅ R93（2026-10-17）：编制依据「逐条提取」新增标准名
-    "标准图集": "standard_atlas", "法规依据": "legal_basis",
+    "标准图集": "standard_atlas",
+    "法规依据": "legal_basis",
     # 劳动力配置（新增分组）
-    "劳动力计划": "labor_plan", "劳动力配置": "labor_plan", "劳动力": "labor_plan",
-    "工种": "labor_trade", "高峰人数": "labor_peak", "管理人员配置": "staffing",
+    "劳动力计划": "labor_plan",
+    "劳动力配置": "labor_plan",
+    "劳动力": "labor_plan",
+    "工种": "labor_trade",
+    "高峰人数": "labor_peak",
+    "管理人员配置": "staffing",
     # 监测方案（新增分组）
-    "监测项目": "monitoring_item", "监测频率": "monitoring_frequency",
-    "监测点": "monitoring_point", "报警值": "alarm_value",
-    "控制值": "control_value", "监测单位": "monitoring_unit",
+    "监测项目": "monitoring_item",
+    "监测频率": "monitoring_frequency",
+    "监测点": "monitoring_point",
+    "报警值": "alarm_value",
+    "控制值": "control_value",
+    "监测单位": "monitoring_unit",
     # 应急处置（新增分组）
-    "应急组织": "emergency_org", "应急物资": "emergency_supplies",
-    "应急响应": "emergency_response", "应急电话": "emergency_phone",
+    "应急组织": "emergency_org",
+    "应急物资": "emergency_supplies",
+    "应急响应": "emergency_response",
+    "应急电话": "emergency_phone",
     "应急演练": "emergency_drill",
     # 验收要求（新增分组）
-    "验收标准": "acceptance_standard", "验收程序": "acceptance_process",
-    "隐蔽验收": "concealed_acceptance", "检验批": "inspection_lot",
+    "验收标准": "acceptance_standard",
+    "验收程序": "acceptance_process",
+    "隐蔽验收": "concealed_acceptance",
+    "检验批": "inspection_lot",
     # 临时工程（新增分组）
-    "临时用电": "temporary_power", "临时用水": "temporary_water",
-    "临时道路": "temporary_road", "临时设施": "temporary_facility",
+    "临时用电": "temporary_power",
+    "临时用水": "temporary_water",
+    "临时道路": "temporary_road",
+    "临时设施": "temporary_facility",
     # 环保与文明施工（新增分组）
-    "扬尘控制": "dust_control", "噪声控制": "noise_control",
-    "污水处理": "sewage_treatment", "文明施工": "civilized_construction",
+    "扬尘控制": "dust_control",
+    "噪声控制": "noise_control",
+    "污水处理": "sewage_treatment",
+    "文明施工": "civilized_construction",
     # 风险与危大工程（新增分组）
-    "危大工程": "hazardous_project", "重大危险源": "major_hazard_source",
-    "风险等级": "risk_level", "风险辨识": "risk_identification",
+    "危大工程": "hazardous_project",
+    "重大危险源": "major_hazard_source",
+    "风险等级": "risk_level",
+    "风险辨识": "risk_identification",
 }
 
 
@@ -506,6 +618,7 @@ def _fact_key_seed(name: str) -> str:
       · **其它符号**按 Unicode 码点转义进种子（``α`` → ``x03b1``），使「抹掉符号后
         同形、实际不同」的名称产出不同 key。
     """
+
     def _repl(m):
         parts = []
         for ch in m.group():
@@ -532,7 +645,7 @@ def normalize_key(name: str) -> str:
         if cn in name:
             return en
     # 英文直接用
-    if re.match(r'^[a-z_]+$', name):
+    if re.match(r"^[a-z_]+$", name):
         return name
     # ✅ 修复：兜底改为名称哈希（旧实现 fact_{len(name)} 会让所有同长度
     # 不同名称的事实共用一个 key，跨段合并时被误判为矛盾/互相覆盖）
@@ -566,9 +679,7 @@ _WARN_OPT = r"(?:⚠" + _VS16 + r"?)?"
 #:          参与「值是否变化」比较，凡曾落过统一写法的模拟值事实恒被判为
 #:          「已改值」——2026-09-20 修的「只改分类/改名静默清矛盾」漏洞
 #:          实际并未堵住（脏值让比较永远为 True）。
-SIMULATED_MARKER_RE = re.compile(
-    r"\s*" + _WARN_OPT + r"\s*\*\s*\(\s*" + _WARN_OPT + r"\s*模拟值\s*\)\s*\*\s*$"
-)
+SIMULATED_MARKER_RE = re.compile(r"\s*" + _WARN_OPT + r"\s*\*\s*\(\s*" + _WARN_OPT + r"\s*模拟值\s*\)\s*\*\s*$")
 
 
 def strip_simulated_marker(text: str) -> str:
@@ -611,11 +722,10 @@ def _split_fact_line(line: str) -> tuple[str, str]:
             best_idx, best_sep = idx, sep
     if best_idx < 0:
         return line.strip(), ""
-    return line[:best_idx].strip(), line[best_idx + len(best_sep):].strip()
+    return line[:best_idx].strip(), line[best_idx + len(best_sep) :].strip()
 
 
 def extract_value_from_markdown_line(line: str) -> tuple[str, str]:
-
     """从旧版 Markdown 格式中提取 name 和 value
     旧格式：- **名称**: 值  或  - 名称：值
 
@@ -634,16 +744,16 @@ def extract_value_from_markdown_line(line: str) -> tuple[str, str]:
     #    参与「值是否变化」比较，导致模拟值事实恒被判为已改值。
     line = strip_simulated_marker(line)
     # 去掉 **
-    line = re.sub(r'\*\*(.+?)\*\*', r'\1', line)
+    line = re.sub(r"\*\*(.+?)\*\*", r"\1", line)
     # 去掉 *(...)* 括号注释
-    line = re.sub(r'\s*\*[^*]*\*\s*', '', line).strip()
+    line = re.sub(r"\s*\*[^*]*\*\s*", "", line).strip()
     # ✅ 2026-10-06：按最早出现的冒号切分（半角/全角同等对待）
     return _split_fact_line(line)
 
 
 #: 「**名称**: 值」形态的事实行（读路径唯一出口 fact_name_value 消费，
 #: routers/global_facts.py 的 _fact_name_value 委托本层，R75b 下沉）。
-_RE_BOLD_FACT_LINE = re.compile(r'^-?\s*\*\*(.+?)\*\*\s*[:：]\s*(.*)')
+_RE_BOLD_FACT_LINE = re.compile(r"^-?\s*\*\*(.+?)\*\*\s*[:：]\s*(.*)")
 
 
 def fact_name_value(row: dict) -> tuple[str, str]:
@@ -706,93 +816,217 @@ def fact_name_value(row: dict) -> tuple[str, str]:
     return name, ""
 
 
-
 # ---------------------------------------------------------------------------
 # 分段工具 + 语义区域识别
 # ---------------------------------------------------------------------------
 
 # zone_type 识别权重表（命中关键词越多越确定）
 _ZONE_KEYWORDS: dict[str, list[str]] = {
-    "machinery_stat": [     # P11 机械统计表（最高价值结构化区）
-        "主要施工机械设备", "机械设备配置", "施工机械", "机械配置表",
-        "设备名称", "机械名称", "规格型号", "进退场时间",
-        "塔式起重机", "挖掘机", "液压挖掘机", "履带吊", "汽车吊",
+    "machinery_stat": [  # P11 机械统计表（最高价值结构化区）
+        "主要施工机械设备",
+        "机械设备配置",
+        "施工机械",
+        "机械配置表",
+        "设备名称",
+        "机械名称",
+        "规格型号",
+        "进退场时间",
+        "塔式起重机",
+        "挖掘机",
+        "液压挖掘机",
+        "履带吊",
+        "汽车吊",
     ],
     "construction_practice_zone": [  # P7 工程做法区
-        "工程做法", "施工工艺", "防水做法", "保温做法", "做法表",
-        "构造层次", "分层做法", "屋面做法", "外墙做法", "地下室防水",
-        "自上而下", "自下而上", "由内至外",
+        "工程做法",
+        "施工工艺",
+        "防水做法",
+        "保温做法",
+        "做法表",
+        "构造层次",
+        "分层做法",
+        "屋面做法",
+        "外墙做法",
+        "地下室防水",
+        "自上而下",
+        "自下而上",
+        "由内至外",
     ],
-    "deployment_zone": [    # P8 施工部署区
-        "施工部署", "施工组织", "施工段划分", "流水段", "施工区",
-        "总体部署", "施工准备", "施工目标", "平面布置",
+    "deployment_zone": [  # P8 施工部署区
+        "施工部署",
+        "施工组织",
+        "施工段划分",
+        "流水段",
+        "施工区",
+        "总体部署",
+        "施工准备",
+        "施工目标",
+        "平面布置",
     ],
-    "process_zone": [       # P9 施工流程区
-        "施工流程", "施工顺序", "工艺流程", "工序衔接", "施工步骤",
-        "测量放线", "土方开挖", "垫层浇筑", "防水层施工", "钢筋绑扎",
-        "→", "施工方法与措施", "施工工艺流程",
+    "process_zone": [  # P9 施工流程区
+        "施工流程",
+        "施工顺序",
+        "工艺流程",
+        "工序衔接",
+        "施工步骤",
+        "测量放线",
+        "土方开挖",
+        "垫层浇筑",
+        "防水层施工",
+        "钢筋绑扎",
+        "→",
+        "施工方法与措施",
+        "施工工艺流程",
     ],
-    "material_mgmt_zone": [ # P10 材料管理区
-        "材料管理", "材料规格", "材料进场", "材料计划", "检验复试",
-        "混凝土强度", "钢筋级别", "砂浆等级", "模板配置", "周转材料",
-        "C30", "C35", "C40", "HRB400", "HRB335", "M10",
+    "material_mgmt_zone": [  # P10 材料管理区
+        "材料管理",
+        "材料规格",
+        "材料进场",
+        "材料计划",
+        "检验复试",
+        "混凝土强度",
+        "钢筋级别",
+        "砂浆等级",
+        "模板配置",
+        "周转材料",
+        "C30",
+        "C35",
+        "C40",
+        "HRB400",
+        "HRB335",
+        "M10",
     ],
     "schedule_zone": [
-        "工期安排", "进度计划", "施工进度", "总工期", "施工计划",
-        "开工日期", "竣工日期", "进度表", "横道图",
+        "工期安排",
+        "进度计划",
+        "施工进度",
+        "总工期",
+        "施工计划",
+        "开工日期",
+        "竣工日期",
+        "进度表",
+        "横道图",
     ],
     "personnel_zone": [
-        "项目组织", "管理人员", "人员配置", "项目经理", "技术负责人",
-        "安全管理机构", "质量保证体系",
+        "项目组织",
+        "管理人员",
+        "人员配置",
+        "项目经理",
+        "技术负责人",
+        "安全管理机构",
+        "质量保证体系",
     ],
     "tech_param_zone": [
-        "工程概况", "地质条件", "基坑设计", "支护结构", "地下水",
-        "土层参数", "承载力", "边坡",
+        "工程概况",
+        "地质条件",
+        "基坑设计",
+        "支护结构",
+        "地下水",
+        "土层参数",
+        "承载力",
+        "边坡",
     ],
     # --- 新增语义区（对应新增 fact_type 类别）---
     "basis_zone": [
-        "编制依据", "依据规范", "执行标准", "标准规范", "设计文件",
-        "法律法规", "技术规程", "验收规范", "图纸会审",
+        "编制依据",
+        "依据规范",
+        "执行标准",
+        "标准规范",
+        "设计文件",
+        "法律法规",
+        "技术规程",
+        "验收规范",
+        "图纸会审",
         # ✅ R93（2026-10-17）：图集/规范清单形态的编制依据也须命中本区
-        "标准图集", "图集", "规范清单", "引用标准", "法规依据",
+        "标准图集",
+        "图集",
+        "规范清单",
+        "引用标准",
+        "法规依据",
     ],
     "monitoring_zone": [
-        "监测方案", "监测项目", "监测频率", "监测点", "报警值", "控制值",
-        "沉降观测", "变形观测", "第三方监测", "监测预警",
+        "监测方案",
+        "监测项目",
+        "监测频率",
+        "监测点",
+        "报警值",
+        "控制值",
+        "沉降观测",
+        "变形观测",
+        "第三方监测",
+        "监测预警",
     ],
     "emergency_zone": [
-        "应急预案", "应急处置", "应急救援", "应急物资", "应急组织",
-        "应急演练", "抢险", "突发事件", "应急响应",
+        "应急预案",
+        "应急处置",
+        "应急救援",
+        "应急物资",
+        "应急组织",
+        "应急演练",
+        "抢险",
+        "突发事件",
+        "应急响应",
     ],
     "acceptance_zone": [
-        "验收要求", "验收标准", "验收程序", "隐蔽验收", "检验批",
-        "分项验收", "质量验收", "验收依据",
+        "验收要求",
+        "验收标准",
+        "验收程序",
+        "隐蔽验收",
+        "检验批",
+        "分项验收",
+        "质量验收",
+        "验收依据",
     ],
     "labor_zone": [
-        "劳动力", "劳动力计划", "劳动力配置", "工种", "投入人员",
-        "用工计划", "高峰人数", "管理人员配置",
+        "劳动力",
+        "劳动力计划",
+        "劳动力配置",
+        "工种",
+        "投入人员",
+        "用工计划",
+        "高峰人数",
+        "管理人员配置",
     ],
     "environment_zone": [
-        "环境保护", "文明施工", "扬尘", "噪声", "污水", "固废",
-        "降尘", "垃圾清运", "绿色施工",
+        "环境保护",
+        "文明施工",
+        "扬尘",
+        "噪声",
+        "污水",
+        "固废",
+        "降尘",
+        "垃圾清运",
+        "绿色施工",
     ],
     "temporary_zone": [
-        "临时用电", "临时用水", "临时道路", "临时设施", "临建",
-        "施工用电", "配电箱", "临时消防",
+        "临时用电",
+        "临时用水",
+        "临时道路",
+        "临时设施",
+        "临建",
+        "施工用电",
+        "配电箱",
+        "临时消防",
     ],
     "risk_zone": [
-        "危险源", "重大危险源", "危大工程", "风险等级", "风险辨识",
-        "风险管控", "危险因素", "安全隐患",
+        "危险源",
+        "重大危险源",
+        "危大工程",
+        "风险等级",
+        "风险辨识",
+        "风险管控",
+        "危险因素",
+        "安全隐患",
     ],
 }
 
 _priority_weights: dict[str, float] = {
-    "machinery_stat": 1.5,          # 结构化表格，价值最高
+    "machinery_stat": 1.5,  # 结构化表格，价值最高
     "construction_practice_zone": 1.3,
     "deployment_zone": 1.2,
     "process_zone": 1.2,
     "material_mgmt_zone": 1.2,
-    "monitoring_zone": 1.2,          # 监测参数直接关系安全，高价值
+    "monitoring_zone": 1.2,  # 监测参数直接关系安全，高价值
     "risk_zone": 1.2,
     "emergency_zone": 1.1,
     "acceptance_zone": 1.1,
@@ -802,8 +1036,8 @@ _priority_weights: dict[str, float] = {
     "environment_zone": 1.0,
     "personnel_zone": 1.0,
     "tech_param_zone": 1.0,
-    "basis_zone": 0.9,               # 规范引用类，结构化价值中等
-    "general": 0.8,                  # 低权重区（标题/目录/规范引用）
+    "basis_zone": 0.9,  # 规范引用类，结构化价值中等
+    "general": 0.8,  # 低权重区（标题/目录/规范引用）
 }
 
 
@@ -814,10 +1048,11 @@ class Chunk:
     ✅ 报告步骤⑤：标题边界 > 表格完整 > token 预算；高权重区切分更细。
     zone_type 决定步骤⑥按段注入哪套 P7-P11 类型规则块。
     """
-    text: str                    # 段落原文
-    zone_type: str = "general"   # 语义区域类型（machinery_stat / construction_practice_zone / ... / general）
-    priority_weight: float = 0.8 # 优先权重（高权重区切分更细、提取时注入更多上下文）
-    heading: str = ""            # 该段归属的最近标题（用于溯源）
+
+    text: str  # 段落原文
+    zone_type: str = "general"  # 语义区域类型（machinery_stat / construction_practice_zone / ... / general）
+    priority_weight: float = 0.8  # 优先权重（高权重区切分更细、提取时注入更多上下文）
+    heading: str = ""  # 该段归属的最近标题（用于溯源）
 
 
 def _classify_zone_type(text: str) -> str:
@@ -834,9 +1069,9 @@ def _classify_zone_type(text: str) -> str:
     return scores[0][0]
 
 
-def _split_table_rows(sec: str, chunk_size: int, chunks: list, heading: str,
-                      zone_type: str = "general",
-                      priority_weight: float = 0.8) -> None:
+def _split_table_rows(
+    sec: str, chunk_size: int, chunks: list, heading: str, zone_type: str = "general", priority_weight: float = 0.8
+) -> None:
     """把超长表格（如百行机械统计表）按行切分为多个 Chunk，每段复用表头行。
 
     ✅ 增强（报告步骤⑤表格完整性升级）：旧实现对超长表格直接整段塞入
@@ -860,17 +1095,18 @@ def _split_table_rows(sec: str, chunk_size: int, chunks: list, heading: str,
     # 表头：第一个表格行（以 | 开头）。
     # ✅ token 优化：旧实现把表头前的全部说明文字并入 header，每个切分子段
     # 重复注入可能上千字的说明。说明行只在首个子段保留一次。
-    header_idx = next(
-        (i for i, ln in enumerate(lines) if ln.strip().startswith("|")), -1)
+    header_idx = next((i for i, ln in enumerate(lines) if ln.strip().startswith("|")), -1)
     if header_idx >= 0:
         header = [lines[header_idx]]
         # 若下一行为 Markdown 对齐分隔行（|---|---|），一并保留
-        if (header_idx + 1 < len(lines)
-                and set(lines[header_idx + 1].strip().replace("|", "").replace(":", "").replace("-", "").strip()) == set()):
+        if (
+            header_idx + 1 < len(lines)
+            and set(lines[header_idx + 1].strip().replace("|", "").replace(":", "").replace("-", "").strip()) == set()
+        ):
             header.append(lines[header_idx + 1])
-            body = lines[header_idx + 2:]
+            body = lines[header_idx + 2 :]
         else:
-            body = lines[header_idx + 1:]
+            body = lines[header_idx + 1 :]
         # 说明行仅随第一个子段注入
         preamble = lines[:header_idx]
     else:
@@ -883,12 +1119,14 @@ def _split_table_rows(sec: str, chunk_size: int, chunks: list, heading: str,
 
     def _flush() -> None:
         if cur:
-            chunks.append(Chunk(
-                text="\n".join(cur).strip(),
-                zone_type=zone_type,
-                priority_weight=priority_weight,
-                heading=heading,
-            ))
+            chunks.append(
+                Chunk(
+                    text="\n".join(cur).strip(),
+                    zone_type=zone_type,
+                    priority_weight=priority_weight,
+                    heading=heading,
+                )
+            )
 
     for ln in body:
         # ✅ BUG 修复（丢行）：旧实现对超限行先 _flush() 缓冲、再以
@@ -902,12 +1140,14 @@ def _split_table_rows(sec: str, chunk_size: int, chunks: list, heading: str,
         if len(ln) + 1 > chunk_size:
             _flush()
             cur = list(header) if header else []
-            chunks.append(Chunk(
-                text="\n".join([ln] if not header else header + [ln]).strip(),
-                zone_type=zone_type,
-                priority_weight=priority_weight,
-                heading=heading,
-            ))
+            chunks.append(
+                Chunk(
+                    text="\n".join([ln] if not header else header + [ln]).strip(),
+                    zone_type=zone_type,
+                    priority_weight=priority_weight,
+                    heading=heading,
+                )
+            )
             continue
         if cur and len("\n".join(cur)) + len(ln) + 1 > chunk_size:
             _flush()
@@ -961,7 +1201,9 @@ def resolve_fact_context_chars() -> int:
         logger.info(
             "事实提取上下文窗口 %d 超过单段硬天花板 %d，已夹到天花板"
             "（可调 facts_context_length_limit，但单段过大会显著提高超时/限流风险）",
-            raw, FACTS_SEGMENT_HARD_CEILING)
+            raw,
+            FACTS_SEGMENT_HARD_CEILING,
+        )
         raw = FACTS_SEGMENT_HARD_CEILING
     return raw
 
@@ -999,6 +1241,7 @@ def resolve_chunk_size(chunk_size: int = CHUNK_SIZE) -> int:
         return chunk_size
     try:
         from app.services.facts_patches import get_segment_limit
+
         # 固定消息 = system 提示词骨架 + 归一化字典块（两者都与资料长度无关），
         # 与易标 getMessagesContentLength 的口径一致（每条额外计 64 字符开销）。
         fixed = [{"role": "system", "content": _FIXED_PROMPT_SKELETON}]
@@ -1012,16 +1255,17 @@ def resolve_chunk_size(chunk_size: int = CHUNK_SIZE) -> int:
                 "上下文预算分段：窗口=%d 扣固定消息后可用=%d，"
                 "低于历史基线 CHUNK_SIZE=%d → 沿用基线（配置过小，"
                 "长资料会切出较多段）",
-                resolve_fact_context_chars(), limit, CHUNK_SIZE)
+                resolve_fact_context_chars(),
+                limit,
+                CHUNK_SIZE,
+            )
         return resolved
     except Exception:  # noqa: BLE001 - 任何异常都退回旧行为
-        logger.warning("上下文预算分段计算失败，回落到 CHUNK_SIZE=%d", chunk_size,
-                       exc_info=True)
+        logger.warning("上下文预算分段计算失败，回落到 CHUNK_SIZE=%d", chunk_size, exc_info=True)
         return chunk_size
 
 
-def split_into_chunks(text: str, chunk_size: int = CHUNK_SIZE,
-                       overlap: int = CHUNK_OVERLAP) -> list[Chunk]:
+def split_into_chunks(text: str, chunk_size: int = CHUNK_SIZE, overlap: int = CHUNK_OVERLAP) -> list[Chunk]:
     """智能切分资料为多个重叠段落（报告步骤⑤语义分段升级）
 
     ✅ 升级点：
@@ -1040,9 +1284,9 @@ def split_into_chunks(text: str, chunk_size: int = CHUNK_SIZE,
 
     # 先按章节标题边界切分（markdown # / Word 四级编号）
     heading_patterns = [
-        r'\n(?=#{1,6}\s)',           # markdown 标题
-        r'\n(?=(?:第[一二三四五六七八九十\d]+[章节篇部]))',  # 中文章节编号
-        r'\n(?=(\d+\.)+\d+\s)',      # 阿拉伯数字多级编号 1. 1.1 1.1.1
+        r"\n(?=#{1,6}\s)",  # markdown 标题
+        r"\n(?=(?:第[一二三四五六七八九十\d]+[章节篇部]))",  # 中文章节编号
+        r"\n(?=(\d+\.)+\d+\s)",  # 阿拉伯数字多级编号 1. 1.1 1.1.1
     ]
     raw_sections = [text]
     for pat in heading_patterns:
@@ -1072,12 +1316,14 @@ def split_into_chunks(text: str, chunk_size: int = CHUNK_SIZE,
         if not current_text.strip():
             return
         zone = _classify(current_text)
-        chunks.append(Chunk(
-            text=current_text.strip(),
-            zone_type=zone,
-            priority_weight=_priority_weights.get(zone, 0.8),
-            heading=current_heading,
-        ))
+        chunks.append(
+            Chunk(
+                text=current_text.strip(),
+                zone_type=zone,
+                priority_weight=_priority_weights.get(zone, 0.8),
+                heading=current_heading,
+            )
+        )
         current_text = ""
 
     for sec in raw_sections:
@@ -1087,8 +1333,9 @@ def split_into_chunks(text: str, chunk_size: int = CHUNK_SIZE,
         # 提取标题行作为 heading
         lines = sec.split("\n")
         first_line = lines[0].strip() if lines else ""
-        if (first_line.startswith("#") or
-                re.match(r'^(第[一二三四五六七八九十\d]+[章节篇部]|[一二三四五六七八九十]+[、．.]|\d+[\.、]\d*)', first_line)):
+        if first_line.startswith("#") or re.match(
+            r"^(第[一二三四五六七八九十\d]+[章节篇部]|[一二三四五六七八九十]+[、．.]|\d+[\.、]\d*)", first_line
+        ):
             current_heading = first_line.lstrip("#").strip()[:60]
 
         # 检测是否为表格主导段（保护表格不切断）
@@ -1118,13 +1365,17 @@ def split_into_chunks(text: str, chunk_size: int = CHUNK_SIZE,
                 # 避免单段塞入超长表格导致 LLM 输入超限 / 单次调用失败、
                 # 进而该段提取整体失败（表现为「部分段落无事实」）。
                 _finalize()
-                _split_table_rows(sec, effective_size, chunks, current_heading,
-                                  zone_type=estimated_zone,
-                                  priority_weight=_priority_weights.get(
-                                      estimated_zone, 0.8))
+                _split_table_rows(
+                    sec,
+                    effective_size,
+                    chunks,
+                    current_heading,
+                    zone_type=estimated_zone,
+                    priority_weight=_priority_weights.get(estimated_zone, 0.8),
+                )
                 current_text = ""
         elif len(sec) > effective_size:
-            sub_parts = re.split(r'\n\n', sec)
+            sub_parts = re.split(r"\n\n", sec)
             for part in sub_parts:
                 if len(current_text) + len(part) <= effective_size:
                     current_text += ("\n\n" if current_text else "") + part
@@ -1133,14 +1384,16 @@ def split_into_chunks(text: str, chunk_size: int = CHUNK_SIZE,
                     if len(part) > effective_size:
                         # 超长 part 强制按字数切（相同子段文本走 _classify 缓存，仅首次扫描）
                         for i in range(0, len(part), effective_size - overlap):
-                            _seg_text = part[i:i + effective_size]
+                            _seg_text = part[i : i + effective_size]
                             _seg_zone = _classify(_seg_text)
-                            chunks.append(Chunk(
-                                text=_seg_text,
-                                zone_type=_seg_zone,
-                                priority_weight=_priority_weights.get(_seg_zone, 0.8),
-                                heading=current_heading,
-                            ))
+                            chunks.append(
+                                Chunk(
+                                    text=_seg_text,
+                                    zone_type=_seg_zone,
+                                    priority_weight=_priority_weights.get(_seg_zone, 0.8),
+                                    heading=current_heading,
+                                )
+                            )
                         current_text = ""
                     else:
                         current_text = part
@@ -1152,10 +1405,12 @@ def split_into_chunks(text: str, chunk_size: int = CHUNK_SIZE,
                 current_text = sec
     _finalize()
 
-    logger.info("分段：%d 段 (总字符 %d, zone_types: %s)",
-                len(chunks), len(text),
-                {z: sum(1 for c in chunks if c.zone_type == z)
-                 for z in set(c.zone_type for c in chunks)})
+    logger.info(
+        "分段：%d 段 (总字符 %d, zone_types: %s)",
+        len(chunks),
+        len(text),
+        {z: sum(1 for c in chunks if c.zone_type == z) for z in set(c.zone_type for c in chunks)},
+    )
     return chunks
 
 
@@ -1163,13 +1418,17 @@ def split_into_chunks(text: str, chunk_size: int = CHUNK_SIZE,
 # 提取管线
 # ---------------------------------------------------------------------------
 
-async def extract_from_single_chunk(text: str, context_summary: str = "",
-                                     chunk_index: int = 0,
-                                     zone_type: str = "general",
-                                     priority_weight: float = 0.8,
-                                     heading: str = "",
-                                     error_out: dict | None = None,
-                                     missing_value_mode: str = "fabricate") -> list[FactItem]:
+
+async def extract_from_single_chunk(
+    text: str,
+    context_summary: str = "",
+    chunk_index: int = 0,
+    zone_type: str = "general",
+    priority_weight: float = 0.8,
+    heading: str = "",
+    error_out: dict | None = None,
+    missing_value_mode: str = "fabricate",
+) -> list[FactItem]:
     """从单个文本段中提取事实
 
     ✅ 升级（报告 v2.0 + 步骤⑥ zone_type 加权注入）：
@@ -1203,9 +1462,7 @@ async def extract_from_single_chunk(text: str, context_summary: str = "",
         "general": "本段为通用资料区，综合运用所有规则块",
     }.get(zone_type, "本段为通用资料区")
 
-    priority_hint = (
-        f"（优先权重 {priority_weight:.1f}，属于{'高' if priority_weight >= 1.3 else '中' if priority_weight >= 1.0 else '低'}价值区）"
-    )
+    priority_hint = f"（优先权重 {priority_weight:.1f}，属于{'高' if priority_weight >= 1.3 else '中' if priority_weight >= 1.0 else '低'}价值区）"
 
     def _validate(o) -> list[str]:
         # ✅ BUG 修复：旧校验对 `{}` / 缺字段返回 []（视为通过），
@@ -1221,20 +1478,26 @@ async def extract_from_single_chunk(text: str, context_summary: str = "",
         return []
 
     try:
-        prompt_material = text
-        if settings.prompt_injection_defense:
-            from app.services.prompt_governance import guard_material
-            prompt_material = guard_material("全局事实提取资料", text)
-        sys_prompt = render("facts_extract_system",
-                           material=prompt_material,
-                           summary=context_summary[:500] if context_summary else "（无全文摘要）",
-                           chunk_index=chunk_index + 1,
-                           NORM_DICT_BLOCK=norm_dict_block,
-                           zone_type=zone_type,
-                           priority_weight=f"{priority_weight:.1f}",
-                           heading=heading or "（无章节标题）",
-                           zone_hint=zone_hint,
-                           priority_hint=priority_hint)
+        # ✅ R175（2026-11-03 · BUG-1 接线）：事实提取素材是外部不可信原文，
+        #   统一走 prompt_material_guard.govern_blob：
+        #   围栏（prompt_injection_defense）→ 凭据脱敏（prompt_redact_sensitive）
+        #   → 上下文预算（prompt_context_budget）。三个开关默认关闭，
+        #   未开启时与修复前逐字节一致。
+        from app.services.prompt_material_guard import govern_blob
+
+        prompt_material = govern_blob(text, "全局事实提取资料")
+        sys_prompt = render(
+            "facts_extract_system",
+            material=prompt_material,
+            summary=context_summary[:500] if context_summary else "（无全文摘要）",
+            chunk_index=chunk_index + 1,
+            NORM_DICT_BLOCK=norm_dict_block,
+            zone_type=zone_type,
+            priority_weight=f"{priority_weight:.1f}",
+            heading=heading or "（无章节标题）",
+            zone_hint=zone_hint,
+            priority_hint=priority_hint,
+        )
     except Exception as e:
         logger.warning("第 %d 段提示词渲染失败: %s", chunk_index + 1, e)
         if error_out is not None:
@@ -1251,11 +1514,13 @@ async def extract_from_single_chunk(text: str, context_summary: str = "",
             "\n\n【缺值模式：不杜撰（omit）】资料中未明确给出的确定性数据"
             "（人数、工期、设备型号、强度等级、人员姓名等），严禁编造具体值："
             "可改写成笼统但正确的表述（如“按设计要求配置”“满足规范要求”）；"
-            "无法笼统表述的条目直接跳过不要输出，所有输出条目 is_simulated 一律为 false。")
+            "无法笼统表述的条目直接跳过不要输出，所有输出条目 is_simulated 一律为 false。"
+        )
     elif _mode == "placeholder":
         sys_prompt += (
             "\n\n【缺值模式：留待填写（placeholder）】资料中未明确给出的确定性数据，"
-            "value 逐字写为“【待填写】”，不要编造任何具体值，is_simulated=true。")
+            "value 逐字写为“【待填写】”，不要编造任何具体值，is_simulated=true。"
+        )
 
     # ✅ 容错重试：429 限流 / 瞬时网络错误常是阶段性的，直接放弃该段会造成
     #    "功能部分未完成"（部分段落无事实）。这里做指数退避重试。
@@ -1264,7 +1529,8 @@ async def extract_from_single_chunk(text: str, context_summary: str = "",
     for attempt in range(FACTS_CHUNK_RETRIES + 1):
         try:
             obj, _ = await collect_json_response(
-                [{"role": "system", "content": sys_prompt}], _validate,
+                [{"role": "system", "content": sys_prompt}],
+                _validate,
                 # 低温 + JSON 模式 + 放宽超时：显著降低非法 JSON 与超时失败率
                 temperature=0.0,
                 json_mode=True,
@@ -1282,9 +1548,7 @@ async def extract_from_single_chunk(text: str, context_summary: str = "",
             #    修复轮，整段重试不会改变结果，只会成倍放大 AI 调用与耗时
             #    （最多 3×3=9 次/段）。立即终止该段重试。
             if _is_structural_error(e):
-                logger.warning(
-                    "第 %d 段提取返回结构性错误（内层修复未通过，不再整段重试）: %s",
-                    chunk_index + 1, e)
+                logger.warning("第 %d 段提取返回结构性错误（内层修复未通过，不再整段重试）: %s", chunk_index + 1, e)
                 break
             # ✅ R111（P2-7）：确定性永久错误（401/402/403/404 令牌失效、余额
             #    不足、模型不存在——R109 实证 agnes 401 被白重试 49 次）整段
@@ -1294,36 +1558,41 @@ async def extract_from_single_chunk(text: str, context_summary: str = "",
             #    可能成功，保留既有退避路径。
             try:
                 from app.services.ai.provider_factory import is_non_retryable_error
+
                 _permanent = is_non_retryable_error(e)
             except Exception:  # noqa: BLE001 - 判据自身故障不得中断提取
                 # ✅ R166：补 DEBUG 留痕（同 save_extracted_chunks 2026-11-02 口径），
                 #    判据自身故障按「可重试」降级是安全方向，但必须可观测。
-                logger.debug(
-                    "is_non_retryable_error 判据自身故障（按可重试错误处理）",
-                    exc_info=True)
+                logger.debug("is_non_retryable_error 判据自身故障（按可重试错误处理）", exc_info=True)
                 _permanent = False
             if _permanent:
                 logger.warning(
-                    "第 %d 段提取命中确定性永久错误（%s），不再整段重试"
-                    "（避免白烧重试与延迟失败暴露）",
-                    chunk_index + 1, str(e)[:120])
+                    "第 %d 段提取命中确定性永久错误（%s），不再整段重试" "（避免白烧重试与延迟失败暴露）",
+                    chunk_index + 1,
+                    str(e)[:120],
+                )
                 break
             if attempt < FACTS_CHUNK_RETRIES:
                 err_s = str(e).lower()
                 # 429 限流需要更长的冷却，等待限流窗口恢复
-                base = (FACTS_RETRY_BACKOFF_RATE_LIMIT
-                        if ("429" in err_s or "rate" in err_s or "limit" in err_s)
-                        else FACTS_RETRY_BACKOFF)
-                backoff = base * (2 ** attempt)
+                base = (
+                    FACTS_RETRY_BACKOFF_RATE_LIMIT
+                    if ("429" in err_s or "rate" in err_s or "limit" in err_s)
+                    else FACTS_RETRY_BACKOFF
+                )
+                backoff = base * (2**attempt)
                 logger.warning(
                     "第 %d 段提取失败（第 %d/%d 次），%.0fs 后重试: %s",
-                    chunk_index + 1, attempt + 1, FACTS_CHUNK_RETRIES + 1,
-                    backoff, e)
+                    chunk_index + 1,
+                    attempt + 1,
+                    FACTS_CHUNK_RETRIES + 1,
+                    backoff,
+                    e,
+                )
                 await asyncio.sleep(backoff)
 
     if obj is None:
-        logger.warning("第 %d 段提取最终失败（已重试 %d 次）: %s",
-                       chunk_index + 1, FACTS_CHUNK_RETRIES, last_err)
+        logger.warning("第 %d 段提取最终失败（已重试 %d 次）: %s", chunk_index + 1, FACTS_CHUNK_RETRIES, last_err)
         if error_out is not None:
             error_out["error"] = str(last_err)[:200] if last_err else "未知错误"
         return []
@@ -1453,12 +1722,20 @@ def _parse_fact_dict(f: dict, default_source: str = "") -> FactItem | None:
         is_safety = True
 
     return FactItem(
-        name=name, value=value, key=key, category=category,
-        source=source, source_ref=source_ref,
-        is_simulated=is_sim, confidence=confidence,
-        value_unit=value_unit, fact_type=fact_type,
-        evidence_kind=evidence_kind, page_ref=page_ref,
-        zone_type=zone_type, is_safety_critical=is_safety,
+        name=name,
+        value=value,
+        key=key,
+        category=category,
+        source=source,
+        source_ref=source_ref,
+        is_simulated=is_sim,
+        confidence=confidence,
+        value_unit=value_unit,
+        fact_type=fact_type,
+        evidence_kind=evidence_kind,
+        page_ref=page_ref,
+        zone_type=zone_type,
+        is_safety_critical=is_safety,
         value_kind=value_kind,
     )
 
@@ -1472,7 +1749,10 @@ def _parse_legacy_fact_dict(it: dict, chunk_index: int = 0) -> FactItem | None:
     key = it.get("key") or normalize_key(name)
     cat = it.get("category") or "other"
     return FactItem(
-        name=name, value=value, key=key, category=cat,
+        name=name,
+        value=value,
+        key=key,
+        category=cat,
         source=it.get("source", f"第{chunk_index + 1}段"),
         source_ref=it.get("source_ref", ""),
         is_simulated=bool(it.get("is_simulated", False)),
@@ -1485,9 +1765,9 @@ def _parse_legacy_fact_dict(it: dict, chunk_index: int = 0) -> FactItem | None:
 # fact_type → category 完整映射（可行性研究报告 v2.0 + 规则扩充）
 _FACT_TYPE_TO_CATEGORY: dict[str, str] = {
     "basic": "basic",
-    "basis": "basis",                    # 新增：编制依据（规范/标准/设计文件）
+    "basis": "basis",  # 新增：编制依据（规范/标准/设计文件）
     "personnel": "personnel",
-    "labor": "labor",                    # 新增：劳动力配置（工种/人数）
+    "labor": "labor",  # 新增：劳动力配置（工种/人数）
     "schedule": "schedule",
     "machinery": "machinery",
     "material": "material_mgmt",
@@ -1506,12 +1786,12 @@ _FACT_TYPE_TO_CATEGORY: dict[str, str] = {
     "design_param": "tech_param",
     "equipment": "tech_param",
     "safety": "safety_critical",
-    "risk": "risk",                      # 新增：风险与危大工程
-    "monitoring": "monitoring",          # 新增：监测方案
-    "emergency": "emergency",            # 新增：应急处置
-    "acceptance": "acceptance",          # 新增：验收要求
-    "temporary": "temporary",            # 新增：临时工程
-    "environment": "environment",        # 新增：环保与文明施工
+    "risk": "risk",  # 新增：风险与危大工程
+    "monitoring": "monitoring",  # 新增：监测方案
+    "emergency": "emergency",  # 新增：应急处置
+    "acceptance": "acceptance",  # 新增：验收要求
+    "temporary": "temporary",  # 新增：临时工程
+    "environment": "environment",  # 新增：环保与文明施工
     "quality": "quality",
     "other": "other",
 }
@@ -1550,11 +1830,29 @@ CATEGORY_TITLES: dict[str, str] = {
 
 # category 展示顺序（提取结果分组的稳定排序）
 _CATEGORY_ORDER: list[str] = [
-    "basic", "basis", "personnel", "labor", "schedule", "equipment",
-    "machinery", "material_mgmt", "tech_param", "scale", "risk",
-    "safety_critical", "deployment", "temporary", "process", "execution",
-    "monitoring", "quality", "acceptance", "commitment", "environment",
-    "emergency", "other",
+    "basic",
+    "basis",
+    "personnel",
+    "labor",
+    "schedule",
+    "equipment",
+    "machinery",
+    "material_mgmt",
+    "tech_param",
+    "scale",
+    "risk",
+    "safety_critical",
+    "deployment",
+    "temporary",
+    "process",
+    "execution",
+    "monitoring",
+    "quality",
+    "acceptance",
+    "commitment",
+    "environment",
+    "emergency",
+    "other",
 ]
 
 
@@ -1583,10 +1881,18 @@ def _is_safety_critical(item: FactItem) -> bool:
         if kw in name:
             return True
     key_to_safety = {
-        "foundation_depth", "support_type", "tower_crane_model",
-        "concrete_grade", "bearing_capacity", "water_table",
-        "rebar_grade", "steel_model", "scaffold_type",
-        "formwork_type", "max_lift_weight", "slope_ratio",
+        "foundation_depth",
+        "support_type",
+        "tower_crane_model",
+        "concrete_grade",
+        "bearing_capacity",
+        "water_table",
+        "rebar_grade",
+        "steel_model",
+        "scaffold_type",
+        "formwork_type",
+        "max_lift_weight",
+        "slope_ratio",
     }
     return item.key in key_to_safety
 
@@ -1598,14 +1904,13 @@ def is_safety_critical_name(name: str, value: str = "", key: str = "") -> bool:
     旧实现只在提取阶段计算，重新查询后该标记丢失 → 前端"安全关键"提示
     刷新即消失。现由查询接口按同一规则复算，保证展示与提取一致。
     """
-    return _is_safety_critical(
-        FactItem(name=name or "", value=value or "",
-                 key=key or normalize_key(name or "")))
+    return _is_safety_critical(FactItem(name=name or "", value=value or "", key=key or normalize_key(name or "")))
 
 
 # ---------------------------------------------------------------------------
 # 合并去重与矛盾检测
 # ---------------------------------------------------------------------------
+
 
 def _as_text(v) -> str:
     """把 value（str / list / 数字 / None）安全转为比较用字符串。
@@ -1626,7 +1931,7 @@ def _norm_value(v) -> str:
 
     ✅ BUG 修复：兼容序列类 list 值（先安全转字符串再归一）。
     """
-    return re.sub(r'\s+', '', _as_text(v).replace('：', ':'))
+    return re.sub(r"\s+", "", _as_text(v).replace("：", ":"))
 
 
 # ---------------------------------------------------------------------------
@@ -1642,10 +1947,16 @@ def _norm_value(v) -> str:
 #   （后缀 = _norm_value 的 md5 前 8 位，同一部规范跨段落/跨次提取仍收敛同键）。
 #: 判据单一事实源（merge 分簇与 persist 已确认行兼容共用，勿复制第二份）
 BASIS_COEXIST_CATEGORY = "basis"
-BASIS_COEXIST_KEYS: frozenset = frozenset({
-    "compilation_basis", "execution_standard", "tech_standard",
-    "acceptance_code", "standard_atlas", "legal_basis",
-})
+BASIS_COEXIST_KEYS: frozenset = frozenset(
+    {
+        "compilation_basis",
+        "execution_standard",
+        "tech_standard",
+        "acceptance_code",
+        "standard_atlas",
+        "legal_basis",
+    }
+)
 
 _BASIS_SCOPED_SEP = "::"
 _BASIS_SCOPED_RE = re.compile(r"^(?P<base>.+)::(?P<tag>[0-9a-f]{8})$")
@@ -1702,13 +2013,11 @@ def apply_norm_dicts(all_items: list[FactItem]) -> None:
     """
     for it in all_items:
         new_name = normalize_machinery_name(it.name)
-        if new_name != it.name and (
-                not it.key or it.key == normalize_key(it.name)):
+        if new_name != it.name and (not it.key or it.key == normalize_key(it.name)):
             it.key = normalize_key(new_name)
         it.name = new_name
         if isinstance(it.value, list):
-            it.value = [normalize_material_spec(_as_text(v)) if isinstance(v, str) else v
-                        for v in it.value]
+            it.value = [normalize_material_spec(_as_text(v)) if isinstance(v, str) else v for v in it.value]
         else:
             it.value = normalize_material_spec(_as_text(it.value))
         # 单位规范化：台套→台、米→m、日历日→日历天等（统一全文口径）
@@ -1736,8 +2045,7 @@ def merge_and_deduplicate(all_items: list[FactItem]) -> list[FactItem]:
             continue
         by_key.setdefault(k, []).append(it)
     # 无 key 且无名称的条目：保持原顺序追加在末尾
-    orphans = [it for it in all_items
-               if not (it.key or "").strip() and not (it.name or "").strip()]
+    orphans = [it for it in all_items if not (it.key or "").strip() and not (it.name or "").strip()]
 
     resolved: list[FactItem] = []
     for key, group in by_key.items():
@@ -1756,6 +2064,13 @@ def merge_and_deduplicate(all_items: list[FactItem]) -> list[FactItem]:
             if nv and nv not in seen_values:
                 seen_values.add(nv)
                 unique.append(it)
+
+        # ✅ BUG-12 修复（R175）：簇内取值**全为空白**时去重后为空列表，
+        #    后续 `unique[0]` 直接 IndexError，整轮提取落库失败。
+        #    取值为空白/纯符号的「事实」无可注入信息，直接丢弃该簇（不产出空值事实）。
+        if not unique:
+            logger.debug("事实簇取值全为空白，跳过（名称=%s）", (group[0].name if group else "")[:40])
+            continue
 
         # ✅ R93（2026-10-17）：多值并存（清单型）事实 —— 每条唯一取值独立
         #   成条并获「值域限定键」，绝不折叠成「1 条事实 + N-1 个矛盾候选」
@@ -1784,9 +2099,13 @@ def merge_and_deduplicate(all_items: list[FactItem]) -> list[FactItem]:
             #    一条「备选值」渲染（自己与自己并列），既冗余又易误导裁决。
             best = unique[0]
             conflict_vals = [
-                {"value": u.value, "source": u.source, "confidence": u.confidence,
-                 # ✅ 候选值的模拟值语义一并带上（落库 / 前端回传 / 裁决重算共用）
-                 "is_simulated": bool(u.is_simulated)}
+                {
+                    "value": u.value,
+                    "source": u.source,
+                    "confidence": u.confidence,
+                    # ✅ 候选值的模拟值语义一并带上（落库 / 前端回传 / 裁决重算共用）
+                    "is_simulated": bool(u.is_simulated),
+                }
                 for u in unique[1:]
             ]
             best.has_conflict = True
@@ -1838,12 +2157,30 @@ def _build_local_summary(chunks: list, max_chars: int = 800) -> str:
     不追求自然语言流畅，只求关键参数覆盖。替代 AI 摘要调用，省 5-15s + token 成本。
     """
     keywords = [
-        "项目名称", "工程名称", "建设地点", "项目地点",
-        "总工期", "建设工期", "计划工期", "运维期", "保修期",
-        "基坑深度", "开挖深度", "支护", "地下水位", "地质",
-        "建筑面积", "占地面积", "层数", "结构形式",
-        "混凝土", "钢筋", "塔吊", "挖掘机",
-        "质量标准", "安全等级",
+        "项目名称",
+        "工程名称",
+        "建设地点",
+        "项目地点",
+        "总工期",
+        "建设工期",
+        "计划工期",
+        "运维期",
+        "保修期",
+        "基坑深度",
+        "开挖深度",
+        "支护",
+        "地下水位",
+        "地质",
+        "建筑面积",
+        "占地面积",
+        "层数",
+        "结构形式",
+        "混凝土",
+        "钢筋",
+        "塔吊",
+        "挖掘机",
+        "质量标准",
+        "安全等级",
     ]
     hits: list[str] = []
     for chunk in chunks[:3]:
@@ -1855,7 +2192,7 @@ def _build_local_summary(chunks: list, max_chars: int = 800) -> str:
     seen = set()
     dedup = []
     for h in hits:
-        key = re.sub(r'\s+', '', h)[:40]
+        key = re.sub(r"\s+", "", h)[:40]
         if key not in seen:
             seen.add(key)
             dedup.append(h)
@@ -1881,13 +2218,13 @@ def _chunk_hash(text: str) -> str:
     陈旧）。现改用 ``surrogatepass``：孤立代理原样编入，指纹必然区分。
     """
     import hashlib
+
     raw = (text or "").encode("utf-8", errors="surrogatepass")
     return hashlib.sha1(raw).hexdigest()[:16]
 
 
 async def run_extraction_pipeline(
     full_text: str,
-
     max_chunks: int = MAX_CHUNKS,
     progress_cb=None,
     should_stop=None,
@@ -1913,9 +2250,9 @@ async def run_extraction_pipeline(
       的「只产补丁」补充阶段。
     """
     import time
+
     _t0 = time.perf_counter()
     result = ExtractionResult()
-
 
     # 分段区间占进度 0.10 → 0.72；后续程序阶段占 0.72 → 0.94
     _P_START, _P_END = 0.10, 0.72
@@ -1951,22 +2288,28 @@ async def run_extraction_pipeline(
         #    （priority_weight 仅 0.9）→ 提取结果"有量无质"。
         #    现按语义区优先权重保留高价值段，再按原文档顺序还原，
         #    保证超限时长资料仍能覆盖最关键的结构化信息。
-        ranked = sorted(range(len(chunks)),
-                        key=lambda i: (-chunks[i].priority_weight, i))
+        ranked = sorted(range(len(chunks)), key=lambda i: (-chunks[i].priority_weight, i))
         keep_idx = sorted(ranked[:max_chunks])
         dropped = total_before - len(keep_idx)
         chunks = [chunks[i] for i in keep_idx]
-        logger.warning("分段数 %d 超过上限 %d，按语义区优先级保留 %d 段（丢弃 %d 段低价值区）",
-                       total_before, max_chunks, len(chunks), dropped)
+        logger.warning(
+            "分段数 %d 超过上限 %d，按语义区优先级保留 %d 段（丢弃 %d 段低价值区）",
+            total_before,
+            max_chunks,
+            len(chunks),
+            dropped,
+        )
         # ✅ 增强：截断对用户可见，避免"后面资料没提取到"无从得知
         result.warnings.append(
             f"资料过长（共 {total_before} 段），本次按优先级保留 {max_chunks} 段"
             f"（已跳过 {dropped} 段低价值区，如封面/目录/规范引用），"
-            f"建议拆分文件分批上传以获得完整覆盖")
+            f"建议拆分文件分批上传以获得完整覆盖"
+        )
         # ✅ 实时提示：不要等提取结束才让用户知道后半段没被处理
-        await _emit(0.06,
-                    f"⚠️ 资料过长（共 {total_before} 段），本次按优先级提取 {max_chunks} 段，"
-                    f"建议拆分文件分批上传以完整覆盖")
+        await _emit(
+            0.06,
+            f"⚠️ 资料过长（共 {total_before} 段），本次按优先级提取 {max_chunks} 段，" f"建议拆分文件分批上传以完整覆盖",
+        )
 
     # 2. 生成全文摘要（用于增强每段提取的全局语义）
     # ✅ BUG-3 修复：本地规则摘要替代 AI 调用（省 5-15s + token 成本）。
@@ -1981,46 +2324,60 @@ async def run_extraction_pipeline(
     #    上次提取成功落库的段不再重复调用 AI（线上审计日志显示平均单次调用
     #    22.9s、失败率约 36%，主因 429 限流；跳过已完成段可直接省掉这部分）。
     completed = completed_chunks or set()
+    # ✅ BUG-02 修复（R175）：deferred = 退避窗口内的失败段（参与跳过，
+    #    但**绝不**能写入完成表）。
+    deferred_hashes = set(getattr(completed_chunks, "deferred", set()) or set())
     chunk_hashes = [_chunk_hash(c.text) for c in chunks]
     # ✅ 残留清理作用域 = 文档完整段（含被优先级截断丢弃的段），见上方 doc_chunk_hashes 注释。
     #    本轮实际处理仍以下方 chunk_hashes（截断后保留段）为准，二者职责不同。
     result.chunk_hashes_all = doc_chunk_hashes
     skipped_idx = {i for i, h in enumerate(chunk_hashes) if h in completed}
     # ✅ BUG 修复：仅「实际重跑段」参与事实刷新删除范围（见 chunk_hashes_run 注释）
-    result.chunk_hashes_run = {chunk_hashes[i]
-                               for i in range(len(chunk_hashes))
-                               if i not in skipped_idx}
+    result.chunk_hashes_run = {chunk_hashes[i] for i in range(len(chunk_hashes)) if i not in skipped_idx}
     result.skipped_chunks = len(skipped_idx)
     if skipped_idx:
-        logger.info("增量提取：跳过 %d/%d 段（上次已成功提取）",
-                    len(skipped_idx), len(chunks))
+        logger.info("增量提取：跳过 %d/%d 段（上次已成功提取）", len(skipped_idx), len(chunks))
     if chunks and len(skipped_idx) == len(chunks):
         # 全部段都已完成：无新增内容，直接成功返回（事实保持上次落库结果）
-        result.chunk_hashes_ok = set(chunk_hashes)
+        # ✅ BUG-02 修复（R175）：退避窗口内的失败段不算「已完成」，
+        #    否则会被 save_extracted_chunks 写入完成表 → 永久跳过。
+        result.chunk_hashes_ok = set(chunk_hashes) - deferred_hashes
         result.all_skipped = True
         result.segment_stats = {
-            "total": len(chunks), "ok": 0, "skipped": len(skipped_idx),
-            "failed": 0, "failed_details": [],
+            "total": len(chunks),
+            "ok": 0,
+            "skipped": len(skipped_idx),
+            "failed": 0,
+            "failed_details": [],
         }
         await _emit(
-            0.9,
-            f"全部 {len(chunks)} 段均已提取过，无新增内容（已跳过）；"
-            "如需强制重新提取请使用「全部重新提取」")
+            0.9, f"全部 {len(chunks)} 段均已提取过，无新增内容（已跳过）；" "如需强制重新提取请使用「全部重新提取」"
+        )
         return result
 
     from app.services.ai.workflows_base import concurrency_controller
+
     _run_total = len(chunks) - len(skipped_idx)
-    effective_concurrency = max(1, min(
-        _run_total,
+    effective_concurrency = max(
+        1,
+        min(
+            _run_total,
+            concurrency_controller.current,
+            FACTS_MAX_CONCURRENCY,
+        ),
+    )
+    logger.info(
+        "分段提取并发: %d (chunks=%d, skipped=%d, global=%d)",
+        effective_concurrency,
+        len(chunks),
+        len(skipped_idx),
         concurrency_controller.current,
-        FACTS_MAX_CONCURRENCY,
-    ))
-    logger.info("分段提取并发: %d (chunks=%d, skipped=%d, global=%d)",
-                effective_concurrency, len(chunks), len(skipped_idx),
-                concurrency_controller.current)
-    await _emit(_P_START,
-                f"已切分 {len(chunks)} 段（跳过 {len(skipped_idx)} 段已提取），"
-                f"开始并发提取（并发 {effective_concurrency}）...")
+    )
+    await _emit(
+        _P_START,
+        f"已切分 {len(chunks)} 段（跳过 {len(skipped_idx)} 段已提取），"
+        f"开始并发提取（并发 {effective_concurrency}）...",
+    )
     sem = asyncio.Semaphore(effective_concurrency)
 
     total_chunks = _run_total
@@ -2031,6 +2388,9 @@ async def run_extraction_pipeline(
     # ✅ 2026-10-06：模型主动声明未能提取的段（与 failed 语义不同，见 ExtractionResult）
     declared_failed: list[dict] = []
     ok_idx: set[int] = set()
+    # ✅ BUG-02 修复（R175）：本轮失败的段（报错 / 模型声明 segment_failed）。
+    #    这些段指纹**不得**进入 chunk_hashes_ok（否则写入完成表 → 下次永久跳过）。
+    failed_idx: set[int] = set()
     _lock = asyncio.Lock()
 
     async def _chunk_worker(idx: int, chunk: Chunk):
@@ -2074,39 +2434,52 @@ async def run_extraction_pipeline(
                 # 导致前端误报"N 段失败，结果可能不完整"。
                 if not items and err.get("error"):
                     fail_count += 1
-                    failed_details.append({
-                        "index": idx + 1,
-                        "heading": (chunk.heading or "")[:60],
-                        "zone_type": chunk.zone_type,
-                        "reason": err["error"],
-                        "preview": (chunk.text or "")[:60].replace("\n", " "),
-                    })
+                    failed_idx.add(idx)
+                    failed_details.append(
+                        {
+                            "index": idx + 1,
+                            "heading": (chunk.heading or "")[:60],
+                            "zone_type": chunk.zone_type,
+                            "reason": err["error"],
+                            "preview": (chunk.text or "")[:60].replace("\n", " "),
+                        }
+                    )
                 else:
                     # ✅ 2026-10-06：模型声明未能提取的段**不计入 failed**
                     #    （与「合法无事实段」不可区分，计入会虚报失败），
                     #    改为独立登记，供 segment_stats / warnings 可见，
                     #    并在告警中给出「重新提取」恢复入口。
                     if err.get("segment_failed"):
-                        declared_failed.append({
-                            "index": idx + 1,
-                            "heading": (chunk.heading or "")[:60],
-                            "zone_type": chunk.zone_type,
-                            "preview": (chunk.text or "")[:60].replace("\n", " "),
-                        })
-                    # ✅ 增量提取：成功段（含合法空段）记为已完成，下次跳过
-                    ok_idx.add(idx)
+                        declared_failed.append(
+                            {
+                                "index": idx + 1,
+                                "heading": (chunk.heading or "")[:60],
+                                "zone_type": chunk.zone_type,
+                                "preview": (chunk.text or "")[:60].replace("\n", " "),
+                            }
+                        )
+                        # ✅ BUG-02 修复（R175）：模型声明未提取 ≠ 已完成。
+                        #    旧实现把它并入 ok_idx → 写入 facts_extracted_chunks
+                        #    → 下次增量**永久跳过**，只有 force 才能恢复。
+                        #    现登记为失败段（下次重试 + 连续失败退避），
+                        #    与「合法空段」（模型正常返回 facts=[]）区分。
+                        failed_idx.add(idx)
+                    else:
+                        # ✅ 增量提取：成功段（含合法空段）记为已完成，下次跳过
+                        ok_idx.add(idx)
                 acc_count += len(items)
                 p = _P_START + (_P_END - _P_START) * done_count / max(total_chunks, 1)
                 await _emit(
                     p,
                     f"已完成 {done_count}/{total_chunks} 段"
-                    f"（本段 +{len(items)} 条，累计 {acc_count} 条，失败 {fail_count} 段）")
+                    f"（本段 +{len(items)} 条，累计 {acc_count} 条，失败 {fail_count} 段）",
+                )
             return items
 
     tasks = [_chunk_worker(i, c) for i, c in enumerate(chunks)]
     chunk_results = await asyncio.gather(*tasks, return_exceptions=True)
 
-    for res in chunk_results:
+    for _i, res in enumerate(chunk_results):
         # ✅ 注意：CancelledError 继承自 BaseException（非 Exception），
         #    gather(return_exceptions=True) 会把它当作"结果"返回，
         #    只判 isinstance(res, Exception) 会让它落到 all_items.extend() 崩溃。
@@ -2114,15 +2487,36 @@ async def run_extraction_pipeline(
             if isinstance(res, asyncio.CancelledError):
                 raise res  # 用户停止 → 交由上层按"已停止"处理
             logger.warning("分段提取异常: %s", res)
+            # ✅ BUG-02 修复（R175）：worker 级异常同样属于失败段 ——
+            #    旧实现只记日志，既不计数也不排除出完成集（段数虚高 +
+            #    该段指纹缺席导致语义漂移）。现与 AI 失败同口径登记。
+            if _i not in skipped_idx:
+                fail_count += 1
+                failed_idx.add(_i)
+                _ch = chunks[_i]
+                failed_details.append(
+                    {
+                        "index": _i + 1,
+                        "heading": (_ch.heading or "")[:60],
+                        "zone_type": _ch.zone_type,
+                        "reason": str(res)[:200],
+                        "preview": (_ch.text or "")[:60].replace("\n", " "),
+                    }
+                )
             continue
         all_items.extend(res)
 
     # ✅ 分段级诊断（无论成功/部分/全部失败都记录，供接口与前端展示）
-    result.chunk_hashes_ok = {chunk_hashes[i] for i in ok_idx} | set(
-        chunk_hashes[i] for i in skipped_idx)
+    result.chunk_hashes_ok = (
+        {chunk_hashes[i] for i in ok_idx} | set(chunk_hashes[i] for i in skipped_idx)
+    ) - deferred_hashes
+    # ✅ BUG-02 修复（R175）：失败段指纹单列（绝不与 ok 混同）。
+    result.chunk_hashes_failed = {chunk_hashes[i] for i in failed_idx}
     result.segment_stats = {
         "total": len(chunks),
-        "ok": max(_run_total - fail_count, 0),
+        # ✅ BUG-02 修复（R175）：声明失败段也不再计入 ok（它们与真正成功段
+        #    语义不同，计入会让前端把「未提取」误读为「已提取」）。
+        "ok": max(_run_total - fail_count - len(declared_failed), 0),
         "skipped": len(skipped_idx),
         "failed": fail_count,
         "failed_details": failed_details[:10],
@@ -2132,21 +2526,24 @@ async def run_extraction_pipeline(
     }
     result.declared_failed_chunks = len(declared_failed)
     result.declared_failed_details = declared_failed[:10]
-    _fail_reasons = "；".join(
-        dict.fromkeys(d["reason"] for d in failed_details[:3]))  # 去重保序
+    _fail_reasons = "；".join(dict.fromkeys(d["reason"] for d in failed_details[:3]))  # 去重保序
 
     logger.info(
         "分段提取完成：共 %d 条原始事实（失败 %d/%d 段，跳过 %d 段）%s",
-        len(all_items), fail_count, _run_total, len(skipped_idx),
-        f" 原因: {_fail_reasons}" if _fail_reasons else "")
+        len(all_items),
+        fail_count,
+        _run_total,
+        len(skipped_idx),
+        f" 原因: {_fail_reasons}" if _fail_reasons else "",
+    )
 
     if not all_items:
         if _run_total and fail_count >= _run_total:
             # ✅ 全部段提取失败：给出实际原因（超时/限流/密钥/网络），
             #    而不是笼统的"AI 未提取到任何事实"。
             result.warnings.append(
-                f"全部 {total_chunks} 段提取失败："
-                f"{_fail_reasons or '请检查模型配置（限流/密钥/网络）后重试'}")
+                f"全部 {total_chunks} 段提取失败：" f"{_fail_reasons or '请检查模型配置（限流/密钥/网络）后重试'}"
+            )
         else:
             result.warnings.append("AI 未提取到任何事实，请检查资料内容或模型配置")
         return result
@@ -2154,27 +2551,27 @@ async def run_extraction_pipeline(
     if fail_count:
         if fail_count == total_chunks:
             result.warnings.append(
-                f"全部 {total_chunks} 段提取失败："
-                f"{_fail_reasons or '请检查模型配置（限流/密钥/网络）后重试'}")
+                f"全部 {total_chunks} 段提取失败：" f"{_fail_reasons or '请检查模型配置（限流/密钥/网络）后重试'}"
+            )
         else:
             # ✅ 部分失败显式告警（带实际原因）：避免用户以为"提取完成"却漏了段落
             result.warnings.append(
                 f"{fail_count}/{total_chunks} 段提取失败，结果可能不完整："
                 f"{_fail_reasons or '多为限流或超时'}"
-                f"（建议稍后重新提取）")
+                f"（建议稍后重新提取）"
+            )
 
     # ✅ 2026-10-06：模型声明未能提取的段必须可见（否则用户误以为「提取完成」）。
-    #    口径说明：这类段**已记入增量进度表**，下次普通提取会跳过 → 必须显式
-    #    告知「重新提取」才是恢复入口，否则用户永远无法补齐这批事实。
+    #    口径说明（✅ BUG-02 修复 R175，2026-11-03）：这类段**不再**记入
+    #    增量完成表，普通重跑会自动重试（连续失败按指数退避）。
     if declared_failed:
         result.warnings.append(
             f"另有 {len(declared_failed)}/{total_chunks} 段模型未能提取到事实"
             f"（可能是封面/目录/纯图段落，也可能是模型未读懂）。"
-            f"这些段落已记为完成，普通重跑不会重试；"
-            f"如需补齐请点「重新提取」（强制全量重跑）。")
-        logger.info(
-            "模型声明未提取段：%d/%d（已记入进度表，需「重新提取」才会重跑）",
-            len(declared_failed), total_chunks)
+            f"这些段落未记为完成，下次重新提取会自动重试；"
+            f"若多次重试仍无结果，请确认该段是否为纯图片/扫描页。"
+        )
+        logger.info("模型声明未提取段：%d/%d（未记入完成表，下次自动重试）", len(declared_failed), total_chunks)
 
     # 4. 归一化（报告补充①：与 Prompt 共用 _norm_dicts 单一事实源）
     await _emit(_P_END + 0.02, "正在归一化名称与规格...")
@@ -2197,8 +2594,8 @@ async def run_extraction_pipeline(
         _dropped = _before - len(merged)
         if _dropped:
             result.warnings.append(
-                f"缺值模式「不杜撰」：已剔除 {_dropped} 条资料未给出的模拟值"
-                f"（正文涉及时请改写为笼统承诺）")
+                f"缺值模式「不杜撰」：已剔除 {_dropped} 条资料未给出的模拟值" f"（正文涉及时请改写为笼统承诺）"
+            )
     elif _mode == "placeholder":
         _ph = 0
         for it in merged:
@@ -2207,8 +2604,8 @@ async def run_extraction_pipeline(
                 _ph += 1
         if _ph:
             result.warnings.append(
-                f"缺值模式「留待填写」：{_ph} 条资料未给出的值已置为【待填写】"
-                f"（请人工补齐后再生成正文）")
+                f"缺值模式「留待填写」：{_ph} 条资料未给出的值已置为【待填写】" f"（请人工补齐后再生成正文）"
+            )
 
     # 5.5 知识库补充（对齐易标 runKnowledgeGlobalFactPatches，:876-891）
     #    位置在缺值模式后处理**之后**：知识库给的是已确定的具体值，不该被
@@ -2218,6 +2615,7 @@ async def run_extraction_pipeline(
         await _emit(_P_END + 0.10, "正在用项目知识库补充事实...")
         try:
             from app.services.facts_enrich import apply_knowledge_patches
+
             merged, kb_n = await apply_knowledge_patches(merged, knowledge_text)
             if kb_n:
                 result.warnings.append(f"知识库补充了 {kb_n} 条事实（已合并）")
@@ -2233,6 +2631,7 @@ async def run_extraction_pipeline(
         await _emit(_P_END + 0.11, "正在最终整理事实（去重与口径统一）...")
         try:
             from app.services.facts_enrich import finalize_facts
+
             merged, fin_n = await finalize_facts(merged)
             if fin_n:
                 result.warnings.append(f"最终整理改写了 {fin_n} 条事实表述")
@@ -2248,10 +2647,15 @@ async def run_extraction_pipeline(
             result.cross_conflicts = cross_conflicts
             high_n = sum(1 for c in cross_conflicts if c["severity"] == "high")
             result.warnings.append(
-                f"交叉校验发现 {len(cross_conflicts)} 处跨维度矛盾"
-                f"（高危 {high_n} 处），请人工裁决")
+                f"交叉校验发现 {len(cross_conflicts)} 处跨维度矛盾" f"（高危 {high_n} 处），请人工裁决"
+            )
     except Exception as e:
-        logger.warning("交叉校验异常（不影响主流程）: %s", e)
+        # ✅ BUG-03 修复（R175）：异常时冲突状态**未知**，不得让下游按
+        #    「无冲突」继续自动裁决。置标志 → persist_extraction 放弃
+        #    auto_resolve（全部转人工审核），并在告警里明示。
+        result.cross_validation_failed = True
+        logger.warning("交叉校验异常（已关闭本轮自动裁决）: %s", e)
+        result.warnings.append("交叉校验异常，本轮冲突状态未知：已取消自动裁决，" "全部事实转为待人工审核")
 
     # 7. 归一化 category（基于安全关键和常规分类）
     # ✅ BUG 修复：安全关键项禁止模拟。旧实现对 `_is_safety_critical` 命中项
@@ -2277,22 +2681,22 @@ async def run_extraction_pipeline(
     await _emit(
         _P_END + 0.22,
         f"提取完成：{len(result.groups)} 组 / {result.total_items} 条事实"
-        f"（模拟 {result.simulated_count} 条，矛盾 {result.conflict_count} 条）")
+        f"（模拟 {result.simulated_count} 条，矛盾 {result.conflict_count} 条）",
+    )
 
     # 7. 模拟值占比告警
     if result.total_items > 0:
         ratio = result.simulated_count / result.total_items
         if ratio > SIMULATED_RATIO_WARN:
             result.warnings.append(
-                f"模拟值占比 {ratio:.0%} 超过 {SIMULATED_RATIO_WARN:.0%} 阈值，"
-                f"建议补充更多项目资料")
+                f"模拟值占比 {ratio:.0%} 超过 {SIMULATED_RATIO_WARN:.0%} 阈值，" f"建议补充更多项目资料"
+            )
         if result.conflict_count > 0:
-            result.warnings.append(
-                f"检测到 {result.conflict_count} 条事实存在矛盾，"
-                f"请在审核界面人工裁决")
+            result.warnings.append(f"检测到 {result.conflict_count} 条事实存在矛盾，" f"请在审核界面人工裁决")
 
-    logger.info("事实提取管线完成：%.1fs，%d 段 → %d 条事实",
-                time.perf_counter() - _t0, len(chunks), result.total_items)
+    logger.info(
+        "事实提取管线完成：%.1fs，%d 段 → %d 条事实", time.perf_counter() - _t0, len(chunks), result.total_items
+    )
     return result
 
 
@@ -2303,8 +2707,16 @@ async def run_extraction_pipeline(
 # 时间类事实的 category 集合（用于"必须有工期"规则校验）
 _SCHEDULE_CATEGORIES = {"schedule", "duration"}
 _SCHEDULE_KEY_TAGS = (
-    "duration", "schedule", "工期", "运维", "保修", "质保",
-    "交货", "delivery", "warranty", "service_period",
+    "duration",
+    "schedule",
+    "工期",
+    "运维",
+    "保修",
+    "质保",
+    "交货",
+    "delivery",
+    "warranty",
+    "service_period",
 )
 
 
@@ -2323,29 +2735,53 @@ def apply_category_auto_classify(items: list[FactItem]) -> None:
     #      含 "tech" 的片段，"材料" 会吞掉材料管理类事实。现拆出独立的
     #      material_mgmt 规则并置于 equipment 之前，equipment 只保留设备/参数/规格。
     rules: list[tuple[str, tuple[str, ...]]] = [
-        ("basis", ("编制依据", "依据规范", "执行标准", "标准规范", "法律法规",
-                   "技术规程", "design_code", "standard",
-                   # ✅ R93（2026-10-17）：图集/法规依据也是编制依据清单成员
-                   "图集", "法规依据", "规范清单", "引用标准")),
+        (
+            "basis",
+            (
+                "编制依据",
+                "依据规范",
+                "执行标准",
+                "标准规范",
+                "法律法规",
+                "技术规程",
+                "design_code",
+                "standard",
+                # ✅ R93（2026-10-17）：图集/法规依据也是编制依据清单成员
+                "图集",
+                "法规依据",
+                "规范清单",
+                "引用标准",
+            ),
+        ),
         ("monitoring", ("监测", "报警值", "控制值", "测点", "观测", "monitoring")),
         ("emergency", ("应急", "预案", "抢险", "emergency")),
         ("acceptance", ("验收", "检验批", "acceptance")),
         ("labor", ("劳动力", "工种", "用工", "高峰人数", "labor")),
-        ("temporary", ("临时用电", "临时用水", "临时道路", "临时设施", "临建",
-                       "temporary")),
-        ("environment", ("环保", "扬尘", "噪声", "污水", "文明施工", "绿色施工",
-                         "environment")),
+        ("temporary", ("临时用电", "临时用水", "临时道路", "临时设施", "临建", "temporary")),
+        ("environment", ("环保", "扬尘", "噪声", "污水", "文明施工", "绿色施工", "environment")),
         ("risk", ("危险源", "危大", "风险等级", "风险辨识", "风险管控", "risk")),
         ("schedule", _SCHEDULE_KEY_TAGS),
         ("commitment", ("commit", "承诺", "service", "响应", "售后")),
         ("quality", ("quality", "质量")),
-        ("personnel", ("person", "manager", "负责人", "项目经理", "安全员",
-                       "质量员", "人员配置", "组织机构")),
-        ("material_mgmt", ("材料", "混凝土", "钢筋", "砂浆", "水泥", "防水材料",
-                           "保温材料", "周转材料", "material")),
-        ("machinery", ("机械", "挖掘机", "起重机", "塔吊", "装载机", "推土机",
-                       "压路机", "发电机", "泵车", "自卸车", "施工电梯",
-                       "machinery")),
+        ("personnel", ("person", "manager", "负责人", "项目经理", "安全员", "质量员", "人员配置", "组织机构")),
+        ("material_mgmt", ("材料", "混凝土", "钢筋", "砂浆", "水泥", "防水材料", "保温材料", "周转材料", "material")),
+        (
+            "machinery",
+            (
+                "机械",
+                "挖掘机",
+                "起重机",
+                "塔吊",
+                "装载机",
+                "推土机",
+                "压路机",
+                "发电机",
+                "泵车",
+                "自卸车",
+                "施工电梯",
+                "machinery",
+            ),
+        ),
         ("equipment", ("equipment", "设备", "技术参数", "规格型号", "参数", "规格")),
         ("execution", ("implement", "施工", "方法", "组织", "实施")),
         ("safety_critical", ("safety", "安全")),
@@ -2382,8 +2818,7 @@ def ensure_schedule_fact(items: list[FactItem], fallback_text: str = "") -> None
     """
     has_schedule = any(
         (it.category in _SCHEDULE_CATEGORIES)
-        or any(tag in (it.key or "").lower() + (it.name or "")
-               for tag in _SCHEDULE_KEY_TAGS)
+        or any(tag in (it.key or "").lower() + (it.name or "") for tag in _SCHEDULE_KEY_TAGS)
         for it in items
     )
     if has_schedule:
@@ -2392,21 +2827,32 @@ def ensure_schedule_fact(items: list[FactItem], fallback_text: str = "") -> None
     # 先从 fallback 文本启发式提取
     val = _extract_schedule_value(fallback_text)
     if val:
-        items.append(FactItem(
-            name="建设工期", value=val,
-            key="total_duration", category="schedule",
-            source="heuristic", source_ref="启发式规则提取",
-            is_simulated=False, confidence=0.85,
-        ))
+        items.append(
+            FactItem(
+                name="建设工期",
+                value=val,
+                key="total_duration",
+                category="schedule",
+                source="heuristic",
+                source_ref="启发式规则提取",
+                is_simulated=False,
+                confidence=0.85,
+            )
+        )
     else:
         # 降级：给一个安全默认值，标记为模拟
-        items.append(FactItem(
-            name="建设工期",
-            value="按合同约定工期执行",
-            key="total_duration", category="schedule",
-            source="default", source_ref="无工期信息，默认值",
-            is_simulated=True, confidence=0.3,
-        ))
+        items.append(
+            FactItem(
+                name="建设工期",
+                value="按合同约定工期执行",
+                key="total_duration",
+                category="schedule",
+                source="default",
+                source_ref="无工期信息，默认值",
+                is_simulated=True,
+                confidence=0.3,
+            )
+        )
         logger.info("未提取到工期，注入默认值保证完整性")
 
 
@@ -2438,29 +2884,44 @@ def apply_heuristic_fallback(
     if not m:
         m = re.search(r"项目名称.*?[:：]\s*(.+)", fallback_text)
     if m:
-        default_items.append(FactItem(
-            name="项目名称", value=m.group(1).strip(),
-            key="project_name", category="basic",
-            source="heuristic", confidence=0.85,
-        ))
+        default_items.append(
+            FactItem(
+                name="项目名称",
+                value=m.group(1).strip(),
+                key="project_name",
+                category="basic",
+                source="heuristic",
+                confidence=0.85,
+            )
+        )
 
     # 项目地点
     locs = re.findall(r"(?:建设地点|项目地点|位于)[:：]\s*([^\n*]{2,30})", fallback_text)
     if locs:
-        default_items.append(FactItem(
-            name="建设地点", value=locs[0].strip(),
-            key="project_location", category="basic",
-            source="heuristic", confidence=0.85,
-        ))
+        default_items.append(
+            FactItem(
+                name="建设地点",
+                value=locs[0].strip(),
+                key="project_location",
+                category="basic",
+                source="heuristic",
+                confidence=0.85,
+            )
+        )
 
     # 工期
     duration = _extract_schedule_value(fallback_text)
     if duration:
-        default_items.append(FactItem(
-            name="建设工期", value=duration,
-            key="total_duration", category="schedule",
-            source="heuristic", confidence=0.85,
-        ))
+        default_items.append(
+            FactItem(
+                name="建设工期",
+                value=duration,
+                key="total_duration",
+                category="schedule",
+                source="heuristic",
+                confidence=0.85,
+            )
+        )
 
     if not default_items:
         # ✅ 修复（2026-09-24）：极端兜底从「伪造 项目名称=待补充」改为如实
@@ -2472,7 +2933,8 @@ def apply_heuristic_fallback(
         logger.warning(
             "启发式规则未从资料文本中提取到任何基本事实，返回空清单"
             "（不再注入模拟占位值；正文侧按模糊生成规则把话说完，"
-            "不留任何占位标记）")
+            "不留任何占位标记）"
+        )
 
     return default_items
 
@@ -2511,6 +2973,7 @@ def run_post_extract_normalize(
 # SSE 事件推送辅助
 # ---------------------------------------------------------------------------
 
+
 def _display_value(it: FactItem) -> str:
     """事实值的展示文本：序列 → 顿号连接，追加单位（供 Markdown 与前端共用）"""
     val = _as_text(it.value)
@@ -2533,13 +2996,25 @@ def format_for_frontend(result: ExtractionResult) -> dict[str, Any]:
             lines.append(f"- **{it.name}**: {append_simulated_marker(_display_value(it), it.is_simulated)}")
         content_md = "\n".join(lines)
 
-        flat_groups.append({
-            "id": gid,
-            "title": grp.title,
-            "category": grp.category,
-            "content": content_md,
-            "items": [
+        _items_payload = []
+        for it in grp.items:
+            # ✅ L3/BUG-07（R177 · 2026-11-04）：SSE payload 与前端 FactItem
+            #    逐字段对齐。chapter_title/shared_chapters 由同一分类纯函数派生，
+            #    fact_id/is_resolved 取 persist_extraction 回填的落库态。
+            _dims = classify_fact_dimensions(
+                it.name,
+                _as_text(it.value),
+                it.category or "",
+                it.fact_type or "",
+                it.key or "",
+                it.source or "",
+                it.source_ref or "",
+            )
+            _chapter = it.chapter or _dims["chapter"]
+            _items_payload.append(
                 {
+                    "fact_id": it.persisted_id,
+                    "is_resolved": bool(it.persisted_is_resolved),
                     "name": it.name,
                     # ✅ 序列类值转字符串下发（前端直接渲染，避免 React 渲染数组报错）
                     "value": _display_value(it),
@@ -2559,10 +3034,13 @@ def format_for_frontend(result: ExtractionResult) -> dict[str, Any]:
                     "chunk_hash": it.chunk_hash,
                     # ✅ 2026-09-24：九大章节四维标注随 SSE 下发（与 list_facts
                     #    刷新路径保持一致，避免「流式有、刷新无」的字段漂移）。
-                    "chapter": it.chapter or "",
+                    "chapter": _chapter,
+                    "chapter_title": CHAPTER_TITLES.get(_chapter, ""),
                     "fact_attr": it.fact_attr or "",
                     "source_kind": it.source_kind or "",
                     "is_shared": bool(it.is_shared),
+                    "shared_chapters": list(_dims["shared_chapters"]),
+                    "value_kind": it.value_kind or "",
                     "is_simulated": it.is_simulated,
                     "is_safety_critical": it.is_safety_critical,
                     "confidence": it.confidence,
@@ -2576,21 +3054,30 @@ def format_for_frontend(result: ExtractionResult) -> dict[str, Any]:
                     "scope": "scheme",
                     "is_stale": False,
                     "conflict_values": [
-                        {"value": _as_text(c.get("value")),
-                         "source": c.get("source", ""),
-                         # ✅ BUG 修复（一致性）：DB 落库路径（to_db_row）已用
-                         #    _safe_confidence 收敛脏值，此处 SSE 回传路径却直传，
-                         #    跨条目回写的候选值置信度若为 "high"/越界值，前端进度条
-                         #    会渲染异常。两路径统一口径。
-                         "confidence": _safe_confidence(c.get("confidence"), 1.0),
-                         # ✅ 候选值模拟值语义随 SSE 下发（与 to_db_row 落库口径一致）
-                         "is_simulated": bool(c.get("is_simulated"))}
+                        {
+                            "value": _as_text(c.get("value")),
+                            "source": c.get("source", ""),
+                            # ✅ BUG 修复（一致性）：DB 落库路径（to_db_row）已用
+                            #    _safe_confidence 收敛脏值，此处 SSE 回传路径却直传，
+                            #    跨条目回写的候选值置信度若为 "high"/越界值，前端进度条
+                            #    会渲染异常。两路径统一口径。
+                            "confidence": _safe_confidence(c.get("confidence"), 1.0),
+                            # ✅ 候选值模拟值语义随 SSE 下发（与 to_db_row 落库口径一致）
+                            "is_simulated": bool(c.get("is_simulated")),
+                        }
                         for c in (it.conflict_values or [])
                     ],
                 }
-                for it in grp.items
-            ],
-        })
+            )
+        flat_groups.append(
+            {
+                "id": gid,
+                "title": grp.title,
+                "category": grp.category,
+                "content": content_md,
+                "items": _items_payload,
+            }
+        )
 
     return {
         "ok": True,
@@ -2607,6 +3094,7 @@ def format_for_frontend(result: ExtractionResult) -> dict[str, Any]:
 # ---------------------------------------------------------------------------
 # 工具函数：将提取结果持久化到数据库
 # ---------------------------------------------------------------------------
+
 
 def resolve_fact_is_resolved(item: "FactItem", auto_resolve: bool) -> int:
     """计算某条提取事实落库时的 is_resolved 值（信息调用完整性门控）。
@@ -2649,8 +3137,7 @@ async def persist_extraction(
         scope_sql = "SELECT * FROM global_facts WHERE scheme_id=?"
         scope_params = (scheme_id,)
     else:
-        scope_sql = ("SELECT * FROM global_facts WHERE " +
-                     FACT_SCOPE_SHARED_FRAGMENT)
+        scope_sql = "SELECT * FROM global_facts WHERE " + FACT_SCOPE_SHARED_FRAGMENT
         scope_params = (project_id,)
     cur = await db.execute(scope_sql, scope_params)
     # ✅ R169（R166 FIX-3 服务层延伸）：R13 命中（execute 返回 None）时裸
@@ -2689,10 +3176,7 @@ async def persist_extraction(
     protected = [r for r in existing if _is_protected(r)]
     # 只把已确认事实用于“用户确认为准”的去重；手动但未确认的事实仍需保留，
     # 但不能阻止新资料进入冲突候选，否则人工录入后重新提取会静默吞掉新证据。
-    protected_by_key = {
-        r.get("fact_key"): r for r in protected
-        if r.get("fact_key") and r.get("is_resolved")
-    }
+    protected_by_key = {r.get("fact_key"): r for r in protected if r.get("fact_key") and r.get("is_resolved")}
 
     # ✅ BUG 修复（2026-10-08 · 全局事实模块收口 F5）：方案级提取**只看方案私有行**
     #   （上方 scope_sql），项目共享层（scheme_id=''）里用户已确认的同名事实不在
@@ -2711,13 +3195,10 @@ async def persist_extraction(
     shared_protected_by_key: dict[str, dict] = {}
     shared_hits = 0
     if scheme_id and project_id:
-        cur = await db.execute(
-            "SELECT * FROM global_facts WHERE " +
-            FACT_SCOPE_SHARED_FRAGMENT, (project_id,))
+        cur = await db.execute("SELECT * FROM global_facts WHERE " + FACT_SCOPE_SHARED_FRAGMENT, (project_id,))
         # ✅ R169（R166 FIX-3 服务层延伸）：同上，R13 命中按可定位失败抛出。
         if cur is None:
-            raise RuntimeError(
-                "R13：db.execute 返回 None（persist_extraction 共享保护行回查）")
+            raise RuntimeError("R13：db.execute 返回 None（persist_extraction 共享保护行回查）")
         for r in [dict(x) for x in await cur.fetchall()]:
             if not _is_protected(r):
                 continue
@@ -2750,6 +3231,14 @@ async def persist_extraction(
     #    旧实现逐条直发、依赖最终 commit 一并提交）
     writeback_buf: list[tuple[str, tuple]] = []
     skipped_dup = 0
+    # ✅ BUG-03 修复（R175）：交叉校验失败 ⇒ 冲突状态未知 ⇒ **禁止**自动裁决。
+    #    否则「未校验」事实会被直接置 is_resolved=1 并进入目录/正文/导出。
+    _auto_resolve_enabled = bool(settings.auto_resolve_extracted_facts)
+    if _auto_resolve_enabled and getattr(result, "cross_validation_failed", False):
+        logger.warning(
+            "交叉校验失败：本轮已关闭 auto_resolve_extracted_facts，" "全部事实保持待人工审核（is_resolved=0）"
+        )
+        _auto_resolve_enabled = False
     cat_group_id_cache: dict[str, str] = {}
     for grp in result.groups:
         cat = (grp.category or "other") or "other"
@@ -2784,8 +3273,7 @@ async def persist_extraction(
                         prior = shared_protected_by_key.get(_base)
                         _hit_shared = prior is not None
             if prior is not None and _coexist:
-                _prior_val = extract_value_from_markdown_line(
-                    str(prior.get("content") or ""))[1]
+                _prior_val = extract_value_from_markdown_line(str(prior.get("content") or ""))[1]
                 _new_val = _as_text(it.value)
                 # 「同值」判据取 :func:`_norm_value`（去空白 + 全角冒号统一）——
                 # 与并存分簇的**值域同一性口径**逐字一致（scoped 后缀本身就
@@ -2794,16 +3282,18 @@ async def persist_extraction(
                 # GB50300-2013」同一部规范的记法变体会被判为异值 → 与已确认
                 # 行并列成两条重复事实（清单型并存最忌重复）。旧分支面向单值
                 # 型真矛盾登记，口径不同是有意为之。
-                _same_value = bool(
-                    _norm_value(_prior_val)
-                    and _norm_value(_prior_val) == _norm_value(_new_val))
+                _same_value = bool(_norm_value(_prior_val) and _norm_value(_prior_val) == _norm_value(_new_val))
                 if _same_value:
                     if _hit_shared:
                         shared_hits += 1
-                    writeback_buf.append((
-                        "UPDATE global_facts SET is_stale=0, "
-                        "updated_at=datetime('now','localtime') WHERE id=?",
-                        (prior["id"],)))
+                    it.persisted_id = str(prior["id"])
+                    it.persisted_is_resolved = bool(prior.get("is_resolved"))
+                    writeback_buf.append(
+                        (
+                            "UPDATE global_facts SET is_stale=0, " "updated_at=datetime('now','localtime') WHERE id=?",
+                            (prior["id"],),
+                        )
+                    )
                     skipped_dup += 1
                     continue
                 # 异值并存：摘除 prior，让本条走下方正常插入分支
@@ -2817,25 +3307,29 @@ async def persist_extraction(
                 prior_content = str(prior.get("content") or "")
                 prior_value = extract_value_from_markdown_line(prior_content)[1]
                 new_value = _as_text(it.value)
-                if prior_value.strip() and new_value.strip() and \
-                        normalize_key(prior_value) != normalize_key(new_value) and \
-                        prior_value.strip() != new_value.strip():
+                if (
+                    prior_value.strip()
+                    and new_value.strip()
+                    and normalize_key(prior_value) != normalize_key(new_value)
+                    and prior_value.strip() != new_value.strip()
+                ):
                     try:
                         candidates = json.loads(prior.get("conflict_keys") or "[]")
                     except (json.JSONDecodeError, TypeError):
                         candidates = []
                     if not isinstance(candidates, list):
                         candidates = []
-                    if not any(_as_text(c.get("value")) == new_value
-                               for c in candidates if isinstance(c, dict)):
-                        candidates.append({
-                            "value": it.value,
-                            "source": it.source,
-                            "confidence": _safe_confidence(it.confidence, 1.0),
-                            # ✅ 候选值自带模拟值语义随证据落库：resolve_conflict
-                            #    按值裁决时据此重算行的 is_simulated。
-                            "is_simulated": bool(it.is_simulated),
-                        })
+                    if not any(_as_text(c.get("value")) == new_value for c in candidates if isinstance(c, dict)):
+                        candidates.append(
+                            {
+                                "value": it.value,
+                                "source": it.source,
+                                "confidence": _safe_confidence(it.confidence, 1.0),
+                                # ✅ 候选值自带模拟值语义随证据落库：resolve_conflict
+                                #    按值裁决时据此重算行的 is_simulated。
+                                "is_simulated": bool(it.is_simulated),
+                            }
+                        )
                     # ✅ BUG-3 修复：用户已确认的事实在「重新提取」时不得被静默打回
                     #    「待审核」（否则会脱离注入/导出门控 is_resolved=1，等于
                     #    「重新提取丢了已审事实」）。
@@ -2848,16 +3342,23 @@ async def persist_extraction(
                     #    裁决前一律不进正文/导出（回归护栏见
                     #    tests/test_facts_incremental.py 与
                     #    tests/test_facts_inject_gate_failclosed_20260927.py）。
-                    writeback_buf.append((
-                        "UPDATE global_facts SET conflict_keys=?, has_conflict=1, "
-                        "is_stale=1, updated_at=datetime('now','localtime') WHERE id=?",
-                        (json.dumps(candidates, ensure_ascii=False), prior["id"])))
+                    writeback_buf.append(
+                        (
+                            "UPDATE global_facts SET conflict_keys=?, has_conflict=1, "
+                            "is_stale=1, updated_at=datetime('now','localtime') WHERE id=?",
+                            (json.dumps(candidates, ensure_ascii=False), prior["id"]),
+                        )
+                    )
                 else:
                     # 同 key 同值：本次资料已再次证明该已确认事实，可解除来源过期标记。
-                    writeback_buf.append((
-                        "UPDATE global_facts SET is_stale=0, "
-                        "updated_at=datetime('now','localtime') WHERE id=?",
-                        (prior["id"],)))
+                    writeback_buf.append(
+                        (
+                            "UPDATE global_facts SET is_stale=0, " "updated_at=datetime('now','localtime') WHERE id=?",
+                            (prior["id"],),
+                        )
+                    )
+                it.persisted_id = str(prior["id"])
+                it.persisted_is_resolved = bool(prior.get("is_resolved"))
                 skipped_dup += 1
                 continue
             row = list(it.to_db_row(group_id, project_id, scheme_id, grp.title))
@@ -2869,7 +3370,10 @@ async def persist_extraction(
             #    is_resolved=1，使其无需人工确认即可进入生成链路；模拟值与矛盾值仍
             #    保持待审核，安全闸门对高风险项依然生效。默认 False = 向后兼容。
             #    row[11] 即 is_resolved 列（见 FactItem.to_db_row）。
-            row[11] = resolve_fact_is_resolved(it, settings.auto_resolve_extracted_facts)
+            row[11] = resolve_fact_is_resolved(it, _auto_resolve_enabled)
+            # ✅ L3/BUG-07（R177）：回填 SSE payload 需要的落库 id / 裁决态。
+            it.persisted_id = str(row[0])
+            it.persisted_is_resolved = bool(row[11])
             insert_buf.append(tuple(row))
 
     # 3) 仅删除「未保护(未确认/旧 AI) 且 所属分类在本次提取结果中」的行，
@@ -2880,8 +3384,7 @@ async def persist_extraction(
     #    造成不可逆数据丢失。现把删除范围收窄到「本次结果覆盖到的分类」：
     #    未被本次结果覆盖的分类其事实一律保留，等该分类被再次提取时再刷新。
     #    已确认 / 手动事实始终保留。
-    new_categories = {(grp.category or "other") or "other"
-                      for grp in result.groups}
+    new_categories = {(grp.category or "other") or "other" for grp in result.groups}
     # ✅ 跨分类漂移：自动分类器在两次提取间可能把同一 fact_key 归到不同分类
     # （如 schedule→basic）。仅按 category 收窄删除范围会留下旧分类下的未确认
     # 旧行，新行照插 → 列表出现重复事实。同 key 未保护行一并纳入刷新范围。
@@ -2897,6 +3400,17 @@ async def persist_extraction(
     #    未提供 run 的调用方（历史/测试直接构造）回退为 all，保持原语义。
     _run = result.chunk_hashes_run or result.chunk_hashes_all
     run_hashes = {str(h) for h in (_run or set()) if h}
+    # ✅ BUG-01 修复（R175 · 2026-11-03）：删除范围从「本轮重跑段」进一步收窄为
+    #    「本轮重跑 **且抽取成功** 的段」= run_hashes ∩ chunk_hashes_ok。
+    #    旧行为：中间段失败时，该段仍属 run_hashes → 其旧事实被 DELETE，而失败段
+    #    不会产出新事实 ⇒ 静默丢失（进度表还记它「已重跑」）。
+    #    新行为：失败段（报错 / segment_failed）的旧事实原样保留，等下次重试
+    #    成功后再刷新；成功段照常「先删后插」。
+    #    兼容：历史上未上报 chunk_hashes_ok / failed 的调用方（直接构造
+    #    ExtractionResult 的测试/脚本）回退为旧语义（run_hashes），不改变结论。
+    _ok_reported = bool(result.chunk_hashes_ok or result.chunk_hashes_failed)
+    ok_hashes = {str(h) for h in (result.chunk_hashes_ok or set()) if h}
+    refresh_hashes = (run_hashes & ok_hashes) if _ok_reported else run_hashes
     # ✅ 2026-09-28（重复/过期事实清理）：
     #   `all_hashes` = 当前文档的**全量**分段指纹（含被优先级截断的低价值段，
     #   见管线 doc_chunk_hashes 注释：截断前的完整段集）。旧实现只删除
@@ -2911,13 +3425,18 @@ async def persist_extraction(
     all_hashes = {str(h) for h in (result.chunk_hashes_all or set()) if h}
     if new_categories:
         non_protected_ids = [
-            r["id"] for r in existing
+            r["id"]
+            for r in existing
             if (not _is_protected(r))
-            and (((r.get("category") or "other") or "other") in new_categories
-                 or (r.get("fact_key") and r.get("fact_key") in new_keys))
-            and ((not (r.get("chunk_hash") or ""))
-                 or (r.get("chunk_hash") in run_hashes)
-                 or (all_hashes and (r.get("chunk_hash") not in all_hashes)))
+            and (
+                ((r.get("category") or "other") or "other") in new_categories
+                or (r.get("fact_key") and r.get("fact_key") in new_keys)
+            )
+            and (
+                (not (r.get("chunk_hash") or ""))
+                or (r.get("chunk_hash") in refresh_hashes)
+                or (all_hashes and (r.get("chunk_hash") not in all_hashes))
+            )
         ]
     else:
         # 本次结果为空（理论上 SSE 层已拦截，这里兜底）：不删除任何既有事实
@@ -2944,13 +3463,15 @@ async def persist_extraction(
             await db.execute(_sql, _params)
         if non_protected_ids:
             ph = ",".join("?" * len(non_protected_ids))
-            await db.execute(
-                f"DELETE FROM global_facts WHERE id IN ({ph})",
-                non_protected_ids)
+            await db.execute(f"DELETE FROM global_facts WHERE id IN ({ph})", non_protected_ids)
         if insert_buf:
             # ✅ 2026-10-06：列清单与占位符改走 GLOBAL_FACTS_INSERT_SQL 单一事实源
             #    （此前内联 27 列字面量 + 手写 27 个占位符，与路由侧 28 列清单漂移）。
             await db.executemany(GLOBAL_FACTS_INSERT_SQL, insert_buf)
+        # ✅ BUG-04 修复（R175）：冲突记录与事实同事务落库，刷新后仍可追溯。
+        #    交叉校验失败的轮次状态未知 → 不改写既有冲突记录（保留上次已知结果）。
+        if not getattr(result, "cross_validation_failed", False):
+            await _sync_cross_conflicts_tx(db, result, project_id, scheme_id or "")
         await db.commit()
 
     try:
@@ -2959,19 +3480,44 @@ async def persist_extraction(
         await db.rollback()
         raise
     logger.info(
-        "持久化完成：新增 %d 条 AI 事实，保留 %d 条已确认/手动事实%s"
-        "（作用域方案=%s）",
-        len(insert_buf), len(protected),
+        "持久化完成：新增 %d 条 AI 事实，保留 %d 条已确认/手动事实%s" "（作用域方案=%s）",
+        len(insert_buf),
+        len(protected),
         f"，跳过 {skipped_dup} 条与已确认事实重复"
         + (f"（其中 {shared_hits} 条命中项目共享事实）" if shared_hits else "")
-        if skipped_dup else "",
+        if skipped_dup
+        else "",
         scheme_id or f"项目={project_id}",
+    )
+    # ✅ BUG-02 修复（R175）：失败段登记 + 连续失败退避（失败段不写完成表）。
+    await record_chunk_failures(
+        db,
+        project_id,
+        scheme_id or "",
+        failed_hashes=getattr(result, "chunk_hashes_failed", set()),
+        ok_hashes=getattr(result, "chunk_hashes_ok", set()),
     )
 
 
 # ---------------------------------------------------------------------------
 # 工具函数：增量提取进度（facts_extracted_chunks）
 # ---------------------------------------------------------------------------
+
+
+class CompletedChunkSet(set):
+    """已完成段指纹集合（附带 ``deferred``：退避窗口内的失败段）。
+
+    二者在本轮都「跳过不调用 AI」，但**只有**真正完成的段可以写入
+    ``facts_extracted_chunks``；``deferred`` 若被当成完成写入，
+    等价于把失败段永久跳过（BUG-02 回归）。
+    """
+
+    deferred: set
+
+    def __init__(self, items=(), deferred=()):
+        super().__init__(items)
+        self.deferred = {str(h) for h in (deferred or set()) if h}
+
 
 async def load_completed_chunks(db, project_id: str, scheme_id: str = "") -> set:
     """读取方案已成功提取的分段指纹集合（增量提取「跳过已完成段」的依据）。
@@ -2986,17 +3532,33 @@ async def load_completed_chunks(db, project_id: str, scheme_id: str = "") -> set
         return set()
     try:
         cur = await db.execute(
-            "SELECT chunk_hash FROM facts_extracted_chunks "
-            "WHERE project_id=? AND scheme_id=?",
-            (project_id, scheme_id or ""))
-        return {r[0] for r in await cur.fetchall() if r[0]}
+            "SELECT chunk_hash FROM facts_extracted_chunks " "WHERE project_id=? AND scheme_id=?",
+            (project_id, scheme_id or ""),
+        )
+        done = {r[0] for r in await cur.fetchall() if r[0]}
     except Exception as e:
         logger.warning("读取提取进度失败（按全量提取处理）: %s", e)
         return set()
 
+    # ✅ BUG-02 修复（R175）：连续失败退避窗口内的段也视为「本轮暂跳过」。
+    #    这些段不在完成表（下次必重试），但在 next_retry_at 到期前不重复烧 AI。
+    #    退避到期后本查询不再返回它 → 自动重新进入提取队列。
+    deferred: set = set()
+    try:
+        cur = await db.execute(
+            "SELECT chunk_hash FROM facts_chunk_failures "
+            "WHERE project_id=? AND scheme_id=? "
+            "AND next_retry_at <> '' "
+            "AND next_retry_at > datetime('now','localtime')",
+            (project_id, scheme_id or ""),
+        )
+        deferred = {r[0] for r in await cur.fetchall() if r[0]}
+    except Exception as e:
+        logger.warning("读取失败段退避状态失败（按立即重试处理）: %s", e)
+    return CompletedChunkSet(done | deferred, deferred=deferred)
 
-async def save_extracted_chunks(db, project_id: str, scheme_id: str,
-                                ok_hashes, all_hashes) -> None:
+
+async def save_extracted_chunks(db, project_id: str, scheme_id: str, ok_hashes, all_hashes) -> None:
     """提取成功后更新进度表（2026-09-17 增量提取）：
 
     - 写入本次成功段指纹（含跳过段，它们本就已完成），按 (project, scheme) 作用域；
@@ -3023,27 +3585,46 @@ async def save_extracted_chunks(db, project_id: str, scheme_id: str,
             except Exception:  # noqa: BLE001 - 回滚失败按原语义继续重试
                 pass
         cur = await db.execute(
-            "SELECT chunk_hash FROM facts_extracted_chunks "
-            "WHERE project_id=? AND scheme_id=?",
-            (project_id, scheme_id or ""))
+            "SELECT chunk_hash FROM facts_extracted_chunks " "WHERE project_id=? AND scheme_id=?",
+            (project_id, scheme_id or ""),
+        )
         existing = {r[0] for r in await cur.fetchall()}
         stale = existing - all_h
         if stale:
             ph = ",".join("?" * len(stale))
             await db.execute(
-                f"DELETE FROM facts_extracted_chunks "
-                f"WHERE project_id=? AND scheme_id=? AND chunk_hash IN ({ph})",
-                (project_id, scheme_id or "", *stale))
+                f"DELETE FROM facts_extracted_chunks " f"WHERE project_id=? AND scheme_id=? AND chunk_hash IN ({ph})",
+                (project_id, scheme_id or "", *stale),
+            )
         missing = ok - existing
         if missing:
             await db.executemany(
-                "INSERT OR IGNORE INTO facts_extracted_chunks "
-                "(project_id, scheme_id, chunk_hash) VALUES (?,?,?)",
-                [(project_id, scheme_id or "", h) for h in missing])
+                "INSERT OR IGNORE INTO facts_extracted_chunks " "(project_id, scheme_id, chunk_hash) VALUES (?,?,?)",
+                [(project_id, scheme_id or "", h) for h in missing],
+            )
+        # ✅ BUG-02 修复（R175）：成功段清掉失败退避记录（恢复正常跳过语义）；
+        #    文档内容漂移后已消失的段（不在 all_h）一并清理，防表膨胀。
+        if ok:
+            ph = ",".join("?" * len(ok))
+            await db.execute(
+                f"DELETE FROM facts_chunk_failures " f"WHERE project_id=? AND scheme_id=? AND chunk_hash IN ({ph})",
+                (project_id, scheme_id or "", *sorted(ok)),
+            )
+        if all_h:
+            ph = ",".join("?" * len(all_h))
+            await db.execute(
+                f"DELETE FROM facts_chunk_failures " f"WHERE project_id=? AND scheme_id=? AND chunk_hash NOT IN ({ph})",
+                (project_id, scheme_id or "", *sorted(all_h)),
+            )
         await db.commit()
         logger.info(
             "提取进度已更新：项目=%s 方案=%s 完成 %d 段（新增 %d，清理残留 %d）",
-            project_id, scheme_id, len(ok), len(missing), len(stale))
+            project_id,
+            scheme_id,
+            len(ok),
+            len(missing),
+            len(stale),
+        )
 
     try:
         await retry_db_op(_save_chunks_once, max_retries=3, base_delay=0.1, jitter=0.05)
@@ -3053,13 +3634,198 @@ async def save_extracted_chunks(db, project_id: str, scheme_id: str,
             await db.rollback()
         except Exception:
             logger.debug(
-                "提取进度更新失败后的回滚也失败（放弃清理 · 项目=%s 方案=%s）",
-                project_id, scheme_id, exc_info=True)
+                "提取进度更新失败后的回滚也失败（放弃清理 · 项目=%s 方案=%s）", project_id, scheme_id, exc_info=True
+            )
+
+
+def retry_delay_seconds(fail_count: int) -> int:
+    """失败段第 N 次连续失败后的退避秒数（BUG-02 R175）。
+
+    第 1 次失败延迟 0（下一次运行立即重试，保证失败段永远可恢复）；
+    从第 2 次起指数退避 60s / 120s / 240s …，上限 ``RETRY_BACKOFF_MAX_SECONDS``。
+    """
+    if fail_count <= 1:
+        return 0
+    return min(RETRY_BACKOFF_BASE_SECONDS * (2 ** (fail_count - 2)), RETRY_BACKOFF_MAX_SECONDS)
+
+
+async def record_chunk_failures(db, project_id: str, scheme_id: str = "", *, failed_hashes=(), ok_hashes=()) -> None:
+    """记录本轮失败段并维护连续失败退避（BUG-02 R175）。
+
+    - ``failed_hashes``：本轮报错 / 模型声明 segment_failed 的段 →
+      fail_count+1，写入 ``next_retry_at``（第 1 次为 0 秒）；
+    - ``ok_hashes``：本轮成功段 → 删除其失败记录（下次按正常完成表跳过）。
+
+    失败段**不会**写入 ``facts_extracted_chunks``（那是「已完成」表），
+    因此即使本函数写入失败，下次运行仍会重试 —— 只是少了退避防抖。
+    """
+    if not project_id:
+        return
+    ok = {str(h) for h in (ok_hashes or set()) if h}
+    failed = {str(h) for h in (failed_hashes or set()) if h} - ok
+    if not ok and not failed:
+        return
+    now = datetime.now()
+
+    _attempt = {"n": 0}
+
+    async def _record_once() -> None:
+        _attempt["n"] += 1
+        if _attempt["n"] > 1:
+            try:
+                await db.rollback()
+            except Exception:  # noqa: BLE001 - 回滚失败按原语义继续重试
+                pass
+        if ok:
+            ph = ",".join("?" * len(ok))
+            await db.execute(
+                f"DELETE FROM facts_chunk_failures " f"WHERE project_id=? AND scheme_id=? AND chunk_hash IN ({ph})",
+                (project_id, scheme_id or "", *sorted(ok)),
+            )
+        for h in failed:
+            cur = await db.execute(
+                "SELECT fail_count FROM facts_chunk_failures " "WHERE project_id=? AND scheme_id=? AND chunk_hash=?",
+                (project_id, scheme_id or "", h),
+            )
+            row = await cur.fetchone()
+            count = int(row[0] or 0) + 1 if row else 1
+            delay = retry_delay_seconds(count)
+            next_at = (now + timedelta(seconds=delay)).strftime("%Y-%m-%d %H:%M:%S")
+            await db.execute(
+                "INSERT INTO facts_chunk_failures "
+                "(project_id, scheme_id, chunk_hash, fail_count, "
+                " last_failed_at, next_retry_at) VALUES (?,?,?,?,?,?) "
+                "ON CONFLICT(project_id, scheme_id, chunk_hash) DO UPDATE SET "
+                " fail_count=excluded.fail_count, "
+                " last_failed_at=excluded.last_failed_at, "
+                " next_retry_at=excluded.next_retry_at",
+                (project_id, scheme_id or "", h, count, now.strftime("%Y-%m-%d %H:%M:%S"), next_at),
+            )
+        await db.commit()
+
+    try:
+        await retry_db_op(_record_once, max_retries=3, base_delay=0.1, jitter=0.05)
+    except Exception as e:
+        logger.warning("记录失败段退避状态失败（不影响提取结果）: %s", e)
+        try:
+            await db.rollback()
+        except Exception:
+            logger.debug("失败段退避状态回滚失败", exc_info=True)
+
+
+# ---------------------------------------------------------------------------
+# 工具函数：多来源冲突记录持久化（facts_cross_conflicts）
+# ---------------------------------------------------------------------------
+# ✅ BUG-04 修复（R175 · 2026-11-03）：cross_conflicts 此前只存在于本次运行的
+#    内存结果里，SSE completed 事件之后即消失 —— 刷新页面 / 隔天回溯时
+#    「哪条事实、因哪条规则、哪两个来源冲突」全部丢失，人工裁决无据可查。
+#    现落库为只读诊断记录（不参与门控，不改变下游取值）：
+#      · 定位 = fact_name + conflict_type；规则 = rule_id；
+#      · 冲突值 = side_a_json / side_b_json（含 source / confidence）；
+#      · 同一 (project, scheme, rule, name, type) 幂等 upsert。
+
+
+def _conflict_side_name(c: dict) -> str:
+    for side in ("side_a", "side_b"):
+        v = c.get(side)
+        if isinstance(v, dict) and (v.get("name") or "").strip():
+            return str(v.get("name") or "").strip()
+    return ""
+
+
+def _conflict_row(c: dict, project_id: str, scheme_id: str) -> tuple:
+    return (
+        project_id,
+        scheme_id or "",
+        str(c.get("rule_id") or ""),
+        str(c.get("severity") or ""),
+        str(c.get("conflict_type") or ""),
+        _conflict_side_name(c),
+        json.dumps(c.get("side_a") or {}, ensure_ascii=False),
+        json.dumps(c.get("side_b") or {}, ensure_ascii=False),
+        str(c.get("resolution_hint") or ""),
+        1 if c.get("auto_resolvable") else 0,
+    )
+
+
+async def _sync_cross_conflicts_tx(db, result, project_id: str, scheme_id: str) -> None:
+    """在 persist 事务内同步本方案的冲突记录（只增改、不误删其它段的记录）。
+
+    删除范围限定为「本次结果涉及的事实名」：增量提取只重跑部分段，
+    未涉及事实名的历史冲突记录必须保留（否则每轮增量都会清空旧冲突）。
+    """
+    conflicts = list(getattr(result, "cross_conflicts", None) or [])
+    names = {(it.name or "").strip() for grp in result.groups for it in grp.items if (it.name or "").strip()}
+    if names:
+        ph = ",".join("?" * len(names))
+        await db.execute(
+            f"DELETE FROM facts_cross_conflicts " f"WHERE project_id=? AND scheme_id=? AND fact_name IN ({ph})",
+            (project_id, scheme_id or "", *sorted(names)),
+        )
+    rows = [_conflict_row(c, project_id, scheme_id) for c in conflicts if isinstance(c, dict)]
+    if rows:
+        await db.executemany(
+            "INSERT INTO facts_cross_conflicts "
+            "(project_id, scheme_id, rule_id, severity, conflict_type, fact_name, "
+            " side_a_json, side_b_json, resolution_hint, auto_resolvable) "
+            "VALUES (?,?,?,?,?,?,?,?,?,?) "
+            "ON CONFLICT(project_id, scheme_id, rule_id, fact_name, conflict_type) "
+            "DO UPDATE SET severity=excluded.severity, "
+            " side_a_json=excluded.side_a_json, side_b_json=excluded.side_b_json, "
+            " resolution_hint=excluded.resolution_hint, "
+            " auto_resolvable=excluded.auto_resolvable, "
+            " updated_at=datetime('now','localtime')",
+            rows,
+        )
+
+
+async def load_cross_conflicts(db, project_id: str, scheme_id: str = "") -> list[dict]:
+    """读取已落库的多来源冲突记录（刷新页面 / 回溯用）。
+
+    返回结构对齐运行时 cross_conflicts 的字段名（side_a/side_b 已反序列化）。
+    """
+    if not project_id:
+        return []
+    try:
+        cur = await db.execute(
+            "SELECT rule_id, severity, conflict_type, fact_name, "
+            " side_a_json, side_b_json, resolution_hint, auto_resolvable, "
+            " created_at, updated_at FROM facts_cross_conflicts "
+            "WHERE project_id=? AND scheme_id=? ORDER BY id",
+            (project_id, scheme_id or ""),
+        )
+        rows = await cur.fetchall()
+    except Exception as e:
+        logger.warning("读取冲突记录失败（返回空列表）: %s", e)
+        return []
+    out: list[dict] = []
+    for r in rows:
+        try:
+            side_a = json.loads(r[4] or "{}")
+            side_b = json.loads(r[5] or "{}")
+        except Exception:
+            side_a, side_b = {}, {}
+        out.append(
+            {
+                "rule_id": r[0] or "",
+                "severity": r[1] or "",
+                "conflict_type": r[2] or "",
+                "fact_name": r[3] or "",
+                "side_a": side_a,
+                "side_b": side_b,
+                "resolution_hint": r[6] or "",
+                "auto_resolvable": bool(r[7]),
+                "created_at": r[8] or "",
+                "updated_at": r[9] or "",
+            }
+        )
+    return out
 
 
 # ---------------------------------------------------------------------------
 # 工具函数：清空缓存（facts 变更后联动）
 # ---------------------------------------------------------------------------
+
 
 async def invalidate_export_cache(db, scheme_id: str, facts_touched: bool = False) -> int:
     """事实变更后清空 export_cache，强制下次导出重新生成。
@@ -3089,8 +3855,7 @@ async def invalidate_export_cache(db, scheme_id: str, facts_touched: bool = Fals
     """
     from pathlib import Path
 
-    cur = await db.execute(
-        "SELECT id, result_path FROM export_cache WHERE scheme_id=?", (scheme_id,))
+    cur = await db.execute("SELECT id, result_path FROM export_cache WHERE scheme_id=?", (scheme_id,))
     rows = [dict(r) for r in await cur.fetchall()]
     cache_count = len(rows)
     if cache_count > 0:
@@ -3108,8 +3873,7 @@ async def invalidate_export_cache(db, scheme_id: str, facts_touched: bool = Fals
                     await db.rollback()
                 except Exception:  # noqa: BLE001 - 回滚失败按原语义继续重试
                     pass
-            await db.execute(
-                "DELETE FROM export_cache WHERE scheme_id=?", (scheme_id,))
+            await db.execute("DELETE FROM export_cache WHERE scheme_id=?", (scheme_id,))
             await db.commit()
 
         await retry_db_op(_delete_cache_once, max_retries=3, base_delay=0.1, jitter=0.05)
@@ -3128,8 +3892,8 @@ async def invalidate_export_cache(db, scheme_id: str, facts_touched: bool = Fals
         # 少一个「建议重生」提示不应让事实写操作整体失败。
         try:
             await db.execute(
-                "UPDATE schemes SET facts_updated_at=? WHERE id=?",
-                (datetime.now().isoformat(), scheme_id))
+                "UPDATE schemes SET facts_updated_at=? WHERE id=?", (datetime.now().isoformat(), scheme_id)
+            )
             await db.commit()
         except Exception as e:  # pragma: no cover - 仅告警，不改变主流程结论
             logger.warning("推进方案事实变更时间戳失败（章节失效标记不可用）: %s", e)
@@ -3259,27 +4023,26 @@ async def resolve_scheme_project_id(db, scheme_id: str) -> str:
         if pcur is None:
             logger.warning(
                 "反查方案所属项目失败（游标为空 · R13）· scheme_id=%s · "
-                "本次仅按方案级查询（项目共享事实将不参与注入）", scheme_id)
+                "本次仅按方案级查询（项目共享事实将不参与注入）",
+                scheme_id,
+            )
             return ""
         prow = await pcur.fetchone()
         if prow is None:
             logger.warning(
-                "方案不存在或未绑定项目 · scheme_id=%s · "
-                "本次仅按方案级查询（项目共享事实将不参与注入）", scheme_id)
+                "方案不存在或未绑定项目 · scheme_id=%s · " "本次仅按方案级查询（项目共享事实将不参与注入）", scheme_id
+            )
             return ""
         # ✅ F7（2026-10-08）：旧实现是 ``prow[0]`` —— 只认序列行。行工厂换成
         #   Mapping 时抛 KeyError，被下方 except 吞成 "" → 项目共享事实静默退出作用域。
         #   现走 row_field 单一出口（键名优先，序列兜底）。
         return row_field(prow, "project_id")
     except Exception as e:  # noqa: BLE001 - fail-soft，但必须留痕
-        logger.warning(
-            "反查方案所属项目异常（降级为仅方案级查询）· scheme_id=%s: %s",
-            scheme_id, e, exc_info=True)
+        logger.warning("反查方案所属项目异常（降级为仅方案级查询）· scheme_id=%s: %s", scheme_id, e, exc_info=True)
         return ""
 
 
-def build_injectable_facts_query(scheme_id: str, project_id: str,
-                                 columns: str) -> tuple[str, tuple]:
+def build_injectable_facts_query(scheme_id: str, project_id: str, columns: str) -> tuple[str, tuple]:
     """构造「可注入下游」全局事实查询（返回 sql + params）。
 
     ✅ 收敛去重（数据流审计 2026-09-23）：目录生成/正文生成（sse_handlers
@@ -3297,10 +4060,7 @@ def build_injectable_facts_query(scheme_id: str, project_id: str,
             f"AND {_FACTS_INJECT_WHERE} ORDER BY gt, title"
         )
         return sql, (scheme_id, project_id)
-    sql = (
-        f"SELECT {columns} FROM global_facts "
-        f"WHERE scheme_id=? AND {_FACTS_INJECT_WHERE} ORDER BY gt, title"
-    )
+    sql = f"SELECT {columns} FROM global_facts " f"WHERE scheme_id=? AND {_FACTS_INJECT_WHERE} ORDER BY gt, title"
     return sql, (scheme_id,)
 
 
@@ -3337,19 +4097,15 @@ def _bridge_safety_critical(row: dict, name: str, value: str) -> bool:
     col_val = bool(row.get("is_safety_critical") or 0)
     try:
         heuristic = is_safety_critical_name(
-            name or (row.get("title") or ""),
-            value or (row.get("content") or ""),
-            row.get("fact_key") or "")
+            name or (row.get("title") or ""), value or (row.get("content") or ""), row.get("fact_key") or ""
+        )
     except Exception as e:  # noqa: BLE001 - 判定失败不得丢掉库列信号
-        logger.warning(
-            "桥接安全关键启发式判定失败（回退为库列标记）· fact=%s: %s",
-            str(row.get("id") or "")[:8], e)
+        logger.warning("桥接安全关键启发式判定失败（回退为库列标记）· fact=%s: %s", str(row.get("id") or "")[:8], e)
         return col_val
     return bool(heuristic) or col_val
 
 
-async def load_resolved_facts_for_scope(db, scheme_id: str = "",
-                                         project_id: str = "") -> list[dict]:
+async def load_resolved_facts_for_scope(db, scheme_id: str = "", project_id: str = "") -> list[dict]:
     """跨模块只读桥接：返回作用域内「已确认可注入」的事实清单（fail-soft）。
 
     用途：预检/审核/合规/一致性修复等模块需要基于「用户已确认的全局事实」
@@ -3364,10 +4120,8 @@ async def load_resolved_facts_for_scope(db, scheme_id: str = "",
     当作「不增强」处理即可，保证主流程不受全局事实模块可用性影响。
     """
     try:
-        pid = project_id or (await resolve_scheme_project_id(db, scheme_id)
-                             if scheme_id else "")
-        sql, params = build_injectable_facts_query(
-            scheme_id, pid, _BRIDGE_COLUMNS)
+        pid = project_id or (await resolve_scheme_project_id(db, scheme_id) if scheme_id else "")
+        sql, params = build_injectable_facts_query(scheme_id, pid, _BRIDGE_COLUMNS)
         cur = await db.execute(sql, params)
         out: list[dict] = []
         for raw in await cur.fetchall():
@@ -3386,40 +4140,42 @@ async def load_resolved_facts_for_scope(db, scheme_id: str = "",
                     src = str((refs[0] or {}).get("file", "") or "")
             except Exception:
                 src = ""
-            out.append({
-                "fact_id": r["id"],
-                "name": nm or (r.get("title") or ""),
-                "value": val or (r.get("content") or ""),
-                "category": r.get("category") or "other",
-                "chapter": r.get("chapter") or "",
-                "fact_attr": r.get("fact_attr") or "",
-                "source": src,
-                # ✅ BUG 修复（2026-10-11 · 跨模块数据链 R70 · 安全关键漏标）：
-                #    旧实现只取库列 ``is_safety_critical``。而该列由 to_db_row
-                #    在提取/编辑落库时写入，**历史行与手工录入行默认 0**；
-                #    本仓其它两处（``global_facts.list_facts``:753 与
-                #    ``batch_resolve``:2390）的口径是
-                #    ``is_safety_critical_name(...) or 列`` —— 启发式（17 类白名单）
-                #    作为**权威下限**、列仅作补充信号，理由正是「只信列会漏拦」。
-                #    唯独本桥接退化为纯列值 ⇒ 预检 / 审核 / 合规 / 一致性修复
-                #    四个下游拿到的安全关键标记**系统性偏少**：白名单内的危大
-                #    参数（开挖深度、支护形式、起重荷载…）若来自历史/手工行，
-                #    在交付门控与审核里被当成普通事实放行，属安全方向漏报。
-                #    修法：与 list_facts 同口径（启发式 OR 列），启发式异常时
-                #    回退列值并留痕，绝不因判定失败而失去原有信号。
-                "is_safety_critical": _bridge_safety_critical(r, nm, val),
-                "fact_key": r.get("fact_key") or "",
-                "group_title": r.get("group_title") or "",
-                # ✅ 2026-10-03：计量单位一并下发 —— 下游 extract_danger_params
-                #    等按「value 内单位优先、value_unit 兜底」解析（危大阈值
-                #    长度类需换算为米），value 为裸数字时不丢单位。
-                "value_unit": r.get("value_unit") or "",
-                # ✅ R81（2026-10-15）：要求 vs 事实口径如实回传（''=未区分，
-                #    读侧按 fact 处理；'requirement'=招标/规范要求原文口径，
-                #    不得当本方案既定值）。旧库缺列时build_injectable_facts_query
-                #    的 COALESCE 兜底为 ''，历史行行为逐字不变。
-                "value_kind": r.get("value_kind") or "",
-            })
+            out.append(
+                {
+                    "fact_id": r["id"],
+                    "name": nm or (r.get("title") or ""),
+                    "value": val or (r.get("content") or ""),
+                    "category": r.get("category") or "other",
+                    "chapter": r.get("chapter") or "",
+                    "fact_attr": r.get("fact_attr") or "",
+                    "source": src,
+                    # ✅ BUG 修复（2026-10-11 · 跨模块数据链 R70 · 安全关键漏标）：
+                    #    旧实现只取库列 ``is_safety_critical``。而该列由 to_db_row
+                    #    在提取/编辑落库时写入，**历史行与手工录入行默认 0**；
+                    #    本仓其它两处（``global_facts.list_facts``:753 与
+                    #    ``batch_resolve``:2390）的口径是
+                    #    ``is_safety_critical_name(...) or 列`` —— 启发式（17 类白名单）
+                    #    作为**权威下限**、列仅作补充信号，理由正是「只信列会漏拦」。
+                    #    唯独本桥接退化为纯列值 ⇒ 预检 / 审核 / 合规 / 一致性修复
+                    #    四个下游拿到的安全关键标记**系统性偏少**：白名单内的危大
+                    #    参数（开挖深度、支护形式、起重荷载…）若来自历史/手工行，
+                    #    在交付门控与审核里被当成普通事实放行，属安全方向漏报。
+                    #    修法：与 list_facts 同口径（启发式 OR 列），启发式异常时
+                    #    回退列值并留痕，绝不因判定失败而失去原有信号。
+                    "is_safety_critical": _bridge_safety_critical(r, nm, val),
+                    "fact_key": r.get("fact_key") or "",
+                    "group_title": r.get("group_title") or "",
+                    # ✅ 2026-10-03：计量单位一并下发 —— 下游 extract_danger_params
+                    #    等按「value 内单位优先、value_unit 兜底」解析（危大阈值
+                    #    长度类需换算为米），value 为裸数字时不丢单位。
+                    "value_unit": r.get("value_unit") or "",
+                    # ✅ R81（2026-10-15）：要求 vs 事实口径如实回传（''=未区分，
+                    #    读侧按 fact 处理；'requirement'=招标/规范要求原文口径，
+                    #    不得当本方案既定值）。旧库缺列时build_injectable_facts_query
+                    #    的 COALESCE 兜底为 ''，历史行行为逐字不变。
+                    "value_kind": r.get("value_kind") or "",
+                }
+            )
         return out
     except Exception as e:  # pragma: no cover - 只读桥接失败不影响主流程
         logger.warning("load_resolved_facts_for_scope 失败（返回空）: %s", e)

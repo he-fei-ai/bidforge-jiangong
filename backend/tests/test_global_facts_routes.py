@@ -10,6 +10,7 @@
 测试直接调用路由函数（与既有测试风格一致），避免 TestClient 跨事件循环
 持有 aiosqlite 连接导致的偶发失败。
 """
+
 import io
 import uuid
 
@@ -36,16 +37,15 @@ async def ctx(tmp_path, monkeypatch):
 
     pid, sid = uuid.uuid4().hex, uuid.uuid4().hex
     await db.execute("INSERT INTO projects(id,name) VALUES(?,?)", (pid, "p"))
-    await db.execute(
-        "INSERT INTO schemes(id,project_id,name) VALUES(?,?,?)", (sid, pid, "s"))
+    await db.execute("INSERT INTO schemes(id,project_id,name) VALUES(?,?,?)", (sid, pid, "s"))
     await db.commit()
     yield db, pid, sid, uploads
 
 
 async def _docs(db, pid):
     cur = await db.execute(
-        "SELECT id, file_name, file_path, parsed_markdown FROM project_documents "
-        "WHERE project_id=?", (pid,))
+        "SELECT id, file_name, file_path, parsed_markdown FROM project_documents " "WHERE project_id=?", (pid,)
+    )
     return [dict(r) for r in await cur.fetchall()]
 
 
@@ -53,13 +53,18 @@ async def _docs(db, pid):
 # 上传
 # ---------------------------------------------------------------------------
 
+
 async def test_upload_saves_files_and_rows(ctx):
     db, pid, sid, uploads = ctx
     res = await gf.upload_documents(
-        scheme_id=sid, project_id="",
-        files=[_upload("a.txt", "工程名称：某某项目".encode("utf-8")),
-               _upload("b.csv", "设备,数量\n塔吊,2\n".encode("utf-8"))],
-        db=db)
+        scheme_id=sid,
+        project_id="",
+        files=[
+            _upload("a.txt", "工程名称：某某项目".encode("utf-8")),
+            _upload("b.csv", "设备,数量\n塔吊,2\n".encode("utf-8")),
+        ],
+        db=db,
+    )
 
     assert res["saved_count"] == 2
     rows = await _docs(db, pid)
@@ -75,12 +80,16 @@ async def test_upload_saves_files_and_rows(ctx):
 async def test_upload_rejects_unsupported_empty_and_spoofed(ctx):
     db, _pid, sid, _uploads = ctx
     res = await gf.upload_documents(
-        scheme_id=sid, project_id="",
-        files=[_upload("x.exe", b"MZ"),
-               _upload("empty.txt", b""),
-               # 扩展名是 .pdf 但内容不是 PDF → 文件头校验拦截
-               _upload("fake.pdf", b"this is plain text")],
-        db=db)
+        scheme_id=sid,
+        project_id="",
+        files=[
+            _upload("x.exe", b"MZ"),
+            _upload("empty.txt", b""),
+            # 扩展名是 .pdf 但内容不是 PDF → 文件头校验拦截
+            _upload("fake.pdf", b"this is plain text"),
+        ],
+        db=db,
+    )
 
     assert res["saved_count"] == 0
     assert res["unsupported"] == ["x.exe"]
@@ -92,9 +101,8 @@ async def test_upload_rejects_unsupported_empty_and_spoofed(ctx):
 async def test_upload_rejects_oversize_by_declared_size(ctx):
     db, _pid, sid, _uploads = ctx
     res = await gf.upload_documents(
-        scheme_id=sid, project_id="",
-        files=[_upload("big.txt", b"x", size=gf.MAX_UPLOAD_BYTES + 1)],
-        db=db)
+        scheme_id=sid, project_id="", files=[_upload("big.txt", b"x", size=gf.MAX_UPLOAD_BYTES + 1)], db=db
+    )
     assert res["saved_count"] == 0
     assert res["oversize"] == ["big.txt"]
 
@@ -113,9 +121,8 @@ async def test_upload_enforces_total_bytes_quota(ctx, monkeypatch):
     db, _pid, sid, _uploads = ctx
     monkeypatch.setattr(gf, "MAX_UPLOAD_TOTAL_BYTES", 10)
     res = await gf.upload_documents(
-        scheme_id=sid, project_id="",
-        files=[_upload("a.txt", b"12345678"), _upload("b.txt", b"12345678")],
-        db=db)
+        scheme_id=sid, project_id="", files=[_upload("a.txt", b"12345678"), _upload("b.txt", b"12345678")], db=db
+    )
 
     assert res["saved_count"] == 1
     assert res["quota_exceeded"] is True
@@ -131,14 +138,10 @@ async def test_upload_enforces_total_bytes_quota(ctx, monkeypatch):
 
 async def test_upload_same_name_replaces_row_and_old_file(ctx):
     db, _pid, sid, _uploads = ctx
-    await gf.upload_documents(
-        scheme_id=sid, project_id="",
-        files=[_upload("same.txt", b"first version")], db=db)
+    await gf.upload_documents(scheme_id=sid, project_id="", files=[_upload("same.txt", b"first version")], db=db)
     first = (await _docs(db, _pid))[0]
 
-    res = await gf.upload_documents(
-        scheme_id=sid, project_id="",
-        files=[_upload("same.txt", b"second version")], db=db)
+    res = await gf.upload_documents(scheme_id=sid, project_id="", files=[_upload("same.txt", b"second version")], db=db)
 
     assert res["replaced"] == 1
     rows = await _docs(db, _pid)
@@ -155,13 +158,11 @@ async def test_upload_rejects_scope_mismatch_and_unknown_scheme(ctx):
     await db.commit()
 
     with pytest.raises(HTTPException) as e1:
-        await gf.upload_documents(scheme_id=_sid, project_id=other_pid,
-                                  files=[_upload("a.txt", b"x")], db=db)
+        await gf.upload_documents(scheme_id=_sid, project_id=other_pid, files=[_upload("a.txt", b"x")], db=db)
     assert e1.value.status_code == 400
 
     with pytest.raises(HTTPException) as e2:
-        await gf.upload_documents(scheme_id=uuid.uuid4().hex, project_id="",
-                                  files=[_upload("a.txt", b"x")], db=db)
+        await gf.upload_documents(scheme_id=uuid.uuid4().hex, project_id="", files=[_upload("a.txt", b"x")], db=db)
     assert e2.value.status_code == 404
     # 不允许跨项目写入
     assert await _docs(db, other_pid) == []
@@ -171,12 +172,15 @@ async def test_upload_rejects_scope_mismatch_and_unknown_scheme(ctx):
 # 解析
 # ---------------------------------------------------------------------------
 
+
 async def test_parse_document_stores_text_and_reports_diagnostics(ctx):
     db, _pid, sid, _uploads = ctx
     await gf.upload_documents(
-        scheme_id=sid, project_id="",
+        scheme_id=sid,
+        project_id="",
         files=[_upload("doc.txt", "工程名称：某某产业园\n建设工期：120 日历天".encode("utf-8"))],
-        db=db)
+        db=db,
+    )
     doc_id = (await _docs(db, _pid))[0]["id"]
 
     res = await gf.parse_document(doc_id, db=db)
@@ -197,9 +201,7 @@ async def test_parse_document_stores_text_and_reports_diagnostics(ctx):
 
 async def test_parse_document_missing_file_returns_400(ctx):
     db, _pid, sid, _uploads = ctx
-    await gf.upload_documents(
-        scheme_id=sid, project_id="",
-        files=[_upload("gone.txt", b"hello world")], db=db)
+    await gf.upload_documents(scheme_id=sid, project_id="", files=[_upload("gone.txt", b"hello world")], db=db)
     row = (await _docs(db, _pid))[0]
     gf._managed_upload_path(row["file_path"]).unlink()
 
@@ -225,7 +227,8 @@ async def test_parse_failure_does_not_store_error_message_as_content(ctx):
         "INSERT INTO project_documents "
         "(id, project_id, file_name, file_type, doc_type, parsed_markdown, file_path) "
         "VALUES (?,?,?,?,?,?,?)",
-        (doc_id, _pid, "broken.docx", "docx", "全局事实上传", "", str(fpath)))
+        (doc_id, _pid, "broken.docx", "docx", "全局事实上传", "", str(fpath)),
+    )
     await db.commit()
 
     with pytest.raises(HTTPException) as e:
@@ -239,11 +242,14 @@ async def test_parse_failure_does_not_store_error_message_as_content(ctx):
 async def test_parse_all_mixed_success_and_failure(ctx):
     db, _pid, sid, _uploads = ctx
     await gf.upload_documents(
-        scheme_id=sid, project_id="",
-        files=[_upload("ok.txt",
-                       "工程名称：某某产业园建设项目\n建设工期：120 日历天".encode("utf-8")),
-               _upload("lost.txt", b"content")],
-        db=db)
+        scheme_id=sid,
+        project_id="",
+        files=[
+            _upload("ok.txt", "工程名称：某某产业园建设项目\n建设工期：120 日历天".encode("utf-8")),
+            _upload("lost.txt", b"content"),
+        ],
+        db=db,
+    )
     rows = await _docs(db, _pid)
     lost = next(r for r in rows if r["file_name"] == "lost.txt")
     gf._managed_upload_path(lost["file_path"]).unlink()
@@ -258,6 +264,7 @@ async def test_parse_all_mixed_success_and_failure(ctx):
 # 资料档案
 # ---------------------------------------------------------------------------
 
+
 async def test_list_documents_marks_truncated(ctx):
     db, _pid, sid, _uploads = ctx
     doc_id = uuid.uuid4().hex
@@ -265,8 +272,8 @@ async def test_list_documents_marks_truncated(ctx):
         "INSERT INTO project_documents "
         "(id, project_id, file_name, file_type, doc_type, parsed_markdown, file_path) "
         "VALUES (?,?,?,?,?,?,?)",
-        (doc_id, _pid, "big.txt", "txt", "全局事实上传",
-         "字" * gf.MAX_PARSED_CHARS, ""))
+        (doc_id, _pid, "big.txt", "txt", "全局事实上传", "字" * gf.MAX_PARSED_CHARS, ""),
+    )
     await db.commit()
 
     res = await gf.list_documents(scheme_id=sid, db=db)
@@ -283,7 +290,8 @@ async def test_delete_document_refuses_path_outside_upload_root(ctx, tmp_path):
         "INSERT INTO project_documents "
         "(id, project_id, file_name, file_type, doc_type, parsed_markdown, file_path) "
         "VALUES (?,?,?,?,?,?,?)",
-        (doc_id, _pid, "sneaky.txt", "txt", "全局事实上传", "", str(outside)))
+        (doc_id, _pid, "sneaky.txt", "txt", "全局事实上传", "", str(outside)),
+    )
     await db.commit()
 
     res = await gf.delete_document(doc_id, db=db)
@@ -299,13 +307,15 @@ async def test_delete_document_refuses_path_outside_upload_root(ctx, tmp_path):
 #   存在时必然 AttributeError → 500；且该路由此前零测试覆盖。
 # ---------------------------------------------------------------------------
 
+
 async def test_preview_document_unparsed_and_parsed(ctx):
     db, _pid, sid, _uploads = ctx
     up = await gf.upload_documents(
-        scheme_id=sid, project_id="",
-        files=[_upload("prev.txt",
-                       "工程概况：某大桥加固工程，工期 180 天，施工单位为某建司。".encode("utf-8"))],
-        db=db)
+        scheme_id=sid,
+        project_id="",
+        files=[_upload("prev.txt", "工程概况：某大桥加固工程，工期 180 天，施工单位为某建司。".encode("utf-8"))],
+        db=db,
+    )
     doc_id = up["saved"][0]["id"]
 
     # 未解析：回 is_parsed=False + 可操作提示，不得抛错
@@ -342,9 +352,11 @@ async def test_preview_response_contract_symmetric(ctx):
     """
     db, _pid, sid, _uploads = ctx
     up = await gf.upload_documents(
-        scheme_id=sid, project_id="",
+        scheme_id=sid,
+        project_id="",
         files=[_upload("sym.txt", "工程名称：某项目；工期 90 天。".encode("utf-8"))],
-        db=db)
+        db=db,
+    )
     doc_id = up["saved"][0]["id"]
 
     before = await gf.preview_document(doc_id, max_chars=50, db=db)

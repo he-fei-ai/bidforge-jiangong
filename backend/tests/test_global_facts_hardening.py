@@ -1,4 +1,5 @@
 """全局事实模块增强回归测试：作用域、文件边界与重提取冲突。"""
+
 import uuid
 
 import app.db as _appdb
@@ -31,8 +32,7 @@ async def db_ctx(tmp_path, monkeypatch):
     pid = uuid.uuid4().hex
     sid = uuid.uuid4().hex
     await db.execute("INSERT INTO projects(id,name) VALUES(?,?)", (pid, "p"))
-    await db.execute(
-        "INSERT INTO schemes(id,project_id,name) VALUES(?,?,?)", (sid, pid, "s"))
+    await db.execute("INSERT INTO schemes(id,project_id,name) VALUES(?,?,?)", (sid, pid, "s"))
     await db.commit()
     yield db, pid, sid
 
@@ -62,12 +62,18 @@ def test_safe_filename_basic_sanitization():
 
 def test_safe_filename_windows_reserved_names():
     # 保留设备名（含小写/带扩展名）一律加下划线前缀，避免在 Windows 命中设备
-    for raw in ["CON", "nul", "NUL.txt", "aux.docx", "Prn.pdf",
-                "com1", "COM9.xlsx", "lpt4"]:
+    for raw in ["CON", "nul", "NUL.txt", "aux.docx", "Prn.pdf", "com1", "COM9.xlsx", "lpt4"]:
         result = _safe_filename(raw)
         assert result.startswith("_"), raw
         assert _safe_filename(raw).upper().split(".", 1)[0].lstrip("_") in {
-            "CON", "NUL", "AUX", "PRN", "COM1", "COM9", "LPT4"}
+            "CON",
+            "NUL",
+            "AUX",
+            "PRN",
+            "COM1",
+            "COM9",
+            "LPT4",
+        }
     # 仅主名完全相等才算保留名；正常文件名不受影响
     assert _safe_filename("CONTRACT.docx") == "CONTRACT.docx"
     assert _safe_filename("配置文件.txt") == "配置文件.txt"
@@ -94,8 +100,7 @@ async def test_persist_parse_result_writes_all_fields(db_ctx):
     db, _pid, _sid = db_ctx
     doc_id = uuid.uuid4().hex
     await db.execute(
-        "INSERT INTO project_documents(id,project_id,file_name,file_type,parse_status) "
-        "VALUES(?,?,?,?,?)",
+        "INSERT INTO project_documents(id,project_id,file_name,file_type,parse_status) " "VALUES(?,?,?,?,?)",
         (doc_id, _pid, "改名无后缀", "", "pending"),
     )
     await db.commit()
@@ -123,12 +128,10 @@ async def test_persist_parse_result_writes_all_fields(db_ctx):
     assert row["parse_truncated"] == 1
 
     # file_type 空值不得覆盖既有类型：先把类型改成 docx，再以空 diag 重写
-    await db.execute(
-        "UPDATE project_documents SET file_type='docx' WHERE id=?", (doc_id,))
+    await db.execute("UPDATE project_documents SET file_type='docx' WHERE id=?", (doc_id,))
     await db.commit()
     await _persist_parse_result(db, doc_id, "x", 0.5, [], {"file_type": ""}, False)
-    cur = await db.execute(
-        "SELECT file_type,parse_truncated FROM project_documents WHERE id=?", (doc_id,))
+    cur = await db.execute("SELECT file_type,parse_truncated FROM project_documents WHERE id=?", (doc_id,))
     row = dict(await cur.fetchone())
     assert row["file_type"] == "docx"
     assert row["parse_truncated"] == 0
@@ -137,21 +140,46 @@ async def test_persist_parse_result_writes_all_fields(db_ctx):
 async def test_reextract_conflict_not_silently_dropped(db_ctx):
     db, pid, sid = db_ctx
     await persist_extraction(
-        ExtractionResult(groups=[FactGroup(
-            title="人员角色", category="personnel",
-            items=[FactItem(name="项目经理", value="张伟",
-                            key="project_manager", category="personnel")],
-        )], total_items=1), db, pid, sid)
-    await db.execute(
-        "UPDATE global_facts SET is_resolved=1 WHERE scheme_id=?", (sid,))
+        ExtractionResult(
+            groups=[
+                FactGroup(
+                    title="人员角色",
+                    category="personnel",
+                    items=[FactItem(name="项目经理", value="张伟", key="project_manager", category="personnel")],
+                )
+            ],
+            total_items=1,
+        ),
+        db,
+        pid,
+        sid,
+    )
+    await db.execute("UPDATE global_facts SET is_resolved=1 WHERE scheme_id=?", (sid,))
     await db.commit()
 
     await persist_extraction(
-        ExtractionResult(groups=[FactGroup(
-            title="人员角色", category="personnel",
-            items=[FactItem(name="项目经理", value="李强",
-                            key="project_manager", category="personnel", source="new.docx")],
-        )], total_items=1), db, pid, sid)
+        ExtractionResult(
+            groups=[
+                FactGroup(
+                    title="人员角色",
+                    category="personnel",
+                    items=[
+                        FactItem(
+                            name="项目经理",
+                            value="李强",
+                            key="project_manager",
+                            category="personnel",
+                            source="new.docx",
+                        )
+                    ],
+                )
+            ],
+            total_items=1,
+        ),
+        db,
+        pid,
+        sid,
+    )
     cur = await db.execute(
         "SELECT content, has_conflict, is_resolved, conflict_keys "
         "FROM global_facts WHERE scheme_id=? AND fact_key=?",
@@ -174,20 +202,16 @@ async def test_batch_resolve_is_scoped_to_scheme(db_ctx):
         (other_sid, pid, "other"),
     )
     await db.execute(
-        "INSERT INTO global_facts "
-        "(id,project_id,scheme_id,title,content,is_resolved) VALUES (?,?,?,?,?,?)",
+        "INSERT INTO global_facts " "(id,project_id,scheme_id,title,content,is_resolved) VALUES (?,?,?,?,?,?)",
         ("fact-a", pid, sid, "a", "a", 0),
     )
     await db.execute(
-        "INSERT INTO global_facts "
-        "(id,project_id,scheme_id,title,content,is_resolved) VALUES (?,?,?,?,?,?)",
+        "INSERT INTO global_facts " "(id,project_id,scheme_id,title,content,is_resolved) VALUES (?,?,?,?,?,?)",
         ("fact-b", pid, other_sid, "b", "b", 0),
     )
     await db.commit()
     await batch_resolve(BatchResolveRequest(scheme_id=sid, fact_ids=["fact-a", "fact-b"]), db)
-    cur = await db.execute(
-        "SELECT id,is_resolved FROM global_facts WHERE id IN ('fact-a','fact-b') ORDER BY id"
-    )
+    cur = await db.execute("SELECT id,is_resolved FROM global_facts WHERE id IN ('fact-a','fact-b') ORDER BY id")
     rows = [dict(r) for r in await cur.fetchall()]
     assert rows == [
         {"id": "fact-a", "is_resolved": 1},

@@ -5,6 +5,7 @@
 - E2：XV-NUM-UNIT 量纲一致性冲突（单位不一致 / 疑似单位换算错误）
 - E3：跨模块只读桥接 load_resolved_facts_for_scope（fail-soft、受同一注入门控）
 """
+
 import uuid
 
 import app.db as _appdb
@@ -23,8 +24,7 @@ async def ctx(tmp_path):
     db = await get_conn()
     pid, sid = uuid.uuid4().hex, uuid.uuid4().hex
     await db.execute("INSERT INTO projects(id,name) VALUES(?,?)", (pid, "p"))
-    await db.execute(
-        "INSERT INTO schemes(id,project_id,name) VALUES(?,?,?)", (sid, pid, "s"))
+    await db.execute("INSERT INTO schemes(id,project_id,name) VALUES(?,?,?)", (sid, pid, "s"))
     await db.commit()
     yield db, pid, sid
     await db.execute("DELETE FROM global_facts WHERE scheme_id=?", (sid,))
@@ -33,8 +33,7 @@ async def ctx(tmp_path):
     await db.commit()
 
 
-async def _seed_group(db, pid, sid, gid, name, value, *, simulated=False,
-                      resolved=1, conflict=0, stale=0, unit=""):
+async def _seed_group(db, pid, sid, gid, name, value, *, simulated=False, resolved=1, conflict=0, stale=0, unit=""):
     fid = uuid.uuid4().hex
     content = gf._build_fact_content(name, value + (f" {unit}" if unit else ""), simulated)
     await db.execute(
@@ -42,9 +41,25 @@ async def _seed_group(db, pid, sid, gid, name, value, *, simulated=False,
         "group_title, title, content, category, source_ref, is_simulated, "
         "confidence, is_resolved, has_conflict, conflict_keys, fact_key, "
         "is_stale) VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)",
-        (fid, pid, sid, gid, "工期安排", name, content, "schedule",
-         '[{"file":"招标文件","quote":"x"}]', 1 if simulated else 0, 0.9,
-         resolved, conflict, "", name, stale))
+        (
+            fid,
+            pid,
+            sid,
+            gid,
+            "工期安排",
+            name,
+            content,
+            "schedule",
+            '[{"file":"招标文件","quote":"x"}]',
+            1 if simulated else 0,
+            0.9,
+            resolved,
+            conflict,
+            "",
+            name,
+            stale,
+        ),
+    )
     await db.commit()
     return fid
 
@@ -71,36 +86,39 @@ async def test_list_facts_pagination_slices_and_stats_full(ctx):
     db, pid, sid = ctx
     for i in range(7):
         await _seed_group(db, pid, sid, f"g{i}", f"工期{i}", str(10 + i))
-    resp = await gf.list_facts(scheme_id=sid, project_id=pid,
-                               limit=3, offset=2, db=db)
+    resp = await gf.list_facts(scheme_id=sid, project_id=pid, limit=3, offset=2, db=db)
     assert resp["pagination"]["total_groups"] == 7
     assert resp["pagination"]["returned"] == 3
     assert len(resp["groups"]) == 3
     # 第 3 页（offset=2, limit=3）应拿到 g2/g3/g4 对应的排序后分组
     assert resp["stats"]["total"] == 7
     # 分页字段本身随请求变化
-    resp2 = await gf.list_facts(scheme_id=sid, project_id=pid,
-                                limit=2, offset=0, db=db)
+    resp2 = await gf.list_facts(scheme_id=sid, project_id=pid, limit=2, offset=0, db=db)
     assert resp2["pagination"]["returned"] == 2
 
 
 async def test_list_facts_pagination_overflow_returns_partial(ctx):
-    """offset 超出总量时返回空列表，不报错。"""
+    """offset 越界 → clamp 到最后一页（BUG-06 修复口径，2026-11-04）。
+
+    旧行为：越界直接切片 → 返回空列表（前端沿用旧页码时表现为「事实全没了」）。
+    新行为：回落到最后一页首行并回传实际生效 offset；requested_offset 保留原值
+    供前端自我纠正。非越界场景（上一用例）不受影响。
+    """
     db, pid, sid = ctx
     await _seed_group(db, pid, sid, "g0", "工期", "10")
-    resp = await gf.list_facts(scheme_id=sid, project_id=pid,
-                               limit=10, offset=99, db=db)
+    resp = await gf.list_facts(scheme_id=sid, project_id=pid, limit=10, offset=99, db=db)
     assert resp["pagination"]["total_groups"] == 1
-    assert resp["pagination"]["returned"] == 0
-    assert resp["groups"] == []
+    assert resp["pagination"]["requested_offset"] == 99
+    assert resp["pagination"]["offset"] == 0
+    assert resp["pagination"]["returned"] == 1
+    assert len(resp["groups"]) == 1
 
 
 # ---------------------------------------------------------------------------
 # E2 · XV-NUM-UNIT 量纲一致性冲突
 # ---------------------------------------------------------------------------
 def _num_item(name, value, key):
-    return FactItem(name=name, value=value, key=key, category="technique",
-                    source="doc", confidence=0.9)
+    return FactItem(name=name, value=value, key=key, category="technique", source="doc", confidence=0.9)
 
 
 def test_xv_num_unit_inconsistent_low():
@@ -132,8 +150,7 @@ def test_xv_num_scale_suspect_medium():
         _num_item("开挖深度", "0.125m", "excavation_depth"),
     ]
     confs = xv.run_cross_validations(items)
-    num = [c for c in confs if c["rule_id"] == "XV-NUM-UNIT"
-           and c["conflict_type"] == "numeric_scale_suspect"]
+    num = [c for c in confs if c["rule_id"] == "XV-NUM-UNIT" and c["conflict_type"] == "numeric_scale_suspect"]
     assert len(num) == 1
     assert num[0]["severity"] == "medium"
 
@@ -168,17 +185,14 @@ def test_xv_num_unit_different_dimensions_not_compared():
 async def test_bridge_returns_only_injectable_facts(ctx):
     """桥接只返回「可注入」事实（无矛盾/已确认/非模拟/未过期）。"""
     db, pid, sid = ctx
-    ok = await _seed_group(db, pid, sid, "g0", "项目经理", "张伟",
-                           resolved=1, conflict=0, stale=0)
-    bad = await _seed_group(db, pid, sid, "g1", "工期", "365",
-                            resolved=1, conflict=1, stale=0)
-    sim = await _seed_group(db, pid, sid, "g2", "质保期", "两年",
-                            simulated=True, resolved=0)
+    ok = await _seed_group(db, pid, sid, "g0", "项目经理", "张伟", resolved=1, conflict=0, stale=0)
+    bad = await _seed_group(db, pid, sid, "g1", "工期", "365", resolved=1, conflict=1, stale=0)
+    sim = await _seed_group(db, pid, sid, "g2", "质保期", "两年", simulated=True, resolved=0)
     out = await fe.load_resolved_facts_for_scope(db, scheme_id=sid, project_id=pid)
     names = {f["name"] for f in out}
     assert "项目经理" in names
-    assert "工期" not in names          # 有矛盾，被门控排除
-    assert "质保期" not in names        # 模拟值，被门控排除
+    assert "工期" not in names  # 有矛盾，被门控排除
+    assert "质保期" not in names  # 模拟值，被门控排除
     assert len(out) == 1
     assert out[0]["fact_id"] == ok
 
@@ -196,7 +210,16 @@ async def test_bridge_field_shape(ctx):
     await _seed_group(db, pid, sid, "g0", "项目经理", "张伟")
     out = await fe.load_resolved_facts_for_scope(db, scheme_id=sid, project_id=pid)
     f = out[0]
-    for k in ("fact_id", "name", "value", "category", "chapter",
-              "fact_attr", "source", "is_safety_critical", "fact_key",
-              "group_title"):
+    for k in (
+        "fact_id",
+        "name",
+        "value",
+        "category",
+        "chapter",
+        "fact_attr",
+        "source",
+        "is_safety_critical",
+        "fact_key",
+        "group_title",
+    ):
         assert k in f

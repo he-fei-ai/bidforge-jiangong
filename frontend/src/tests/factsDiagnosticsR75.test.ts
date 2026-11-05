@@ -22,7 +22,9 @@ import { mergeFactsDiagnosticsSettled } from "../pages/SchemeWorkbenchPage";
 const RAW: Record<string, string> = Object.fromEntries(
   Object.entries(
     import.meta.glob("../**/*.{ts,tsx}", {
-      query: "?raw", import: "default", eager: true,
+      query: "?raw",
+      import: "default",
+      eager: true,
     }) as Record<string, string>,
   ).map(([k, v]) => [k.replace(/^\.\.\//, "").replace(/^\.\//, "tests/"), v]),
 );
@@ -146,10 +148,15 @@ describe("R75·G-D B组 · loadFactsDiagnostics 静态接线锁", () => {
     expect(body).not.toContain("await Promise.all([");
   });
 
-  it("必须经 mergeFactsDiagnosticsSettled 合并，且成功侧各自落板", () => {
+  it("必须经 mergeFactsDiagnosticsSettled 合并，且两侧各自经同一判定源落板", () => {
     expect(body).toContain("mergeFactsDiagnosticsSettled(chaptersRes, dangerRes)");
-    expect(body).toContain("if (merged.chapters !== undefined) setFactsChapterReport(merged.chapters);");
-    expect(body).toContain("if (merged.danger !== undefined) setFactsDangerReport(merged.danger);");
+    // ✅ R177（2026-11-04）：章节覆盖度与危大报告都经 factsShared 的统一判定源
+    //    落板 —— 缺席（失败刷新/成功但无数据）必须清空，禁止沿用上一次数据；
+    //    旧的条件赋值形态（章节保留旧覆盖率、危大保留旧结论）已全部移除。
+    expect(body).toContain("setFactsChapterReport(resolveFactsChapterSettled(merged));");
+    expect(body).toContain("setFactsDangerReport(resolveFactsDangerSettled(merged));");
+    expect(body).not.toContain("if (merged.chapters !== undefined) setFactsChapterReport");
+    expect(body).not.toContain("if (merged.danger !== undefined) setFactsDangerReport");
   });
 
   it("aborted 必须短路（双侧取消静默返回），旧的整体赋值形态不得回流", () => {

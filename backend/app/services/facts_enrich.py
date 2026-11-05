@@ -34,6 +34,7 @@
   （``_MAX_FINALIZE_FACT``），AI 若误当成「重新提取」返回大量新事实，
   超限部分**丢弃**而非全量采纳。
 """
+
 from __future__ import annotations
 
 import json
@@ -77,11 +78,13 @@ def items_to_prompt_json(items: Sequence) -> list[dict]:
     """
     out: list[dict] = []
     for it in (items or [])[:_MAX_PROMPT_FACTS]:
-        out.append({
-            "fact_key": str(getattr(it, "key", "") or getattr(it, "fact_key", "") or ""),
-            "name": _clip(getattr(it, "name", ""), 40),
-            "value": _clip(getattr(it, "value", "")),
-        })
+        out.append(
+            {
+                "fact_key": str(getattr(it, "key", "") or getattr(it, "fact_key", "") or ""),
+                "name": _clip(getattr(it, "name", ""), 40),
+                "value": _clip(getattr(it, "value", "")),
+            }
+        )
     return out
 
 
@@ -89,6 +92,7 @@ def _timeout() -> int:
     """新增 AI 调用的超时（秒），读配置失败时回落到 240。"""
     try:
         from app.config import settings
+
         return int(getattr(settings, "facts_enrich_timeout", 240) or 240)
     except Exception:  # pragma: no cover
         return 240
@@ -123,17 +127,22 @@ async def apply_knowledge_patches(items: list, knowledge_text: str) -> tuple[lis
         return items, 0
 
     try:
-        system = render("facts_knowledge_patch_system",
-                        current_facts=json.dumps(
-                            items_to_prompt_json(items), ensure_ascii=False),
-                        knowledge_text=text)
+        system = render(
+            "facts_knowledge_patch_system",
+            current_facts=json.dumps(items_to_prompt_json(items), ensure_ascii=False),
+            knowledge_text=text,
+        )
         obj, _ = await collect_json_response(
             [{"role": "system", "content": system}],
-            _validate_patches, max_retries=1, temperature=0.1,
-            json_mode=True, timeout=_timeout(), scene="facts_knowledge_patch")
+            _validate_patches,
+            max_retries=1,
+            temperature=0.1,
+            json_mode=True,
+            timeout=_timeout(),
+            scene="facts_knowledge_patch",
+        )
     except Exception as e:  # noqa: BLE001 - fail-soft：补充失败不拖垮提取
-        logger.warning("知识库事实补充阶段失败（已跳过，不影响本次提取结果）: %s",
-                       e, exc_info=True)
+        logger.warning("知识库事实补充阶段失败（已跳过，不影响本次提取结果）: %s", e, exc_info=True)
         return items, 0
 
     patches = _build_patches(obj, items)
@@ -147,8 +156,7 @@ async def apply_knowledge_patches(items: list, knowledge_text: str) -> tuple[lis
         logger.warning("知识库补丁合并失败（已跳过）: %s", e, exc_info=True)
         return items, 0
 
-    logger.info("知识库事实补充已应用 %d 条补丁，事实数 %d → %d",
-                len(patches), len(items), len(merged))
+    logger.info("知识库事实补充已应用 %d 条补丁，事实数 %d → %d", len(patches), len(items), len(merged))
     return merged, len(patches)
 
 
@@ -171,13 +179,11 @@ def _build_patches(obj: Any, items: Sequence) -> list[FactPatch]:
     patches = list(normalize_patches_response(obj).get("patches") or [])
     if not patches:
         return []
-    valid_keys = {str(getattr(it, "key", "") or getattr(it, "fact_key", "") or "")
-                  for it in items}
+    valid_keys = {str(getattr(it, "key", "") or getattr(it, "fact_key", "") or "") for it in items}
     valid_names = {str(getattr(it, "name", "") or "") for it in items}
     out: list[FactPatch] = []
     for p in patches:
-        is_new = not (p.target_fact_id in valid_keys
-                      or (p.title and p.title in valid_names))
+        is_new = not (p.target_fact_id in valid_keys or (p.title and p.title in valid_names))
         if is_new and (p.target_fact_id or p.title):
             # 幻觉锚点降级：清空 target 并标记 create。
             # ⚠️ 必须**清空** target_fact_id（而不只是置 create=True）——
@@ -189,7 +195,6 @@ def _build_patches(obj: Any, items: Sequence) -> list[FactPatch]:
             p = replace(p, create=True)
         out.append(p)
     return out
-
 
 
 # =========================================================================
@@ -255,19 +260,22 @@ async def finalize_facts(items: list) -> tuple[list, int]:
     if not items:
         return items, 0
     try:
-        system = render("facts_finalize_system",
-                        current_facts=json.dumps(
-                            items_to_prompt_json(items), ensure_ascii=False))
+        system = render(
+            "facts_finalize_system", current_facts=json.dumps(items_to_prompt_json(items), ensure_ascii=False)
+        )
         obj, _ = await collect_json_response(
             [{"role": "system", "content": system}],
-            _validate_finalize, max_retries=1, temperature=0.1,
-            json_mode=True, timeout=_timeout(), scene="facts_finalize")
+            _validate_finalize,
+            max_retries=1,
+            temperature=0.1,
+            json_mode=True,
+            timeout=_timeout(),
+            scene="facts_finalize",
+        )
     except Exception as e:  # noqa: BLE001 - fail-soft
-        logger.warning("全局事实最终整理阶段失败（保留整理前结果）: %s",
-                       e, exc_info=True)
+        logger.warning("全局事实最终整理阶段失败（保留整理前结果）: %s", e, exc_info=True)
         return items, 0
 
     out, changed = apply_finalize_result(items, obj)
     logger.info("全局事实最终整理改写 %d 条（事实总数 %d）", changed, len(out))
     return out, changed
-

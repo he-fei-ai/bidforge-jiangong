@@ -18,26 +18,41 @@ import { describe, it, expect, vi, afterEach } from "vitest";
 import { render, fireEvent, cleanup } from "@testing-library/react";
 import React from "react";
 import {
-  FactsGroupList, buildBatchResolveResultCopy, buildBatchResolveCopy,
-  factChapterTitle, factAttrTitle, factSourceKindTitle,
-  FACT_CHAPTER_TITLES, FALLBACK_FACT_ATTR_TITLES, FALLBACK_SOURCE_KIND_TITLES,
+  FactsGroupList,
+  buildBatchResolveResultCopy,
+  buildBatchResolveCopy,
+  factChapterTitle,
+  factAttrTitle,
+  factSourceKindTitle,
+  FACT_CHAPTER_TITLES,
+  FALLBACK_FACT_ATTR_TITLES,
+  FALLBACK_SOURCE_KIND_TITLES,
 } from "../pages/SchemeWorkbenchPage";
-import { ClassificationPanel, chapterFieldCoverage, chapterTitleOf }
-  from "../components/BidAnalysisTab";
+import {
+  ClassificationPanel,
+  chapterFieldCoverage,
+  chapterTitleOf,
+} from "../components/BidAnalysisTab";
 
 afterEach(cleanup);
 
 if (!(window as any).matchMedia) {
   (window as any).matchMedia = (query: string) => ({
-    matches: false, media: query, onchange: null,
-    addListener: () => {}, removeListener: () => {},
-    addEventListener: () => {}, removeEventListener: () => {},
+    matches: false,
+    media: query,
+    onchange: null,
+    addListener: () => {},
+    removeListener: () => {},
+    addEventListener: () => {},
+    removeEventListener: () => {},
     dispatchEvent: () => false,
   });
 }
 if (!(globalThis as any).ResizeObserver) {
   (globalThis as any).ResizeObserver = class {
-    observe() {} unobserve() {} disconnect() {}
+    observe() {}
+    unobserve() {}
+    disconnect() {}
   };
 }
 
@@ -50,9 +65,8 @@ function expandFirstPanel(utils: {
   queryByText: (t: string) => HTMLElement | null;
   getByText: (t: string) => HTMLElement;
 }) {
-  const header = utils.queryByText("工程概况")
-    || utils.queryByText("技术参数")
-    || utils.queryByText("基本信息");
+  const header =
+    utils.queryByText("工程概况") || utils.queryByText("技术参数") || utils.queryByText("基本信息");
   expect(header).toBeTruthy();
   fireEvent.click(header as HTMLElement);
 }
@@ -86,8 +100,7 @@ describe("chapterFieldCoverage · 后端字段名契约", () => {
   });
 
   it("field_coverage 优先于 completeness", () => {
-    expect(chapterFieldCoverage({ field_coverage: 0.25, completeness: 0.9 }))
-      .toBeCloseTo(0.25);
+    expect(chapterFieldCoverage({ field_coverage: 0.25, completeness: 0.9 })).toBeCloseTo(0.25);
   });
 });
 
@@ -107,7 +120,13 @@ describe("chapterTitleOf · 章节标题来源优先级", () => {
 
 describe("ClassificationPanel · 逐章进度条渲染", () => {
   const mkPayload = () => ({
-    classification: { category_names: ["基坑工程"], sub_names: [], is_hazardous: true, is_oversize: false, standards_keys: [] },
+    classification: {
+      category_names: ["基坑工程"],
+      sub_names: [],
+      is_hazardous: true,
+      is_oversize: false,
+      standards_keys: [],
+    },
     chapter_completeness: {
       completeness: 0.6,
       chapters: {
@@ -121,9 +140,9 @@ describe("ClassificationPanel · 逐章进度条渲染", () => {
   it("逐章渲染后端 field_coverage 对应的百分比（修复前全为 0%）", () => {
     const { container } = render(<ClassificationPanel data={mkPayload()} />);
     const text = container.textContent || "";
-    expect(text).toContain("100%");   // overview
-    expect(text).toContain("50%");    // basis
-    expect(text).toContain("0%");     // plan
+    expect(text).toContain("100%"); // overview
+    expect(text).toContain("50%"); // basis
+    expect(text).toContain("0%"); // plan
   });
 
   it("总体百分比读顶层 completeness（与逐章字段名不同，勿混用）", () => {
@@ -141,7 +160,9 @@ describe("ClassificationPanel · 逐章进度条渲染", () => {
   it("章节标题用响应自带 title（后端增删章节后前端不失真）", () => {
     const payload = mkPayload();
     (payload.chapter_completeness.chapters as any).brand_new = {
-      title: "后端新增章节", field_coverage: 0.3, missing_fields: [],
+      title: "后端新增章节",
+      field_coverage: 0.3,
+      missing_fields: [],
     };
     const { container } = render(<ClassificationPanel data={payload} />);
     expect(container.textContent || "").toContain("后端新增章节");
@@ -149,7 +170,8 @@ describe("ClassificationPanel · 逐章进度条渲染", () => {
 
   it("智能分类关闭时只渲染提示，不渲染进度条", () => {
     const { container } = render(
-      <ClassificationPanel data={{ disabled: true, reason: "已关闭" }} />);
+      <ClassificationPanel data={{ disabled: true, reason: "已关闭" }} />,
+    );
     expect(container.textContent || "").toContain("智能分类已关闭");
     expect(container.textContent || "").not.toContain("%");
   });
@@ -187,8 +209,7 @@ describe("枚举标题解析 · category-map 注入", () => {
     const chapters = { safety: "后端改名·安全", brand_new: "后端新增章节" };
     expect(factChapterTitle("safety", chapters)).toBe("后端改名·安全");
     expect(factChapterTitle("brand_new", chapters)).toBe("后端新增章节");
-    expect(factSourceKindTitle("survey", { survey: "后端改名·勘察" }))
-      .toBe("后端改名·勘察");
+    expect(factSourceKindTitle("survey", { survey: "后端改名·勘察" })).toBe("后端改名·勘察");
   });
 
   it("空表 / 未注入时安全回落到兜底表（不得渲染空白）", () => {
@@ -215,13 +236,24 @@ describe("枚举标题解析 · category-map 注入", () => {
 // ===========================================================================
 
 describe("FactsGroupList · 来源类型与枚举注入渲染", () => {
-  const mkGroups = (item: any) => ([{
-    id: "g1", title: "工程概况", category: "basic", content: "md", items: [item],
-  }]);
+  const mkGroups = (item: any) => [
+    {
+      id: "g1",
+      title: "工程概况",
+      category: "basic",
+      content: "md",
+      items: [item],
+    },
+  ];
 
   const baseItem = {
-    fact_id: "f1", name: "基坑深度", value: "12.5m",
-    is_simulated: false, is_resolved: true, has_conflict: false, is_stale: false,
+    fact_id: "f1",
+    name: "基坑深度",
+    value: "12.5m",
+    is_simulated: false,
+    is_resolved: true,
+    has_conflict: false,
+    is_stale: false,
   };
 
   const renderList = (item: any, titles?: any) => {
@@ -229,8 +261,11 @@ describe("FactsGroupList · 来源类型与枚举注入渲染", () => {
       <FactsGroupList
         groups={mkGroups(item)}
         filter="all"
-        onEditGroup={noop} onDeleteGroup={noop} onEditItem={noop}
-        onResolveItem={noop} onResolveConflict={noop}
+        onEditGroup={noop}
+        onDeleteGroup={noop}
+        onEditItem={noop}
+        onResolveItem={noop}
+        onResolveConflict={noop}
         chapterTitles={titles?.chapterTitles}
         factAttrTitles={titles?.factAttrTitles}
         sourceKindTitles={titles?.sourceKindTitles}
@@ -282,7 +317,10 @@ describe("FactsGroupList · 来源类型与枚举注入渲染", () => {
 
   it("未注入时全部回落兜底表（既有渲染点零行为变化）", () => {
     const { container } = renderList({
-      ...baseItem, chapter: "safety", fact_attr: "norm", source_kind: "survey",
+      ...baseItem,
+      chapter: "safety",
+      fact_attr: "norm",
+      source_kind: "survey",
     });
     const text = container.textContent || "";
     expect(text).toContain("施工安全保证措施");
@@ -292,7 +330,10 @@ describe("FactsGroupList · 来源类型与枚举注入渲染", () => {
 
   it("未知枚举键一律不渲染标签（三套枚举同口径，不回落原键）", () => {
     const { container } = renderList({
-      ...baseItem, chapter: "nope", fact_attr: "nope", source_kind: "nope",
+      ...baseItem,
+      chapter: "nope",
+      fact_attr: "nope",
+      source_kind: "nope",
     });
     const text = container.textContent || "";
     expect(text).not.toContain("📖");
@@ -306,15 +347,24 @@ describe("FactsGroupList · 来源类型与枚举注入渲染", () => {
 // ===========================================================================
 
 describe("批量确认结果文案", () => {
-  const mkGroups = (items: any[]) => ([{
-    id: "g1", title: "工程概况", category: "basic", content: "md", items,
-  }]);
+  const mkGroups = (items: any[]) => [
+    {
+      id: "g1",
+      title: "工程概况",
+      category: "basic",
+      content: "md",
+      items,
+    },
+  ];
 
   it("被安全闸门拦下时按实际条数提示，不虚报成功", () => {
     // ✅ 返回形状是 { tone, text }（此前按字符串断言，属测试自身误用）
     const r = buildBatchResolveResultCopy({
-      ok: true, changed: 3, skipped: 0,
-      skipped_safety: [], skipped_safety_count: 2,
+      ok: true,
+      changed: 3,
+      skipped: 0,
+      skipped_safety: [],
+      skipped_safety_count: 2,
     } as any);
     expect(r.tone).toBe("warning");
     expect(r.text).toContain("3");
@@ -323,7 +373,10 @@ describe("批量确认结果文案", () => {
 
   it("全部被安全闸门拦下时文案非空且不谎报成功", () => {
     const r = buildBatchResolveResultCopy({
-      ok: true, changed: 0, skipped: 0, skipped_safety_count: 5,
+      ok: true,
+      changed: 0,
+      skipped: 0,
+      skipped_safety_count: 5,
     } as any);
     expect(r.tone).toBe("warning");
     expect(r.text).toContain("0");
@@ -332,7 +385,10 @@ describe("批量确认结果文案", () => {
 
   it("无拦截时只报确认条数", () => {
     const r = buildBatchResolveResultCopy({
-      ok: true, changed: 5, skipped: 0, skipped_safety_count: 0,
+      ok: true,
+      changed: 5,
+      skipped: 0,
+      skipped_safety_count: 0,
     } as any);
     expect(r.tone).toBe("success");
     expect(r.text).toContain("5");
@@ -341,10 +397,11 @@ describe("批量确认结果文案", () => {
 
   it("✅ 被安全闸门拦下时列出具体是哪几条（后端早已逐条回传 skipped_safety）", () => {
     const r = buildBatchResolveResultCopy({
-      ok: true, changed: 3, skipped: 0, skipped_safety_count: 3,
-      skipped_safety: [
-        { name: "基坑深度" }, { name: "支护形式" }, { name: "混凝土强度等级" },
-      ],
+      ok: true,
+      changed: 3,
+      skipped: 0,
+      skipped_safety_count: 3,
+      skipped_safety: [{ name: "基坑深度" }, { name: "支护形式" }, { name: "混凝土强度等级" }],
     } as any);
     expect(r.tone).toBe("warning");
     expect(r.blockedNames).toEqual(["基坑深度", "支护形式", "混凝土强度等级"]);
@@ -355,7 +412,10 @@ describe("批量确认结果文案", () => {
   it("被拦条数多时只列前 6 条并给出总数（不刷屏）", () => {
     const many = Array.from({ length: 12 }, (_, i) => ({ name: `事实${i + 1}` }));
     const r = buildBatchResolveResultCopy({
-      ok: true, changed: 0, skipped: 0, skipped_safety_count: 12,
+      ok: true,
+      changed: 0,
+      skipped: 0,
+      skipped_safety_count: 12,
       skipped_safety: many,
     } as any);
     expect(r.blockedNames.length).toBe(12);
@@ -395,8 +455,13 @@ describe("批量确认结果文案", () => {
 
 describe("冲突裁决交互", () => {
   const conflictItem = {
-    fact_id: "f1", name: "混凝土强度等级", value: "C30",
-    is_simulated: false, is_resolved: false, has_conflict: true, is_stale: false,
+    fact_id: "f1",
+    name: "混凝土强度等级",
+    value: "C30",
+    is_simulated: false,
+    is_resolved: false,
+    has_conflict: true,
+    is_stale: false,
     conflict_values: [
       { value: "C35", source: "设计说明", confidence: 0.9 },
       { value: "C25", source: "施工组织设计", confidence: 0.6 },
@@ -406,10 +471,15 @@ describe("冲突裁决交互", () => {
   const renderConflict = (item: any, onResolveConflict = vi.fn()) => {
     const r = render(
       <FactsGroupList
-        groups={[{ id: "g1", title: "技术参数", category: "tech_param", content: "md", items: [item] }]}
+        groups={[
+          { id: "g1", title: "技术参数", category: "tech_param", content: "md", items: [item] },
+        ]}
         filter="all"
-        onEditGroup={noop} onDeleteGroup={noop} onEditItem={noop}
-        onResolveItem={noop} onResolveConflict={onResolveConflict}
+        onEditGroup={noop}
+        onDeleteGroup={noop}
+        onEditItem={noop}
+        onResolveItem={noop}
+        onResolveConflict={onResolveConflict}
       />,
     );
     // ✅ antd Collapse 默认折叠：不展开则裁决按钮不在 DOM 里
@@ -421,7 +491,8 @@ describe("冲突裁决交互", () => {
     const { getByText, onResolveConflict } = renderConflict(conflictItem);
     fireEvent.click(getByText("保留当前值"));
     expect(onResolveConflict).toHaveBeenCalledWith(
-      expect.objectContaining({ fact_id: "f1" }), "C30",
+      expect.objectContaining({ fact_id: "f1" }),
+      "C30",
     );
   });
 
@@ -434,8 +505,7 @@ describe("冲突裁决交互", () => {
     const calls = onResolveConflict.mock.calls;
     expect(calls.length).toBe(2);
     expect(calls[0][0].fact_id).toBe("f1");
-    expect(calls.map((c: any[]) => c[1]).sort())
-      .toEqual(["C25", "C35"]);
+    expect(calls.map((c: any[]) => c[1]).sort()).toEqual(["C25", "C35"]);
   });
 
   it("当前值始终提供「保留当前值」入口（即便某候选值与它相同）", () => {
@@ -445,7 +515,8 @@ describe("冲突裁决交互", () => {
     const { getByText, onResolveConflict } = renderConflict(dup);
     fireEvent.click(getByText("保留当前值"));
     expect(onResolveConflict).toHaveBeenCalledWith(
-      expect.objectContaining({ fact_id: "f1" }), "C30",
+      expect.objectContaining({ fact_id: "f1" }),
+      "C30",
     );
   });
 

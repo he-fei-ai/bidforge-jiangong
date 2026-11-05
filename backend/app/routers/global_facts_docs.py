@@ -2,6 +2,7 @@
 
 负责文档上传、解析、预览、分类管理。与 facts CRUD 解耦，单独成模块。
 """
+
 import asyncio
 import json
 import logging
@@ -75,11 +76,13 @@ async def list_documents(
     real_pid = await _resolve_project_id(db, scheme_id, project_id)
     if not real_pid:
         raise HTTPException(400, "需要 scheme_id 或 project_id")
-    sql = ("SELECT id, project_id, file_name, file_type, doc_type, "
-           "length(parsed_markdown) as text_len, "
-           "doc_category, file_size, parse_time, parse_warnings, "
-           "parse_truncated, "
-           "parse_status, created_at FROM project_documents")
+    sql = (
+        "SELECT id, project_id, file_name, file_type, doc_type, "
+        "length(parsed_markdown) as text_len, "
+        "doc_category, file_size, parse_time, parse_warnings, "
+        "parse_truncated, "
+        "parse_status, created_at FROM project_documents"
+    )
     params: list = [real_pid]
     sql += " WHERE project_id=?"
     sql += " ORDER BY created_at DESC"
@@ -101,9 +104,9 @@ async def list_documents(
     return {"documents": rows}
 
 
-async def load_parsed_docs(db, project_id: str,
-                           limit: int | None = None,
-                           truncated_out: list | None = None) -> list[tuple[str, str]]:
+async def load_parsed_docs(
+    db, project_id: str, limit: int | None = None, truncated_out: list | None = None
+) -> list[tuple[str, str]]:
     """✅ 唯一读取入口：按上传先后取该项目【已解析】文档的 (file_name, 正文)。
 
     - 仅返回正文非空的文档；`limit=None` 表示不限份数（全量，供事实提取使用）。
@@ -127,9 +130,11 @@ async def load_parsed_docs(db, project_id: str,
     """
     if not project_id:
         return []
-    base = ("SELECT file_name, parsed_markdown FROM project_documents "
-            "WHERE project_id=? AND parsed_markdown IS NOT NULL AND parsed_markdown!='' "
-            "ORDER BY created_at, id")
+    base = (
+        "SELECT file_name, parsed_markdown FROM project_documents "
+        "WHERE project_id=? AND parsed_markdown IS NOT NULL AND parsed_markdown!='' "
+        "ORDER BY created_at, id"
+    )
     tail = ""
     params: list = [project_id]
     if limit is not None:
@@ -143,9 +148,10 @@ async def load_parsed_docs(db, project_id: str,
     pairs, truncated = await _query_docs_with_diag(db, base, tail, tuple(params))
     if truncated:
         logger.warning(
-            "生成链路使用了 %d 份被截断的文档（依据不完整）：%s；"
-            "建议在「全局事实」页重新解析或拆分文件后重新上传",
-            len(truncated), "、".join(truncated[:5]))
+            "生成链路使用了 %d 份被截断的文档（依据不完整）：%s；" "建议在「全局事实」页重新解析或拆分文件后重新上传",
+            len(truncated),
+            "、".join(truncated[:5]),
+        )
         if truncated_out is not None:
             truncated_out.extend(truncated)
     return pairs
@@ -177,12 +183,12 @@ async def _query_docs_with_diag(db, base: str, tail: str, params: tuple):
                 if r[1]:
                     pairs.append((r[0] or "", r[1]))
             return pairs, truncated
-        extra = ([("parse_truncated")] if has_trunc else []) + \
-                ([("parse_warnings")] if has_warn else [])
-        sql = ("SELECT file_name, parsed_markdown, " + ", ".join(extra)
-               + " FROM project_documents "
-               "WHERE project_id=? AND parsed_markdown IS NOT NULL AND parsed_markdown!='' "
-               "ORDER BY created_at, id" + tail)
+        extra = ([("parse_truncated")] if has_trunc else []) + ([("parse_warnings")] if has_warn else [])
+        sql = (
+            "SELECT file_name, parsed_markdown, " + ", ".join(extra) + " FROM project_documents "
+            "WHERE project_id=? AND parsed_markdown IS NOT NULL AND parsed_markdown!='' "
+            "ORDER BY created_at, id" + tail
+        )
         cur = await db.execute(sql, params)
         for r in await cur.fetchall():
             d = dict(r)
@@ -217,8 +223,7 @@ async def _query_docs_with_diag(db, base: str, tail: str, params: tuple):
     return pairs, truncated
 
 
-async def load_parsed_texts(db, project_id: str, limit: int = 5,
-                            truncated_out: list | None = None) -> list[str]:
+async def load_parsed_texts(db, project_id: str, limit: int = 5, truncated_out: list | None = None) -> list[str]:
     """（兼容入口）只返回已解析文档的正文，最多 limit 份。
 
     ✅ 统一入口：完整语义见 load_parsed_docs —— 本函数委托它，避免"已解析文档"
@@ -228,8 +233,7 @@ async def load_parsed_texts(db, project_id: str, limit: int = 5,
     出参，供调用方把「依据不完整」显式告知用户；不传时 ``load_parsed_docs``
     仍会恒记 WARNING，可观测性不依赖调用方记得传参。
     """
-    return [text for _name, text in
-            await load_parsed_docs(db, project_id, limit, truncated_out)]
+    return [text for _name, text in await load_parsed_docs(db, project_id, limit, truncated_out)]
 
 
 def _decode_parse_warnings(raw) -> list[str]:
@@ -247,8 +251,7 @@ def _decode_parse_warnings(raw) -> list[str]:
 
 @router.delete("/documents/{doc_id}")
 async def delete_document(doc_id: str, db=Depends(get_db)):
-    cur = await db.execute(
-        "SELECT file_path, project_id FROM project_documents WHERE id=?", (doc_id,))
+    cur = await db.execute("SELECT file_path, project_id FROM project_documents WHERE id=?", (doc_id,))
     # ✅ R13 读路径补漏（2026-10-05）：cursor 为 None 时下方 fetchone 抛
     #    AttributeError → 500。也不得降级成「无此文档」——那会把 DB 瞬时
     #    故障误报成 404「文档不存在」，用户以为文件丢了。503 = 可重试。
@@ -271,8 +274,7 @@ async def delete_document(doc_id: str, db=Depends(get_db)):
         logger.warning("拒绝删除上传目录外的文档路径: %s", fpath)
     # ✅ R13 写路径补漏（2026-10-05）：DELETE 未生效仍回 ok=True 是「假成功」
     #    —— 前端提示已删除、列表却仍在，且四层产物与事实 stale 都被错误清理。
-    del_doc_cur = await db.execute(
-        "DELETE FROM project_documents WHERE id=?", (doc_id,))
+    del_doc_cur = await db.execute("DELETE FROM project_documents WHERE id=?", (doc_id,))
     if del_doc_cur is None:
         logger.warning("删除文档未生效（db.execute 返回 None，R13），doc=%s", doc_id)
         raise HTTPException(503, "文档服务暂时不可用，请稍后重试")
@@ -289,16 +291,14 @@ async def delete_document(doc_id: str, db=Depends(get_db)):
     proj_id = row["project_id"] if "project_id" in row.keys() else ""
     if proj_id:
         try:
-            await doc_pipeline.purge_document(db, doc_id=doc_id,
-                                              project_id=proj_id)
+            await doc_pipeline.purge_document(db, doc_id=doc_id, project_id=proj_id)
         except Exception:
             logger.exception("文档 %s 四层产物清理失败（记录已删除）", doc_id)
         # ✅ 跨模块链路收敛：删除源文档后旧事实立即退出生成链路，并失效所有方案缓存。
         stale_count = await _mark_project_facts_stale(db, proj_id)
         await db.commit()
         await _invalidate_project_export_caches(db, proj_id)
-        logger.info("删除文档 %s，标记项目 %s 的 %d 条事实为 stale",
-                    doc_id, proj_id, stale_count)
+        logger.info("删除文档 %s，标记项目 %s 的 %d 条事实为 stale", doc_id, proj_id, stale_count)
     return {"ok": True, "stale_facts": stale_count if proj_id else 0}
 
 
@@ -329,6 +329,28 @@ def _is_truncated(text_len) -> bool:
     # 只要发生过截断，落库长度就恰好等于 MAX。故此处必须用 `>=`（用 `>` 会漏判
     # 所有真实截断），与写入侧 `len(text) > MAX` 判定互为补充、并不矛盾。
     return n >= MAX_PARSED_CHARS or n in _LEGACY_PARSE_LIMITS
+
+
+def _truncate_for_storage(text: str) -> tuple[str, bool]:
+    """按 ``MAX_PARSED_CHARS`` 截断落库正文，返回 ``(落库文本, 是否超限)``。
+
+    ✅ R175 · G7：旧实现 ``text[:MAX_PARSED_CHARS]`` 按字符硬切，切点可能落在
+    表格行 / 单元格中间 —— 半截行进入下游分段器与事实提取，产生错位或残句。
+    现优先回退到**最后一个完整换行**（只保留含换行的那一行之前的内容）。
+
+    两条兜底（保持旧的硬截断语义）：
+      - 切点前的最后一个换行在很靠前的位置（< 半预算）：说明是「超长单行」，
+        按行切会丢掉一半以上内容，直接硬截；
+      - 完全没有换行：同样硬截。
+    截断标志仍按原文长度判定，告警文案与旧实现一致（不新增/不减少告警）。
+    """
+    if len(text) <= MAX_PARSED_CHARS:
+        return text, False
+    head = text[:MAX_PARSED_CHARS]
+    cut = head.rfind("\n")
+    if cut >= MAX_PARSED_CHARS // 2:
+        return head[: cut + 1], True
+    return head, True
 
 
 #: 解析告警里表示「内容不完整」的关键词（中英都认，兼容历史/外部写入的告警文本）。
@@ -378,14 +400,14 @@ def doc_is_truncated(row) -> bool:
     return any(k in warnings for k in _TRUNCATION_HINTS)
 
 
-
 # Windows 保留设备名：不区分大小写，且「主名命中即保留」，带任意扩展名
 # （CON.txt / NUL.doc）在 Windows 上仍指向设备，落盘会失败或写入错误位置。
 _WINDOWS_RESERVED_STEMS = frozenset(
-    {"CON", "PRN", "AUX", "NUL"}
-    | {f"COM{i}" for i in range(1, 10)}
-    | {f"LPT{i}" for i in range(1, 10)}
+    {"CON", "PRN", "AUX", "NUL"} | {f"COM{i}" for i in range(1, 10)} | {f"LPT{i}" for i in range(1, 10)}
 )
+
+
+_MAX_SAFE_FILENAME_CHARS = 120
 
 
 def _safe_filename(raw: str) -> str:
@@ -397,11 +419,22 @@ def _safe_filename(raw: str) -> str:
     在 Windows 上会导致落盘路径被篡改；控制字符与通配符亦会造成写盘失败。
     ✅ 加固：CON/NUL/PRN/AUX/COM1-9/LPT1-9（含带扩展名形式）此前漏网，
     在 Windows 落盘时会命中设备名（如 NUL）导致文件静默丢失；统一加下划线前缀。
+    ✅ R179 修复（超长文件名落盘失败）：Windows 单段路径有长度上限，超长
+    文件名会让 `dest.open("wb")` 抛 OSError，被上传路由外层泛化成 500
+    「上传保存失败」——用户看不出是文件名问题，也无法自助解决。此处按字符
+    上限截断并保留扩展名（解析分派依赖后缀）。
     """
     name = (raw or "").replace("\\", "/").split("/")[-1]
     name = re.sub(r'[\\/:*?"<>|\x00-\x1f]', "_", name).strip().strip(".")
     if not name:
         return "uploaded_file"
+    if len(name) > _MAX_SAFE_FILENAME_CHARS:
+        stem_part, dot, ext = name.rpartition(".")
+        if dot and 0 < len(ext) <= 10:
+            keep = _MAX_SAFE_FILENAME_CHARS - len(ext) - 1
+            name = f"{stem_part[:keep]}.{ext}"
+        else:
+            name = name[:_MAX_SAFE_FILENAME_CHARS]
     stem = name.split(".", 1)[0].strip().upper()
     if stem in _WINDOWS_RESERVED_STEMS:
         name = f"_{name}"
@@ -452,8 +485,7 @@ async def _resolve_project_id(db, scheme_id: str, project_id: str) -> str:
     sid = scheme_id.strip() if isinstance(scheme_id, str) else ""
     pid = project_id.strip() if isinstance(project_id, str) else ""
     if sid:
-        cur = await db.execute(
-            SCHEME_PROJECT_ID_SQL, (sid,))
+        cur = await db.execute(SCHEME_PROJECT_ID_SQL, (sid,))
         # ✅ R13 读路径补漏（2026-10-05）：本函数是所有 documents 接口的
         #    作用域入口，cursor 为 None 时 fetchone 抛 AttributeError → 500；
         #    也不得降级成「方案不存在」（会把 DB 瞬时故障误报为 404）。
@@ -484,6 +516,7 @@ def _doc_file_path(project_id: str, doc_id: str, fname: str) -> Path:
     safe_name = _safe_filename(fname)
     # 延迟从 global_facts 命名空间读 FACT_UPLOADS_DIR，兼容 monkeypatch
     from app.routers import global_facts as _gf
+
     return _gf.FACT_UPLOADS_DIR / project_id / f"{doc_id[:8]}_{safe_name}"
 
 
@@ -493,6 +526,7 @@ def _managed_upload_path(raw_path: str | Path) -> Path | None:
         return None
     try:
         from app.routers import global_facts as _gf
+
         root = _gf.FACT_UPLOADS_DIR.resolve()
         candidate = Path(raw_path).resolve()
         candidate.relative_to(root)
@@ -513,6 +547,7 @@ async def upload_documents(
     同名文件重复上传时替换旧记录（含旧文件删除）。
     """
     from app.routers import global_facts as gf
+
     # 动态读配额常量，兼容 monkeypatch.setattr(gf, "MAX_UPLOAD_*", N)
     max_files = gf.MAX_UPLOAD_FILES_PER_REQUEST
     max_bytes = gf.MAX_UPLOAD_BYTES
@@ -543,8 +578,7 @@ async def upload_documents(
     # ✅ 配额：单请求文件数上限。超出部分直接拒绝，不做任何落盘。
     too_many: list[str] = []
     if len(files) > max_files:
-        too_many = [(x.filename or "uploaded_file")
-                    for x in files[max_files:]]
+        too_many = [(x.filename or "uploaded_file") for x in files[max_files:]]
         files = files[:max_files]
     total_bytes = 0
     quota_exceeded = False
@@ -553,6 +587,10 @@ async def upload_documents(
     #    「超过 30MB」；一个 8 字节文件因累计配额被拒时混入 oversize 会让用户
     #    误以为文件太大去拆分重试（错误归因）。
     quota_files: list[str] = []
+    # ✅ R179 新增：落盘 I/O 失败（磁盘满 / 路径过长 / 权限不足 / 杀软占用）
+    #    必须点名到文件并给出可操作提示，而不是让 OSError 冒到外层泛化成
+    #    「上传保存失败」500。加法式新增响应字段，旧消费方零影响。
+    write_errors: list[str] = []
 
     try:
         for _idx, f in enumerate(files):
@@ -578,7 +616,22 @@ async def upload_documents(
             fpath = _doc_file_path(real_pid, doc_id, fname)
             # ✅ 优化：流式落盘（分块），旧实现 `await f.read()` 会把整份文件
             #    读入内存——多文件同时上传时峰值 = N × 30MB，易触发 OOM。
-            size = await _stream_to_disk(f, fpath, max_bytes)
+            try:
+                size = await _stream_to_disk(f, fpath, max_bytes)
+            except OSError as e:
+                # ✅ R179 修复：落盘 I/O 失败（磁盘满 / 路径超长 / 权限不足 /
+                #    杀软占用）旧实现会冒到外层泛化成 500「上传保存失败」，
+                #    用户看不出是文件名还是磁盘问题、也无法自助。现点名到文件
+                #    并清理半成品，单文件失败不中断整批上传（加法式新增
+                #    write_errors 字段，旧消费方零影响）。
+                logger.warning("上传文件 %s 落盘失败（磁盘/路径/权限）: %s", raw_name, e)
+                try:
+                    if fpath.exists():
+                        fpath.unlink()
+                except OSError:
+                    pass
+                write_errors.append(raw_name)
+                continue
             if size < 0:
                 oversize.append(raw_name)
                 continue
@@ -587,9 +640,7 @@ async def upload_documents(
                 try:
                     fpath.unlink()
                 except OSError as e:
-                    logger.warning(
-                        "清理空文件 %s 失败（可能残留孤儿文件）: %s",
-                        fpath, e, exc_info=True)
+                    logger.warning("清理空文件 %s 失败（可能残留孤儿文件）: %s", fpath, e, exc_info=True)
                 empty_files.append(raw_name)
                 continue
             # ✅ 配额：累计体积上限。已落盘文件需立即清理，避免孤儿文件。
@@ -609,18 +660,17 @@ async def upload_documents(
                 #    这些文件与触发文件同因（累计配额触顶后停止处理）未保存，
                 #    一并登记进 quota_files —— 既有的提示文案「超出部分未保存
                 #    （…）」无需改动即可覆盖，前端 `quota_files` 消费逻辑不变。
-                quota_files.extend((x.filename or "uploaded_file")
-                                   for x in files[_idx + 1:])
+                quota_files.extend((x.filename or "uploaded_file") for x in files[_idx + 1 :])
                 break
             total_bytes += size
             written.append(fpath)
 
-            # 同名替换：先删旧记录，旧文件延迟到 DB commit 成功后清理。
-            # 若后续文件/数据库失败，rollback 后旧记录和旧文件仍可用。
+            # 同名替换：旧文件延迟到 DB commit 成功后清理；若后续失败，rollback
+            # 后旧记录和旧文件仍可用。档案行的替换不再走「先 DELETE 再 INSERT」，
+            # 而由下方单条 upsert 完成（R175 · BUG-1，见落库处注释）。
             cur = await db.execute(
-                "SELECT id, file_path FROM project_documents "
-                "WHERE project_id=? AND file_name=?",
-                (real_pid, fname))
+                "SELECT id, file_path FROM project_documents " "WHERE project_id=? AND file_name=?", (real_pid, fname)
+            )
             # ✅ P1（R13 漏改 · 2026-10-05）：返回 None 时下方 `cur.fetchall()`
             #    抛 AttributeError，被外层 except 接住 → rollback + 原样上抛 →
             #    用户拿到 500 且只有一句「上传保存失败」，看不出是数据库瞬时
@@ -636,27 +686,38 @@ async def upload_documents(
                     old_paths_to_delete.append(safe_old)
                 elif old_path:
                     logger.warning("跳过上传目录外旧文件清理: %s", old_path)
-                # ✅ P1（R13 写路径 · 2026-10-05）：DELETE 未生效就继续往下走，
-                #    会让同名旧档案行与新 INSERT 并存 → 列表里出现两条同名文档、
-                #    下游按 file_name 去重/取数的结果不确定。整批拒绝并回滚。
-                del_cur = await db.execute(
-                    "DELETE FROM project_documents WHERE id=?", (old["id"],))
-                if del_cur is None:
-                    logger.warning("同名替换删除旧档案未生效（db.execute 返回 None，R13），"
-                                   "old=%s", old["id"])
-                    raise HTTPException(503, "文档服务暂时不可用，请稍后重试")
+                # ✅ R13：旧档案行由 upsert 的 DO UPDATE 覆盖（不再单独 DELETE），
+                #    其 doc_chunks / 四层产物仍按旧 doc_id 在 commit 后 purge。
                 purged_old_doc_ids.append((str(old["id"]), real_pid))
                 replaced += 1
             # 落库（parsed_markdown 留空 = 待解析）
             # ✅ 增强：自动文件分类 + 文件大小记录（供前端「文件导入」Tab 展示）
+            # ✅ R175 · BUG-1：并发同名上传在旧「SELECT→DELETE→INSERT」三步窗口内
+            #    可产生两行同名档案（两条连接的 SELECT 都早于对方 commit），下游
+            #    load_parsed_docs 会把同一文档正文重复送进事实提取。现改为单条
+            #    ON CONFLICT(project_id, file_name) DO UPDATE —— 依赖 db._migrate 建的
+            #    唯一索引 uq_project_documents_pid_fname，由 SQLite 写串行化兜底，
+            #    最终只剩一行且内容为最后一次上传。DO UPDATE 的重置清单与旧
+            #    「DELETE + INSERT」的默认值逐列等价（旧行 id 换新、解析派生列清零）。
             doc_category = _auto_classify_document(fname, ftype)
             ins_cur = await db.execute(
                 "INSERT INTO project_documents "
                 "(id, project_id, file_name, file_type, doc_type, parsed_markdown, file_path, "
                 "doc_category, file_size) "
-                "VALUES (?,?,?,?,?,?,?,?,?)",
-                (doc_id, real_pid, fname, ftype, "全局事实上传", "", str(fpath),
-                 doc_category, size))
+                "VALUES (?,?,?,?,?,?,?,?,?) "
+                "ON CONFLICT(project_id, file_name) DO UPDATE SET "
+                "id=excluded.id, file_type=excluded.file_type, "
+                "doc_type=excluded.doc_type, parsed_markdown=excluded.parsed_markdown, "
+                "file_path=excluded.file_path, doc_category=excluded.doc_category, "
+                "file_size=excluded.file_size, parse_time=0, parse_warnings='', "
+                "parse_truncated=0, file_hash_md5='', file_hash_sha256='', page_count=0, "
+                "parse_status='pending', parse_version='v1', parsed_at='', "
+                "parse_duration_ms=0, parse_engine='', extract_status='pending', "
+                "extract_time='', quality_score=-1, completeness_json='', "
+                "expires_at='', status='valid', "
+                "created_at=datetime('now','localtime')",
+                (doc_id, real_pid, fname, ftype, "全局事实上传", "", str(fpath), doc_category, size),
+            )
             # ✅ P1（R13 写路径 · 2026-10-05）：INSERT 返回 None = 档案行没写进去，
             #    而本函数的返回值是靠 `saved.append(...)` 在内存里攒的 —— 不拦就会
             #    回 `{"saved_count": N}`（前端显示「已保存 N 个」）而库里一行没有，
@@ -664,29 +725,36 @@ async def upload_documents(
             #    一处「假成功」出口，必须在 append 之前拦。503 让用户整批重试
             #    （外层 except 回滚 + 清理已落盘文件，不留半截状态）。
             if ins_cur is None:
-                logger.warning("上传档案 INSERT 未生效（db.execute 返回 None，R13），"
-                               "project=%s file=%s", real_pid, fname)
+                logger.warning(
+                    "上传档案 INSERT 未生效（db.execute 返回 None，R13），" "project=%s file=%s", real_pid, fname
+                )
                 raise HTTPException(503, "文档服务暂时不可用，请稍后重试")
             # ✅ 四层存储（阶段1 原文层）：指纹入库 + meta 落盘 + 文档索引。
             #    失败只降级告警，不阻断既有上传主链路（DB 档案已建）。
             try:
                 meta = await doc_pipeline.ingest_upload(
-                    doc_id=doc_id, project_id=real_pid, file_name=fname,
-                    file_type=ftype, saved_path=fpath, size=size,
-                    doc_category=doc_category)
+                    doc_id=doc_id,
+                    project_id=real_pid,
+                    file_name=fname,
+                    file_type=ftype,
+                    saved_path=fpath,
+                    size=size,
+                    doc_category=doc_category,
+                )
                 if meta:
                     hash_cur = await db.execute(
                         "UPDATE project_documents SET file_hash_md5=?,"
                         " file_hash_sha256=?, parse_status='pending' WHERE id=?",
-                        (meta.get("file_hash_md5", ""),
-                         meta.get("file_hash_sha256", ""), doc_id))
+                        (meta.get("file_hash_md5", ""), meta.get("file_hash_sha256", ""), doc_id),
+                    )
                     # ✅ P1（R13 写路径 · 2026-10-05）：返回 None 时指纹回写静默
                     #    丢失 → 时效性判定（file_changed / 增量跳过）从此失真且
                     #    无法自愈。落库已成功，故只告警不阻断上传主链路。
                     if hash_cur is None:
                         logger.warning(
-                            "上传后回写文件指纹未生效（db.execute 返回 None，R13）"
-                            "，时效性判定将停留在旧值：%s", doc_id)
+                            "上传后回写文件指纹未生效（db.execute 返回 None，R13）" "，时效性判定将停留在旧值：%s",
+                            doc_id,
+                        )
             except Exception:
                 logger.exception("文档 %s 原文层入库失败（不影响上传）", fname)
             saved.append({"id": doc_id, "file_name": fname, "size": size})
@@ -720,22 +788,19 @@ async def upload_documents(
     # 被替换旧文档的四层产物同步清理（与手动删除文档同一 purge 口径）。
     for old_doc_id, old_pid in purged_old_doc_ids:
         try:
-            await doc_pipeline.purge_document(db, doc_id=old_doc_id,
-                                              project_id=old_pid)
+            await doc_pipeline.purge_document(db, doc_id=old_doc_id, project_id=old_pid)
         except Exception:
             logger.warning("清理被替换旧文档 %s 的四层产物失败", old_doc_id)
-    result: dict = {"ok": True, "saved": saved,
-                    "saved_count": len(saved),
-                    "replaced": replaced}
+    result: dict = {"ok": True, "saved": saved, "saved_count": len(saved), "replaced": replaced}
     warnings: list[str] = []
     if oversize:
         result["oversize"] = oversize
-        warnings.append(
-            f"以下文件超过 {max_bytes // (1024 * 1024)}MB 未保存：{', '.join(oversize)}")
+        warnings.append(f"以下文件超过 {max_bytes // (1024 * 1024)}MB 未保存：{', '.join(oversize)}")
     if unsupported:
         result["unsupported"] = unsupported
         warnings.append(
-            f"以下文件格式不支持（支持 {', '.join(sorted(SUPPORTED_EXTENSIONS))}）：{', '.join(unsupported)}")
+            f"以下文件格式不支持（支持 {', '.join(sorted(SUPPORTED_EXTENSIONS))}）：{', '.join(unsupported)}"
+        )
     if signature_invalid:
         result["signature_invalid"] = signature_invalid
         warnings.append("以下文件扩展名与文件头不匹配，未保存：" + ", ".join(signature_invalid))
@@ -745,8 +810,8 @@ async def upload_documents(
     if too_many:
         result["too_many"] = too_many
         warnings.append(
-            f"单次最多上传 {max_files} 个文件，"
-            f"以下 {len(too_many)} 个文件未处理：" + "、".join(too_many[:10]))
+            f"单次最多上传 {max_files} 个文件，" f"以下 {len(too_many)} 个文件未处理：" + "、".join(too_many[:10])
+        )
     if quota_exceeded:
         result["quota_exceeded"] = True
         # ✅ 独立字段：被累计体积上限拒绝的文件清单（勿混入 oversize）
@@ -754,8 +819,13 @@ async def upload_documents(
             result["quota_files"] = quota_files
         warn_files = f"（{', '.join(quota_files[:10])}）" if quota_files else ""
         warnings.append(
-            f"本次上传累计体积超过 {max_total // (1024 * 1024)}MB 上限，"
-            f"超出部分未保存{warn_files}，请分批上传")
+            f"本次上传累计体积超过 {max_total // (1024 * 1024)}MB 上限，" f"超出部分未保存{warn_files}，请分批上传"
+        )
+    if write_errors:
+        result["write_errors"] = write_errors
+        warnings.append(
+            "以下文件保存失败（磁盘空间不足 / 文件名过长 / 无写入权限），未保存：" + "、".join(write_errors[:10])
+        )
     if replaced:
         warnings.append(f"替换了 {replaced} 个同名旧文件")
     if warnings:
@@ -763,18 +833,16 @@ async def upload_documents(
     return result
 
 
-async def _ingest_parsed_doc(db, doc_id: str, project_id: str, file_name: str,
-                             elapsed: float, diag: dict,
-                             warnings: list[str], reparse: bool) -> dict:
+async def _ingest_parsed_doc(
+    db, doc_id: str, project_id: str, file_name: str, elapsed: float, diag: dict, warnings: list[str], reparse: bool
+) -> dict:
     """✅ 四层存储（阶段2+3）：解析成功后落盘解析层产物 + 分块入 doc_chunks。
 
     失败只告警不阻断主链路（DB parsed_markdown 才是下游消费的唯一硬依赖，
     磁盘四层产物可通过 reparse 重建）。返回落盘摘要（可能为空 dict）。
     """
     try:
-        cur = await db.execute(
-            "SELECT parsed_markdown, parse_version FROM project_documents"
-            " WHERE id=?", (doc_id,))
+        cur = await db.execute("SELECT parsed_markdown, parse_version FROM project_documents" " WHERE id=?", (doc_id,))
         r = dict(await cur.fetchone() or {})
         # 首次解析 prev='' → v1；重解析（源文档此前已成功解析过）→ 代次递增。
         # ✅ BUG 修复：旧版文档的 parse_version 列可能为空（四层存储上线前解析的），
@@ -784,10 +852,17 @@ async def _ingest_parsed_doc(db, doc_id: str, project_id: str, file_name: str,
         prev_version = (r.get("parse_version") or "v1") if reparse else ""
         md = r.get("parsed_markdown") or ""
         return await doc_pipeline.ingest_parse_result(
-            db, doc_id=doc_id, project_id=project_id, file_name=file_name,
-            markdown=md, page_count=int(diag.get("page_count") or 1),
-            parse_duration_s=elapsed, parse_engine=str(diag.get("file_type") or ""),
-            warnings=warnings, prev_version=prev_version)
+            db,
+            doc_id=doc_id,
+            project_id=project_id,
+            file_name=file_name,
+            markdown=md,
+            page_count=int(diag.get("page_count") or 1),
+            parse_duration_s=elapsed,
+            parse_engine=str(diag.get("file_type") or ""),
+            warnings=warnings,
+            prev_version=prev_version,
+        )
     except Exception:
         logger.exception("文档 %s 解析层/分块落盘失败（不影响解析结果）", file_name)
         return {}
@@ -888,7 +963,8 @@ async def _reconcile_parse_status(db, doc_id: str) -> bool:
             "UPDATE project_documents SET parse_status='success' "
             "WHERE id=? AND parsed_markdown IS NOT NULL AND parsed_markdown<>'' "
             "AND (parse_status IS NULL OR parse_status<>'success')",
-            (doc_id,))
+            (doc_id,),
+        )
         await db.commit()
         # ✅ 2026-09-30 收敛到 safe_rowcount 单一出口（R13）：旧写法
         #   int(getattr(cur, "rowcount", 0) or 0) 不会抛 AttributeError，但
@@ -917,7 +993,8 @@ async def _reconcile_parse_status_all(db, project_id: str) -> int:
             "WHERE project_id=? AND parsed_markdown IS NOT NULL "
             "AND parsed_markdown<>'' AND (parse_status IS NULL "
             "OR parse_status<>'success')",
-            (project_id,))
+            (project_id,),
+        )
         await db.commit()
         # ✅ 2026-09-30 同上：收敛到 safe_rowcount（R13 静默失败 → WARNING）
         return safe_rowcount(cur, what="项目级 parse_status 批量修正")
@@ -938,12 +1015,11 @@ async def _mark_parse_failed(db, doc_id: str, reason: str) -> None:
     """
     try:
         cur = await db.execute(
-            "UPDATE project_documents SET parse_status='failed', "
-            "parse_warnings=? WHERE id=?",
-            (dump_parse_warnings([f"解析失败：{reason}"]), doc_id))
+            "UPDATE project_documents SET parse_status='failed', " "parse_warnings=? WHERE id=?",
+            (dump_parse_warnings([f"解析失败：{reason}"]), doc_id),
+        )
         if cur is None:
-            logger.warning(
-                "解析失败状态落库未生效（db.execute 返回 None，R13），失败原因未留痕：%s", doc_id)
+            logger.warning("解析失败状态落库未生效（db.execute 返回 None，R13），失败原因未留痕：%s", doc_id)
             # ⚠️ 不 commit：没有成功的语句要提交，提交只会把上一次语句的残留
             #    事务上下文固化（同 _persist_parse_result / doc_pipeline.py:322 口径）。
             return
@@ -986,12 +1062,17 @@ async def _persist_parse_result(
         "UPDATE project_documents SET parsed_markdown=?, parse_time=?, parse_warnings=?,"
         " file_type=COALESCE(NULLIF(?, ''), file_type), parse_status='success',"
         " parse_truncated=? WHERE id=?",
-        (stored, elapsed, dump_parse_warnings(warnings),
-         str((diag or {}).get("file_type") or "").strip().lower(),
-         int(bool(truncated)), doc_id))
+        (
+            stored,
+            elapsed,
+            dump_parse_warnings(warnings),
+            str((diag or {}).get("file_type") or "").strip().lower(),
+            int(bool(truncated)),
+            doc_id,
+        ),
+    )
     if cur is None:
-        logger.warning(
-            "解析结果落库未生效（db.execute 返回 None，R13），正文未写入：%s", doc_id)
+        logger.warning("解析结果落库未生效（db.execute 返回 None，R13），正文未写入：%s", doc_id)
         # ⚠️ 不 commit：没有成功的语句要提交，提交只会把上一次语句的残留
         #    事务上下文固化（见 doc_pipeline.py:322 同款告警的理由）。
         return False
@@ -1011,7 +1092,8 @@ async def _mark_project_facts_stale(db, project_id: str) -> int:
     cur = await db.execute(
         "UPDATE global_facts SET is_stale=1, "
         "updated_at=datetime('now','localtime') WHERE project_id=? AND is_stale=0",
-        (project_id,))
+        (project_id,),
+    )
     return safe_rowcount(cur, what="项目级事实批量置 stale")
 
 
@@ -1024,8 +1106,7 @@ async def _invalidate_project_export_caches(db, project_id: str) -> None:
     按 scheme 失效：文档属项目级，项目下可能有多个方案，需逐一失效。
     """
     try:
-        cur = await db.execute(
-            "SELECT id FROM schemes WHERE project_id=?", (project_id,))
+        cur = await db.execute("SELECT id FROM schemes WHERE project_id=?", (project_id,))
         sids = [r["id"] for r in await cur.fetchall()]
         for sid in sids:
             # 本路径的上游 _mark_project_facts_stale 刚把项目下全部事实置 stale，
@@ -1045,10 +1126,12 @@ async def parse_document(doc_id: str, force: bool = False, db=Depends(get_db)):
     import time as _time
 
     from app.routers import global_facts as _gf
+
     _parse_start = _time.time()
     cur = await db.execute(
-        "SELECT file_name, file_path, parsed_markdown, project_id, parse_version "
-        "FROM project_documents WHERE id=?", (doc_id,))
+        "SELECT file_name, file_path, parsed_markdown, project_id, parse_version " "FROM project_documents WHERE id=?",
+        (doc_id,),
+    )
     # ✅ R13 读路径补漏（2026-10-08）：2026-10-05 收口时本函数只给【锁内二次
     #    复核】查询补了判空（见下方），首查一直是漏改点 —— None 游标直接
     #    fetchone → AttributeError → 500。同一端点两次「按 id 读文档」语义
@@ -1062,9 +1145,11 @@ async def parse_document(doc_id: str, force: bool = False, db=Depends(get_db)):
         raise HTTPException(404, "文档不存在")
     # ✅ 2026-09-23 日志埋点：解析入口绑定 project/doc 上下文，使本次解析及后续
     #    四层落盘 / 提取的日志都能凭 trace_id + doc 串联。
-    set_context(trace_id=new_trace_id(),
-                project_id=(row["project_id"] or "") if "project_id" in row.keys() else "",
-                doc_id=doc_id)
+    set_context(
+        trace_id=new_trace_id(),
+        project_id=(row["project_id"] or "") if "project_id" in row.keys() else "",
+        doc_id=doc_id,
+    )
     fname = row["file_name"]
     fpath = row["file_path"] if "file_path" in row.keys() else ""
     safe_path = _managed_upload_path(fpath)
@@ -1075,8 +1160,7 @@ async def parse_document(doc_id: str, force: bool = False, db=Depends(get_db)):
     #    一次（重复 OCR + 后写覆盖）。锁内再查一次，已解析且非强制则直接返回。
     #    解析结束（含异常）后由 _doc_parse_guard 自动回收锁字典条目（防内存泄漏）。
     async with _doc_parse_guard(doc_id):
-        cur = await db.execute(
-            "SELECT parsed_markdown FROM project_documents WHERE id=?", (doc_id,))
+        cur = await db.execute("SELECT parsed_markdown FROM project_documents WHERE id=?", (doc_id,))
         # ✅ P1（R13 漏改 · 2026-10-05）：读路径判空。直接 fetchone →
         #    AttributeError → 500（且用户只看到「解析失败」的裸错误，看不出是
         #    数据库瞬时故障还是文件问题）。503 = 可重试，与 _load_doc 同口径。
@@ -1089,9 +1173,12 @@ async def parse_document(doc_id: str, force: bool = False, db=Depends(get_db)):
             #    （存量文档正文非空但状态仍为 pending → 前端恒显「待解析」、
             #    点解析永远「已解析过」却无任何变化，体感「解析结果丢失」）。
             reconciled = await _reconcile_parse_status(db, doc_id)
-            result = {"ok": True, "already_parsed": True,
-                      "parse_status": "success",
-                      "text_len": len(_cur["parsed_markdown"])}
+            result = {
+                "ok": True,
+                "already_parsed": True,
+                "parse_status": "success",
+                "text_len": len(_cur["parsed_markdown"]),
+            }
             if reconciled:
                 result["reconciled"] = True
             return result
@@ -1101,8 +1188,7 @@ async def parse_document(doc_id: str, force: bool = False, db=Depends(get_db)):
         _was_parsed = bool(_cur and _cur["parsed_markdown"])
         try:
             content = await asyncio.to_thread(safe_path.read_bytes)
-            text, diag = await asyncio.to_thread(
-                _gf.parse_file_content_ex, content, fname)
+            text, diag = await asyncio.to_thread(_gf.parse_file_content_ex, content, fname)
         except ParseError as e:
             # ParseError 的消息是给用户看的（缺依赖 / 无 OCR 引擎 / 压缩炸弹），
             # 属于可操作提示，原样返回。
@@ -1116,20 +1202,21 @@ async def parse_document(doc_id: str, force: bool = False, db=Depends(get_db)):
             await _mark_parse_failed(db, doc_id, "文件无法识别或已损坏")
             raise HTTPException(400, "解析失败：文件无法识别或已损坏，请查看服务端日志")
         if len(text.strip()) < 10:
-            await _mark_parse_failed(
-                db, doc_id,
-                "未解析到有效文本（空白文件 / 扫描件无 OCR / 已损坏）")
-            raise HTTPException(400,
+            await _mark_parse_failed(db, doc_id, "未解析到有效文本（空白文件 / 扫描件无 OCR / 已损坏）")
+            raise HTTPException(
+                400,
                 f"「{fname}」未解析到有效文本：可能是空白文件、扫描件或已损坏。"
                 f"若为扫描件/图片，请确认 OCR 引擎可用"
-                f"（打开 /api/v1/diagnostics/capabilities 查看启用方法）")
+                f"（打开 /api/v1/diagnostics/capabilities 查看启用方法）",
+            )
         # ✅ BUG 修复：落库长度与实际存储长度一致，避免前端显示"文本长度 X"
         # 但库里只存了 Y < X 的假象。超限时返回 truncated=true 让前端提示重解析。
         # ✅ 两类截断都要告知：① 落库字数超上限；② 解析器自身截断（PDF 页数 /
         #    表格行数）。旧实现只认第 ① 类，"第 50 页之后的设计参数没进事实库"
         #    这类问题在界面上完全无提示。
         char_truncated = len(text) > MAX_PARSED_CHARS
-        stored = text[:MAX_PARSED_CHARS]
+        # ✅ R175 · G7：截到最后一个完整换行（超长单行回退硬截），见 _truncate_for_storage
+        stored, _ = _truncate_for_storage(text)
         # ✅ 增强：记录解析耗时（供前端显示「解析用时」诊断）
         _elapsed = round(_time.time() - _parse_start, 2)
         # ✅ 增强：解析器诊断告警持久化（截断 / OCR 兜底 / 加密 PDF）。
@@ -1137,8 +1224,7 @@ async def parse_document(doc_id: str, force: bool = False, db=Depends(get_db)):
         #    无从得知"该文档内容不完整"。落库后由 /documents 随列表回传。
         parser_warnings = [str(w) for w in (diag.get("warnings") or [])]
         if char_truncated:
-            parser_warnings.append(
-                f"原文 {len(text)} 字，已截断至 {MAX_PARSED_CHARS} 字上限")
+            parser_warnings.append(f"原文 {len(text)} 字，已截断至 {MAX_PARSED_CHARS} 字上限")
         # ✅ 解析成功即置 parse_status='success'（2026-09-23）：旧实现依赖四层入库
         #    （_ingest_parsed_doc）成功才写该列；一旦四层落盘失败，列仍为 'pending'
         #    而 parsed_markdown 已填充 → 状态矛盾，下游 doc_pipeline 去重/结构化
@@ -1151,25 +1237,28 @@ async def parse_document(doc_id: str, force: bool = False, db=Depends(get_db)):
         # ✅ P1（R13 写路径 · 2026-10-05）：落库未生效时**不能**继续 —— 后面的
         #    _ingest_parsed_doc 会从库里读到空正文、result 也会回 ok=True+text_len，
         #    用户看到「解析成功 N 字」而刷新后是 0 字。503 让用户明确重试。
-        if not await _gf._persist_parse_result(
-                db, doc_id, stored, _elapsed, parser_warnings, diag, truncated):
-            raise HTTPException(
-                503, "解析结果保存失败（数据库暂时不可用），请稍后重试")
+        if not await _gf._persist_parse_result(db, doc_id, stored, _elapsed, parser_warnings, diag, truncated):
+            raise HTTPException(503, "解析结果保存失败（数据库暂时不可用），请稍后重试")
         # ✅ 四层存储（阶段2+3）：解析层产物落盘 + 分块入库（失败不阻断解析主结果）
         layer_info = await _ingest_parsed_doc(
-            db, doc_id, row["project_id"], fname, _elapsed, diag,
-            parser_warnings, _was_parsed)
-        logger.info("文档 %s 解析完成：%d 字%s%s", fname, len(stored),
-                    "（已截断至上限）" if char_truncated else "",
-                    "（解析器截断）" if diag.get("truncated") else "")
+            db, doc_id, row["project_id"], fname, _elapsed, diag, parser_warnings, _was_parsed
+        )
+        logger.info(
+            "文档 %s 解析完成：%d 字%s%s",
+            fname,
+            len(stored),
+            "（已截断至上限）" if char_truncated else "",
+            "（解析器截断）" if diag.get("truncated") else "",
+        )
         result: dict = {"ok": True, "text_len": len(stored), "truncated": truncated}
         if layer_info:
             result["layers"] = layer_info
         if parser_warnings:
             result["warnings"] = parser_warnings
         if char_truncated:
-            result["warning"] = (f"原文 {len(text)} 字，已截断至 {MAX_PARSED_CHARS} 字上限；"
-                                 "如需完整提取请拆分文件后重新上传")
+            result["warning"] = (
+                f"原文 {len(text)} 字，已截断至 {MAX_PARSED_CHARS} 字上限；" "如需完整提取请拆分文件后重新上传"
+            )
         if force:
             # 强制重解析改变了源文本：旧事实立即退出目录/正文/导出生成链路。
             stale_count = await _mark_project_facts_stale(db, row["project_id"])
@@ -1178,8 +1267,9 @@ async def parse_document(doc_id: str, force: bool = False, db=Depends(get_db)):
             #    导出缓存，避免下游导出陈旧 docx（导出缓存默认关闭时为 no-op）。
             await _invalidate_project_export_caches(db, row["project_id"])
             result["stale_facts"] = stale_count
-            result["note"] = (f"文档已重新解析，{stale_count} 条旧事实已停止注入；"
-                              "请重新执行「AI 提取事实」更新全局事实")
+            result["note"] = (
+                f"文档已重新解析，{stale_count} 条旧事实已停止注入；" "请重新执行「AI 提取事实」更新全局事实"
+            )
         elif not _was_parsed:
             # ✅ R79 A-4：**首次**解析成功同样改变了事实/导出的输入全集 ——
             #    旧实现把 stale 标记与导出缓存失效全关在 `if force:` 里，
@@ -1193,8 +1283,7 @@ async def parse_document(doc_id: str, force: bool = False, db=Depends(get_db)):
             await db.commit()
             await _invalidate_project_export_caches(db, row["project_id"])
             result["stale_facts"] = stale_count
-            result["note"] = ("文档解析成功，已纳入项目资料全集；"
-                              "如已提取过全局事实，请重新执行「AI 提取事实」")
+            result["note"] = "文档解析成功，已纳入项目资料全集；" "如已提取过全局事实，请重新执行「AI 提取事实」"
         return result
 
 
@@ -1212,6 +1301,7 @@ async def parse_all_documents(
       2. 中途启用了 OCR 引擎后，重解析可让此前识别失败的扫描件重新获得文本。
     """
     from app.routers import global_facts as _gf
+
     real_pid = await _resolve_project_id(db, scheme_id, project_id)
     if not real_pid:
         raise HTTPException(400, "需要 scheme_id 或 project_id")
@@ -1223,8 +1313,7 @@ async def parse_all_documents(
     #    回填）时，它们**不进**下方 pending 列表 → 直接命中"所有文档均已解析"
     #    早退，用户看到的还是「待解析」。放在 SELECT 之前使两个分支都正确。
     reconciled_count = await _reconcile_parse_status_all(db, real_pid)
-    sql = ("SELECT id, project_id, file_name, file_path FROM project_documents "
-           "WHERE project_id=?")
+    sql = "SELECT id, project_id, file_name, file_path FROM project_documents " "WHERE project_id=?"
     if not force:
         sql += " AND (parsed_markdown='' OR parsed_markdown IS NULL)"
     # ✅ 顺序固定：批量解析进度与失败列表按上传先后给出，避免 SQLite 返回顺序漂移
@@ -1242,28 +1331,40 @@ async def parse_all_documents(
     if not pending:
         _msg = "所有文档均已解析"
         if reconciled_count:
-            _msg += (f"（已修正 {reconciled_count} 份存量文档的解析状态）")
-        return {"ok": True, "parsed": 0, "failed_count": 0, "failed": [],
-                "truncated_count": 0, "truncated": [],
-                # ✅ 响应形状一致（2026-09-25）：早退分支与主分支都带
-                # reconciled/reconciled_count，前端才能用统一判据做提示。
-                "reconciled_count": reconciled_count, "reconciled": [],
-                "message": _msg}
+            _msg += f"（已修正 {reconciled_count} 份存量文档的解析状态）"
+        return {
+            "ok": True,
+            "parsed": 0,
+            "failed_count": 0,
+            "failed": [],
+            "truncated_count": 0,
+            "truncated": [],
+            # ✅ 响应形状一致（2026-09-25）：早退分支与主分支都带
+            # reconciled/reconciled_count，前端才能用统一判据做提示。
+            "reconciled_count": reconciled_count,
+            "reconciled": [],
+            "message": _msg,
+        }
 
     import time as _time
 
     parsed, failed = 0, []
     truncated_files: list[dict] = []
     reconciled: list[str] = []
-    for doc in pending:
+    # ✅ R176 · G6-min（2026-11-03）：批量解析（扫描件×OCR 可达分钟级）此前全程
+    #    无 INFO 留痕——卡住时日志既看不到「停在哪份」也看不到整体进度。补三条
+    #    纯日志（零契约/零行为变更）：批始（份数/force）→ 逐份完成（i/N）→
+    #    批末汇总。前端实时进度（SSE 化）仍属排期登记项，见
+    #    docs/解析提取模块遗留收口_R176_20261103.md。
+    logger.info("批量解析开始：project=%s，待解析 %d 份（force=%s）", real_pid, len(pending), force)
+    for _seq, doc in enumerate(pending, 1):
         # ✅ 并发守卫（2026-09-23）：逐文档锁串行化，防与并发单份 parse / 另一
         #    次 parse-all 重复解析同一文档（重复 OCR + 后写覆盖）。锁内先复核
         #    "已解析"状态，已解析且非强制则跳过（与单份解析同口径）。解析结束
         #    后由 _doc_parse_guard 自动回收锁字典条目（防内存泄漏）。
         async with _doc_parse_guard(doc["id"]):
             try:
-                cur = await db.execute(
-                    "SELECT parsed_markdown FROM project_documents WHERE id=?", (doc["id"],))
+                cur = await db.execute("SELECT parsed_markdown FROM project_documents WHERE id=?", (doc["id"],))
                 _c = await cur.fetchone()
                 if _c and _c["parsed_markdown"] and not force:
                     # ✅ BUG 修复（2026-09-25）：与单份解析同口径，短路前自修复
@@ -1279,7 +1380,10 @@ async def parse_all_documents(
                 #    且昂贵的 OCR/MinerU 调用），事后却没有任何痕迹可查。
                 logger.warning(
                     "复核文档 %s 解析状态失败（按未解析继续，可能重复解析）: %s",
-                    doc.get("file_name", doc.get("id", "")), e, exc_info=True)
+                    doc.get("file_name", doc.get("id", "")),
+                    e,
+                    exc_info=True,
+                )
             try:
                 _parse_start = _time.time()
                 fpath = doc.get("file_path", "")
@@ -1298,23 +1402,24 @@ async def parse_all_documents(
                     failed.append({"file_name": doc["file_name"], "reason": _reason})
                     continue
                 content = await asyncio.to_thread(safe_path.read_bytes)
-                text, diag = await asyncio.to_thread(
-                    _gf.parse_file_content_ex, content, doc["file_name"])
+                text, diag = await asyncio.to_thread(_gf.parse_file_content_ex, content, doc["file_name"])
                 if len(text.strip()) < 10:
-                    _reason = ("未解析到有效文本（空白/扫描件/损坏）；"
-                               "扫描件需 OCR 引擎，见 /api/v1/diagnostics/capabilities")
+                    _reason = (
+                        "未解析到有效文本（空白/扫描件/损坏）；"
+                        "扫描件需 OCR 引擎，见 /api/v1/diagnostics/capabilities"
+                    )
                     await _mark_parse_failed(db, doc["id"], _reason)
                     failed.append({"file_name": doc["file_name"], "reason": _reason})
                     continue
                 # ✅ BUG 修复：截断是「解析成功但内容不完整」的告警，不应计入 failed，
                 #    否则前端提示"失败 N 个"会让用户误以为整份解析失败。
                 char_truncated = len(text) > MAX_PARSED_CHARS
-                stored = text[:MAX_PARSED_CHARS]
+                # ✅ R175 · G7：与单文档解析同口径（截到完整换行，超长单行回退硬截）
+                stored, _ = _truncate_for_storage(text)
                 # ✅ 增强：解析器诊断告警随解析结果持久化（与单文档解析一致）
                 all_warnings = [str(w) for w in (diag.get("warnings") or [])]
                 if char_truncated:
-                    all_warnings.append(
-                        f"原文 {len(text)} 字，已截断至 {MAX_PARSED_CHARS} 字上限")
+                    all_warnings.append(f"原文 {len(text)} 字，已截断至 {MAX_PARSED_CHARS} 字上限")
                 # ✅ BUG 修复（口径不一致）：单文档解析会写 parse_time，批量解析不写，
                 #    于是「解析全部」之后前端列表的「解析用时」恒为空 —— 用户无法
                 #    判断到底是哪份文件拖慢了整批解析。现与单文档解析保持一致。
@@ -1328,18 +1433,27 @@ async def parse_all_documents(
                 #    否则响应报「成功 N 份」而库里正文是空的（假成功）。归入 failed
                 #    并落 parse_status='failed'，与其它失败原因同口径、可重试。
                 if not await _gf._persist_parse_result(
-                        db, doc["id"], stored, _elapsed, all_warnings, diag,
-                        doc_truncated):
+                    db, doc["id"], stored, _elapsed, all_warnings, diag, doc_truncated
+                ):
                     _reason = "解析结果保存失败（数据库暂时不可用），请重试"
                     await _mark_parse_failed(db, doc["id"], _reason)
                     failed.append({"file_name": doc["file_name"], "reason": _reason})
                     continue
                 # ✅ 四层存储（阶段2+3）：逐文档落盘解析层 + 分块（失败不阻断批量）
                 await _ingest_parsed_doc(
-                    db, doc["id"], doc["project_id"], doc["file_name"],
-                    _elapsed, diag, all_warnings,
-                    bool(doc.get("force_reparse")))
+                    db,
+                    doc["id"],
+                    doc["project_id"],
+                    doc["file_name"],
+                    _elapsed,
+                    diag,
+                    all_warnings,
+                    bool(doc.get("force_reparse")),
+                )
                 parsed += 1
+                # ✅ R176 · G6-min：逐份完成进度（i/N + 字数），与批始/批末日志
+                #    配套；失败路径已有 WARNING 点名，不重复。
+                logger.info("批量解析进度 %d/%d：%s 完成（%d 字）", _seq, len(pending), doc["file_name"], len(text))
                 # ✅ BUG 修复（2026-09-25，口径不一致）：单文档解析的截断判定是
                 #    `char_truncated or bool(diag["truncated"])`，本函数旧实现多加了
                 #    一个 `and diag["warnings"]` 条件 —— 解析器标记了 truncated
@@ -1348,17 +1462,23 @@ async def parse_all_documents(
                 doc_truncated = char_truncated or bool(diag.get("truncated"))
                 if doc_truncated:
                     if char_truncated:
-                        truncated_files.append({
-                            "file_name": doc["file_name"],
-                            "reason": f"原文 {len(text)} 字，已截断至 {MAX_PARSED_CHARS} 字上限（建议拆分文件后重新上传）",
-                        })
+                        truncated_files.append(
+                            {
+                                "file_name": doc["file_name"],
+                                "reason": f"原文 {len(text)} 字，已截断至 {MAX_PARSED_CHARS} 字上限（建议拆分文件后重新上传）",
+                            }
+                        )
                     else:
-                        truncated_files.append({
-                            "file_name": doc["file_name"],
-                            "reason": ("；".join(str(w) for w in diag["warnings"])
-                                       if diag.get("warnings")
-                                       else "解析器判定内容不完整（PDF 页数/表格行数截断）"),
-                        })
+                        truncated_files.append(
+                            {
+                                "file_name": doc["file_name"],
+                                "reason": (
+                                    "；".join(str(w) for w in diag["warnings"])
+                                    if diag.get("warnings")
+                                    else "解析器判定内容不完整（PDF 页数/表格行数截断）"
+                                ),
+                            }
+                        )
             except ParseError as e:
                 logger.warning("文档 %s 批量解析失败: %s", doc["file_name"], e)
                 # ✅ 解析失败可观测性：标记 failed 状态（前端区分"待解析"）
@@ -1367,19 +1487,22 @@ async def parse_all_documents(
             except Exception:
                 logger.exception("文档 %s 批量解析出现未预期异常", doc["file_name"])
                 await _mark_parse_failed(db, doc["id"], "文件无法识别或已损坏")
-                failed.append({"file_name": doc["file_name"],
-                               "reason": "文件无法识别或已损坏，请查看服务端日志"})
+                failed.append({"file_name": doc["file_name"], "reason": "文件无法识别或已损坏，请查看服务端日志"})
     # ✅ 循环内已对每个成功文档逐条 commit（避免长事务锁库），此处无需再 commit；
     #    旧实现的尾部重复 commit 属无谓 IO 且造成「事务已完成」的误导语义。
 
-    result: dict = {"ok": True, "parsed": parsed, "failed_count": len(failed),
-                    "failed": failed,
-                    "truncated_count": len(truncated_files),
-                    "truncated": truncated_files,
-                    "force": force,
-                    # ✅ 2026-09-25：本轮自修复的陈旧 parse_status 条数（0 表示无）
-                    "reconciled_count": reconciled_count + len(reconciled),
-                    "reconciled": reconciled}
+    result: dict = {
+        "ok": True,
+        "parsed": parsed,
+        "failed_count": len(failed),
+        "failed": failed,
+        "truncated_count": len(truncated_files),
+        "truncated": truncated_files,
+        "force": force,
+        # ✅ 2026-09-25：本轮自修复的陈旧 parse_status 条数（0 表示无）
+        "reconciled_count": reconciled_count + len(reconciled),
+        "reconciled": reconciled,
+    }
     if parsed:
         # ✅ R79 A-4：force 与否**只要本轮有新文本落库**，事实与导出缓存的
         #    输入全集就变了 —— 旧实现只在 `force and parsed` 时处理，
@@ -1391,22 +1514,31 @@ async def parse_all_documents(
         await _invalidate_project_export_caches(db, real_pid)
         result["stale_facts"] = stale_count
         if force:
-            result["note"] = (f"已强制重新解析，{stale_count} 条旧事实已停止注入；"
-                              "请重新执行「③ AI 提取事实」")
+            result["note"] = f"已强制重新解析，{stale_count} 条旧事实已停止注入；" "请重新执行「③ AI 提取事实」"
         else:
-            result["note"] = ("本轮新解析的文档已纳入项目资料全集；"
-                              "如已提取过全局事实，请重新执行「③ AI 提取事实」")
+            result["note"] = "本轮新解析的文档已纳入项目资料全集；" "如已提取过全局事实，请重新执行「③ AI 提取事实」"
     warnings: list[str] = []
     if failed:
         warnings.append(
-            f"{len(failed)} 份文档解析失败：" + "；".join(
-                f"{f['file_name']}（{f['reason']}）" for f in failed[:5]))
+            f"{len(failed)} 份文档解析失败：" + "；".join(f"{f['file_name']}（{f['reason']}）" for f in failed[:5])
+        )
     if truncated_files:
         warnings.append(
-            f"{len(truncated_files)} 份文档内容超长被截断：" + "；".join(
-                f"{f['file_name']}（{f['reason']}）" for f in truncated_files[:5]))
+            f"{len(truncated_files)} 份文档内容超长被截断："
+            + "；".join(f"{f['file_name']}（{f['reason']}）" for f in truncated_files[:5])
+        )
     if warnings:
         result["warnings"] = warnings
+    # ✅ R176 · G6-min：批末汇总（成功/失败/截断/自修复状态），与批始日志
+    #    对账——两边数字应恒等，不等即中途异常路径有漏记。
+    logger.info(
+        "批量解析完成：project=%s，成功 %d / 失败 %d / 截断 %d / 自修复状态 %d",
+        real_pid,
+        parsed,
+        len(failed),
+        len(truncated_files),
+        reconciled_count + len(reconciled),
+    )
     return result
 
 
@@ -1434,8 +1566,7 @@ def _auto_classify_document(file_name: str, file_type: str = "") -> str:
 
 
 @router.get("/documents/{doc_id}/preview")
-async def preview_document(doc_id: str, max_chars: int = Query(5000, ge=100, le=50000),
-                              db=Depends(get_db)):
+async def preview_document(doc_id: str, max_chars: int = Query(5000, ge=100, le=50000), db=Depends(get_db)):
     """文件预览：返回已解析 Markdown 的前 N 个字符供前端快速浏览。
 
     用于「文件解析」Tab 的「查看解析内容」弹窗——**不下载整份文件**，
@@ -1445,7 +1576,8 @@ async def preview_document(doc_id: str, max_chars: int = Query(5000, ge=100, le=
         "SELECT id, file_name, file_type, parsed_markdown, doc_category, "
         "file_size, parse_time, parse_warnings, parse_truncated, created_at "
         "FROM project_documents WHERE id=?",
-        (doc_id,))
+        (doc_id,),
+    )
     # ✅ R13 读路径补漏（2026-10-05）：list_documents 已在 R41 收口，本接口
     #    同属「文档读取面」却漏改 —— cursor 为 None 时 fetchone 抛
     #    AttributeError → 500，前端预览弹窗只看到裸错误。503 = 可重试。
@@ -1514,7 +1646,9 @@ async def preview_document(doc_id: str, max_chars: int = Query(5000, ge=100, le=
         "is_parsed": True,
         "preview_truncated": truncated,
         "truncated": doc_truncated,
-        "message": "（预览仅显示前 {0} 字，完整内容请到「结构化解析」中使用或重新解析）".format(max_chars) if truncated else "",
+        "message": "（预览仅显示前 {0} 字，完整内容请到「结构化解析」中使用或重新解析）".format(max_chars)
+        if truncated
+        else "",
     }
 
 
@@ -1531,9 +1665,7 @@ async def update_document_category(doc_id: str, body: dict, db=Depends(get_db)):
         raise HTTPException(400, "doc_category 不能为空")
     valid_categories = {cat for cat, _ in _DOC_CATEGORY_KEYWORDS} | {"其他"}
     if category not in valid_categories:
-        raise HTTPException(
-            400, f"未知分类（{category}），可选："
-            f"{', '.join(sorted(valid_categories))}")
+        raise HTTPException(400, f"未知分类（{category}），可选：" f"{', '.join(sorted(valid_categories))}")
     cur = await db.execute("SELECT id FROM project_documents WHERE id=?", (doc_id,))
     # ✅ R13 读路径补漏（2026-10-05）：cursor 为 None 时 fetchone 抛
     #    AttributeError → 500；503 更准确（DB 瞬时故障可重试）。
@@ -1545,8 +1677,7 @@ async def update_document_category(doc_id: str, body: dict, db=Depends(get_db)):
         raise HTTPException(404, "文档不存在")
     # ✅ R13 写路径补漏（2026-10-05）：UPDATE 未生效仍回 ok=True 是「假成功」
     #    —— 前端显示分类已改，刷新后又变回旧值。
-    upd_cur = await db.execute(
-        "UPDATE project_documents SET doc_category=? WHERE id=?", (category, doc_id))
+    upd_cur = await db.execute("UPDATE project_documents SET doc_category=? WHERE id=?", (category, doc_id))
     if upd_cur is None:
         logger.warning("改分类未生效（db.execute 返回 None，R13），doc=%s", doc_id)
         raise HTTPException(503, "文档服务暂时不可用，请稍后重试")
@@ -1569,8 +1700,7 @@ async def list_category_options():
     """
     return {
         "options": category_options(),
-        "auto_keywords": [{"category": cat, "keywords": list(kws)}
-                          for cat, kws in AUTO_CLASSIFY_RULES],
+        "auto_keywords": [{"category": cat, "keywords": list(kws)} for cat, kws in AUTO_CLASSIFY_RULES],
     }
 
 

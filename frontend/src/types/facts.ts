@@ -343,7 +343,8 @@ export interface FactSegmentStats {
   /**
    * ✅ 2026-10-06 新增：模型主动声明未能提取的段（`segment_failed=true`）。
    * 与 `failed` 语义不同 —— 无法与「合法无事实段」区分，故不计入 failed，
-   * 但必须可见：这些段的指纹已记入进度表，普通重跑不会重试。
+   * 但必须可见：这些段不写入完成进度表，下次增量提取会按退避策略自动重试
+   * （R175 BUG-02 修复后不再永久跳过；R179 起失败页/面板显式展示）。
    */
   declared_failed?: number;
   declared_failed_details?: Omit<FactSegmentFailure, "reason">[];
@@ -366,10 +367,27 @@ export interface FactCrossConflict {
   auto_resolvable: boolean;
 }
 
+/**
+ * ✅ L3/BUG-07（R177 · 2026-11-04）：SSE `completed.groups[].items[]` 单项。
+ *
+ * 与 `FactItem` 同构（fact_id / is_resolved / chapter_title / shared_chapters /
+ * value_kind 已由后端 `format_for_frontend` 补齐），额外携带历史字段 `key`
+ * （与 fact_key 同值）。禁止用 `any` / `as` / `ts-ignore` 绕过契约。
+ */
+export interface FactsCompletedGroupItem extends FactItem {
+  /** 后端历史字段：与 fact_key 同值 */
+  key?: string;
+}
+
+/** SSE `completed.groups[]`：items 使用 SSE 专用条目类型 */
+export interface FactsCompletedGroup extends Omit<FactGroup, "items"> {
+  items: FactsCompletedGroupItem[];
+}
+
 /** SSE `completed` 事件载荷（services/facts_extractor.format_for_frontend） */
 export interface FactsCompletedEvent {
   ok: boolean;
-  groups: FactGroup[];
+  groups: FactsCompletedGroup[];
   total_items: number;
   simulated_count: number;
   conflict_count: number;

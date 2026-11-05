@@ -6,6 +6,7 @@
 - 分段级诊断 segment_stats（全部失败 / 部分失败的失败原因可定位）
 - format_for_frontend 暴露 segment_stats
 """
+
 import asyncio
 
 import app.services.facts_extractor as fe
@@ -14,14 +15,14 @@ import app.services.facts_extractor as fe
 # 调用参数（低温 / JSON 模式 / 超时 / 修复提示词）
 # ============================================================
 
+
 class TestExtractCallOptions:
     async def test_passes_structured_options(self, monkeypatch):
         captured: dict = {}
 
         async def fake_collect(messages, validate=None, **kw):
             captured.update(kw)
-            return ({"facts": [{"name": "项目经理", "value": "张伟",
-                                "fact_type": "personnel"}]}, "")
+            return ({"facts": [{"name": "项目经理", "value": "张伟", "fact_type": "personnel"}]}, "")
 
         monkeypatch.setattr(fe, "collect_json_response", fake_collect)
         items = await fe.extract_from_single_chunk("项目经理：张伟", chunk_index=0)
@@ -55,6 +56,7 @@ class TestExtractCallOptions:
 # 失败重试
 # ============================================================
 
+
 class TestChunkRetry:
     async def test_retry_on_429_then_success(self, monkeypatch):
         monkeypatch.setattr(fe, "FACTS_RETRY_BACKOFF", 0.01)
@@ -65,8 +67,7 @@ class TestChunkRetry:
             calls["n"] += 1
             if calls["n"] == 1:
                 raise RuntimeError("HTTP 429: inference exceeds tpm/rpm limit")
-            return ({"facts": [{"name": "项目经理", "value": "张伟",
-                                "fact_type": "personnel"}]}, "")
+            return ({"facts": [{"name": "项目经理", "value": "张伟", "fact_type": "personnel"}]}, "")
 
         monkeypatch.setattr(fe, "collect_json_response", flaky)
         items = await fe.extract_from_single_chunk("文本", chunk_index=0)
@@ -114,6 +115,7 @@ class TestChunkRetry:
 # 分段级诊断
 # ============================================================
 
+
 def _big_text(n_chunks: int = 4) -> str:
     # 每段约 4000 字，确保切分为多段（CHUNK_SIZE=8000）
     return "\n".join(f"第{i}章 施工方案\n" + ("内容" * 2000) for i in range(1, n_chunks + 1))
@@ -144,8 +146,7 @@ class TestSegmentDiagnostics:
                 if kw.get("error_out") is not None:
                     kw["error_out"]["error"] = "HTTP 429: rate limit"
                 return []
-            return [fe.FactItem(name="项目经理", value="张伟",
-                               key="project_manager", category="personnel")]
+            return [fe.FactItem(name="项目经理", value="张伟", key="project_manager", category="personnel")]
 
         monkeypatch.setattr(fe, "extract_from_single_chunk", mixed)
         res = await fe.run_extraction_pipeline(_big_text())
@@ -192,17 +193,21 @@ class TestReextractGroupDedup:
         db = await get_conn()
         pid, sid = _uuid.uuid4().hex, _uuid.uuid4().hex
         await db.execute("INSERT INTO projects(id,name) VALUES(?,?)", (pid, "p"))
-        await db.execute(
-            "INSERT INTO schemes(id,project_id,name) VALUES(?,?,?)", (sid, pid, "s"))
+        await db.execute("INSERT INTO schemes(id,project_id,name) VALUES(?,?,?)", (sid, pid, "s"))
         await db.commit()
         return db, pid, sid
 
     def _grp(self, names):
         g = fe.FactGroup(
-            title="人员角色", category="personnel",
-            items=[fe.FactItem(name=n, value=f"值_{n}", key=f"key_{n}",
-                              category="personnel", is_simulated=False,
-                              confidence=0.9) for n in names])
+            title="人员角色",
+            category="personnel",
+            items=[
+                fe.FactItem(
+                    name=n, value=f"值_{n}", key=f"key_{n}", category="personnel", is_simulated=False, confidence=0.9
+                )
+                for n in names
+            ],
+        )
         r = fe.ExtractionResult()
         r.groups = [g]
         r.total_items = len(names)
@@ -214,8 +219,7 @@ class TestReextractGroupDedup:
         # 第 1 次提取：张三、李四
         await fe.persist_extraction(self._grp(["张三", "李四"]), db, pid, sid)
         # 用户确认「张三」
-        cur = await db.execute(
-            "SELECT id FROM global_facts WHERE title='张三'")
+        cur = await db.execute("SELECT id FROM global_facts WHERE title='张三'")
         zid = (await cur.fetchone())[0]
         await db.execute("UPDATE global_facts SET is_resolved=1 WHERE id=?", (zid,))
         await db.commit()
@@ -223,19 +227,15 @@ class TestReextractGroupDedup:
         # 第 2 次提取（重新提取）：李四被删，AI 重新提取 张三2、王五
         await fe.persist_extraction(self._grp(["张三2", "王五"]), db, pid, sid)
 
-        cur = await db.execute(
-            "SELECT group_id, group_title FROM global_facts WHERE scheme_id=?",
-            (sid,))
+        cur = await db.execute("SELECT group_id, group_title FROM global_facts WHERE scheme_id=?", (sid,))
         rows = await cur.fetchall()
         titles = {}
         for gid, title in rows:
             titles.setdefault(title, set()).add(gid)
         # 每个分类标题应只对应一个 group_id
-        assert titles["人员角色"] == {list(titles["人员角色"])[0]}, (
-            f"重新提取后出现重复分类分组: {titles}")
+        assert titles["人员角色"] == {list(titles["人员角色"])[0]}, f"重新提取后出现重复分类分组: {titles}"
         # 且已确认事实(张三)与新事实都在同一分组内
-        cur = await db.execute(
-            "SELECT COUNT(*) FROM global_facts WHERE scheme_id=?", (sid,))
+        cur = await db.execute("SELECT COUNT(*) FROM global_facts WHERE scheme_id=?", (sid,))
         assert (await cur.fetchone())[0] == 3  # 张三 + 张三2 + 王五
 
 
@@ -252,21 +252,22 @@ class TestInvalidateExportCache:
         await db_conn.execute(
             "INSERT INTO export_cache (id, scheme_id, config_hash, content_fingerprint, result_path)"
             " VALUES (?,?,?,?,?)",
-            ("e1", "s1", "cfg", "fp", str(artifact)))
+            ("e1", "s1", "cfg", "fp", str(artifact)),
+        )
         await db_conn.commit()
 
         n = await fe.invalidate_export_cache(db_conn, "s1")
 
         assert n == 1
         assert not artifact.exists(), "磁盘产物应随缓存记录一并清理"
-        cur = await db_conn.execute(
-            "SELECT COUNT(*) FROM export_cache WHERE scheme_id=?", ("s1",))
+        cur = await db_conn.execute("SELECT COUNT(*) FROM export_cache WHERE scheme_id=?", ("s1",))
         assert (await cur.fetchone())[0] == 0
 
     async def test_missing_file_does_not_raise(self, db_conn, tmp_path):
         await db_conn.execute(
             "INSERT INTO export_cache (id, scheme_id, result_path) VALUES (?,?,?)",
-            ("e2", "s2", str(tmp_path / "not-there.docx")))
+            ("e2", "s2", str(tmp_path / "not-there.docx")),
+        )
         await db_conn.commit()
         assert await fe.invalidate_export_cache(db_conn, "s2") == 1
 
@@ -274,8 +275,8 @@ class TestInvalidateExportCache:
         keep = tmp_path / "keep.docx"
         keep.write_bytes(b"x")
         await db_conn.execute(
-            "INSERT INTO export_cache (id, scheme_id, result_path) VALUES (?,?,?)",
-            ("e3", "s3", str(keep)))
+            "INSERT INTO export_cache (id, scheme_id, result_path) VALUES (?,?,?)", ("e3", "s3", str(keep))
+        )
         await db_conn.commit()
         assert await fe.invalidate_export_cache(db_conn, "s-other") == 0
         assert keep.exists()
@@ -287,8 +288,11 @@ class TestInvalidateExportCache:
 class TestFormatConflictConfidence:
     def test_dirty_candidate_confidence_is_sanitized(self):
         it = fe.FactItem(
-            name="混凝土强度等级", value="C30", key="concrete_grade",
-            category="material_mgmt", has_conflict=True,
+            name="混凝土强度等级",
+            value="C30",
+            key="concrete_grade",
+            category="material_mgmt",
+            has_conflict=True,
             conflict_values=[
                 {"value": "C35", "source": "甲", "confidence": "high"},
                 {"value": "C25", "source": "乙", "confidence": 2.5},
@@ -296,9 +300,8 @@ class TestFormatConflictConfidence:
             ],
         )
         res = fe.ExtractionResult(
-            groups=[fe.FactGroup(title="材料管理", category="material_mgmt",
-                                 items=[it])],
-            total_items=1)
+            groups=[fe.FactGroup(title="材料管理", category="material_mgmt", items=[it])], total_items=1
+        )
         payload = fe.format_for_frontend(res)
         confs = payload["groups"][0]["items"][0]["conflict_values"]
         # 脏值 "high" → 默认 1.0；越界 2.5 → 收敛 1.0；正常 0.4 保留

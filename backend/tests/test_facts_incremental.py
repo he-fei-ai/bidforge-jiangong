@@ -6,6 +6,7 @@
 - save_extracted_chunks：残留指纹清理
 - POST /global-facts/clear：清空事实 + 重置提取进度
 """
+
 import io
 import json
 import uuid
@@ -38,8 +39,7 @@ async def ctx(tmp_path, monkeypatch):
     monkeypatch.setattr(gf, "FACT_UPLOADS_DIR", uploads)
     pid, sid = uuid.uuid4().hex, uuid.uuid4().hex
     await db.execute("INSERT INTO projects(id,name) VALUES(?,?)", (pid, "p"))
-    await db.execute(
-        "INSERT INTO schemes(id,project_id,name) VALUES(?,?,?)", (sid, pid, "s"))
+    await db.execute("INSERT INTO schemes(id,project_id,name) VALUES(?,?,?)", (sid, pid, "s"))
     await db.commit()
     yield db, pid, sid
     await db.close()
@@ -52,6 +52,7 @@ def _big_text(n_chars: int, tag: str) -> str:
 # ---------------------------------------------------------------------------
 # 管线增量跳过
 # ---------------------------------------------------------------------------
+
 
 async def test_pipeline_skips_completed_chunks(monkeypatch):
     text = "\n\n".join([_big_text(5000, "第一章"), _big_text(5000, "第二章")])
@@ -68,7 +69,7 @@ async def test_pipeline_skips_completed_chunks(monkeypatch):
     monkeypatch.setattr(fe, "extract_from_single_chunk", _fake_extract)
 
     result = await run_extraction_pipeline(text, completed_chunks=completed)
-    assert calls == []                       # 全部段已提取 → 零 AI 调用
+    assert calls == []  # 全部段已提取 → 零 AI 调用
     assert result.all_skipped is True
     assert result.skipped_chunks == len(chunks)
     assert result.chunk_hashes_ok == completed
@@ -103,7 +104,7 @@ async def test_pipeline_failed_chunk_not_marked_completed(monkeypatch):
 
     monkeypatch.setattr(fe, "extract_from_single_chunk", _fail_extract)
     result = await run_extraction_pipeline(text, completed_chunks=completed)
-    assert result.chunk_hashes_ok == set()   # 失败段不得计入已完成（下次重试）
+    assert result.chunk_hashes_ok == set()  # 失败段不得计入已完成（下次重试）
     assert not result.all_skipped
 
 
@@ -118,12 +119,9 @@ async def test_truncated_chunk_fingerprint_not_evicted(monkeypatch, ctx):
 
     def _fake_split(text, *a, **kw):
         return [
-            fe.Chunk(text="高优先A机械表", priority_weight=1.5,
-                     zone_type="machinery_stat"),
-            fe.Chunk(text="高优先B做法表", priority_weight=1.4,
-                     zone_type="construction_practice_zone"),
-            fe.Chunk(text="低优先C封面", priority_weight=0.2,
-                     zone_type="general"),
+            fe.Chunk(text="高优先A机械表", priority_weight=1.5, zone_type="machinery_stat"),
+            fe.Chunk(text="高优先B做法表", priority_weight=1.4, zone_type="construction_practice_zone"),
+            fe.Chunk(text="低优先C封面", priority_weight=0.2, zone_type="general"),
         ]
 
     async def _fake_extract(**kwargs):
@@ -138,14 +136,12 @@ async def test_truncated_chunk_fingerprint_not_evicted(monkeypatch, ctx):
     assert low_hash in await load_completed_chunks(db, pid, sid)
 
     # max_chunks=1 → 只保留最高权重段 A，B/C 被截断
-    result = await run_extraction_pipeline("x" * 200, max_chunks=1,
-                                           completed_chunks={low_hash})
+    result = await run_extraction_pipeline("x" * 200, max_chunks=1, completed_chunks={low_hash})
     # ✅ 关键断言：chunk_hashes_all 覆盖文档全部段（含被截断的 C）
     assert low_hash in result.chunk_hashes_all
 
     # 按 SSE 口径用本次结果刷新进度：C 的指纹不应被残留清理掉
-    await save_extracted_chunks(db, pid, sid,
-                                result.chunk_hashes_ok, result.chunk_hashes_all)
+    await save_extracted_chunks(db, pid, sid, result.chunk_hashes_ok, result.chunk_hashes_all)
     assert low_hash in await load_completed_chunks(db, pid, sid)
 
 
@@ -153,41 +149,58 @@ async def test_truncated_chunk_fingerprint_not_evicted(monkeypatch, ctx):
 # persist_extraction：跳过段事实保留
 # ---------------------------------------------------------------------------
 
-def _fact_row(db, pid, sid, *, name, key, chunk_hash, category="schedule",
-              resolved=0):
+
+def _fact_row(db, pid, sid, *, name, key, chunk_hash, category="schedule", resolved=0):
     return db.execute(
         "INSERT INTO global_facts (id, project_id, scheme_id, group_id, "
         "group_title, title, content, category, source_ref, is_simulated, "
         "confidence, is_resolved, has_conflict, conflict_keys, fact_key, "
         "chunk_hash) VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)",
-        (uuid.uuid4().hex, pid, sid, "g1", "工期安排", name,
-         f"- **{name}**: v", category,
-         json.dumps([{"file": "doc.docx", "quote": ""}]),
-         0, 1.0, resolved, 0, "", key, chunk_hash))
+        (
+            uuid.uuid4().hex,
+            pid,
+            sid,
+            "g1",
+            "工期安排",
+            name,
+            f"- **{name}**: v",
+            category,
+            json.dumps([{"file": "doc.docx", "quote": ""}]),
+            0,
+            1.0,
+            resolved,
+            0,
+            "",
+            key,
+            chunk_hash,
+        ),
+    )
 
 
 async def test_persist_keeps_skipped_chunk_rows(ctx):
     db, pid, sid = ctx
     # 上一轮提取的行：一段已完成（hash=AAA，增量跳过）、一段未完成（hash=BBB，
     # 本轮重跑）。两行均属本次结果覆盖的分类，用于验证「跳过段保留 / 重跑段刷新」
-    await _fact_row(db, pid, sid, name="总工期", key="total_duration",
-                    chunk_hash="AAA", category="schedule")
-    await _fact_row(db, pid, sid, name="机械数量", key="excavator_count",
-                    chunk_hash="BBB", category="machinery")
+    await _fact_row(db, pid, sid, name="总工期", key="total_duration", chunk_hash="AAA", category="schedule")
+    await _fact_row(db, pid, sid, name="机械数量", key="excavator_count", chunk_hash="BBB", category="machinery")
     await db.commit()
 
     # 本轮只重跑了 hash=BBB 的段（AAA 段被增量跳过）
-    item = FactItem(name="挖掘机型号", value="SY215C", key="excavator_model",
-                    category="machinery", source="doc.docx", chunk_hash="BBB")
+    item = FactItem(
+        name="挖掘机型号",
+        value="SY215C",
+        key="excavator_model",
+        category="machinery",
+        source="doc.docx",
+        chunk_hash="BBB",
+    )
     result = ExtractionResult()
-    result.groups = [FactGroup(title="机械设备", category="machinery",
-                               items=[item])]
+    result.groups = [FactGroup(title="机械设备", category="machinery", items=[item])]
     result.total_items = 1
     result.chunk_hashes_all = {"BBB"}
     await persist_extraction(result, db, pid, sid)
 
-    cur = await db.execute(
-        "SELECT title, chunk_hash FROM global_facts WHERE scheme_id=?", (sid,))
+    cur = await db.execute("SELECT title, chunk_hash FROM global_facts WHERE scheme_id=?", (sid,))
     rows = {(r["title"], r["chunk_hash"]) for r in await cur.fetchall()}
     # 跳过段（AAA）的旧事实必须原样保留，不得被误删
     assert ("总工期", "AAA") in rows
@@ -198,19 +211,17 @@ async def test_persist_keeps_skipped_chunk_rows(ctx):
 
 async def test_persist_deletes_stale_empty_hash_rows(ctx):
     db, pid, sid = ctx
-    await _fact_row(db, pid, sid, name="总工期", key="total_duration",
-                    chunk_hash="")
+    await _fact_row(db, pid, sid, name="总工期", key="total_duration", chunk_hash="")
     await db.commit()
-    item = FactItem(name="总工期", value="300天", key="total_duration",
-                    category="schedule", source="doc.docx", chunk_hash="CCC")
+    item = FactItem(
+        name="总工期", value="300天", key="total_duration", category="schedule", source="doc.docx", chunk_hash="CCC"
+    )
     result = ExtractionResult()
-    result.groups = [FactGroup(title="工期安排", category="schedule",
-                               items=[item])]
+    result.groups = [FactGroup(title="工期安排", category="schedule", items=[item])]
     result.total_items = 1
     result.chunk_hashes_all = {"CCC"}
     await persist_extraction(result, db, pid, sid)
-    cur = await db.execute(
-        "SELECT title, chunk_hash FROM global_facts WHERE scheme_id=?", (sid,))
+    cur = await db.execute("SELECT title, chunk_hash FROM global_facts WHERE scheme_id=?", (sid,))
     rows = [(r["title"], r["chunk_hash"]) for r in await cur.fetchall()]
     assert rows == [("总工期", "CCC")]
 
@@ -226,24 +237,23 @@ async def test_persist_deletes_vanished_source_rows(ctx):
     而仍在 all 但被跳过的 SKIP 段事实必须保留（增量语义不回归）。
     """
     db, pid, sid = ctx
-    await _fact_row(db, pid, sid, name="总工期", key="total_duration",
-                    chunk_hash="V1")                     # 源头已消失 → 应清除
-    await _fact_row(db, pid, sid, name="机械数量", key="machinery_count",
-                    chunk_hash="SKIP", category="machinery")  # 被跳过 → 应保留
+    await _fact_row(db, pid, sid, name="总工期", key="total_duration", chunk_hash="V1")  # 源头已消失 → 应清除
+    await _fact_row(
+        db, pid, sid, name="机械数量", key="machinery_count", chunk_hash="SKIP", category="machinery"
+    )  # 被跳过 → 应保留
     await db.commit()
 
-    item = FactItem(name="总工期", value="300天", key="total_duration",
-                    category="schedule", source="doc.docx", chunk_hash="V2")
+    item = FactItem(
+        name="总工期", value="300天", key="total_duration", category="schedule", source="doc.docx", chunk_hash="V2"
+    )
     result = ExtractionResult()
-    result.groups = [FactGroup(title="工期安排", category="schedule",
-                               items=[item])]
+    result.groups = [FactGroup(title="工期安排", category="schedule", items=[item])]
     result.total_items = 1
-    result.chunk_hashes_all = {"SKIP", "V2"}      # 当前文档全量分段（含跳过的 SKIP）
-    result.chunk_hashes_run = {"V2"}              # 本次实际重跑的段
+    result.chunk_hashes_all = {"SKIP", "V2"}  # 当前文档全量分段（含跳过的 SKIP）
+    result.chunk_hashes_run = {"V2"}  # 本次实际重跑的段
     await persist_extraction(result, db, pid, sid)
 
-    cur = await db.execute(
-        "SELECT title, chunk_hash FROM global_facts WHERE scheme_id=?", (sid,))
+    cur = await db.execute("SELECT title, chunk_hash FROM global_facts WHERE scheme_id=?", (sid,))
     rows = {(r["title"], r["chunk_hash"]) for r in await cur.fetchall()}
     # V1 源已消失 → 清除；SKIP 被跳过 → 保留；V2 新事实 → 落库
     assert rows == {("机械数量", "SKIP"), ("总工期", "V2")}
@@ -253,11 +263,12 @@ async def test_persist_deletes_vanished_source_rows(ctx):
 # 进度表：写入与残留清理
 # ---------------------------------------------------------------------------
 
+
 async def test_save_extracted_chunks_prunes_stale(ctx):
     db, pid, sid = ctx
     await db.execute(
-        "INSERT OR IGNORE INTO facts_extracted_chunks(project_id, chunk_hash) "
-        "VALUES (?,?)", (pid, "OLD"))
+        "INSERT OR IGNORE INTO facts_extracted_chunks(project_id, chunk_hash) " "VALUES (?,?)", (pid, "OLD")
+    )
     await db.commit()
     await save_extracted_chunks(db, pid, "", {"NEW1", "NEW2"}, {"NEW1", "NEW2"})
     assert await load_completed_chunks(db, pid) == {"NEW1", "NEW2"}
@@ -274,10 +285,8 @@ async def test_completed_chunks_scoped_by_scheme(ctx):
     """BUG-1 回归：多方案共享项目时，各方案的提取进度必须相互独立。"""
     db, pid, sid = ctx
     sa, sb = uuid.uuid4().hex, uuid.uuid4().hex
-    await db.execute(
-        "INSERT INTO schemes(id,project_id,name) VALUES(?,?,?)", (sa, pid, "A"))
-    await db.execute(
-        "INSERT INTO schemes(id,project_id,name) VALUES(?,?,?)", (sb, pid, "B"))
+    await db.execute("INSERT INTO schemes(id,project_id,name) VALUES(?,?,?)", (sa, pid, "A"))
+    await db.execute("INSERT INTO schemes(id,project_id,name) VALUES(?,?,?)", (sb, pid, "B"))
     await db.commit()
     # 方案 A 标记一段完成
     await save_extracted_chunks(db, pid, sa, {"H1"}, {"H1"})
@@ -300,14 +309,30 @@ async def test_persist_keeps_confirmed_fact_on_reextract(ctx):
         "category, source_ref, is_simulated, confidence, is_resolved, "
         "has_conflict, conflict_keys, fact_key, chunk_hash) "
         "VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)",
-        (fid, pid, sid, "g1", "工期安排", "总工期",
-         "- **总工期**: 300天", "schedule",
-         json.dumps([{"file": "doc.docx", "quote": ""}]),
-         0, 1.0, 1, 0, "", "total_duration", "OLD"))
+        (
+            fid,
+            pid,
+            sid,
+            "g1",
+            "工期安排",
+            "总工期",
+            "- **总工期**: 300天",
+            "schedule",
+            json.dumps([{"file": "doc.docx", "quote": ""}]),
+            0,
+            1.0,
+            1,
+            0,
+            "",
+            "total_duration",
+            "OLD",
+        ),
+    )
     await db.commit()
     # 重新提取产生同 key 不同值
-    item = FactItem(name="总工期", value="360天", key="total_duration",
-                    category="schedule", source="doc.docx", chunk_hash="NEW")
+    item = FactItem(
+        name="总工期", value="360天", key="total_duration", category="schedule", source="doc.docx", chunk_hash="NEW"
+    )
     result = ExtractionResult()
     result.groups = [FactGroup(title="工期安排", category="schedule", items=[item])]
     result.total_items = 1
@@ -317,13 +342,13 @@ async def test_persist_keeps_confirmed_fact_on_reextract(ctx):
     cur = await db.execute(
         "SELECT is_resolved, has_conflict, content, conflict_keys "
         "FROM global_facts WHERE scheme_id=? AND fact_key=?",
-        (sid, "total_duration"))
+        (sid, "total_duration"),
+    )
     row = await cur.fetchone()
     # ✅ 用户已确认状态保留，不被静默打回「待审核 + 有冲突」
     assert row["is_resolved"] == 1
     assert row["has_conflict"] == 1
-    stale = await (await db.execute(
-        "SELECT is_stale FROM global_facts WHERE id=?", (fid,))).fetchone()
+    stale = await (await db.execute("SELECT is_stale FROM global_facts WHERE id=?", (fid,))).fetchone()
     assert stale["is_stale"] == 1
     # 用户原权威值保留，但新证据使其退出注入链路，等待人工裁决。
     assert "300天" in row["content"]
@@ -335,13 +360,13 @@ async def test_persist_keeps_confirmed_fact_on_reextract(ctx):
 # 清除全部事实
 # ---------------------------------------------------------------------------
 
+
 async def test_clear_all_facts_resets_everything(ctx):
     db, pid, sid = ctx
-    await _fact_row(db, pid, sid, name="总工期", key="total_duration",
-                    chunk_hash="AAA", resolved=1)
+    await _fact_row(db, pid, sid, name="总工期", key="total_duration", chunk_hash="AAA", resolved=1)
     await db.execute(
-        "INSERT INTO facts_extracted_chunks(project_id, scheme_id, chunk_hash) VALUES (?,?,?)",
-        (pid, sid, "AAA"))
+        "INSERT INTO facts_extracted_chunks(project_id, scheme_id, chunk_hash) VALUES (?,?,?)", (pid, sid, "AAA")
+    )
     await db.commit()
 
     res = await gf.clear_all_facts(gf.ClearFactsRequest(scheme_id=sid), db)
@@ -356,6 +381,7 @@ async def test_clear_all_facts_resets_everything(ctx):
 async def test_clear_all_facts_requires_scheme(ctx):
     db, pid, sid = ctx
     from fastapi import HTTPException
+
     with pytest.raises(HTTPException):
         await gf.clear_all_facts(gf.ClearFactsRequest(), db)
 
@@ -376,15 +402,29 @@ async def test_batch_resolve_includes_simulated(ctx):
         "category, source_ref, is_simulated, confidence, is_resolved, "
         "has_conflict, conflict_keys, fact_key, chunk_hash) "
         "VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)",
-        (fid, pid, sid, "g1", "工程概况", "基坑深度",
-         "- **基坑深度**: 【待填写】", "basic",
-         json.dumps([{"file": "doc.docx", "quote": ""}]),
-         1, 0.5, 0, 0, "", "basin_depth", "SIM"))
+        (
+            fid,
+            pid,
+            sid,
+            "g1",
+            "工程概况",
+            "基坑深度",
+            "- **基坑深度**: 【待填写】",
+            "basic",
+            json.dumps([{"file": "doc.docx", "quote": ""}]),
+            1,
+            0.5,
+            0,
+            0,
+            "",
+            "basin_depth",
+            "SIM",
+        ),
+    )
     await db.commit()
     res = await gf.batch_resolve(gf.BatchResolveRequest(fact_ids=[fid], scheme_id=sid), db)
     assert res["ok"] is True
-    cur = await db.execute(
-        "SELECT is_resolved, is_simulated FROM global_facts WHERE id=?", (fid,))
+    cur = await db.execute("SELECT is_resolved, is_simulated FROM global_facts WHERE id=?", (fid,))
     row = await cur.fetchone()
     # 不变式：模拟值不得被批量确认放行
     assert row["is_resolved"] == 0
