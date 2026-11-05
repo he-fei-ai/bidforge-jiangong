@@ -30,7 +30,8 @@ const h = vi.hoisted(() => {
     ok: null,
     err: null,
   };
-  const mk = (method: string) => vi.fn((..._args: any[]) => Promise.resolve({ data: { ok: true } }));
+  const mk = (method: string) =>
+    vi.fn((..._args: any[]) => Promise.resolve({ data: { ok: true } }));
   const instance: any = {
     get: mk("get"),
     post: mk("post"),
@@ -39,7 +40,13 @@ const h = vi.hoisted(() => {
     delete: mk("delete"),
     interceptors: {
       request: { use: vi.fn((_f: any) => 1) },
-      response: { use: vi.fn((f: any, e: any) => { hooks.ok = f; hooks.err = e; return 1; }) },
+      response: {
+        use: vi.fn((f: any, e: any) => {
+          hooks.ok = f;
+          hooks.err = e;
+          return 1;
+        }),
+      },
     },
   };
   return { instance, hooks };
@@ -50,7 +57,11 @@ vi.mock("axios", () => ({ default: { create: () => h.instance } }));
 import { authGuard, clearAuthShortCircuit } from "../api";
 
 /** 把一次 axios 失败喂给真实响应拦截器，返回最终抛出的错误对象。 */
-async function runInterceptor(status: number, data: any, extra: Record<string, any> = {}): Promise<any> {
+async function runInterceptor(
+  status: number,
+  data: any,
+  extra: Record<string, any> = {},
+): Promise<any> {
   const err: any = Object.assign(new Error(`Request failed with status code ${status}`), {
     response: { status, data },
     ...extra,

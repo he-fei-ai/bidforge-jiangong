@@ -4,13 +4,18 @@ import { describe, it, expect, vi, beforeEach } from "vitest";
 
 const h = vi.hoisted(() => {
   const calls: Array<{ method: string; url: string; data?: any; config?: any }> = [];
-  const make = (method: string) => vi.fn((url: string, a?: any, b?: any) => {
-    const bodyMethod = method === "post" || method === "put" || method === "patch";
-    calls.push({ method, url, data: bodyMethod ? a : undefined, config: bodyMethod ? b : a });
-    return Promise.resolve({ data: { ok: true } });
-  });
+  const make = (method: string) =>
+    vi.fn((url: string, a?: any, b?: any) => {
+      const bodyMethod = method === "post" || method === "put" || method === "patch";
+      calls.push({ method, url, data: bodyMethod ? a : undefined, config: bodyMethod ? b : a });
+      return Promise.resolve({ data: { ok: true } });
+    });
   const instance: any = {
-    get: make("get"), post: make("post"), put: make("put"), patch: make("patch"), delete: make("delete"),
+    get: make("get"),
+    post: make("post"),
+    put: make("put"),
+    patch: make("patch"),
+    delete: make("delete"),
     interceptors: {
       request: { use: vi.fn(() => 1) },
       response: { use: vi.fn(() => 1) },
@@ -24,7 +29,10 @@ import { complianceApi, reviewApi, reviewAutoFixApi } from "../api";
 
 const last = () => h.calls[h.calls.length - 1];
 
-beforeEach(() => { h.calls.length = 0; localStorage.clear(); });
+beforeEach(() => {
+  h.calls.length = 0;
+  localStorage.clear();
+});
 
 describe("审核与预检 API 契约", () => {
   it("总览 force=false 不发送空 query，force=true 才发送布尔参数", async () => {
@@ -38,20 +46,30 @@ describe("审核与预检 API 契约", () => {
 
   it("总检历史和整改报告路径/分页参数固定", async () => {
     await complianceApi.runs("s1", 10);
-    expect(last()).toMatchObject({ method: "get", url: "/compliance/runs/s1", config: { params: { limit: 10 } } });
+    expect(last()).toMatchObject({
+      method: "get",
+      url: "/compliance/runs/s1",
+      config: { params: { limit: 10 } },
+    });
     await complianceApi.report("s1");
     expect(last()).toMatchObject({ method: "get", url: "/compliance/report/s1" });
   });
 
   it("方案提交把严格章节门禁放在 body，评审轨迹使用 query 分页", async () => {
-    await reviewApi.submit("s1", { to_status: "approved", reviewer: "张三", require_all_sections_reviewed: true });
+    await reviewApi.submit("s1", {
+      to_status: "approved",
+      reviewer: "张三",
+      require_all_sections_reviewed: true,
+    });
     expect(last()).toMatchObject({
-      method: "post", url: "/schemes/s1/review/submit",
+      method: "post",
+      url: "/schemes/s1/review/submit",
       data: { to_status: "approved", reviewer: "张三", require_all_sections_reviewed: true },
     });
     await reviewApi.records("s1", "sec-1", 50, 100);
     expect(last()).toMatchObject({
-      method: "get", url: "/schemes/s1/review/records",
+      method: "get",
+      url: "/schemes/s1/review/records",
       config: { params: { section_id: "sec-1", limit: 50, offset: 100 } },
     });
   });
@@ -68,7 +86,8 @@ describe("审核与预检 API 契约", () => {
     // 规范符合性检查（AI，120s）
     await complianceApi.check({ scheme_id: "s1", rule_ids: ["CMP-01"] });
     expect(last()).toMatchObject({
-      method: "post", url: "/compliance/check",
+      method: "post",
+      url: "/compliance/check",
       data: { scheme_id: "s1", rule_ids: ["CMP-01"] },
     });
     expect(last().config.timeout).toBe(120000);
@@ -76,7 +95,9 @@ describe("审核与预检 API 契约", () => {
     // 专家论证预检（AI，120s）
     await complianceApi.expertReview({ scheme_id: "s1" });
     expect(last()).toMatchObject({
-      method: "post", url: "/compliance/expert-review", data: { scheme_id: "s1" },
+      method: "post",
+      url: "/compliance/expert-review",
+      data: { scheme_id: "s1" },
     });
     expect(last().config.timeout).toBe(120000);
 
@@ -88,13 +109,15 @@ describe("审核与预检 API 契约", () => {
     // 一致性审计最近一次（GET）
     await complianceApi.consistencyLatest("s1");
     expect(last()).toMatchObject({
-      method: "get", url: "/compliance/consistency-audit/s1/latest",
+      method: "get",
+      url: "/compliance/consistency-audit/s1/latest",
     });
 
     // 历史结果分页
     await complianceApi.results("s1", "compliance", 30);
     expect(last()).toMatchObject({
-      method: "get", url: "/compliance/results/s1",
+      method: "get",
+      url: "/compliance/results/s1",
       config: { params: { check_type: "compliance", limit: 30 } },
     });
 
@@ -103,7 +126,8 @@ describe("审核与预检 API 契约", () => {
     expect(last()).toMatchObject({ method: "get", url: "/compliance/rules" });
     await complianceApi.expertItems();
     expect(last()).toMatchObject({
-      method: "get", url: "/compliance/expert-review/items",
+      method: "get",
+      url: "/compliance/expert-review/items",
     });
   });
 
@@ -116,13 +140,15 @@ describe("审核与预检 API 契约", () => {
 
     await reviewApi.reviewSection("s1", "sec-1", { to_status: "approved", reviewer: "张三" });
     expect(last()).toMatchObject({
-      method: "post", url: "/schemes/s1/review/sections/sec-1",
+      method: "post",
+      url: "/schemes/s1/review/sections/sec-1",
       data: { to_status: "approved", reviewer: "张三" },
     });
 
     await reviewApi.batch("s1", { section_ids: ["sec-1"], to_status: "approved" });
     expect(last()).toMatchObject({
-      method: "post", url: "/schemes/s1/review/sections/batch",
+      method: "post",
+      url: "/schemes/s1/review/sections/batch",
       data: { section_ids: ["sec-1"], to_status: "approved" },
     });
     // 批量端点必须在 /sections/batch 而非 /sections/{id}
@@ -132,60 +158,72 @@ describe("审核与预检 API 契约", () => {
   it("reviewAutoFixApi 全部方法：URL / body / timeout", async () => {
     await reviewAutoFixApi.capabilities("s1");
     expect(last()).toMatchObject({
-      method: "get", url: "/schemes/s1/review/autofix/capabilities",
+      method: "get",
+      url: "/schemes/s1/review/autofix/capabilities",
     });
 
     await reviewAutoFixApi.plan("s1", { rule_id: "CON-01" });
     expect(last()).toMatchObject({
-      method: "post", url: "/schemes/s1/review/autofix/plan",
+      method: "post",
+      url: "/schemes/s1/review/autofix/plan",
       data: { rule_id: "CON-01" },
     });
     expect(last().config.timeout).toBe(120000);
 
     await reviewAutoFixApi.apply("s1", { rule_id: "CON-01", section_id: "sec-1" });
     expect(last()).toMatchObject({
-      method: "post", url: "/schemes/s1/review/autofix/apply",
+      method: "post",
+      url: "/schemes/s1/review/autofix/apply",
       data: { rule_id: "CON-01", section_id: "sec-1" },
     });
     expect(last().config.timeout).toBe(180000);
 
     await reviewAutoFixApi.rollback("s1", { snapshot_id: "ver-1" });
     expect(last()).toMatchObject({
-      method: "post", url: "/schemes/s1/review/autofix/rollback",
+      method: "post",
+      url: "/schemes/s1/review/autofix/rollback",
       data: { snapshot_id: "ver-1" },
     });
 
     await reviewAutoFixApi.repairs("s1", 5);
     expect(last()).toMatchObject({
-      method: "get", url: "/schemes/s1/review/autofix/repairs",
+      method: "get",
+      url: "/schemes/s1/review/autofix/repairs",
       config: { params: { limit: 5 } },
     });
 
     await reviewAutoFixApi.collect("s1", { scope: "all_blocking" });
     expect(last()).toMatchObject({
-      method: "post", url: "/schemes/s1/review/autofix/collect",
+      method: "post",
+      url: "/schemes/s1/review/autofix/collect",
       data: { scope: "all_blocking" },
     });
     expect(last().config.timeout).toBe(120000);
 
     await reviewAutoFixApi.stage("s1", { rule_ids: ["DLV-05"] });
     expect(last()).toMatchObject({
-      method: "post", url: "/schemes/s1/review/autofix/stage",
+      method: "post",
+      url: "/schemes/s1/review/autofix/stage",
       data: { rule_ids: ["DLV-05"] },
     });
     expect(last().config.timeout).toBe(180000);
 
     await reviewAutoFixApi.confirm("s1", { batch_id: "b1", accept_all: true });
     expect(last()).toMatchObject({
-      method: "post", url: "/schemes/s1/review/autofix/confirm",
+      method: "post",
+      url: "/schemes/s1/review/autofix/confirm",
       data: { batch_id: "b1", accept_all: true },
     });
     expect(last().config.timeout).toBe(180000);
   });
 
   it("自动修复链路的三个写端点不得被改成 GET（写路径漂移 = 静默失效）", async () => {
-    for (const fn of [reviewAutoFixApi.apply, reviewAutoFixApi.rollback,
-                      reviewAutoFixApi.confirm, reviewAutoFixApi.stage]) {
+    for (const fn of [
+      reviewAutoFixApi.apply,
+      reviewAutoFixApi.rollback,
+      reviewAutoFixApi.confirm,
+      reviewAutoFixApi.stage,
+    ]) {
       h.calls.length = 0;
       await (fn as any)("s1", { rule_id: "x", snapshot_id: "y", batch_id: "z" });
       expect(last().method, `${fn.name} 必须是 POST`).toBe("post");

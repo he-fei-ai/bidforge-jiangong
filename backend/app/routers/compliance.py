@@ -15,6 +15,7 @@
 规则定义统一取自 ``services/audit_rules.py``（唯一事实源），
 不再在本文件内联清单（原 ``EXPERT_CHECK_ITEMS`` 与提示词文案重复维护，存在分叉）。
 """
+
 # ruff: noqa: I001 —— R13 契约：review_db 必须单独一行，护栏 test_review_db_is_imported 锁
 import asyncio
 import json
@@ -25,6 +26,7 @@ from datetime import datetime
 
 from fastapi import APIRouter, Depends, HTTPException, Response
 
+from app.config import settings
 from app.db import get_db
 from app.models import ComplianceCheckIn, ExpertReviewIn
 
@@ -36,6 +38,16 @@ from app.services import review_autofix
 from app.services import review_db  # noqa: I001
 from app.services.ai.json_response import collect_json_response
 from app.services.ai.prompts._registry import render
+
+# ✅ D-41（R176）：批次审计行复用 provider_factory 的三级降级 INSERT
+#    （旧库缺 scene / config_id / base_url 列时逐级退让，不新增表/列）
+from app.services.ai.provider_factory import (
+    _AUDIT_INSERT_FULL,
+    _AUDIT_INSERT_LEGACY,
+    _AUDIT_INSERT_NO_IDENTITY,
+    _AUDIT_INSERT_RICH,
+    _error_class,
+)
 from app.services.audit_rules import (
     EXPERT_CHECK_ITEMS,
     RULE_VERSION,
@@ -53,6 +65,12 @@ from app.services.audit_scoring import (
     score_findings,
 )
 from app.services.content_utils import order_sections_dfs
+
+# ✅ B-19（R176）：长文本阈值唯一事实源（/check、/consistency-audit 与扫描共用）
+from app.services.numeric_topics import (
+    LONG_TEXT_CALL_CAP,
+    LONG_TEXT_SECTION_CAP,
+)
 
 # ✅ R81（2026-10-15）：requirement 口径前缀的**单一事实源**在 facts_builder
 #    （正文/目录注入渲染同款）。本文件只 import 不自建副本——「同一判据多处
@@ -74,6 +92,18 @@ from app.services.preflight_engine import (
     preflight_stats,
     run_preflight,
 )
+
+
+# ✅ R178（B-4 · 2026-11-05）：预检是**纯 CPU 的同步计算**（8 个 checker +
+#    CON-01 的 11 条数值正则 + 整章查重），此前在**事件循环内直跑**。
+#    大方案（数百章）时会把 SSE 心跳与所有并发请求一起卡住 —— 而预检端点
+#    自称「确定性规则，秒级返回」，实测并不秒级（同步阻塞整个事件循环）。
+#    现整体挪到工作线程执行，**判定口径逐字不变**（同一 ctx、同一函数）。
+def _preflight_findings_blocking(ctx: PreflightContext) -> list:
+    """跑完全部程序化规则（阻塞调用，须在 ``asyncio.to_thread`` 内执行）。"""
+    return run_preflight(ctx)
+
+
 from app.services.standards_registry import (
     STANDARD_DB_CHECKED_AT,
     STANDARD_DB_VERSION,
@@ -91,11 +121,21 @@ logger = logging.getLogger("compliance")
 # ---------------------------------------------------------------------------
 # 请求 / 输出上限（token 保护 + 响应可预测）
 # ---------------------------------------------------------------------------
-#: 单章节送 AI 的最大字符数（超过则截断，并在正文末尾显式标记；避免长章节
-#: 后半段永远不被 AI 检查，同时避免整份方案 60k+ 字符打爆上下文窗口）
-SECTION_CONTENT_CAP = 4000
-#: /check 拼装送 AI 的整份内容字符上限（保留旧值 6000 以兼容既有前端提示）
-AI_CONTENT_HARD_CAP = 6000
+#: 单章节送 AI 的最大字符数（超长章节切片并显式标注续段，禁止静默丢弃）
+#: ✅ B-19（R176）：改为引用 numeric_topics 的统一阈值（旧值 4000 只覆盖 99.85%
+#:    存量章节；统一为 6000 后存量 100% 章节单次送审，不再产生续片）。
+SECTION_CONTENT_CAP = LONG_TEXT_SECTION_CAP
+#: /check 单批内容字符上限（一批 = 一次 AI 调用）
+AI_CONTENT_HARD_CAP = LONG_TEXT_CALL_CAP
+#: ✅ D-41（R176）预算闸门：单次审核最多执行的批次数与字符总量。
+#: ✅ 2026-11-04 配置化：数值改由 ``config.py`` 的 ``compliance_max_batches`` /
+#:    ``compliance_max_chars`` 提供（默认 40 / 240000，与 R176 逐字相同）。
+#:    读取统一走 :func:`_batch_budget`，不在模块常量上再抄一份。
+#: 超出时审到上限并返回 partial=true + 未审章节清单（已审部分不白跑）。
+_BUDGET_WARNED = False
+#: ai_audit_logs 的 action 值：新增 action 必须同步
+#: ``tests/test_audit_budget_config_and_action_enum_20261104.py`` 的白名单，否则测试红。
+COMPLIANCE_BATCH_ACTION = "compliance_batch"
 #: /expert-review 允许的 outline 节点上限（超过视为数据异常，明确 400 而非静默截断）
 EXPERT_OUTLINE_MAX_NODES = 300
 #: /expert-review 允许的附件数量与单条长度上限（防 token 爆炸）
@@ -104,9 +144,6 @@ EXPERT_ATTACH_MAX_LEN = 500
 #: /results 默认 & 最大返回条数（此前无 LIMIT，历史累积后一次返回可能数万行）
 RESULTS_DEFAULT_LIMIT = 50
 RESULTS_MAX_LIMIT = 500
-#: 一致性审计送 AI 的单章节 / 整份内容字符上限（对齐 /check 的口径）
-CONSISTENCY_SECTION_CAP = 3000
-CONSISTENCY_TOTAL_CAP = 50000
 
 
 # ---------------------------------------------------------------------------
@@ -126,13 +163,13 @@ async def list_rules():
     """
     from app.routers.export import _EXPORT_ISSUE_RULE_MAP
     from app.services.audit_rules import _PROGRAM_EMITTED_RULE_IDS
+
     problems = validate_rule_registry(
         mapping=_EXPORT_ISSUE_RULE_MAP,
         emitted_rule_ids=_PROGRAM_EMITTED_RULE_IDS,
     )
     if problems:
-        logger.error("审核规则注册表自检发现 %d 项漂移: %s",
-                     len(problems), "; ".join(problems[:10]))
+        logger.error("审核规则注册表自检发现 %d 项漂移: %s", len(problems), "; ".join(problems[:10]))
     return {
         "rule_version": RULE_VERSION,
         "items": rule_catalog(),
@@ -165,6 +202,7 @@ async def list_checkpoint_constraints():
         checkpoint_constraint_map,
         validate_constraint_map,
     )
+
     items = checkpoint_constraint_map()
     by_group: dict = {}
     by_channel: dict = {}
@@ -250,8 +288,7 @@ from app.services.ai.prompts._limits import FACTS_PROMPT_CAP  # noqa: E402
 SAFETY_MARK = "（安全关键）"
 
 
-def _join_with_budget(lines: list[str], budget: int,
-                       suffixes: list[str] | None = None) -> str:
+def _join_with_budget(lines: list[str], budget: int, suffixes: list[str] | None = None) -> str:
     """按**长度比例**分配预算后逐条截断（**不丢条**），而非头部优先切片。
 
     ✅ R38（2026-10-03 · P1-e）：本模块原实现是 ``"\\n".join(lines)[:budget]``
@@ -281,8 +318,7 @@ def _join_with_budget(lines: list[str], budget: int,
         from app.services.prompt_governance import allocate_char_budgets
     except Exception:  # noqa: BLE001 - 加载顺序异常不得阻断 AI 检查
         logger.warning("事实预算分配器不可用，退回头部截断（可能丢失尾部事实）")
-        return _keep_suffixes("\n".join(lines)[:budget],
-                                suffixes)
+        return _keep_suffixes("\n".join(lines)[:budget], suffixes)
     quotas = allocate_char_budgets([len(x) for x in lines], budget)
     # ✅ 遗留收口（2026-10-03 · R38）：消费侧超支纠偏。分配器的「每项保底
     #    min_chars」面向少量小节（n≈20）设计，保底量是等比份额的 2 倍 ——
@@ -305,7 +341,6 @@ def _join_with_budget(lines: list[str], budget: int,
     return "\n".join(out)
 
 
-
 def _drop_partial_suffix(text: str, mark: str) -> str:
     """去掉末尾那段「被切碎的标记前缀」。
 
@@ -317,7 +352,7 @@ def _drop_partial_suffix(text: str, mark: str) -> str:
         return text
     for n in range(min(len(text), len(mark) - 1), 0, -1):
         if text.endswith(mark[:n]):
-            return text[:len(text) - n]
+            return text[: len(text) - n]
     return text
 
 
@@ -384,6 +419,175 @@ async def _load_facts_prompt_text(db, scheme_id: str) -> str:
         return "（无）"
 
 
+# ---------------------------------------------------------------------------
+# ✅ D-41 / B-19（R176）：章节分片 + 装箱分批（/check 与 /consistency-audit 共用）
+# ---------------------------------------------------------------------------
+def _build_content_batches(sections: list) -> tuple[list[list[dict]], str]:
+    """把章节切「片」再按单批上限装箱，返回 ``(批次列表, 全量正文)``。
+
+    - 单章 > :data:`SECTION_CONTENT_CAP`：切片，续段显式标注（不丢字，AI 可感知）；
+    - 每批 = 一次 AI 调用，块长累计 ≤ :data:`AI_CONTENT_HARD_CAP`
+      （首批允许单块超限，否则单个超长章会被无限细分）。
+    """
+    _chunks: list[dict] = []
+    for _sec in sections:
+        _t, _c = _sec["title"], _sec["content"]
+        _subs = [_c[i : i + SECTION_CONTENT_CAP] for i in range(0, len(_c), SECTION_CONTENT_CAP)] or [""]
+        for _k, _sub in enumerate(_subs):
+            _head = f"### {_t}"
+            if len(_subs) > 1:
+                _head += f"（续 {_k + 1}/{len(_subs)}）"
+            _chunks.append({"section_id": _sec["id"], "block": f"{_head}\n{_sub}"})
+
+    _batches: list[list[dict]] = []
+    _cur: list[dict] = []
+    _cur_len = 0
+    for _ch in _chunks:
+        _blen = len(_ch["block"]) + (2 if _cur else 0)  # 与 "\n\n".join 分隔符一致
+        if _cur and _cur_len + _blen > AI_CONTENT_HARD_CAP:
+            _batches.append(_cur)
+            _cur, _cur_len, _blen = [], 0, len(_ch["block"])
+        _cur.append(_ch)
+        _cur_len += _blen
+    _batches.append(_cur)  # 空目录也保留一次调用（与原实现一致）
+    return _batches, "\n\n".join(_ch["block"] for _ch in _chunks)
+
+
+def _batch_text(batch: list) -> str:
+    """单批正文（与装箱时的分隔符口径一致）。"""
+    return "\n\n".join(_ch["block"] for _ch in batch)
+
+
+def _batch_budget() -> tuple[int, int]:
+    """读取分批送审预算 ``(最大批次数, 最大字符数)``（配置项单一事实源）。
+
+    ✅ 默认值在 ``config.py``（40 / 240000），未设置时与 R176 行为逐字相同。
+    ``<=0`` 视为该维度无上限（仓库「0 = 不限」惯例），并**只记一次** WARNING：
+    选「无上限 + 告警」而非拒绝启动 —— 预算是成本约束，不是正确性依赖，
+    调参失误不应把整个服务拖死（与 fail-soft 原则相悖）。
+    """
+    global _BUDGET_WARNED
+    _mb = int(getattr(settings, "compliance_max_batches", 0) or 0)
+    _mc = int(getattr(settings, "compliance_max_chars", 0) or 0)
+    if (_mb <= 0 or _mc <= 0) and not _BUDGET_WARNED:
+        _BUDGET_WARNED = True
+        logger.warning(
+            "compliance: 分批送审预算被设为无上限（compliance_max_batches=%d,"
+            " compliance_max_chars=%d；<=0 表示不限），单次审核成本可能随目录"
+            "长度线性增长，请确认这是预期配置",
+            _mb,
+            _mc,
+        )
+    return _mb, _mc
+
+
+def _apply_batch_budget(batches: list, limits: tuple[int, int] | None = None) -> tuple[list, list]:
+    """✅ D-41 预算闸门：按「最大批次数 / 最大字符数」截取可执行批次。
+
+    至少保留 1 批（单个批次本身超预算时也执行，否则长方案会得到空结果）。
+    返回 ``(可执行批次, 被跳过的批次)``；被跳过批次用于生成未审章节清单，
+    **不允许静默丢弃**。``<=0`` 的维度不设上限。
+    """
+    _max_batches, _max_chars = limits if limits is not None else _batch_budget()
+    _kept: list = []
+    _chars = 0
+    for _b in batches:
+        _blen = len(_batch_text(_b))
+        if _max_batches > 0 and len(_kept) >= _max_batches:
+            break
+        if _max_chars > 0 and _kept and _chars + _blen > _max_chars:
+            break
+        _kept.append(_b)
+        _chars += _blen
+    return _kept, batches[len(_kept) :]
+
+
+def _unchecked_section_list(kept: list, skipped: list) -> list:
+    """把预算闸门跳过的批次转成「未审 / 部分审」章节清单（可见性契约）。"""
+    _checked_ids = {_ch["section_id"] for _b in kept for _ch in _b}
+    out: dict = {}
+    for _b in skipped:
+        for _ch in _b:
+            _sid = _ch["section_id"]
+            _entry = out.get(_sid)
+            if _entry is None:
+                _head = _ch["block"].split("\n", 1)[0]
+                _title = _head[4:] if _head.startswith("### ") else _head
+                _entry = {
+                    "section_id": _sid,
+                    "section_title": _title.rsplit("（续", 1)[0],
+                    "status": ("partially_checked" if _sid in _checked_ids else "not_checked"),
+                    "unchecked_chars": 0,
+                }
+                out[_sid] = _entry
+            _entry["unchecked_chars"] += len(_ch["block"])
+    return list(out.values())
+
+
+async def _record_batch_audit(
+    db,
+    *,
+    index: int,
+    total: int,
+    chars: int,
+    duration: float,
+    success: bool = True,
+    note: str = "",
+    error_class: str = "",
+) -> None:
+    """✅ D-41 可观测：把「第几批 / 共几批 / 本批字符数」写入 ai_audit_logs。
+
+    不新增表、不新增列 —— 复用已有 ``action`` / ``error`` / ``scene`` 字段：
+    ``action='compliance_batch'``、``error='batch=1/23 chars=5980 [note]'``。
+    ``/ai/stats`` 的 by_provider / by_scene / by_error / summary 均过滤
+    ``action='chat'``，故不会污染这些统计；仅 by_action 会多出该 action。
+
+    ✅ R180 收尾（2026-11-05）：``ai_audit_logs`` 已扩到 16 列（+error_class /
+    attempt_count / attempts_json），本函数旧实现只按 13 列写 → 失败行的
+    ``error_class`` 恒为空，统计归 ``unknown``。现优先走 RICH 16 列：
+    失败行按 ``error`` 原文分类（与 provider_factory 同一分类函数），
+    成功行留空；旧库缺列时仍按 16→13→11→9 逐级退让，兼容性不变。
+    """
+    _err = f"batch={index}/{total} chars={chars}"
+    if note:
+        _err += f" {note}"
+    # 失败行分类：显式传入优先，否则按错误原文归类（成功行留空）
+    _cls = error_class or ("" if success else _error_class(_err))
+    _row = (
+        str(uuid.uuid4()),
+        COMPLIANCE_BATCH_ACTION,
+        "",
+        COMPLIANCE_BATCH_ACTION,
+        0,
+        0,
+        0,
+        round(float(duration), 3),
+        1 if success else 0,
+        _err[:300],
+        "compliance_check",
+        "",
+        "",
+        _cls,
+        1,
+        "[]",
+    )
+    for _sql, _params in (
+        (_AUDIT_INSERT_RICH, _row),
+        (_AUDIT_INSERT_FULL, _row[:13]),
+        (_AUDIT_INSERT_NO_IDENTITY, _row[:11]),
+        (_AUDIT_INSERT_LEGACY, _row[:9]),
+    ):
+        try:
+            await review_db.exec_write(db, _sql, _params, what="规范符合性检查：写入批次审计")
+            return
+        except Exception as exc:
+            if "column" in str(exc).lower():
+                continue  # 旧库缺列 → 降级写下一级
+            logger.warning("批次审计写入失败（忽略）: %s", exc)
+            return
+    logger.warning("批次审计写入失败：ai_audit_logs 列均不兼容")
+
+
 @router.post("/check")
 async def compliance_check(body: ComplianceCheckIn, db=Depends(get_db)):
     scheme_id = body.scheme_id
@@ -391,8 +595,8 @@ async def compliance_check(body: ComplianceCheckIn, db=Depends(get_db)):
     #    走完整次 AI 调用（空内容 + 空方案名），既浪费额度又返回看似正常的响应，
     #    前端无从判断是「方案不存在」还是「正文恰好都没命中」。现补 404。
     sc_row = await review_db.fetch_one(
-        db, "SELECT name, type, project_id FROM schemes WHERE id=?", (scheme_id,),
-        what="规范符合性检查：读取方案")
+        db, "SELECT name, type, project_id FROM schemes WHERE id=?", (scheme_id,), what="规范符合性检查：读取方案"
+    )
     if not sc_row:
         raise HTTPException(404, "方案不存在")
     scheme_name = sc_row["name"]
@@ -412,8 +616,11 @@ async def compliance_check(body: ComplianceCheckIn, db=Depends(get_db)):
         checklist = [get_rule(r).title for r in body.rule_ids if get_rule(r)]
         if not checklist:
             checklist = body.checklist or [r.title for r in ai_rules()]
-            logger.warning("compliance_check: rule_ids %r 均不在规则注册表，"
-                           "已回退为默认清单（scheme=%s）", body.rule_ids, scheme_id)
+            logger.warning(
+                "compliance_check: rule_ids %r 均不在规则注册表，" "已回退为默认清单（scheme=%s）",
+                body.rule_ids,
+                scheme_id,
+            )
     else:
         # ✅ BUG 修复（P1 · 2026-10-04）：`ComplianceCheckIn.checklist` 的默认工厂
         #    是 `list`（models.py:302），因此**前端不传清单、也不传 rule_ids** 时
@@ -429,50 +636,117 @@ async def compliance_check(body: ComplianceCheckIn, db=Depends(get_db)):
     #    ORDER BY sort_order 会把不同层级的同序号节点排在一起（按"列"展开），
     #    超长方案被 AI_CONTENT_HARD_CAP 截断时，送审的可能不是前几章而是
     #    错乱的碎片。现取 parent_id/sort_order 重排为目录树前序 DFS。
-    sections = [(r["title"], r["content"]) for r in order_sections_dfs(
-        await review_db.fetch_all(
+    sections = list(
+        order_sections_dfs(
+            await review_db.fetch_all(
+                db,
+                "SELECT id, parent_id, title, content, sort_order FROM sections"
+                " WHERE scheme_id=? AND content!='' ORDER BY sort_order",
+                (scheme_id,),
+                what="规范符合性检查：读取章节正文",
+            )
+        )
+    )
+    # ✅ D-41（R176 · 2026-11-04）：旧实现「单章 >4000 硬截断 + 总长 >6000 丢弃
+    #    尾部章节」—— 长方案后几章**从未进入模型**，用户却看到「已检查」。
+    #    现改为「章节分片 + 分批送审」：
+    #      1) 单章按 SECTION_CONTENT_CAP 切片，续段显式标注（不丢字）；
+    #      2) 切片按 AI_CONTENT_HARD_CAP 装箱成批，每批独立调用同一提示词；
+    #      3) 批次结果按 rule_id 合并（建议去重并集、严重度取高）。
+    #    正常路径（含存量最大方案 23 批）完整覆盖：partial=False、
+    #    truncated_sections=[]，覆盖度由 batch_count 披露。
+    # ✅ D-41 成本闸门（R176）：分批使调用次数随目录长度线性增长，故设
+    #    compliance_max_batches / compliance_max_chars（config.py，默认 40 批 /
+    #    240000 字）；超限时审到上限即停，partial=true + truncated_sections
+    #    （not_checked / partially_checked），已审部分照常返回，不白跑。
+    _batches, content = _build_content_batches(sections)
+    if len(_batches) > 1:
+        logger.warning(
+            "compliance_check: 内容 %d 字超过单批上限 %d，已拆为 %d 批送审（scheme=%s）",
+            len(content),
+            AI_CONTENT_HARD_CAP,
+            len(_batches),
+            scheme_id,
+        )
+
+    _budget = _batch_budget()
+    _run_batches, _skipped_batches = _apply_batch_budget(_batches, _budget)
+    _truncated_sections = _unchecked_section_list(_run_batches, _skipped_batches)
+    partial = bool(_skipped_batches)
+    if partial:
+        logger.warning(
+            "compliance_check: 触发预算闸门（上限 %d 批 / %d 字），" "已审 %d/%d 批，未审 %d 章（scheme=%s）",
+            _budget[0],
+            _budget[1],
+            len(_run_batches),
+            len(_batches),
+            len(_truncated_sections),
+            scheme_id,
+        )
+
+    # ✅ D-41：事实文本只装配一次（并发批次共享，避免 N 次重复 DB 读）
+    _facts_text = await _load_facts_prompt_text(db, scheme_id)
+
+    async def _run_one_batch(_bidx: int, _batch: list):
+        """执行单批：返回 (本批正文, 模型对象, 耗时秒)。"""
+        _text = _batch_text(_batch)
+        _sys = render(
+            "compliance_check_system",
+            scheme_name=scheme_name,
+            scheme_type=scheme_type,
+            global_facts=_facts_text,
+            checklist=json.dumps(checklist, ensure_ascii=False),
+            content=_text,
+        )
+        # ✅ 修复（2026-09-24）：旧实现未传 scene —— 该调用在 ai_audit_logs 里
+        #    scene 恒为空串，/ai/stats 场景聚看不到「符合性检查」的消耗，且无法
+        #    为其单独配置模型（场景路由按 scene 精确匹配）。
+        _t0 = time.perf_counter()
+        _obj, _ = await collect_json_response(
+            [{"role": "system", "content": _sys}],
+            _validate_check_results,
+            # ✅ R38：补 json_mode —— 本模块此前三个 JSON 端点是全链路唯一未开
+            #    结构化输出模式的（同族 facts/consistency/global_facts 均已开），
+            #    与 json_response 模块「弱模型稳定 JSON 工作流」的前提相悖。
+            json_mode=True,
+            temperature=0.2,
+            scene="compliance_check",
+        )
+        return _text, _obj, time.perf_counter() - _t0
+
+    # ✅ D-41：并发跑批 + 按批序串行合并（结果确定性不依赖完成顺序）。
+    #    并发安全边界**不自造**：collect_json_response 内部固定走
+    #    provider_factory.chat_with_fallback，后者用 concurrency_controller.semaphore
+    #    兜底全局在飞 ≤ settings.max_concurrency（默认 5）—— 仓库 8 并发单日
+    #    769 次 429 的历史教训即由此闸门收敛。return_exceptions=True 保证任何
+    #    一批失败时其余任务被回收，不留孤儿协程，随后统一抛出（与串行语义一致）。
+    _outcomes = await asyncio.gather(
+        *[_run_one_batch(_i, _b) for _i, _b in enumerate(_run_batches)], return_exceptions=True
+    )
+    _merged: dict = {}
+    _sent_chars = 0
+    for _i, _out in enumerate(_outcomes):
+        if isinstance(_out, BaseException):
+            raise _out
+        _text, _obj, _dur = _out
+        _sent_chars += len(_text)
+        _merge_check_results(_merged, _normalize_ai_results(_obj.get("results", []), checklist, body.rule_ids))
+        # 单批（绝大多数场景）不写额外审计行，避免污染 ai_audit_logs
+        if len(_batches) > 1:
+            await _record_batch_audit(db, index=_i + 1, total=len(_batches), chars=len(_text), duration=_dur)
+    if partial:
+        await _record_batch_audit(
             db,
-            "SELECT id, parent_id, title, content, sort_order FROM sections"
-            " WHERE scheme_id=? AND content!='' ORDER BY sort_order", (scheme_id,),
-            what="规范符合性检查：读取章节正文"))]
-    # ✅ BUG 修复（2026-09-21）：旧实现 c[:2000] 单章节截断，长章节后半段
-    #    永远不被 AI 看到；同时总长 [:6000] 也是硬截断，超长方案只能送前几章。
-    #    现提升单章节上限至 SECTION_CONTENT_CAP（覆盖绝大多数危大工程章节），
-    #    并在超长章节末尾显式标记截断事实，让 AI 至少知道「这段有更多内容」，
-    #    避免无中生有。总长上限保持 6000 以避免上下文窗口爆炸。
-    _trunc_count = 0
-    _parts: list = []
-    for t, c in sections:
-        if len(c) > SECTION_CONTENT_CAP:
-            _trunc_count += 1
-            _c = c[:SECTION_CONTENT_CAP] + f"\n\n[……本章正文已截断，原文 {len(c)} 字]"
-        else:
-            _c = c
-        _parts.append(f"### {t}\n{_c}")
-    content = "\n\n".join(_parts)
-    if _trunc_count:
-        logger.warning("compliance_check: %d 个章节正文超过 %d 字上限被截断（scheme=%s）",
-                       _trunc_count, SECTION_CONTENT_CAP, scheme_id)
-
-    sys_prompt = render("compliance_check_system",
-                        scheme_name=scheme_name,
-                        scheme_type=scheme_type,
-                        global_facts=await _load_facts_prompt_text(db, scheme_id),
-                        checklist=json.dumps(checklist, ensure_ascii=False),
-                        content=content[:AI_CONTENT_HARD_CAP])
-    # ✅ 修复（2026-09-24）：旧实现未传 scene —— 该调用在 ai_audit_logs 里
-    #    scene 恒为空串，/ai/stats 场景聚看不到「符合性检查」的消耗，且无法
-    #    为其单独配置模型（场景路由按 scene 精确匹配）。
-    obj, _ = await collect_json_response(
-        [{"role": "system", "content": sys_prompt}],
-        _validate_check_results,
-        # ✅ R38：补 json_mode —— 本模块此前三个 JSON 端点是全链路唯一未开
-        #    结构化输出模式的（同族 facts/consistency/global_facts 均已开），
-        #    与 json_response 模块「弱模型稳定 JSON 工作流」的前提相悖。
-        json_mode=True, temperature=0.2,
-        scene="compliance_check")
-
-    results = _normalize_ai_results(obj.get("results", []), checklist, body.rule_ids)
+            index=len(_run_batches),
+            total=len(_batches),
+            chars=_sent_chars,
+            duration=0.0,
+            note=(
+                f"budget_hit=1 skipped_batches={len(_skipped_batches)}"
+                f" unchecked_sections={len(_truncated_sections)}"
+            ),
+        )
+    results = list(_merged.values())
     # ✅ 根治批次截头（2026-09-23）：本次调用的全部行共享一个 batch_id，
     #    总检聚合按 batch_id 取「最近一批」，不再依赖 rowid 连续段推断
     #    （两次 /check 跨秒交错时 rowid 段会错切，首批被截头/混批）。
@@ -481,6 +755,11 @@ async def compliance_check(body: ComplianceCheckIn, db=Depends(get_db)):
     _batch_fp = await _content_fingerprint(db, scheme_id)
     for r in results:
         cid = str(uuid.uuid4())
+        # ✅ B-01：把「部分检查」事实随结果行落库。总检聚合读 result JSON 时
+        #    可据此把该批标记为 partial，而不是当成完整检查通过。
+        _row = dict(r)
+        _row["partial"] = partial
+        _row["truncated_section_count"] = len(_truncated_sections)
         # ✅ R13（2026-10-06）：写路径经 exec_write。旧实现丢弃返回值 ——
         #    INSERT 返回 None 时 commit 照常成功、接口返回 batch_id，前端
         #    「清除本次结果」后端查无此批，「最近一批合规结果」永远取不到，
@@ -491,13 +770,41 @@ async def compliance_check(body: ComplianceCheckIn, db=Depends(get_db)):
             " rule_id, item, severity, result, suggestion, batch_id,"
             " content_fingerprint)"
             " VALUES (?,?,?,?,?,?,?,?,?,?,?)",
-            (cid, scheme_id, project_id, "compliance", r.get("rule_id", ""),
-             r.get("item", ""), r.get("severity", ""),
-             json.dumps(r, ensure_ascii=False), r.get("suggestion", ""), batch_id,
-             _batch_fp),
-            what="规范符合性检查：写入结果行")
+            (
+                cid,
+                scheme_id,
+                project_id,
+                "compliance",
+                r.get("rule_id", ""),
+                r.get("item", ""),
+                r.get("severity", ""),
+                json.dumps(_row, ensure_ascii=False),
+                r.get("suggestion", ""),
+                batch_id,
+                _batch_fp,
+            ),
+            what="规范符合性检查：写入结果行",
+        )
     await db.commit()
-    return {"results": results, "batch_id": batch_id}
+    return {
+        "results": results,
+        "batch_id": batch_id,
+        # ✅ B-01（加法式，向后兼容）：partial=true 表示本次 AI 检查只覆盖了
+        #    前 AI_CONTENT_HARD_CAP 个字符，truncated_sections 逐章标注未完整
+        #    参与检查的章节。旧消费方忽略这些字段即可，语义不变。
+        # ✅ D-41（R176）：分批送审后正常路径不再丢章节（partial=false、
+        #    truncated_sections=[]）；仅预算闸门触顶时 partial=true 并逐章
+        #    标注 not_checked / partially_checked（加法式，旧消费方忽略即可）。
+        "partial": partial,
+        "truncated_sections": _truncated_sections,
+        "checked_chars": _sent_chars,
+        "total_chars": len(content),
+        "batch_count": len(_batches),
+        "executed_batch_count": len(_run_batches),
+        # 闸门值随响应下发，便于前端在 partial 时解释「为什么没审完」
+        # （<=0 表示该维度无上限，与配置语义一致）
+        "budget": {"max_batches": _budget[0], "max_chars": _budget[1]},
+    }
 
 
 def _validate_check_results(o) -> list[str]:
@@ -552,9 +859,65 @@ def _normalize_ai_results(results: list, checklist: list, rule_ids: list) -> lis
     return out
 
 
+#: 严重度排序（用于分批结果合并时「取更高一档」）
+_SEVERITY_RANK = {"高": 3, "中": 2, "低": 1, "high": 3, "medium": 2, "low": 1}
+
+
+def _suggestion_list(row: dict) -> list[str]:
+    """把一条结果的建议归一为**去重后的条目列表**（兼容加法式 ``suggestions``）。"""
+    _raw = row.get("suggestions")
+    _items = list(_raw) if isinstance(_raw, list) else []
+    if not _items and _raw:
+        _items = [str(_raw)]
+    _items.append(row.get("suggestion") or "")
+    out: list[str] = []
+    for _s in _items:
+        _s = str(_s or "").strip()
+        if _s and _s not in out:
+            out.append(_s)
+    return out
+
+
+def _merge_check_results(merged: dict, rows: list) -> None:
+    """✅ D-41（R176）：把单批的检查结果并入跨批结果集（按规则号合并）。
+
+    同一规则可能在多批中都被命中（不同章节的同类问题）。合并口径：
+    - ``hit`` 取并集（任一批命中即为命中）；
+    - ``severity`` 取更高一档（高 > 中 > 低）；
+    - ✅ D-41 修复（R176）：``suggestions`` 取**去重并集**（不同批次的补充建议
+      都保留为独立条目，不拼接成一段、也不只留首条 —— 旧实现会丢后续批次
+      的建议），``suggestion`` 兼容旧消费方取并集首条。
+    规则号缺失时按 item 文案归并；两者都缺失时保留为独立行（不误合并）。
+    """
+    for _i, _r in enumerate(rows or []):
+        rid = str(_r.get("rule_id") or "").strip()
+        item = str(_r.get("item") or "").strip()
+        key = rid or (f"item:{item}" if item else f"__row__{len(merged)}:{_i}")
+        prev = merged.get(key)
+        if prev is None:
+            _first = dict(_r)
+            _sugs = _suggestion_list(_r)
+            if _sugs:
+                _first["suggestions"] = _sugs
+                _first["suggestion"] = _sugs[0]
+            merged[key] = _first
+            continue
+        prev["hit"] = bool(prev.get("hit")) or bool(_r.get("hit"))
+        if _SEVERITY_RANK.get(str(_r.get("severity")), 0) > _SEVERITY_RANK.get(str(prev.get("severity")), 0):
+            prev["severity"] = _r.get("severity")
+        _sugs = _suggestion_list(prev)
+        for _s in _suggestion_list(_r):
+            if _s not in _sugs:
+                _sugs.append(_s)
+        if _sugs:
+            prev["suggestions"] = _sugs
+            prev["suggestion"] = _sugs[0]
+
+
 def _match_rule_by_title(item_text: str, checklist: list) -> str:
     """按检查项文案在清单中的位置反查规则号（清单来自规则注册表时有效）。"""
     from app.services.audit_rules import ai_rules
+
     if item_text:
         for rule in ai_rules():
             if rule.title == item_text or rule.title in item_text:
@@ -574,8 +937,8 @@ async def expert_review(body: ExpertReviewIn, db=Depends(get_db)):
     #    走一次 AI 调用（空 outline + 空方案名），返回看似合理的评分，前端无从
     #    区分"方案不存在"与"章节全部通过论证"。现补 404。
     sc_row = await review_db.fetch_one(
-        db, "SELECT name, type, project_id FROM schemes WHERE id=?", (scheme_id,),
-        what="专家论证预检：读取方案")
+        db, "SELECT name, type, project_id FROM schemes WHERE id=?", (scheme_id,), what="专家论证预检：读取方案"
+    )
     if not sc_row:
         raise HTTPException(404, "方案不存在")
     scheme_name = sc_row["name"]
@@ -583,48 +946,53 @@ async def expert_review(body: ExpertReviewIn, db=Depends(get_db)):
     project_id = sc_row["project_id"] or ""
 
     # ✅ 遗留修复（2026-09-22）：目录树按前序 DFS 送 AI，避免扁平序层级错乱
-    outline_rows = order_sections_dfs(await review_db.fetch_all(
-        db,
-        "SELECT id, parent_id, title, level, sort_order FROM sections"
-        " WHERE scheme_id=? ORDER BY sort_order", (scheme_id,),
-        what="专家论证预检：读取章节目录"))
+    outline_rows = order_sections_dfs(
+        await review_db.fetch_all(
+            db,
+            "SELECT id, parent_id, title, level, sort_order FROM sections" " WHERE scheme_id=? ORDER BY sort_order",
+            (scheme_id,),
+            what="专家论证预检：读取章节目录",
+        )
+    )
     # ✅ BUG 修复（2026-09-21）：旧实现 outline_tree 无节点上限，方案章节多时
     #    JSON 序列化后的提示词可轻易突破模型上下文；现引入 EXPERT_OUTLINE_MAX_NODES
     #    显式 400，避免静默打爆 token。附件同理：既限数量也限单条长度。
     if len(outline_rows) > EXPERT_OUTLINE_MAX_NODES:
         raise HTTPException(
-            400, f"章节数 {len(outline_rows)} 超过上限 {EXPERT_OUTLINE_MAX_NODES}，"
-                 "请精简目录后再执行专家论证预检")
+            400, f"章节数 {len(outline_rows)} 超过上限 {EXPERT_OUTLINE_MAX_NODES}，" "请精简目录后再执行专家论证预检"
+        )
     outline_tree = [{"title": r["title"], "level": r["level"]} for r in outline_rows]
 
     attachments = [str(a) for a in (body.attachments or [])]
     if len(attachments) > EXPERT_ATTACH_MAX_COUNT:
         raise HTTPException(
-            400, f"附件数量 {len(attachments)} 超过上限 {EXPERT_ATTACH_MAX_COUNT}，"
-                 "请筛选最关键的材料再试")
+            400, f"附件数量 {len(attachments)} 超过上限 {EXPERT_ATTACH_MAX_COUNT}，" "请筛选最关键的材料再试"
+        )
     for _i, a in enumerate(attachments):
         if len(a) > EXPERT_ATTACH_MAX_LEN:
             raise HTTPException(
-                400, f"第 {_i + 1} 条附件长度 {len(a)} 超过上限 {EXPERT_ATTACH_MAX_LEN}，"
-                     "请精简后重试")
+                400, f"第 {_i + 1} 条附件长度 {len(a)} 超过上限 {EXPERT_ATTACH_MAX_LEN}，" "请精简后重试"
+            )
 
     # ✅ 论证必要项由规则注册表在运行时注入（消除提示词内联清单与 EXPERT_CHECK_ITEMS 的分叉）
-    check_items = "\n".join(
-        f"- {it['item']}（规则 {it['rule_id']}｜{it['basis']}）"
-        for it in expert_items())
-    sys_prompt = render("expert_review_system",
-                        scheme_name=scheme_name,
-                        scheme_type=scheme_type,
-                        global_facts=await _load_facts_prompt_text(db, scheme_id),
-                        outline_tree=json.dumps(outline_tree, ensure_ascii=False),
-                        attachments=json.dumps(attachments, ensure_ascii=False),
-                        check_items=check_items)
+    check_items = "\n".join(f"- {it['item']}（规则 {it['rule_id']}｜{it['basis']}）" for it in expert_items())
+    sys_prompt = render(
+        "expert_review_system",
+        scheme_name=scheme_name,
+        scheme_type=scheme_type,
+        global_facts=await _load_facts_prompt_text(db, scheme_id),
+        outline_tree=json.dumps(outline_tree, ensure_ascii=False),
+        attachments=json.dumps(attachments, ensure_ascii=False),
+        check_items=check_items,
+    )
     # ✅ 修复（2026-09-24）：补 scene（原为空 → 统计归空场景、场景路由配不上）
     obj, _ = await collect_json_response(
         [{"role": "system", "content": sys_prompt}],
         lambda o: [] if "score" in o else ["缺少 score"],
-        json_mode=True, temperature=0.2,
-        scene="expert_review")
+        json_mode=True,
+        temperature=0.2,
+        scene="expert_review",
+    )
 
     result = _normalize_expert_review_result(obj)
     cid = str(uuid.uuid4())
@@ -635,10 +1003,17 @@ async def expert_review(body: ExpertReviewIn, db=Depends(get_db)):
         db,
         "INSERT INTO compliance_check (id, scheme_id, project_id, check_type,"
         " result, batch_id, content_fingerprint) VALUES (?,?,?,?,?,?,?)",
-        (cid, scheme_id, project_id, "expert_review",
-         json.dumps(result, ensure_ascii=False), uuid.uuid4().hex,
-         await _content_fingerprint(db, scheme_id)),
-        what="专家论证预检：写入结果行")
+        (
+            cid,
+            scheme_id,
+            project_id,
+            "expert_review",
+            json.dumps(result, ensure_ascii=False),
+            uuid.uuid4().hex,
+            await _content_fingerprint(db, scheme_id),
+        ),
+        what="专家论证预检：写入结果行",
+    )
     await db.commit()
     return result
 
@@ -658,27 +1033,25 @@ def _normalize_expert_review_result(obj: dict) -> dict:
     result = dict(obj or {})
     for f in ("ready", "missing", "suggestions"):
         if f not in result:
-            logger.warning("expert_review 输出缺少 %s 字段，按空列表补齐（score=%r）",
-                           f, result.get("score"))
+            logger.warning("expert_review 输出缺少 %s 字段，按空列表补齐（score=%r）", f, result.get("score"))
             result[f] = []
         elif not isinstance(result[f], list):
             # 模型可能返回单字符串（如 missing="工程概况"），直接丢弃会丢失信息
             # 转为单元素数组保留内容，并记 WARNING 供运维审计
             raw = result[f]
             if isinstance(raw, str) and raw.strip():
-                logger.warning("expert_review 的 %s 是字符串（%r），转为单元素数组保留",
-                               f, raw[:120])
+                logger.warning("expert_review 的 %s 是字符串（%r），转为单元素数组保留", f, raw[:120])
                 result[f] = [raw.strip()]
             else:
-                logger.warning("expert_review 的 %s 不是数组（%r），按空列表补齐",
-                               f, type(raw).__name__)
+                logger.warning("expert_review 的 %s 不是数组（%r），按空列表补齐", f, type(raw).__name__)
                 result[f] = []
     return result
 
 
 @router.get("/results/{scheme_id}")
-async def get_results(scheme_id: str, check_type: str = "", limit: int = RESULTS_DEFAULT_LIMIT,
-                      offset: int = 0, db=Depends(get_db)):
+async def get_results(
+    scheme_id: str, check_type: str = "", limit: int = RESULTS_DEFAULT_LIMIT, offset: int = 0, db=Depends(get_db)
+):
     # ✅ BUG 修复（2026-09-21）：旧实现无 LIMIT 无分页，历史累积后一次返回可能
     #    数万行 JSON 撑爆前端与网络。现引入 limit/offset（默认 50、上限 500），
     #    保持向后兼容：老调用方不传参仍拿到最近 50 条；前端要全量可显式传
@@ -693,16 +1066,19 @@ async def get_results(scheme_id: str, check_type: str = "", limit: int = RESULTS
     if check_type:
         where += " AND check_type=?"
         params.append(check_type)
-    total = int(await review_db.fetch_scalar(
-        db, f"SELECT COUNT(*) AS n FROM compliance_check WHERE {where}", params, 0,
-        what="合规历史：统计总数") or 0)
+    total = int(
+        await review_db.fetch_scalar(
+            db, f"SELECT COUNT(*) AS n FROM compliance_check WHERE {where}", params, 0, what="合规历史：统计总数"
+        )
+        or 0
+    )
     items = await review_db.fetch_all(
         db,
-        f"SELECT * FROM compliance_check WHERE {where}"
-        " ORDER BY created_at DESC, rowid DESC LIMIT ? OFFSET ?",
-        params + [limit, offset], what="合规历史：读取结果行")
-    return {"items": items, "total": total,
-            "limit": limit, "offset": offset}
+        f"SELECT * FROM compliance_check WHERE {where}" " ORDER BY created_at DESC, rowid DESC LIMIT ? OFFSET ?",
+        params + [limit, offset],
+        what="合规历史：读取结果行",
+    )
+    return {"items": items, "total": total, "limit": limit, "offset": offset}
 
 
 # ---------------------------------------------------------------------------
@@ -737,64 +1113,103 @@ def _validate_consistency_audit(o) -> list[str]:
 @router.post("/consistency-audit/{scheme_id}")
 async def run_consistency_audit(scheme_id: str, db=Depends(get_db)):
     from app.services.facts_builder import build_facts_text as _build_facts_text
+
     sc_row = await review_db.fetch_one(
-        db, "SELECT name, type, project_id FROM schemes WHERE id=?", (scheme_id,),
-        what="一致性审计：读取方案")
+        db, "SELECT name, type, project_id FROM schemes WHERE id=?", (scheme_id,), what="一致性审计：读取方案"
+    )
     if not sc_row:
         raise HTTPException(404, "方案不存在")
 
     # ✅ 遗留修复（2026-09-22）：审计上下文同样按目录树前序 DFS 送 AI，
     #    保证截断与审阅顺序与文档实序一致
-    sections = [(r["title"], r["content"]) for r in order_sections_dfs(
-        await review_db.fetch_all(
-            db,
-            "SELECT id, parent_id, title, content, sort_order FROM sections"
-            " WHERE scheme_id=? AND content!='' ORDER BY sort_order",
-            (scheme_id,), what="一致性审计：读取章节正文"))]
+    sections = [
+        {"id": r["id"], "title": r["title"], "content": r["content"]}
+        for r in order_sections_dfs(
+            await review_db.fetch_all(
+                db,
+                "SELECT id, parent_id, title, content, sort_order FROM sections"
+                " WHERE scheme_id=? AND content!='' ORDER BY sort_order",
+                (scheme_id,),
+                what="一致性审计：读取章节正文",
+            )
+        )
+    ]
     if not sections:
         raise HTTPException(422, "方案尚无正文内容，无法审计")
-    # ✅ BUG 修复（2026-09-21）：旧实现 c[:1500] 单章节 + 总长 [:30000] 双重硬
-    #    截断，长章节后半段永远不被审计；且截断无标记，AI 无从知晓。
-    #    现提升到 3000/50000，并在超长章节末尾显式标注。
-    _parts: list = []
-    _trunc_count = 0
-    for t, c in sections:
-        if len(c) > CONSISTENCY_SECTION_CAP:
-            _trunc_count += 1
-            _c = c[:CONSISTENCY_SECTION_CAP] + f"\n\n[……本章正文已截断，原文 {len(c)} 字]"
-        else:
-            _c = c
-        _parts.append(f"### {t}\n{_c}")
-    content = "\n\n".join(_parts)[:CONSISTENCY_TOTAL_CAP]
-    if _trunc_count:
-        logger.warning("consistency_audit: %d 个章节正文超过 %d 字上限被截断（scheme=%s）",
-                       _trunc_count, CONSISTENCY_SECTION_CAP, scheme_id)
+    # ✅ B-19（R176）：与 /check 完全同一套长文本策略 —— 单章 6000 切片（续段
+    #    显式标注）、按 6000 装箱成批、共用同一预算闸门。旧实现「整份 50000
+    #    硬截断且无总长标记」会静默丢弃长方案尾部章节（存量 6 个方案中 4 个中招）。
+    _batches, content = _build_content_batches(sections)
+    _budget = _batch_budget()
+    _run_batches, _skipped_batches = _apply_batch_budget(_batches, _budget)
+    if _skipped_batches:
+        # 一致性审计的结论会落库供总检消费，而表结构无处存放「部分检查」标记；
+        # 与其把不完整结论当成完整结论落库，不如明确拒绝（不让总检误判已放行）。
+        raise HTTPException(
+            422,
+            f"目录过长：本次需审计 {len(_batches)} 批，超过单次预算上限 "
+            f"{_budget[0]} 批（{_budget[1]} 字），请分批审核",
+        )
 
     facts = await _build_facts_text(db, scheme_id, max_total=6000)
     if not facts.strip():
         raise HTTPException(422, "尚未提取项目关键事实，请先执行「全局事实提取」再审计一致性")
 
-    sys_prompt = render("consistency_audit_system",
-                        scheme_name=sc_row["name"],
-                        scheme_type=sc_row["type"],
-                        facts=facts,
-                        content=content)
-    # ✅ 修复（2026-09-24）：补 scene（原为空 → 统计归空场景、场景路由配不上）
-    obj, _ = await collect_json_response(
-        [{"role": "system", "content": sys_prompt}],
-        _validate_consistency_audit,
-        json_mode=True, temperature=0.2,
-        scene="consistency_audit")
+    async def _run_one_batch(_batch: list):
+        _sys = render(
+            "consistency_audit_system",
+            scheme_name=sc_row["name"],
+            scheme_type=sc_row["type"],
+            facts=facts,
+            content=_batch_text(_batch),
+        )
+        # ✅ 修复（2026-09-24）：补 scene（原为空 → 统计归空场景、场景路由配不上）
+        _obj, _ = await collect_json_response(
+            [{"role": "system", "content": _sys}],
+            _validate_consistency_audit,
+            json_mode=True,
+            temperature=0.2,
+            scene="consistency_audit",
+        )
+        return _obj
 
-    issues = obj["issues"]
+    # ✅ D-41（R176）：与 /check 同一并发模型 —— gather + return_exceptions，
+    #    全局在飞上限由 provider_factory 的 concurrency_controller 统一兜底。
+    _outcomes = await asyncio.gather(*[_run_one_batch(_b) for _b in _run_batches], return_exceptions=True)
+    for _out in _outcomes:
+        if isinstance(_out, BaseException):
+            raise _out
+
+    issues: list = []
+    _seen: set = set()
+    _scores: list[float] = []
+    _sent_chars = 0
+    for _batch, _obj in zip(_run_batches, _outcomes):
+        _sent_chars += len(_batch_text(_batch))
+        for _it in _obj.get("issues", []) or []:
+            _sig = json.dumps(_it, ensure_ascii=False, sort_keys=True)
+            if _sig not in _seen:
+                _seen.add(_sig)
+                issues.append(_it)
+        # 评分容错：AI 可能返回字符串（如"良好"）或缺失，强制转为 float 失败则记 0
+        try:
+            _scores.append(float(_obj.get("score", 0)))
+        except (TypeError, ValueError):
+            logger.warning("一致性审计评分非数值，按 0 处理: %r", _obj.get("score"))
+            _scores.append(0.0)
+    # 多批取最小分：整体一致性不高于最差批次（保守口径，避免分批后分数虚高）
+    score_float = min(_scores) if _scores else 0.0
     audit_id = str(uuid.uuid4())
-    # 评分容错：AI 可能返回字符串（如"良好"）或缺失，强制转为 float 失败则记 0
-    score_raw = obj.get("score", 0)
-    try:
-        score_float = float(score_raw)
-    except (TypeError, ValueError):
-        logger.warning("一致性审计评分非数值，按 0 处理: %r", score_raw)
-        score_float = 0.0
+    # ✅ R180（2026-11-05 · 可观测性）：把本次审计的覆盖范围一并落库，
+    #    使「今天做了几次校验、每次覆盖多少节/字、发现多少问题」可直接查库
+    #    （此前只有 score + issues，无法回答覆盖度）。
+    _counts = {
+        "sections": len(sections),
+        "batches": len(_batches),
+        "checked_chars": _sent_chars,
+        "total_chars": len(content),
+        "issues": len(issues),
+    }
     # ✅ R13（2026-10-06）：写路径经 exec_write。旧实现 INSERT 未生效时
     #    commit 照常成功、接口返回评分与 issues —— 而 /latest 与总检的
     #    「一致性审计」来源永远取不到本次，用户以为已审计。
@@ -810,38 +1225,62 @@ async def run_consistency_audit(scheme_id: str, db=Depends(get_db)):
     await review_db.exec_write(
         db,
         "INSERT INTO consistency_audit (id, project_id, scheme_id, score,"
-        " content_fingerprint, issues) VALUES (?,?,?,?,?,?)",
-        (audit_id, sc_row["project_id"], scheme_id,
-         score_float,
-         await _content_fingerprint(db, scheme_id),
-         json.dumps(issues, ensure_ascii=False)),
-        what="一致性审计：写入审计结果")
+        " content_fingerprint, issues, counts_json) VALUES (?,?,?,?,?,?,?)",
+        (
+            audit_id,
+            sc_row["project_id"],
+            scheme_id,
+            score_float,
+            await _content_fingerprint(db, scheme_id),
+            json.dumps(issues, ensure_ascii=False),
+            json.dumps(_counts, ensure_ascii=False),
+        ),
+        what="一致性审计：写入审计结果",
+    )
     await db.commit()
-    return {"id": audit_id, "score": score_float, "issues": issues}
+    return {
+        "id": audit_id,
+        "score": score_float,
+        "issues": issues,
+        # ✅ B-19（R176，加法式）：分批后披露批次数与覆盖字符数；
+        #    本端点不做截断（超预算直接 422），故 partial 恒为 False。
+        "batch_count": len(_batches),
+        "partial": False,
+        "checked_chars": _sent_chars,
+        "total_chars": len(content),
+        "counts": _counts,
+    }
 
 
 @router.get("/consistency-audit/{scheme_id}/latest")
 async def latest_consistency_audit(scheme_id: str, db=Depends(get_db)):
     item = await review_db.fetch_one(
         db,
-        "SELECT id, score, issues, created_at FROM consistency_audit "
+        "SELECT id, score, issues, counts_json, created_at FROM consistency_audit "
         "WHERE scheme_id=? ORDER BY created_at DESC, rowid DESC LIMIT 1",
-        (scheme_id,), what="一致性审计：读取最近一次结果")
+        (scheme_id,),
+        what="一致性审计：读取最近一次结果",
+    )
     if not item:
         return {"exists": False}
     try:
         item["issues"] = json.loads(item.get("issues") or "[]")
     except json.JSONDecodeError:
         item["issues"] = []
+    # ✅ R180：历史行 counts_json 为 '{}'（或旧库空串）→ 统一解析为空对象，
+    #    读取端永不因新增列报错。
+    try:
+        item["counts"] = json.loads(item.get("counts_json") or "{}")
+    except json.JSONDecodeError:
+        item["counts"] = {}
+    item.pop("counts_json", None)
     item["exists"] = True
     return item
 
 
 # @deprecated 孤儿 API：本前端无调用方；按向后兼容原则保留，大版本评估清理。
 @router.get("/consistency-audit/{scheme_id}/history", deprecated=True)
-async def consistency_audit_history(
-        scheme_id: str, db=Depends(get_db), limit: int = 10,
-        response: Response = None):
+async def consistency_audit_history(scheme_id: str, db=Depends(get_db), limit: int = 10, response: Response = None):
     _apply_deprecation_headers(
         response,
         replacement=f"/api/v1/compliance/runs/{scheme_id}",
@@ -849,15 +1288,23 @@ async def consistency_audit_history(
     limit = max(1, min(limit, 50))
     items = []
     for r in await review_db.fetch_all(
-            db,
-            "SELECT id, score, issues, created_at FROM consistency_audit "
-            "WHERE scheme_id=? ORDER BY created_at DESC, rowid DESC LIMIT ?",
-            (scheme_id, limit), what="一致性审计历史：读取记录"):
+        db,
+        "SELECT id, score, issues, counts_json, created_at FROM consistency_audit "
+        "WHERE scheme_id=? ORDER BY created_at DESC, rowid DESC LIMIT ?",
+        (scheme_id, limit),
+        what="一致性审计历史：读取记录",
+    ):
         item = r
         try:
             item["issues"] = json.loads(item.get("issues") or "[]")
         except json.JSONDecodeError:
             item["issues"] = []
+        # ✅ R180：历史行无 counts_json 时解析为空对象（零迁移兼容）
+        try:
+            item["counts"] = json.loads(item.get("counts_json") or "{}")
+        except json.JSONDecodeError:
+            item["counts"] = {}
+        item.pop("counts_json", None)
         items.append(item)
     return {"items": items}
 
@@ -885,8 +1332,10 @@ async def _facts_signature(db, scheme_id: str) -> str:
         row = await review_db.fetch_one(
             db,
             f"SELECT COUNT(*) AS n, COALESCE(MAX(updated_at),'') AS latest FROM global_facts "
-            f"WHERE ({scope}) AND {get_facts_inject_where()}", params,
-            what="预检缓存键：统计可注入事实")
+            f"WHERE ({scope}) AND {get_facts_inject_where()}",
+            params,
+            what="预检缓存键：统计可注入事实",
+        )
         # ⚠️ 必须按列名取值：review_db.fetch_one 返回 dict（sqlite3.Row 迭代出的是
         #    值、dict 迭代出的是键）。旧实现写 `row[0] / row[1]`，换成 dict 后
         #    恒 KeyError → 被本函数的 except 吞掉恒返回 ""，等于**事实签名永久失效**：
@@ -905,22 +1354,29 @@ async def _build_preflight_context(scheme_id: str, db) -> PreflightContext:
     也看不到原因。
     """
     sc_row = await review_db.fetch_one(
-        db, "SELECT name, type, word_budget FROM schemes WHERE id=?", (scheme_id,),
-        what="预检上下文：读取方案")
+        db, "SELECT name, type, word_budget FROM schemes WHERE id=?", (scheme_id,), what="预检上下文：读取方案"
+    )
     if not sc_row:
         raise HTTPException(404, "方案不存在")
 
     # ✅ 遗留修复（2026-09-22）：预检上下文按目录树前序 DFS 装配，
     #    使重复内容检测（两两配对）之外的序敏感检查与导出链路同口径。
-    sections = order_sections_dfs(await review_db.fetch_all(
-        db,
-        "SELECT id, parent_id, title, content, word_count, word_budget, level, status, sort_order FROM sections"
-        " WHERE scheme_id=? ORDER BY sort_order", (scheme_id,),
-        what="预检上下文：读取章节"))
+    sections = order_sections_dfs(
+        await review_db.fetch_all(
+            db,
+            "SELECT id, parent_id, title, content, word_count, word_budget, level, status, sort_order FROM sections"
+            " WHERE scheme_id=? ORDER BY sort_order",
+            (scheme_id,),
+            what="预检上下文：读取章节",
+        )
+    )
 
     charts = await review_db.fetch_all(
-        db, "SELECT chart_type, status FROM chart_predictions WHERE scheme_id=?", (scheme_id,),
-        what="预检上下文：读取图表登记")
+        db,
+        "SELECT chart_type, status FROM chart_predictions WHERE scheme_id=?",
+        (scheme_id,),
+        what="预检上下文：读取图表登记",
+    )
 
     # ✅ 2026-10-03（全局事实桥接）：装配「已确认可注入」事实（桥接自身
     #    fail-soft，异常返回空 → check_hazard_params 跳过，预检可用性不受影响）。
@@ -1000,7 +1456,7 @@ def invalidate_overview_cache(scheme_id: str | None = None) -> int:
         _OVERVIEW_RECENT.clear()
         _PREFLIGHT_RECENT.clear()
         return n
-    n = (1 if _OVERVIEW_RECENT.pop(scheme_id, None) is not None else 0)
+    n = 1 if _OVERVIEW_RECENT.pop(scheme_id, None) is not None else 0
     n += 1 if _PREFLIGHT_RECENT.pop(scheme_id, None) is not None else 0
     return n
 
@@ -1031,11 +1487,11 @@ async def _content_fingerprint(db, scheme_id: str) -> str:
     #    一致性扫描侧（consistency_scanner）按同一算法落冲突指纹，聚合两侧
     #    才能可靠比较（同一判据两处实现必然再次分叉）。
     from app.services.scheme_fingerprint import content_fingerprint as _fp
+
     return await _fp(db, scheme_id)
 
 
-async def _run_is_stale(db, scheme_id: str, row,
-                        current_fingerprint: str | None = None) -> bool:
+async def _run_is_stale(db, scheme_id: str, row, current_fingerprint: str | None = None) -> bool:
     """判定一条预检运行记录是否已过期（G3）。
 
     历史行没有指纹（本功能上线前的数据）→ 视为**不过期**：无法判定就不打扰用户，
@@ -1062,9 +1518,7 @@ async def _run_is_stale(db, scheme_id: str, row,
 # @deprecated 孤儿 API：本前端走 /overview（内部已含同一预检引擎且带落库+缓存）；
 # 端点保留供脚本/手工诊断（已补幂等锁+缓存），大版本评估清理。
 @router.post("/preflight/{scheme_id}", deprecated=True)
-async def run_preflight_check(
-        scheme_id: str, db=Depends(get_db), force: bool = False,
-        response: Response = None):
+async def run_preflight_check(scheme_id: str, db=Depends(get_db), force: bool = False, response: Response = None):
     """程序化预检：确定性规则，无需 AI，秒级返回。
 
     覆盖空章节 / 孤立节点 / 字数 / 图表完成率 / 控制字符 / 废止标准 /
@@ -1085,30 +1539,32 @@ async def run_preflight_check(
         #    TTL 内不再返回旧结论（SAF-08 能及时出现）；落库指纹语义不变。
         cache_key = (fingerprint, await _facts_signature(db, scheme_id))
         hit = _PREFLIGHT_RECENT.get(scheme_id)
-        if (not force and hit and hit[0] == cache_key
-                and time.monotonic() - hit[1] < OVERVIEW_CACHE_TTL):
+        if not force and hit and hit[0] == cache_key and time.monotonic() - hit[1] < OVERVIEW_CACHE_TTL:
             cached = dict(hit[2])
             cached["cached"] = True
             cached["stale"] = False
             return cached
         ctx = await _build_preflight_context(scheme_id, db)
-        findings = run_preflight(ctx)
-        stats = preflight_stats(ctx)
+        # ✅ R178（B-4）：预检计算移入工作线程（纯 CPU，不阻塞事件循环）。
+        findings = await asyncio.to_thread(_preflight_findings_blocking, ctx)
+        stats = await asyncio.to_thread(preflight_stats, ctx)
         stats["standard_db_version"] = STANDARD_DB_VERSION
         stats["standard_db_checked_at"] = STANDARD_DB_CHECKED_AT
         result = score_findings(findings)
         payload = result.as_dict()
-        payload.update({
-            "scheme_id": scheme_id,
-            "scheme_name": ctx.scheme_name,
-            "stats": stats,
-            "sources": ["program"],
-            "created_at": datetime.now().isoformat(timespec="seconds"),
-            # ✅ G3：本次结论对应的内容指纹（落库后供 /runs /report 判定是否过期）
-            "content_fingerprint": fingerprint,
-            "stale": False,
-            "cached": False,
-        })
+        payload.update(
+            {
+                "scheme_id": scheme_id,
+                "scheme_name": ctx.scheme_name,
+                "stats": stats,
+                "sources": ["program"],
+                "created_at": datetime.now().isoformat(timespec="seconds"),
+                # ✅ G3：本次结论对应的内容指纹（落库后供 /runs /report 判定是否过期）
+                "content_fingerprint": fingerprint,
+                "stale": False,
+                "cached": False,
+            }
+        )
         await _persist_run(db, scheme_id, payload, stats)
         _cache_put(_PREFLIGHT_RECENT, scheme_id, (cache_key, time.monotonic(), payload))
         return payload
@@ -1148,8 +1604,7 @@ async def readiness_overview(scheme_id: str, db=Depends(get_db), force: bool = F
                 cached["stale"] = False
                 return cached
         # ✅ P1-4：复用本函数已算好的指纹，避免同一次请求第二次全表扫描
-        payload = await _readiness_overview_compute(db, scheme_id,
-                                                    fingerprint=fingerprint)
+        payload = await _readiness_overview_compute(db, scheme_id, fingerprint=fingerprint)
         payload["cached"] = False
         payload["stale"] = False
         if not payload.get("content_fingerprint"):
@@ -1171,8 +1626,9 @@ def _ai_row_is_stale(row: dict, current_fingerprint: str) -> bool:
     return fp != current_fingerprint
 
 
-async def _readiness_overview_compute(db, scheme_id: str, *, persist: bool = True,
-                                      fingerprint: str | None = None) -> dict:
+async def _readiness_overview_compute(
+    db, scheme_id: str, *, persist: bool = True, fingerprint: str | None = None
+) -> dict:
     """总检的实际计算（由 readiness_overview 的并发锁与幂等缓存包着）。
 
     ✅ 2026-10-03（数据链收口）：新增 ``persist`` 形参。**默认 True，既有端点
@@ -1190,7 +1646,8 @@ async def _readiness_overview_compute(db, scheme_id: str, *, persist: bool = Tru
     传 ``persist=False`` 跳过落库，两个问题同时消除且不改任何判定口径。
     """
     ctx = await _build_preflight_context(scheme_id, db)
-    program_findings = run_preflight(ctx)
+    # ✅ R178（B-4）：预检计算移入工作线程（纯 CPU，不阻塞事件循环）。
+    program_findings = await asyncio.to_thread(_preflight_findings_blocking, ctx)
     sources = ["program"]
     # ✅ 修复（2026-10-07 · 陈旧 AI 结论计入评分，生产库实证）：
     #    生产方案 10-01 的 AI 合规/一致性结论，在正文已多次修改的 10-07
@@ -1213,6 +1670,11 @@ async def _readiness_overview_compute(db, scheme_id: str, *, persist: bool = Tru
     #    前端看到的是「分数正常、来源齐全」，实际某一路根本没参与评分 ——
     #    分数静默偏高且无任何信号。现加法式上报（不改动既有键的语义与取值）。
     failed_sources: list[str] = []
+    # ✅ B-01（R175）：**部分检查**的来源清单。与 failed_sources（完全没跑成）
+    #    和 stale_ai_sources（正文已变、结论过期）都不同：这里来源跑成了，但
+    #    只覆盖了正文的一部分（如 /check 6000 字硬上限外的章节根本没进模型）。
+    #    前端/消费方据此显示「部分检查」，避免把 partial 当完整通过。
+    partial_sources: list[str] = []
 
     # --- ✅ G1：导出预检问题并入评分（与程序化预检共用同一套规则词表）---
     # 此前导出预检是独立体系，其问题既不进 preflight_runs 也不进本聚合，
@@ -1221,6 +1683,7 @@ async def _readiness_overview_compute(db, scheme_id: str, *, persist: bool = Tru
     export_findings: list = []
     try:
         from app.routers.export import collect_export_issues, export_issues_to_findings
+
         # ✅ BUG 修复（2026-10-17）：必须传 strict_read=True，否则下面这个
         #    except 对「DB 读失败」这一形态**结构性不可达** —— collect_export_issues
         #    内部四路查询原本一律 fail-soft 降级为空结果集，DB 瞬时故障时
@@ -1233,8 +1696,7 @@ async def _readiness_overview_compute(db, scheme_id: str, *, persist: bool = Tru
     except Exception as e:
         # ✅ P1-6：读取失败必须让用户可见（否则该来源静默不参与评分、分数虚高）
         failed_sources.append("export_check")
-        logger.warning("overview: 导出预检问题聚合失败（跳过，不阻断总检）: %s", e,
-                       exc_info=True)
+        logger.warning("overview: 导出预检问题聚合失败（跳过，不阻断总检）: %s", e, exc_info=True)
 
     # --- AI 规范符合性：取最近一批（同一批 = 同一次 /check 调用写入的行）---
     ai_findings: list = []
@@ -1247,28 +1709,39 @@ async def _readiness_overview_compute(db, scheme_id: str, *, persist: bool = Tru
             db,
             "SELECT batch_id FROM compliance_check WHERE scheme_id=?"
             " AND check_type='compliance' AND batch_id != ''"
-            " ORDER BY created_at DESC, rowid DESC LIMIT 1", (scheme_id,),
-            what="总检聚合：定位最近一批合规结果")
+            " ORDER BY created_at DESC, rowid DESC LIMIT 1",
+            (scheme_id,),
+            what="总检聚合：定位最近一批合规结果",
+        )
         _batch = (_brow["batch_id"] if _brow else "") or ""
         if _batch:
             _rows_raw = await review_db.fetch_all(
                 db,
                 "SELECT result, content_fingerprint FROM compliance_check WHERE scheme_id=?"
                 " AND check_type='compliance' AND batch_id=? ORDER BY rowid",
-                (scheme_id, _batch), what="总检聚合：读取该批合规结果")
+                (scheme_id, _batch),
+                what="总检聚合：读取该批合规结果",
+            )
         else:
             last = await review_db.fetch_one(
                 db,
                 "SELECT MIN(rowid) AS min_rowid, created_at"
                 " FROM compliance_check WHERE scheme_id=? AND check_type='compliance' "
                 "GROUP BY created_at ORDER BY created_at DESC LIMIT 1",
-                (scheme_id,), what="总检聚合：定位历史行连续段锚点")
-            _rows_raw = await review_db.fetch_all(
-                db,
-                "SELECT result, content_fingerprint FROM compliance_check WHERE scheme_id=? AND check_type='compliance'"
-                " AND rowid >= ? ORDER BY rowid",
-                (scheme_id, last["min_rowid"]),
-                what="总检聚合：读取历史行连续段") if last else []
+                (scheme_id,),
+                what="总检聚合：定位历史行连续段锚点",
+            )
+            _rows_raw = (
+                await review_db.fetch_all(
+                    db,
+                    "SELECT result, content_fingerprint FROM compliance_check WHERE scheme_id=? AND check_type='compliance'"
+                    " AND rowid >= ? ORDER BY rowid",
+                    (scheme_id, last["min_rowid"]),
+                    what="总检聚合：读取历史行连续段",
+                )
+                if last
+                else []
+            )
         # ✅ R13（2026-10-06）：旧实现把游标本身当判据（`if cur is not None`），
         #    而 `db.execute` 返回 None 时恰好命中「跳过」分支 —— 表面无害，
         #    但同段的 `cur.fetchone()` 会先抛 AttributeError，整段降级；
@@ -1278,7 +1751,7 @@ async def _readiness_overview_compute(db, scheme_id: str, *, persist: bool = Tru
             _stale_n = 0
             for r in _rows_raw:
                 if _ai_row_is_stale(r, fingerprint):
-                    _stale_n += 1   # 正文已变：该结论不再计入评分
+                    _stale_n += 1  # 正文已变：该结论不再计入评分
                     continue
                 try:
                     rows.append(json.loads(r["result"] or "{}"))
@@ -1287,27 +1760,32 @@ async def _readiness_overview_compute(db, scheme_id: str, *, persist: bool = Tru
             if _stale_n:
                 stale_ai_sources.append("compliance")
                 logger.warning(
-                    "overview: %d 条 AI 合规结论正文指纹不一致（已跳过不计分）scheme=%s",
-                    _stale_n, scheme_id)
+                    "overview: %d 条 AI 合规结论正文指纹不一致（已跳过不计分）scheme=%s", _stale_n, scheme_id
+                )
             ai_findings = ai_results_to_findings(rows)
+            # ✅ B-01：该批结果行带 partial=true → 本次 AI 检查只覆盖部分正文。
+            if any(isinstance(x, dict) and x.get("partial") for x in rows):
+                partial_sources.append("compliance")
             if rows:
                 sources.append("compliance")
     except Exception as e:
         failed_sources.append("compliance")
-        logger.warning("overview: 读取 AI 规范符合性结果失败（跳过）: %s", e,
-                       exc_info=True)
+        logger.warning("overview: 读取 AI 规范符合性结果失败（跳过）: %s", e, exc_info=True)
 
     # --- 最近一次一致性审计（作为一致性维度的补充证据）---
     try:
         row = await review_db.fetch_one(
-            db, "SELECT score, issues, content_fingerprint FROM consistency_audit "
-            "WHERE scheme_id=?" " ORDER BY created_at DESC, rowid DESC LIMIT 1",
-            (scheme_id,), what="总检聚合：读取最近一次一致性审计")
+            db,
+            "SELECT score, issues, content_fingerprint FROM consistency_audit "
+            "WHERE scheme_id=?"
+            " ORDER BY created_at DESC, rowid DESC LIMIT 1",
+            (scheme_id,),
+            what="总检聚合：读取最近一次一致性审计",
+        )
         _audit_stale = bool(row) and _ai_row_is_stale(row, fingerprint)
         if _audit_stale:
             stale_ai_sources.append("consistency")
-            logger.warning("overview: 一致性审计结论正文指纹不一致（已跳过）scheme=%s",
-                           scheme_id)
+            logger.warning("overview: 一致性审计结论正文指纹不一致（已跳过）scheme=%s", scheme_id)
         if row and not _audit_stale:
             try:
                 issues = json.loads(row["issues"] or "[]")
@@ -1322,22 +1800,69 @@ async def _readiness_overview_compute(db, scheme_id: str, *, persist: bool = Tru
                 #    1 条，导致一份方案有多处不一致时一致性维度只扣一次分、总分虚高。
                 #    现逐条计入一致性维度扣分，与「看了报告仍不知道能不能交付」的
                 #    设计目标一致（每条不一致都是独立的交付风险）。
-                ai_findings.append({
-                    "rule_id": f"CON-04-{idx + 1}", "dimension": "consistency",
-                    "severity": sev,
-                    "title": f"一致性审计：{it.get('dimension') or '不一致项'}",
-                    "detail": it.get("content_quote") or it.get("fact") or "",
-                    "evidence": [it.get("fact") or "", it.get("content_quote") or ""],
-                    "section_id": "", "section_title": it.get("section_title") or "",
-                    "suggestion": it.get("suggestion") or "",
-                    "basis": "全文一致性审计（AI）", "mode": "ai",
-                })
+                ai_findings.append(
+                    {
+                        "rule_id": f"CON-04-{idx + 1}",
+                        "dimension": "consistency",
+                        "severity": sev,
+                        "title": f"一致性审计：{it.get('dimension') or '不一致项'}",
+                        "detail": it.get("content_quote") or it.get("fact") or "",
+                        "evidence": [it.get("fact") or "", it.get("content_quote") or ""],
+                        "section_id": "",
+                        "section_title": it.get("section_title") or "",
+                        "suggestion": it.get("suggestion") or "",
+                        "basis": "全文一致性审计（AI）",
+                        "mode": "ai",
+                    }
+                )
             if issues or row["score"] is not None:
                 sources.append("consistency")
     except Exception as e:
         failed_sources.append("consistency")
-        logger.warning("overview: 读取一致性审计结果失败（跳过）: %s", e,
-                       exc_info=True)
+        logger.warning("overview: 读取一致性审计结果失败（跳过）: %s", e, exc_info=True)
+
+    # --- ✅ B-17（R175）：编号一致性进入总检 ---
+    # 此前 /numbering-consistency 是独立体系：它报「正文子标题编号与目录不一致」，
+    # 总检却完全不知情，用户在两处看到互相矛盾的结论（一处说漂移、一处说可交付）。
+    # 现把同一校验器的结果以 DLV-13（交付物编号一致性）并入评分，口径单一。
+    try:
+        from app.services.numbering import validate_scheme_numbering_consistency
+
+        _num = await validate_scheme_numbering_consistency(db, scheme_id)
+        if _num.get("error"):
+            failed_sources.append("numbering")
+            logger.warning("overview: 编号一致性校验失败（跳过）: %s", _num["error"])
+        else:
+            _num_bad = [s for s in (_num.get("sections") or []) if not s.get("consistent")]
+            if _num_bad:
+                ai_findings.append(
+                    {
+                        "rule_id": "DLV-13",
+                        "dimension": "deliverability",
+                        "severity": "high",
+                        "title": "正文子标题编号与目录/导出编号不一致",
+                        "detail": (
+                            f"{len(_num_bad)} 个章节的正文子标题编号与当前目录编号"
+                            f"不一致（D4 类漂移），导出后目录与标题会错位"
+                        ),
+                        "evidence": [f"{s.get('section_id')}: {len(s.get('diffs') or [])} 处差异" for s in _num_bad][
+                            :10
+                        ],
+                        "section_id": "",
+                        "section_ids": [s.get("section_id") for s in _num_bad if s.get("section_id")],
+                        "section_title": "",
+                        "suggestion": (
+                            "调用 POST /api/v1/schemes/{id}/sections/" "numbering-consistency/repair 按当前目录重新编号"
+                        ),
+                        "basis": "目录 / 正文编号一致性校验",
+                        "mode": "program",
+                    }
+                )
+            if _num.get("checked"):
+                sources.append("numbering")
+    except Exception as e:
+        failed_sources.append("numbering")
+        logger.warning("overview: 编号一致性校验异常（跳过）: %s", e, exc_info=True)
 
     # --- ✅ 新增（2026-09-17）：最近一次全文一致性扫描（规则 + 仲裁）未解决冲突 ---
     # 此前「一致性扫描 → 修复工作台」产出的冲突清单（consistency_conflicts）完全不参与
@@ -1346,15 +1871,17 @@ async def _readiness_overview_compute(db, scheme_id: str, *, persist: bool = Tru
     # repaired/accepted（已解决）与 skipped（用户明确不处理）不计分。
     try:
         last_scan = await review_db.fetch_one(
-            db, "SELECT scan_id, content_fingerprint FROM consistency_conflicts "
-            "WHERE scheme_id=?" " ORDER BY created_at DESC, rowid DESC LIMIT 1",
-            (scheme_id,), what="总检聚合：定位最近一批一致性扫描")
+            db,
+            "SELECT scan_id, content_fingerprint FROM consistency_conflicts "
+            "WHERE scheme_id=?"
+            " ORDER BY created_at DESC, rowid DESC LIMIT 1",
+            (scheme_id,),
+            what="总检聚合：定位最近一批一致性扫描",
+        )
         _scan_stale = bool(last_scan) and _ai_row_is_stale(last_scan, fingerprint)
         if _scan_stale:
             stale_ai_sources.append("consistency_scan")
-            logger.warning(
-                "overview: 一致性扫描结论正文指纹不一致（已跳过）scheme=%s",
-                scheme_id)
+            logger.warning("overview: 一致性扫描结论正文指纹不一致（已跳过）scheme=%s", scheme_id)
         if last_scan and not _scan_stale:
             scan_conflicts = await review_db.fetch_all(
                 db,
@@ -1364,9 +1891,9 @@ async def _readiness_overview_compute(db, scheme_id: str, *, persist: bool = Tru
                 " FROM consistency_conflicts WHERE scheme_id=? AND scan_id=?"
                 " ORDER BY created_at, rowid",
                 (scheme_id, last_scan["scan_id"]),
-                what="总检聚合：读取一致性扫描冲突")
-            unresolved = [c for c in scan_conflicts
-                          if c.get("status") in ("pending", "failed")]
+                what="总检聚合：读取一致性扫描冲突",
+            )
+            unresolved = [c for c in scan_conflicts if c.get("status") in ("pending", "failed")]
             for idx, c in enumerate(unresolved):
                 sev = str(c.get("severity") or "medium").lower()
                 if sev not in ("high", "medium", "low"):
@@ -1392,43 +1919,48 @@ async def _readiness_overview_compute(db, scheme_id: str, *, persist: bool = Tru
                 if reason and reason != topic:
                     detail_parts.append(reason)
                 if auth:
-                    detail_parts.append(
-                        f"权威值：{auth}（{auth_src}）" if auth_src else f"权威值：{auth}")
+                    detail_parts.append(f"权威值：{auth}（{auth_src}）" if auth_src else f"权威值：{auth}")
                 detail = "；".join(detail_parts) or topic
-                ai_findings.append({
-                    "rule_id": f"CON-SCAN-{idx + 1}", "dimension": "consistency",
-                    "severity": sev,
-                    "title": f"一致性扫描：{c.get('conflict_type') or '数值冲突'}",
-                    "detail": detail,
-                    "evidence": [str(o) for o in occ],
-                    "section_id": "", "section_title": topic,
-                    # 权威值单独成字段（/report 与前端可各自消费）。刻意不塞进
-                    # suggestion —— suggestion 是「怎么改」的指令（repair_instruction），
-                    # 权威值是「改成什么」的目标，混在一起会让 repair_instruction 缺失时
-                    # 用户看到一句孤立的值当指令。
-                    "authoritative_value": auth,
-                    "authoritative_source": auth_src,
-                    "suggestion": c.get("repair_instruction") or "",
-                    "basis": "全文一致性扫描（规则+仲裁）", "mode": "program",
-                })
+                ai_findings.append(
+                    {
+                        "rule_id": f"CON-SCAN-{idx + 1}",
+                        "dimension": "consistency",
+                        "severity": sev,
+                        "title": f"一致性扫描：{c.get('conflict_type') or '数值冲突'}",
+                        "detail": detail,
+                        "evidence": [str(o) for o in occ],
+                        "section_id": "",
+                        "section_title": topic,
+                        # 权威值单独成字段（/report 与前端可各自消费）。刻意不塞进
+                        # suggestion —— suggestion 是「怎么改」的指令（repair_instruction），
+                        # 权威值是「改成什么」的目标，混在一起会让 repair_instruction 缺失时
+                        # 用户看到一句孤立的值当指令。
+                        "authoritative_value": auth,
+                        "authoritative_source": auth_src,
+                        "suggestion": c.get("repair_instruction") or "",
+                        "basis": "全文一致性扫描（规则+仲裁）",
+                        "mode": "program",
+                    }
+                )
             sources.append("consistency_scan")
     except Exception as e:
         failed_sources.append("consistency_scan")
-        logger.warning("overview: 读取一致性扫描冲突失败（跳过）: %s", e,
-                       exc_info=True)
+        logger.warning("overview: 读取一致性扫描冲突失败（跳过）: %s", e, exc_info=True)
 
     # --- 最近一次专家论证预检 ---
     try:
         row = await review_db.fetch_one(
-            db, "SELECT result, content_fingerprint FROM compliance_check "
+            db,
+            "SELECT result, content_fingerprint FROM compliance_check "
             "WHERE scheme_id=? AND check_type='expert_review'"
-            " ORDER BY created_at DESC, rowid DESC LIMIT 1", (scheme_id,),
-            what="总检聚合：读取最近一次专家论证预检")
+            " ORDER BY created_at DESC, rowid DESC LIMIT 1",
+            (scheme_id,),
+            what="总检聚合：读取最近一次专家论证预检",
+        )
         _expert_stale = bool(row) and _ai_row_is_stale(row, fingerprint)
         if _expert_stale:
             stale_ai_sources.append("expert_review")
-            logger.warning("overview: 专家论证预检结论正文指纹不一致（已跳过）scheme=%s",
-                           scheme_id)
+            logger.warning("overview: 专家论证预检结论正文指纹不一致（已跳过）scheme=%s", scheme_id)
         if row and not _expert_stale:
             try:
                 expert = json.loads(row["result"] or "{}")
@@ -1439,39 +1971,46 @@ async def _readiness_overview_compute(db, scheme_id: str, *, persist: bool = Tru
                 sources.append("expert_review")
     except Exception as e:
         failed_sources.append("expert_review")
-        logger.warning("overview: 读取专家论证预检结果失败（跳过）: %s", e,
-                       exc_info=True)
+        logger.warning("overview: 读取专家论证预检结果失败（跳过）: %s", e, exc_info=True)
 
     findings = merge_findings(program_findings, ai_findings, export_findings)
     # ✅ 自动修复能力标注（services/review_autofix.py）：为每条 finding 补
     #    ``autofix`` 字段（mode / fixable / reason），前端据此渲染「一键修复」
     #    按钮。只新增字段，既有字段与评分口径完全不变（向后兼容）。
     review_autofix.capability_summary(findings)
-    result = score_findings(findings)
-    stats = preflight_stats(ctx)
+    # ✅ B-04（R175）：失败/部分来源必须参与放行判定 —— 此前只回传展示字段，
+    #    ``released`` 仍可为 True（导出预检崩溃时 DLV-09~15 静默缺席却仍能放行）。
+    result = score_findings(findings, failed_sources=failed_sources, partial_sources=partial_sources)
+    # ✅ R178（B-4）：统计聚合同样移入工作线程（口径不变）。
+    stats = await asyncio.to_thread(preflight_stats, ctx)
     stats["standard_db_version"] = STANDARD_DB_VERSION
     stats["standard_db_checked_at"] = STANDARD_DB_CHECKED_AT
     # ✅ G1：单列导出预检命中数，前端可说明"这分里有几项来自导出预检"
     stats["export_issue_count"] = sum(int(f.get("count") or 0) for f in export_findings)
     payload = result.as_dict()
-    payload.update({
-        "scheme_id": scheme_id,
-        "scheme_name": ctx.scheme_name,
-        "stats": stats,
-        "sources": sources,
-        # ✅ 2026-10-07：因正文已变而跳过的 AI 来源（提示用户重跑对应 AI 检查）
-        "stale_ai_sources": stale_ai_sources,
-        # ✅ 2026-10-12（P1-6）：**读取失败**而未参与评分的来源（系统故障，
-        #    与上面「结论过期」是两类问题）。为空即表示六路来源全部正常参与。
-        "failed_sources": failed_sources,
-        "created_at": datetime.now().isoformat(timespec="seconds"),
-        # ✅ G3：落库后供 /runs /report / 导出页判定「结论是否已过期」
-        # ✅ P1-4：调用方已传入指纹时直接复用（同一请求只扫一次库）；
-        #    未传（review_autofix 等既有调用方）时仍自行计算，行为不变。
-        "content_fingerprint": (fingerprint
-                                if fingerprint is not None
-                                else await _content_fingerprint(db, scheme_id)),
-    })
+    payload.update(
+        {
+            "scheme_id": scheme_id,
+            "scheme_name": ctx.scheme_name,
+            "stats": stats,
+            "sources": sources,
+            # ✅ 2026-10-07：因正文已变而跳过的 AI 来源（提示用户重跑对应 AI 检查）
+            "stale_ai_sources": stale_ai_sources,
+            # ✅ 2026-10-12（P1-6）：**读取失败**而未参与评分的来源（系统故障，
+            #    与上面「结论过期」是两类问题）。为空即表示六路来源全部正常参与。
+            "failed_sources": failed_sources,
+            # ✅ B-01（加法式）：跑成但未覆盖全文的来源。为空即表示所有已参与
+            #    评分的来源都是完整检查。
+            "partial_sources": partial_sources,
+            "created_at": datetime.now().isoformat(timespec="seconds"),
+            # ✅ G3：落库后供 /runs /report / 导出页判定「结论是否已过期」
+            # ✅ P1-4：调用方已传入指纹时直接复用（同一请求只扫一次库）；
+            #    未传（review_autofix 等既有调用方）时仍自行计算，行为不变。
+            "content_fingerprint": (
+                fingerprint if fingerprint is not None else await _content_fingerprint(db, scheme_id)
+            ),
+        }
+    )
     if persist:
         await _persist_run(db, scheme_id, payload, stats)
     return payload
@@ -1495,30 +2034,38 @@ async def _persist_run(db, scheme_id: str, payload: dict, stats: dict):
         # 与 compliance_check / consistency_audit 的项目维度口径对齐；
         # ✅ G3：内容指纹随运行落库，展示层据此判定结论是否已过期。
         from app.routers.review import _scheme_project_id
+
         await review_db.exec_write(
             db,
             "INSERT INTO preflight_runs (id, scheme_id, project_id, content_fingerprint,"
             " rule_version, total, grade, verdict, released, blocked,"
             " counts, dimensions, findings, stats)"
             " VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?)",
-            (str(uuid.uuid4()), scheme_id, await _scheme_project_id(db, scheme_id),
-             payload.get("content_fingerprint") or "",
-             RULE_VERSION, payload.get("total", 0),
-             payload.get("grade", ""), payload.get("verdict", ""),
-             1 if payload.get("released") else 0, 1 if payload.get("blocked") else 0,
-             json.dumps(payload.get("counts") or {}, ensure_ascii=False),
-             json.dumps(payload.get("dimensions") or [], ensure_ascii=False),
-             json.dumps(payload.get("findings") or [], ensure_ascii=False),
-             json.dumps(stats or {}, ensure_ascii=False)),
-            what=f"写入预检运行记录（scheme={scheme_id[:8]}）")
+            (
+                str(uuid.uuid4()),
+                scheme_id,
+                await _scheme_project_id(db, scheme_id),
+                payload.get("content_fingerprint") or "",
+                RULE_VERSION,
+                payload.get("total", 0),
+                payload.get("grade", ""),
+                payload.get("verdict", ""),
+                1 if payload.get("released") else 0,
+                1 if payload.get("blocked") else 0,
+                json.dumps(payload.get("counts") or {}, ensure_ascii=False),
+                json.dumps(payload.get("dimensions") or [], ensure_ascii=False),
+                json.dumps(payload.get("findings") or [], ensure_ascii=False),
+                json.dumps(stats or {}, ensure_ascii=False),
+            ),
+            what=f"写入预检运行记录（scheme={scheme_id[:8]}）",
+        )
         await db.commit()
     except Exception as e:
         # ✅ BUG 修复（2026-09-21）：旧实现 `except Exception: pass` 静默吞错，
         #    磁盘满 / 连接 poisoned / JSON 序列化失败全无声息，运维无从排查；
         #    且当 INSERT 抛异常但连接事务状态未回滚时，后续请求会踩到
         #    "transaction already in progress"。现至少记录日志并尝试 rollback。
-        logger.warning("preflight_runs 写入失败（不影响评分返回）: scheme=%s err=%s",
-                       scheme_id, e)
+        logger.warning("preflight_runs 写入失败（不影响评分返回）: scheme=%s err=%s", scheme_id, e)
         try:
             await db.rollback()
         except Exception as _re:
@@ -1542,8 +2089,10 @@ async def list_preflight_runs(scheme_id: str, limit: int = 10, db=Depends(get_db
         db,
         "SELECT id, total, grade, verdict, released, blocked, counts, rule_version,"
         " content_fingerprint, created_at FROM preflight_runs WHERE scheme_id=?"
-        " ORDER BY created_at DESC, rowid DESC LIMIT ?", (scheme_id, limit),
-        what="预检历史：读取运行记录")
+        " ORDER BY created_at DESC, rowid DESC LIMIT ?",
+        (scheme_id, limit),
+        what="预检历史：读取运行记录",
+    )
     current_fp: str | None = None
     items = []
     for r in rows:
@@ -1554,8 +2103,7 @@ async def list_preflight_runs(scheme_id: str, limit: int = 10, db=Depends(get_db
             item["counts"] = {}
         if current_fp is None and (item.get("content_fingerprint") or ""):
             current_fp = await _content_fingerprint(db, scheme_id)
-        item["stale"] = await _run_is_stale(db, scheme_id, item,
-                                            current_fingerprint=current_fp)
+        item["stale"] = await _run_is_stale(db, scheme_id, item, current_fingerprint=current_fp)
         items.append(item)
     return {"items": items}
 
@@ -1570,8 +2118,10 @@ async def readiness_report(scheme_id: str, fmt: str = "markdown", db=Depends(get
         db,
         "SELECT total, grade, verdict, released, blocked, dimensions, findings,"
         " stats, content_fingerprint, created_at FROM preflight_runs WHERE scheme_id=?"
-        " ORDER BY created_at DESC, rowid DESC LIMIT 1", (scheme_id,),
-        what="整改清单报告：读取最近一次预检记录")
+        " ORDER BY created_at DESC, rowid DESC LIMIT 1",
+        (scheme_id,),
+        what="整改清单报告：读取最近一次预检记录",
+    )
     if not row:
         raise HTTPException(404, "尚无预检记录，请先执行「一键总检」")
     # ✅ BUG 修复（NameError → 500）：旧实现只写了 isinstance 守卫，却**从未从 row
@@ -1615,17 +2165,18 @@ async def readiness_report(scheme_id: str, fmt: str = "markdown", db=Depends(get
         total_value = 0.0
 
     sc_row = await review_db.fetch_one(
-        db, "SELECT name, type FROM schemes WHERE id=?", (scheme_id,),
-        what="整改清单报告：读取方案名")
+        db, "SELECT name, type FROM schemes WHERE id=?", (scheme_id,), what="整改清单报告：读取方案名"
+    )
     name = sc_row["name"] if sc_row else ""
 
     # ✅ G3（2026-09-21）：报告可能基于旧正文 —— 整改清单被抄进评审意见后，
     # 若正文已改过，按旧结论整改就是白干。报告头部显式标注时效状态。
     stale = await _run_is_stale(db, scheme_id, row)
-    stale_line = ("- ⚠️ 时效状态：**已过期**（本次预检之后正文 / 图表已发生变更，"
-                  "结论可能失效，请先重新执行「一键总检」）"
-                  if stale else
-                  "- 时效状态：有效（正文 / 图表与本次预检一致）")
+    stale_line = (
+        "- ⚠️ 时效状态：**已过期**（本次预检之后正文 / 图表已发生变更，" "结论可能失效，请先重新执行「一键总检」）"
+        if stale
+        else "- 时效状态：有效（正文 / 图表与本次预检一致）"
+    )
 
     lines = [
         "# 专项方案审核预检报告",
@@ -1645,15 +2196,13 @@ async def readiness_report(scheme_id: str, fmt: str = "markdown", db=Depends(get
         "| --- | --- | --- | --- |",
     ]
     for d in dims:
-        lines.append(f"| {d.get('label')} | {d.get('weight')} | {d.get('score')} "
-                     f"| {d.get('issue_count')} |")
+        lines.append(f"| {d.get('label')} | {d.get('weight')} | {d.get('score')} " f"| {d.get('issue_count')} |")
 
     blockers = [f for f in findings if f.get("severity") == "block"]
     if blockers:
         lines += ["", "## 二、交付阻断项（须整改）", ""]
         for i, f in enumerate(blockers, 1):
-            lines.append(f"{i}. **{f.get('title')}**（{f.get('rule_id')}）"
-                         f"：{f.get('detail')}")
+            lines.append(f"{i}. **{f.get('title')}**（{f.get('rule_id')}）" f"：{f.get('detail')}")
             if f.get("suggestion"):
                 lines.append(f"   - 整改建议：{f.get('suggestion')}")
 
@@ -1661,22 +2210,32 @@ async def readiness_report(scheme_id: str, fmt: str = "markdown", db=Depends(get
     if others:
         lines += ["", "## 三、其他问题清单", ""]
         for i, f in enumerate(others, 1):
-            sev = {"high": "严重", "medium": "一般", "low": "提示"}.get(
-                f.get("severity"), f.get("severity"))
+            sev = {"high": "严重", "medium": "一般", "low": "提示"}.get(f.get("severity"), f.get("severity"))
             lines.append(f"{i}. [{sev}] **{f.get('title')}**：{f.get('detail')}")
             if f.get("suggestion"):
                 lines.append(f"   - 建议：{f.get('suggestion')}")
 
     lines += ["", "## 四、客观统计", ""]
-    lines.append(f"- 章节数：{stats.get('section_count', 0)}"
-                 f"（已生成 {stats.get('generated_count', 0)}）")
+    lines.append(f"- 章节数：{stats.get('section_count', 0)}" f"（已生成 {stats.get('generated_count', 0)}）")
     lines.append(f"- 总字数：{stats.get('total_words', 0)}")
     lines.append(f"- 图表完成：{stats.get('chart_done', 0)}/{stats.get('chart_total', 0)}")
 
     md = "\n".join(lines)
     if fmt == "json":
-        return {"markdown": md, "total": total_value, "grade": row["grade"] or "—",
-                "findings": findings, "dimensions": dims, "stats": stats,
-                "stale": stale, "created_at": row["created_at"]}
-    return {"format": "markdown", "filename": f"{name}_审核预检报告.md", "content": md,
-            "stale": stale, "created_at": row["created_at"]}
+        return {
+            "markdown": md,
+            "total": total_value,
+            "grade": row["grade"] or "—",
+            "findings": findings,
+            "dimensions": dims,
+            "stats": stats,
+            "stale": stale,
+            "created_at": row["created_at"],
+        }
+    return {
+        "format": "markdown",
+        "filename": f"{name}_审核预检报告.md",
+        "content": md,
+        "stale": stale,
+        "created_at": row["created_at"],
+    }

@@ -23,15 +23,17 @@
 - 等级：A ≥ 90（可直接交付）/ B ≥ 75（可提交论证）/ C ≥ 60（需整改）/ D < 60；
 - **阻断规则**：存在 block 级问题时，等级最高为 C，且 ``released=False``。
 """
+
 from __future__ import annotations
 
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 
 from app.services.audit_rules import (
     DIMENSIONS,
     RULE_VERSION,
     SEVERITY_ORDER,
     SEVERITY_PENALTY,
+    get_rule,
     grade_of,
 )
 
@@ -44,9 +46,9 @@ class DimensionScore:
     key: str
     label: str
     weight: int
-    score: float          # 0-100
-    penalty: float        # 累计扣分
-    findings: list        # 该维度下的发现
+    score: float  # 0-100
+    penalty: float  # 累计扣分
+    findings: list  # 该维度下的发现
 
     def as_dict(self) -> dict:
         return {
@@ -56,26 +58,31 @@ class DimensionScore:
             "score": round(self.score, 1),
             "penalty": round(self.penalty, 1),
             "issue_count": len(self.findings),
-            "block_count": sum(1 for f in self.findings
-                               if f.get("severity") == "block"),
+            "block_count": sum(1 for f in self.findings if f.get("severity") == "block"),
         }
 
 
 @dataclass
 class ReadinessResult:
-    total: float                     # 0-100 综合分
-    grade: str                       # A / B / C / D
-    verdict: str                     # 结论文案
-    released: bool                   # 是否放行（可交付）
-    blocked: bool                    # 是否存在阻断项
-    blockers: list                   # 阻断项清单
-    dimensions: list                 # 各维度得分
-    findings: list                   # 全部发现（已排序）
-    weakest: str                     # 最弱维度 key
+    total: float  # 0-100 综合分
+    grade: str  # A / B / C / D
+    verdict: str  # 结论文案
+    released: bool  # 是否放行（可交付）
+    blocked: bool  # 是否存在阻断项
+    blockers: list  # 阻断项清单
+    dimensions: list  # 各维度得分
+    findings: list  # 全部发现（已排序）
+    weakest: str  # 最弱维度 key
     rule_version: str = RULE_VERSION
     #: ✅ 新增（2026-09-21）：dimension 字段既不在 DIMENSIONS 里、也无映射兜底的
     #: 发现数量；非 0 意味着规则目录与维度定义分叉，运维需要关注。
     unknown_dimension_count: int = 0
+    #: ✅ B-04（R175，可信度）：检查是否完整。``incomplete=True`` 表示有来源
+    #: 没跑成（failed_sources）或只覆盖了部分正文（partial_sources），
+    #: 即便分数够高也**不得**给出「建议放行」。
+    incomplete: bool = False
+    failed_sources: list = field(default_factory=list)
+    partial_sources: list = field(default_factory=list)
 
     def as_dict(self) -> dict:
         return {
@@ -92,6 +99,11 @@ class ReadinessResult:
             "findings": self.findings,
             # ✅ 新增字段（2026-09-21）：未知维度计数，前端可忽略
             "unknown_dimension_count": self.unknown_dimension_count,
+            # ✅ B-04（R175，加法式）：未完整检查的来源清单。前端/消费方
+            #    据此显示「部分检查」或「来源失败」，而不是把它当完整通过。
+            "incomplete": self.incomplete,
+            "failed_sources": self.failed_sources,
+            "partial_sources": self.partial_sources,
         }
 
 
@@ -105,15 +117,25 @@ def _count_by_severity(findings: list) -> dict:
     return out
 
 
-def score_findings(findings: list) -> ReadinessResult:
+def score_findings(
+    findings: list, *, failed_sources: list | None = None, partial_sources: list | None = None
+) -> ReadinessResult:
     """把发现列表聚合成就绪度评分。
 
     Args:
         findings: 统一结构的发现列表（见 ``preflight_engine`` 输出契约）。
+        failed_sources: ✅ B-04（R175）完全没跑成的检查来源（如 AI 超时）。
+        partial_sources: 跑成但只覆盖部分正文的来源（如 /check 总长截断）。
 
     Returns:
         ``ReadinessResult``：含总分、等级、放行结论、各维度得分与阻断项。
     """
+    failed_sources = list(failed_sources or [])
+    partial_sources = list(partial_sources or [])
+    # ✅ B-04（R175，可信度）：来源失败 / 只检查了一部分，都不能算「已检」。
+    #   旧实现 failed_sources 只放进 payload 展示，released 仍可能为 True ——
+    #   AI 超时的方案照样显示「建议放行」。
+    incomplete = bool(failed_sources) or bool(partial_sources)
     grouped: dict = {d.key: [] for d in DIMENSIONS}
     unknown_dim_count = 0
     for f in findings:
@@ -140,9 +162,11 @@ def score_findings(findings: list) -> ReadinessResult:
         items = grouped.get(dim.key, [])
         penalty = sum(SEVERITY_PENALTY.get(f.get("severity") or "low", 0) for f in items)
         score = max(0.0, 100.0 - penalty)
-        dim_scores.append(DimensionScore(
-            key=dim.key, label=dim.label, weight=dim.weight,
-            score=score, penalty=penalty, findings=items))
+        dim_scores.append(
+            DimensionScore(
+                key=dim.key, label=dim.label, weight=dim.weight, score=score, penalty=penalty, findings=items
+            )
+        )
         total += score * dim.weight / total_weight
 
     total = max(0.0, min(100.0, total))
@@ -163,7 +187,9 @@ def score_findings(findings: list) -> ReadinessResult:
     #    若 total >= 75 且同时存在 block，会出现 grade=C + released=True
     #    的矛盾状态（"需整改"却"建议放行"）。现改为以 grade 为准：
     #    只有 grade ∈ {A, B} 且未被阻断才建议放行。
-    released = (not blocked) and grade in ("A", "B")
+    released = (not blocked) and grade in ("A", "B") and not incomplete
+    if incomplete and not blocked:
+        verdict = verdict + "；检查不完整（部分来源失败或未覆盖全文），" "结果仅供参考，不得据此放行"
 
     return ReadinessResult(
         total=total,
@@ -176,6 +202,9 @@ def score_findings(findings: list) -> ReadinessResult:
         findings=_sort_by_severity(findings),
         weakest=weakest,
         unknown_dimension_count=unknown_dim_count,
+        incomplete=incomplete,
+        failed_sources=failed_sources,
+        partial_sources=partial_sources,
     )
 
 
@@ -192,9 +221,8 @@ def _brief(f: dict) -> dict:
 
 def _sort_by_severity(findings: list) -> list:
     return sorted(
-        findings,
-        key=lambda f: (-SEVERITY_ORDER.get(f.get("severity") or "low", 0),
-                       f.get("rule_id") or "zzz"))
+        findings, key=lambda f: (-SEVERITY_ORDER.get(f.get("severity") or "low", 0), f.get("rule_id") or "zzz")
+    )
 
 
 def _merge_dropped_evidence(target: dict, dropped: dict) -> None:
@@ -237,8 +265,56 @@ def _merge_dropped_evidence(target: dict, dropped: dict) -> None:
             target["sources"] = srcs
 
 
+#: ✅ B-13（R175，双计消除）：语义同族规则。CON-01（预检数值一致性）与
+#: CON-07（程序预扫描数值冲突）描述的是**同一件事**，同一冲突过去按 rule_id
+#: 各计一次 —— 一致性维度被扣两遍分，用户看到两条几乎相同的问题。
+#: 去重键由此从「rule_id」升级为「规则族 + 目标定位」。
+_RULE_FAMILY: dict[str, str] = {
+    "CON-01": "CON-NUMERIC",
+    "CON-07": "CON-NUMERIC",
+}
+
+
+def _base_rule_key(rule_id: str) -> str:
+    """取规则基号（去掉 ``-1`` 这类实例后缀），用于族判定与去重键。"""
+    parts = (rule_id or "").split("-")
+    if len(parts) >= 2 and parts[1].isdigit():
+        return f"{parts[0]}-{parts[1]}"
+    return rule_id or ""
+
+
+def _target_signature(finding: dict) -> str:
+    """目标定位签名：优先 section_id，其次归一后的 evidence 集合。"""
+    sid = str(finding.get("section_id") or "").strip()
+    if sid:
+        return sid
+    ev = sorted({str(x).strip() for x in (finding.get("evidence") or []) if str(x).strip()})
+    return "|".join(ev)[:240]
+
+
+def _dedup_key(finding: dict) -> str:
+    """去重键：默认仍按 ``rule_id``；仅显式登记的语义同族才带目标定位。
+
+    ✅ B-13（R175）：只按 rule_id 去重会让「同一冲突、两个规则号」各计一次；
+    只按规则族去重又会把**不同数值冲突**（工期 vs 强度）错误合并。故对同族
+    规则追加目标定位（章节或 evidence 集合），做到「同一处冲突只计一次，
+    不同冲突各自成条」。
+
+    ✅ R175 回归修复：目标定位**只对显式登记的族生效**。此前对全部规则生效，
+    导致同一 rule_id（如 DLV-01）命中不同章节时不再合并、证据也不再并入 ——
+    违反本函数「同 rule_id 去重」的既有契约（见 docstring），并造成重复扣分。
+    """
+    rid = str(finding.get("rule_id") or "")
+    family = _RULE_FAMILY.get(_base_rule_key(rid))
+    if not family:
+        # 非登记族：保持旧契约 —— 同 rule_id 即一条，证据由 merge 阶段并入。
+        return rid
+    target = _target_signature(finding)
+    return f"{family}::{target}" if target else family
+
+
 def merge_findings(*groups: list) -> list:
-    """合并多来源发现（程序化预检 + AI 判定），按规则 ID 去重。
+    """合并多来源发现（程序化预检 + AI 判定），按「规则族 + 目标定位」去重。
 
     同一规则被两条链路同时命中时保留严重度更高的一条，避免同一问题重复扣分。
     **被丢弃那条的证据会并入保留者**（见 :func:`_merge_dropped_evidence`），
@@ -250,13 +326,19 @@ def merge_findings(*groups: list) -> list:
     merge 阶段被塌缩成 1 条 —— 现 preflight_engine 已改为 CON-05-1、CON-05-2 …
     编号，本函数保持按 rule_id 去重的语义不变。
 
+    ✅ B-13（R175）：**仅对登记的同族规则**把去重键扩展为「规则族 + 目标定位」
+    （``CON-01`` 与 ``CON-07`` 同族），同一数值冲突只保留一条；不同目标/不同
+    evidence 的冲突仍各自保留。其余规则仍按 ``rule_id`` 去重，产出方可用实例
+    后缀区分，行为不变。
+
     若某维度允许多条 finding 共用 rule_id（如"某规则命中 3 个不同章节"），
     产出方应显式加后缀区分；否则会被本函数视为重复并合并。
     """
     merged: dict = {}
     for group in groups:
         for f in group or []:
-            key = f.get("rule_id") or (f.get("title") or "")
+            rid = f.get("rule_id") or ""
+            key = _dedup_key(f) if rid else (f.get("title") or "")
             if not key:
                 # 无 rule_id 的临时发现（如检查项异常）直接保留
                 merged[f"__anon_{len(merged)}"] = f
@@ -265,8 +347,7 @@ def merge_findings(*groups: list) -> list:
             if prev is None:
                 merged[key] = f
                 continue
-            if SEVERITY_ORDER.get(f.get("severity"), 0) > SEVERITY_ORDER.get(
-                    prev.get("severity"), 0):
+            if SEVERITY_ORDER.get(f.get("severity"), 0) > SEVERITY_ORDER.get(prev.get("severity"), 0):
                 # 新者胜出：把旧者的证据并入新者
                 _merge_dropped_evidence(f, prev)
                 merged[key] = f
@@ -274,6 +355,31 @@ def merge_findings(*groups: list) -> list:
                 # 旧者胜出：把新者的证据并入旧者（此前是**整条丢弃**）
                 _merge_dropped_evidence(prev, f)
     return _sort_by_severity(list(merged.values()))
+
+
+#: ✅ B-18（R176）：AI severity 锚定注册表 —— 允许 AI 在注册表档位上下浮动一档
+#: （模型看到更具体的证据时可比注册表更严/更宽），但**永不允许 AI 产出 block**：
+#: 阻断项只能由确定性程序规则给出，否则模型一句「严重」就能把方案锁在 D 级；
+#: 注册表本身为 block 时也不允许 AI 下调（红线不可被模型观感降级）。
+_AI_SEVERITY_UP = 1
+_AI_SEVERITY_DOWN = 1
+_SEVERITY_BY_RANK = {v: k for k, v in SEVERITY_ORDER.items()}
+
+
+def _anchor_ai_severity(rule_id: str, ai_severity: str) -> str:
+    """把 AI 自报严重度锚定到规则注册表（B-18）。"""
+    _ai = ai_severity if ai_severity in SEVERITY_PENALTY else "medium"
+    _rule = get_rule(rule_id) if rule_id else None
+    if _rule is None or _rule.severity not in SEVERITY_ORDER:
+        # 注册表外的规则号（AI 自由生成）：保留档位但不允许 block
+        return "high" if _ai == "block" else _ai
+    _base = _rule.severity
+    if _base == "block":
+        return "block"
+    _lo = max(0, SEVERITY_ORDER[_base] - _AI_SEVERITY_DOWN)
+    _hi = min(SEVERITY_ORDER["high"], SEVERITY_ORDER[_base] + _AI_SEVERITY_UP)
+    _rank = min(max(SEVERITY_ORDER[_ai], _lo), _hi)
+    return _SEVERITY_BY_RANK.get(_rank, "medium")
 
 
 def ai_results_to_findings(results: list) -> list:
@@ -288,20 +394,25 @@ def ai_results_to_findings(results: list) -> list:
         if hit is True:
             continue  # 命中即合规，不产生发现
         severity = (r.get("severity") or "medium").lower()
+        # "疑似"且 AI 自报低风险：不扣分，仅提示（用 AI 原始档位判定，
+        # 锚定只影响最终计分档位，不改变「疑似低风险不扣分」的策略）
         if hit is None and severity == "low":
-            continue  # "疑似"且低风险：不扣分，仅提示
-        out.append({
-            "rule_id": r.get("rule_id") or "",
-            "dimension": _guess_dimension(r.get("rule_id") or ""),
-            "severity": severity if severity in SEVERITY_PENALTY else "medium",
-            "title": r.get("item") or "AI 检查项",
-            "detail": r.get("evidence") or "AI 判定为缺失 / 疑似缺失",
-            "evidence": [r.get("evidence")] if r.get("evidence") else [],
-            "section_id": "", "section_title": "",
-            "suggestion": r.get("suggestion") or "",
-            "basis": "AI 语义判定",
-            "mode": "ai",
-        })
+            continue
+        out.append(
+            {
+                "rule_id": r.get("rule_id") or "",
+                "dimension": _guess_dimension(r.get("rule_id") or ""),
+                "severity": _anchor_ai_severity(r.get("rule_id") or "", severity),
+                "title": r.get("item") or "AI 检查项",
+                "detail": r.get("evidence") or "AI 判定为缺失 / 疑似缺失",
+                "evidence": [r.get("evidence")] if r.get("evidence") else [],
+                "section_id": "",
+                "section_title": "",
+                "suggestion": r.get("suggestion") or "",
+                "basis": "AI 语义判定",
+                "mode": "ai",
+            }
+        )
     return out
 
 
@@ -309,8 +420,12 @@ def _guess_dimension(rule_id: str) -> str:
     """按规则号前缀推断维度（兼容 AI 自由生成的 rule_id）。"""
     prefix = (rule_id or "").split("-")[0].upper()
     mapping = {
-        "CMP": "completeness", "STD": "compliance", "SAF": "safety",
-        "CON": "consistency", "TRC": "traceability", "DLV": "deliverability",
+        "CMP": "completeness",
+        "STD": "compliance",
+        "SAF": "safety",
+        "CON": "consistency",
+        "TRC": "traceability",
+        "DLV": "deliverability",
     }
     # ✅ BUG 修复：AI 自由生成的 rule_id（无前缀）默认映射到 content 维度而非
     # compliance。compliance 维度是"引用现行标准"的语义，AI 无法判定的未知规则
@@ -326,21 +441,30 @@ def expert_result_to_findings(expert: dict) -> list:
     for item in (expert or {}).get("missing") or []:
         rule_id = EXPERT_ITEM_RULES.get(item, "")
         rule = get_rule(rule_id) if rule_id else None
-        out.append({
-            "rule_id": rule_id or "CMP-00",
-            "dimension": rule.dimension if rule else "completeness",
-            "severity": rule.severity if rule else "high",
-            "title": f"论证必要项缺失：{item}",
-            "detail": f"专家论证预检判定「{item}」尚未覆盖",
-            "evidence": [], "section_id": "", "section_title": "",
-            "suggestion": rule.detail if rule else f"请补充「{item}」内容",
-            "basis": rule.basis if rule else "",
-            "mode": "ai",
-        })
+        out.append(
+            {
+                "rule_id": rule_id or "CMP-00",
+                "dimension": rule.dimension if rule else "completeness",
+                "severity": rule.severity if rule else "high",
+                "title": f"论证必要项缺失：{item}",
+                "detail": f"专家论证预检判定「{item}」尚未覆盖",
+                "evidence": [],
+                "section_id": "",
+                "section_title": "",
+                "suggestion": rule.detail if rule else f"请补充「{item}」内容",
+                "basis": rule.basis if rule else "",
+                "mode": "ai",
+            }
+        )
     return out
 
 
 __all__ = [
-    "ReadinessResult", "DimensionScore", "score_findings", "merge_findings",
-    "ai_results_to_findings", "expert_result_to_findings", "grade_of",
+    "ReadinessResult",
+    "DimensionScore",
+    "score_findings",
+    "merge_findings",
+    "ai_results_to_findings",
+    "expert_result_to_findings",
+    "grade_of",
 ]

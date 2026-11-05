@@ -20,6 +20,7 @@
 - 正文散文中的编号告警不变（不回归）；
 - 两条判据对同一份正文的保护范围一致（parity）。
 """
+
 from app.services.content_polish import (
     _protected_ranges,
     _strip_fences,
@@ -67,13 +68,10 @@ def test_quality_issues_ignores_code_in_tilde_fence():
 
 def test_quality_issues_still_flags_code_in_prose():
     """正文散文中的废止编号必须照旧告警（不回归）。"""
-    assert quality_issues("临时用电执行 JGJ 46-2005 的规定。")["abolished_standards"] \
-        == ["JGJ 46-2005"]
+    assert quality_issues("临时用电执行 JGJ 46-2005 的规定。")["abolished_standards"] == ["JGJ 46-2005"]
     # 无空格 / 全角破折号等变体同样命中（口径归一化不变）
-    assert quality_issues("依据 GB50202-2002 施工")["abolished_standards"] \
-        == ["GB 50202-2002"]
-    assert quality_issues("依据 GB 50202—2002 施工")["abolished_standards"] \
-        == ["GB 50202-2002"]
+    assert quality_issues("依据 GB50202-2002 施工")["abolished_standards"] == ["GB 50202-2002"]
+    assert quality_issues("依据 GB 50202—2002 施工")["abolished_standards"] == ["GB 50202-2002"]
 
 
 def test_quality_issues_still_flags_code_in_table():
@@ -142,9 +140,9 @@ def test_strip_fences_default_still_removes_tables():
 def test_strip_fences_code_only_keeps_tables():
     text = "前言。\n```mermaid\nA-->B\n```\n| 编号 | 值 |\n| --- | --- |\n| x | y |\n"
     stripped = _strip_fences(text, include_tables=False)
-    assert "```mermaid" not in stripped        # 代码块仍被剔除
+    assert "```mermaid" not in stripped  # 代码块仍被剔除
     assert "A-->B" not in stripped
-    assert "| 编号 | 值 |" in stripped          # 表格行保留
+    assert "| 编号 | 值 |" in stripped  # 表格行保留
     assert stripped.startswith("前言。\n")
 
 
@@ -185,7 +183,7 @@ def test_colloquial_audit_path_unchanged_by_fix():
     """口语化判据的行为必须与修复前完全一致（默认 include_tables=True）。"""
     text = "咱们搞定它。\n```mermaid\nA[咱们]-->B\n```\n"
     hits = find_colloquial_hits(text)
-    assert set(hits) == {"咱们", "搞定"}   # 仅正文命中，围栏内不计
+    assert set(hits) == {"咱们", "搞定"}  # 仅正文命中，围栏内不计
     assert sanitize_ai_content(text).count("施工项目部") == 1
 
 

@@ -23,6 +23,7 @@ R95 §6 遗留清单（源自 R90 §7）中本轮落地的三项修复 + 两项�
 编号说明：原拟 R96 与并行会话（导出模块收口 test_export_closeout_r96_20261017）
 撞号，按「后来者让号」惯例改号 R98（R93 先例）。
 """
+
 from __future__ import annotations
 
 import ast
@@ -57,18 +58,20 @@ def _src(fn) -> str:
 # A 组 · 守卫原语行为契约
 # ---------------------------------------------------------------------------
 
+
 class TestGuardPrimitive:
     """ensure_no_generation_write 的两级判定与文案契约。"""
 
     def test_no_task_does_not_raise(self, monkeypatch):
-        monkeypatch.setattr(sections_mod, "_scheme_task_status_in_progress",
-                            lambda *a, **kw: None)
+        monkeypatch.setattr(sections_mod, "_scheme_task_status_in_progress", lambda *a, **kw: None)
         sections_mod.ensure_no_generation_write(SCHEME, "单元测试动作")
 
     def test_content_running_raises_409_with_action(self, monkeypatch):
         monkeypatch.setattr(
-            sections_mod, "_scheme_task_status_in_progress",
-            lambda sid, t: "running" if t == "content_generation" else None)
+            sections_mod,
+            "_scheme_task_status_in_progress",
+            lambda sid, t: "running" if t == "content_generation" else None,
+        )
         with pytest.raises(HTTPException) as ei:
             sections_mod.ensure_no_generation_write(SCHEME, "自动修复落库")
         assert ei.value.status_code == 409
@@ -79,16 +82,20 @@ class TestGuardPrimitive:
     def test_content_paused_also_blocked(self, monkeypatch):
         # 口径与既有 update_section 守卫逐字一致：running 与 paused 都拦
         monkeypatch.setattr(
-            sections_mod, "_scheme_task_status_in_progress",
-            lambda sid, t: "paused" if t == "content_generation" else None)
+            sections_mod,
+            "_scheme_task_status_in_progress",
+            lambda sid, t: "paused" if t == "content_generation" else None,
+        )
         with pytest.raises(HTTPException) as ei:
             sections_mod.ensure_no_generation_write(SCHEME, "字数压缩")
         assert ei.value.status_code == 409
 
     def test_outline_running_raises_409_outline_wording(self, monkeypatch):
         monkeypatch.setattr(
-            sections_mod, "_scheme_task_status_in_progress",
-            lambda sid, t: "running" if t == "outline_generation" else None)
+            sections_mod,
+            "_scheme_task_status_in_progress",
+            lambda sid, t: "running" if t == "outline_generation" else None,
+        )
         with pytest.raises(HTTPException) as ei:
             sections_mod.ensure_no_generation_write(SCHEME, "全文一致性修复")
         assert ei.value.status_code == 409
@@ -102,6 +109,7 @@ class TestGuardPrimitive:
         def _fake(sid, task_type):
             seen.append(task_type)
             return "running"
+
         monkeypatch.setattr(sections_mod, "_scheme_task_status_in_progress", _fake)
         with pytest.raises(HTTPException) as ei:
             sections_mod.ensure_no_generation_write(SCHEME, "批量修复确认")
@@ -117,20 +125,23 @@ class TestGuardPrimitive:
 
     def test_warning_log_carries_action_scheme_and_status(self, monkeypatch, caplog):
         monkeypatch.setattr(
-            sections_mod, "_scheme_task_status_in_progress",
-            lambda sid, t: "running" if t == "content_generation" else None)
+            sections_mod,
+            "_scheme_task_status_in_progress",
+            lambda sid, t: "running" if t == "content_generation" else None,
+        )
         with caplog.at_level("WARNING", logger="sections"):
             with pytest.raises(HTTPException):
                 sections_mod.ensure_no_generation_write(SCHEME, "图表代码修复")
-        msgs = [r.getMessage() for r in caplog.records
-                if r.name == "sections" and r.levelname == "WARNING"]
-        assert any("图表代码修复" in m and SCHEME in m and "running" in m
-                   for m in msgs), f"WARNING 日志要素不全: {msgs}"
+        msgs = [r.getMessage() for r in caplog.records if r.name == "sections" and r.levelname == "WARNING"]
+        assert any(
+            "图表代码修复" in m and SCHEME in m and "running" in m for m in msgs
+        ), f"WARNING 日志要素不全: {msgs}"
 
 
 # ---------------------------------------------------------------------------
 # B 组 · charts._guard_chart_target 反查与 fail-open
 # ---------------------------------------------------------------------------
+
 
 class _FakeCur:
     def __init__(self, row, raises: bool = False):
@@ -161,11 +172,11 @@ async def _probe_guard(db, section_id="", action="图表代码修复", predictio
         # 既观测「是否进入守卫」也观测「outline 二级确实被走到（无任务时）」
         seen.append((sid, task_type))
         return None
+
     orig = sections_mod._scheme_task_status_in_progress
     sections_mod._scheme_task_status_in_progress = _fake
     try:
-        await charts_mod._guard_chart_target(db, section_id, action,
-                                             prediction_id=prediction_id)
+        await charts_mod._guard_chart_target(db, section_id, action, prediction_id=prediction_id)
     finally:
         sections_mod._scheme_task_status_in_progress = orig
     return [sid for sid, t in seen if t == "content_generation"], seen
@@ -210,12 +221,10 @@ class TestChartGuardResolution:
     async def test_guard_blocks_when_generating(self):
         # 反查到 scheme 且任务在跑 → 必须真实抛 409（不是只「委派了就完事」）
         orig = sections_mod._scheme_task_status_in_progress
-        sections_mod._scheme_task_status_in_progress = (
-            lambda sid, t: "running" if t == "content_generation" else None)
+        sections_mod._scheme_task_status_in_progress = lambda sid, t: "running" if t == "content_generation" else None
         try:
             with pytest.raises(HTTPException) as ei:
-                await charts_mod._guard_chart_target(
-                    _FakeDB(row={"scheme_id": "S1"}), "sec1", "AI 配图生成")
+                await charts_mod._guard_chart_target(_FakeDB(row={"scheme_id": "S1"}), "sec1", "AI 配图生成")
             assert ei.value.status_code == 409
             assert "AI 配图生成" in str(ei.value.detail)
         finally:
@@ -227,22 +236,20 @@ class TestChartGuardResolution:
 # ---------------------------------------------------------------------------
 
 WIRING = [
-    (sections_mod.shrink_section, "ensure_no_generation_write(scheme_id, \"字数压缩\")"),
-    (review_autofix_mod.apply, "_guard_not_generating(scheme_id, \"自动修复落库\")"),
-    (review_autofix_mod.rollback, "_guard_not_generating(scheme_id, \"自动修复回滚\")"),
-    (review_autofix_mod.confirm, "_guard_not_generating(scheme_id, \"批量修复确认\")"),
-    (consistency_repair_mod.repair, "ensure_no_generation_write(scheme_id, \"全文一致性修复\")"),
-    (consistency_repair_mod.confirm, "ensure_no_generation_write(scheme_id, \"一致性修复拒绝恢复\")"),
-    (consistency_repair_mod.rollback, "ensure_no_generation_write(scheme_id, \"一致性修复回滚\")"),
-    (charts_mod.fix_mermaid, "_guard_chart_target(db, section_id, \"图表代码修复\""),
-    (charts_mod.generate_ai_image, "_guard_chart_target(db, section_id, \"AI 配图生成\")"),
+    (sections_mod.shrink_section, 'ensure_no_generation_write(scheme_id, "字数压缩")'),
+    (review_autofix_mod.apply, '_guard_not_generating(scheme_id, "自动修复落库")'),
+    (review_autofix_mod.rollback, '_guard_not_generating(scheme_id, "自动修复回滚")'),
+    (review_autofix_mod.confirm, '_guard_not_generating(scheme_id, "批量修复确认")'),
+    (consistency_repair_mod.repair, 'ensure_no_generation_write(scheme_id, "全文一致性修复")'),
+    (consistency_repair_mod.confirm, 'ensure_no_generation_write(scheme_id, "一致性修复拒绝恢复")'),
+    (consistency_repair_mod.rollback, 'ensure_no_generation_write(scheme_id, "一致性修复回滚")'),
+    (charts_mod.fix_mermaid, '_guard_chart_target(db, section_id, "图表代码修复"'),
+    (charts_mod.generate_ai_image, '_guard_chart_target(db, section_id, "AI 配图生成")'),
 ]
 
 
 class TestWiringSourceLocks:
-    @pytest.mark.parametrize("fn, anchor", WIRING,
-                             ids=[f.__name__ + "-" + str(i)
-                                  for i, (f, _) in enumerate(WIRING)])
+    @pytest.mark.parametrize("fn, anchor", WIRING, ids=[f.__name__ + "-" + str(i) for i, (f, _) in enumerate(WIRING)])
     def test_call_site_present(self, fn, anchor):
         assert anchor in _src(fn), f"{fn.__module__}.{fn.__name__} 缺守卫接线: {anchor}"
 
@@ -254,18 +261,15 @@ class TestWiringSourceLocks:
         # review_autofix / charts 的 helper 都只是委派，判据不许本地复制一份
         src_ra = _src(review_autofix_mod._guard_not_generating)
         src_ch = _src(charts_mod._guard_chart_target)
-        for src, where in ((src_ra, "review_autofix._guard_not_generating"),
-                           (src_ch, "charts._guard_chart_target")):
+        for src, where in ((src_ra, "review_autofix._guard_not_generating"), (src_ch, "charts._guard_chart_target")):
             assert "from app.routers.sections import ensure_no_generation_write" in src
-            assert "content_generation_in_progress" not in src, (
-                where + " 复制了判据，绕开单一事实源")
+            assert "content_generation_in_progress" not in src, where + " 复制了判据，绕开单一事实源"
 
     def test_autofix_helper_delegation_is_functional(self, monkeypatch):
         # A/B M2 抓出的盲区：静态锁只锚 import 行与调用点实参串，
         # 摘掉 helper **体内的委派调用行**全部仍绿 —— 必须功能实证委派为活路径。
         orig = sections_mod._scheme_task_status_in_progress
-        sections_mod._scheme_task_status_in_progress = (
-            lambda sid, t: "running" if t == "content_generation" else None)
+        sections_mod._scheme_task_status_in_progress = lambda sid, t: "running" if t == "content_generation" else None
         try:
             with pytest.raises(HTTPException) as ei:
                 review_autofix_mod._guard_not_generating(SCHEME, "自动修复落库")
@@ -291,13 +295,13 @@ class TestWiringSourceLocks:
 # D 组 · DLV 口径唯一实现 content_coverage_stats
 # ---------------------------------------------------------------------------
 
+
 def _tree_sections() -> list[dict]:
     """父空子满 + 一个纯空白叶子 + 一个真空叶子的标准样本树。"""
     return [
         {"id": "p1", "parent_id": "", "content": "", "word_count": 0},
         {"id": "p1a", "parent_id": "p1", "content": "正文甲", "word_count": 10},
-        {"id": "p1b", "parent_id": "p1",
-         "content": "   \n\t ", "word_count": 0},          # 纯空白 = 空
+        {"id": "p1b", "parent_id": "p1", "content": "   \n\t ", "word_count": 0},  # 纯空白 = 空
         {"id": "p2", "parent_id": "", "content": "独立正文", "word_count": 5},
         {"id": "p2a", "parent_id": "p2", "content": "", "word_count": 0},  # 真空叶子
     ]
@@ -311,8 +315,8 @@ class TestContentCoverageStats:
         cov = content_coverage_stats(_tree_sections())
         assert cov == {
             "section_count": 5,
-            "leaf_count": 3,          # p1a p1b p2a
-            "generated_count": 3,     # p1(经子孙) p1a p2；p1b 纯空白、p2a 空 不计
+            "leaf_count": 3,  # p1a p1b p2a
+            "generated_count": 3,  # p1(经子孙) p1a p2；p1b 纯空白、p2a 空 不计
             "empty_ratio": round(2 / 3 * 100, 1),
         }
 
@@ -325,8 +329,7 @@ class TestContentCoverageStats:
     def test_preflight_stats_uses_shared_impl(self):
         sections = _tree_sections()
         cov = content_coverage_stats(sections)
-        st = preflight_mod.preflight_stats(
-            PreflightContext(scheme_id="s", sections=sections))
+        st = preflight_mod.preflight_stats(PreflightContext(scheme_id="s", sections=sections))
         for k in ("section_count", "leaf_count", "generated_count", "empty_ratio"):
             assert st[k] == cov[k], f"总检看板 {k} 与共用口径分叉"
         src = _src(preflight_mod.preflight_stats)
@@ -334,17 +337,18 @@ class TestContentCoverageStats:
         # AST 级锁：函数体内不得再出现 build_section_tree_index **调用**
         # （注释里提到该名字是历史说明，不构成第二份判据）
         tree = ast.parse(textwrap.dedent(src))
-        self_calls = [n for n in ast.walk(tree)
-                      if isinstance(n, ast.Call)
-                      and isinstance(n.func, ast.Name)
-                      and n.func.id == "build_section_tree_index"]
-        assert not self_calls, (
-            "preflight_stats 又自己算了一份覆盖口径 —— 判据再次分叉")
+        self_calls = [
+            n
+            for n in ast.walk(tree)
+            if isinstance(n, ast.Call) and isinstance(n.func, ast.Name) and n.func.id == "build_section_tree_index"
+        ]
+        assert not self_calls, "preflight_stats 又自己算了一份覆盖口径 —— 判据再次分叉"
 
 
 # ---------------------------------------------------------------------------
 # E 组 · 导出缓存指纹双维取证锁 + charts 写点「刻意不接 invalidate」判据
 # ---------------------------------------------------------------------------
+
 
 def _fingerprint_prep(content: str, data_json: str) -> dict:
     return {
@@ -352,8 +356,7 @@ def _fingerprint_prep(content: str, data_json: str) -> dict:
         "fe_codes": [],
         "fe_images": {},
         "scheme": {"name": "n", "project_id": "p"},
-        "sections": [{"id": "s1", "parent_id": "", "sort_order": 1,
-                      "level": 1, "title": "t", "content": content}],
+        "sections": [{"id": "s1", "parent_id": "", "sort_order": 1, "level": 1, "title": "t", "content": content}],
         "chart_fp": [("s1", "flowchart", data_json)],
         "global_facts": [],
     }
@@ -363,19 +366,19 @@ class TestFingerprintEvidence:
     """R90 遗留⑧取证结论的可执行形态：charts 写点无需接 invalidate。"""
 
     def test_same_input_stable(self):
-        a = export_mod._content_fingerprint(_fingerprint_prep("甲", "{\"a\":1}"))
-        b = export_mod._content_fingerprint(_fingerprint_prep("甲", "{\"a\":1}"))
+        a = export_mod._content_fingerprint(_fingerprint_prep("甲", '{"a":1}'))
+        b = export_mod._content_fingerprint(_fingerprint_prep("甲", '{"a":1}'))
         assert a == b
 
     def test_content_change_misses(self):
-        base = export_mod._content_fingerprint(_fingerprint_prep("甲", "{\"a\":1}"))
-        moved = export_mod._content_fingerprint(_fingerprint_prep("乙", "{\"a\":1}"))
+        base = export_mod._content_fingerprint(_fingerprint_prep("甲", '{"a":1}'))
+        moved = export_mod._content_fingerprint(_fingerprint_prep("乙", '{"a":1}'))
         assert base[1] != moved[1]
 
     def test_data_json_change_misses(self):
         # fix-mermaid 改 data_json（前端重登记同路径）同样必须 miss
-        base = export_mod._content_fingerprint(_fingerprint_prep("甲", "{\"a\":1}"))
-        moved = export_mod._content_fingerprint(_fingerprint_prep("甲", "{\"a\":2}"))
+        base = export_mod._content_fingerprint(_fingerprint_prep("甲", '{"a":1}'))
+        moved = export_mod._content_fingerprint(_fingerprint_prep("甲", '{"a":2}'))
         assert base[1] != moved[1]
 
     def test_fingerprint_covers_both_dims_in_source(self):
@@ -393,12 +396,14 @@ class TestFingerprintEvidence:
     def test_invalidate_still_real_for_its_owners(self):
         # 非空自证：facts 侧既有失效链没被本轮误伤
         from app.services.facts_extractor import invalidate_export_cache
+
         assert callable(invalidate_export_cache)
 
 
 # ---------------------------------------------------------------------------
 # F 组 · export.collect_export_issues 共用口径 + 旧口径不回流
 # ---------------------------------------------------------------------------
+
 
 class TestExportSharedCoverage:
     def test_calls_shared_impl(self):
@@ -433,6 +438,7 @@ class TestExportSharedCoverage:
 # G 组 · MONITOR_CATEGORIES 子集锁 + stage_label 副本一致锁
 # ---------------------------------------------------------------------------
 
+
 class TestCategoryAndStageLabelLocks:
     def test_monitor_categories_is_subset_of_registry(self):
         # R90 遗留④：收敛 MONITOR_CATEGORIES 与 CATEGORY_STANDARDS 的键集是
@@ -440,8 +446,7 @@ class TestCategoryAndStageLabelLocks:
         # 监测类别若出现注册表不认识的键，匹配环节会静默失灵。
         mon = preflight_mod.MONITOR_CATEGORIES
         assert mon, "MONITOR_CATEGORIES 为空 —— 判据静默失灵"
-        assert set(mon) <= set(CATEGORY_STANDARDS), (
-            f"越界键: {set(mon) - set(CATEGORY_STANDARDS)}")
+        assert set(mon) <= set(CATEGORY_STANDARDS), f"越界键: {set(mon) - set(CATEGORY_STANDARDS)}"
 
     def test_monitor_categories_referenced_by_single_object(self):
         src = _src(preflight_mod.check_safety)
@@ -455,12 +460,12 @@ class TestCategoryAndStageLabelLocks:
         #     改前端语义）；
         # (b) 休眠副本不得回流（死代码棘轮）—— content_progress 收敛为纯常量
         #     事实源，函数族一回来就说明有人按旧副本「恢复共用」，直接红。
-        live = re.search(r'"stage_label": rec\.get\([^)]*\)',
-                        _src(sse_handlers_mod._snapshot_stats)).group(0)
+        live = re.search(r'"stage_label": rec\.get\([^)]*\)', _src(sse_handlers_mod._snapshot_stats)).group(0)
         assert live == '"stage_label": rec.get("stage_label", "")'
         assert not hasattr(content_progress_mod, "snapshot_stats"), (
             "content_progress.snapshot_stats 休眠副本回流 —— 活实现唯一在 "
-            "sse_handlers/_sse_outline_build，恢复共用会静默回退 B19 行为")
+            "sse_handlers/_sse_outline_build，恢复共用会静默回退 B19 行为"
+        )
 
     def test_old_stage_fallback_not_reintroduced(self):
         src = _src(sse_handlers_mod._snapshot_stats)

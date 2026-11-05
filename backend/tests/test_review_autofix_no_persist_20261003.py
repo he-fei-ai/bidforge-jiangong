@@ -19,6 +19,7 @@
 4. A/B 反向锚点：若把路由三处改回无参调用（还原缺陷形态），
    TestRouterCallSites 三例与 TestWiringParity 首例必然定向失败。
 """
+
 from __future__ import annotations
 
 import pathlib
@@ -34,10 +35,8 @@ from fastapi import HTTPException
 
 pytestmark = pytest.mark.asyncio
 
-_ROUTER_SRC = (pathlib.Path(__file__).resolve().parent.parent
-               / "app" / "routers" / "review_autofix.py")
-_COMPLIANCE_SRC = (pathlib.Path(__file__).resolve().parent.parent
-                   / "app" / "routers" / "compliance.py")
+_ROUTER_SRC = pathlib.Path(__file__).resolve().parent.parent / "app" / "routers" / "review_autofix.py"
+_COMPLIANCE_SRC = pathlib.Path(__file__).resolve().parent.parent / "app" / "routers" / "compliance.py"
 
 
 @pytest.fixture
@@ -50,13 +49,28 @@ async def db_ctx(tmp_path):
     await db.execute("INSERT INTO projects(id,name) VALUES(?,?)", (pid, "p"))
     await db.execute(
         "INSERT INTO schemes(id,project_id,name,status,word_budget) VALUES(?,?,?,?,0)",
-        (sid, pid, "深基坑支护专项方案", "目录已确认"))
+        (sid, pid, "深基坑支护专项方案", "目录已确认"),
+    )
     await db.execute(
         "INSERT INTO sections (id, scheme_id, project_id, parent_id, title,"
         " description, level, status, word_count, word_budget, content,"
         " review_status, sort_order) VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?)",
-        (uuid.uuid4().hex, sid, "", "", "工程概况", "", 1, "generated",
-         300, 0, "基坑开挖深度 5.6m，周边环境详见图纸。", "", 0))
+        (
+            uuid.uuid4().hex,
+            sid,
+            "",
+            "",
+            "工程概况",
+            "",
+            1,
+            "generated",
+            300,
+            0,
+            "基坑开挖深度 5.6m，周边环境详见图纸。",
+            "",
+            0,
+        ),
+    )
     await db.commit()
     yield db, sid
     await close_db()
@@ -98,8 +112,7 @@ class TestRouterCallSites:
             calls.append(kw)
             return {"findings": [], "content_fingerprint": "fp", "stale": False}
 
-        monkeypatch.setattr(
-            "app.routers.compliance._readiness_overview_compute", fake_compute)
+        monkeypatch.setattr("app.routers.compliance._readiness_overview_compute", fake_compute)
         return calls
 
     async def test_resolve_finding_uses_persist_false(self, db_ctx, monkeypatch):
@@ -131,11 +144,9 @@ class TestWiringParity:
     async def test_autofix_router_has_no_bare_compute_call(self):
         """review_autofix.py 内所有重算调用必须显式 persist=False。"""
         src = _ROUTER_SRC.read_text(encoding="utf-8")
-        bare = re.findall(
-            r"_readiness_overview_compute\(db, scheme_id\)", src)
+        bare = re.findall(r"_readiness_overview_compute\(db, scheme_id\)", src)
         assert not bare, "存在未带 persist=False 的重算调用（会污染分数趋势）"
-        assert src.count(
-            "_readiness_overview_compute(db, scheme_id, persist=False)") == 3
+        assert src.count("_readiness_overview_compute(db, scheme_id, persist=False)") == 3
 
     async def test_overview_endpoint_keeps_persist(self):
         """compliance.py /overview 端点本体仍走缺省落库（主链路数据源）。
@@ -144,9 +155,7 @@ class TestWiringParity:
         若有人把它改成 persist=False，运行历史与分数趋势当场断链。
         """
         src = _COMPLIANCE_SRC.read_text(encoding="utf-8")
-        m = re.search(
-            r"async def readiness_overview\(.*?\n(?:.*\n)*?.*?_readiness_overview_compute\(([^)]*)\)",
-            src)
+        m = re.search(r"async def readiness_overview\(.*?\n(?:.*\n)*?.*?_readiness_overview_compute\(([^)]*)\)", src)
         assert m and "persist=False" not in m.group(1)
 
     async def test_compute_signature_defaults_compatible(self):

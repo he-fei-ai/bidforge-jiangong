@@ -24,6 +24,7 @@ D 组 · 控制台日志编码统一（P1）：重定向日志全 GBK（1412 行
    logs/backend.log（UTF-8）双轨 → 工具链解析乱码。修复：非 TTY 时
    reconfigure stdout/stderr 为 UTF-8（TTY 保持 locale，控制台零回归）。
 """
+
 import io
 import json
 import logging
@@ -44,10 +45,15 @@ _TRUNCATED_GANTT = (
     '"tasks":[{"id":"t1","name":"瓷砖","start":"2026-03-01","end":"2026-03-15"},'
     '{"id":"t2","name":"钢筋","start":"2026-03-05","end":"2026-03-2'
 )
-_VALID_GANTT = json.dumps({
-    "type": "gantt", "title": "主要材料进场计划", "fig_no": "",
-    "tasks": [{"id": "t1", "name": "瓷砖", "start": "2026-03-01", "end": "2026-03-15"}],
-}, ensure_ascii=False)
+_VALID_GANTT = json.dumps(
+    {
+        "type": "gantt",
+        "title": "主要材料进场计划",
+        "fig_no": "",
+        "tasks": [{"id": "t1", "name": "瓷砖", "start": "2026-03-01", "end": "2026-03-15"}],
+    },
+    ensure_ascii=False,
+)
 
 
 # ---------------------------------------------------------------- A 组：截断载荷
@@ -56,36 +62,33 @@ class TestTruncatedJsonPayloadRejected:
 
     def test_truncated_json_returns_400_with_actionable_message(self):
         from app.main import app
+
         client = TestClient(app)
-        r = client.post("/api/v1/charts/render",
-                        json={"chart_type": "flowchart", "code": _TRUNCATED_GANTT})
-        assert r.status_code == 400, (
-            "截断的 JSON 载荷必须 400 早退（旧行为 500 且文案误导为 Mermaid 语法）")
+        r = client.post("/api/v1/charts/render", json={"chart_type": "flowchart", "code": _TRUNCATED_GANTT})
+        assert r.status_code == 400, "截断的 JSON 载荷必须 400 早退（旧行为 500 且文案误导为 Mermaid 语法）"
         assert "重新生成" in r.text, f"400 文案必须可行动（引导重新生成）：{r.text[:200]}"
 
     def test_valid_json_payload_not_rejected_as_invalid(self):
         """合法 JSON 载荷不得被新守卫误伤（绝不因守卫返回 400）。"""
         from app.main import app
+
         client = TestClient(app)
-        r = client.post("/api/v1/charts/render",
-                        json={"chart_type": "gantt", "code": _VALID_GANTT,
-                              "skip_http": True})
-        assert r.status_code != 400 or "不是合法 JSON" not in r.text, (
-            "合法 JSON 载荷不得被误判为非法")
+        r = client.post("/api/v1/charts/render", json={"chart_type": "gantt", "code": _VALID_GANTT, "skip_http": True})
+        assert r.status_code != 400 or "不是合法 JSON" not in r.text, "合法 JSON 载荷不得被误判为非法"
 
     def test_mermaid_syntax_payload_unaffected(self):
         """Mermaid 语法载荷不经 JSON 守卫（行为逐字兼容）。"""
         from app.main import app
+
         client = TestClient(app)
         code = "graph TD\n  A[开始] --> B[结束]"
-        r = client.post("/api/v1/charts/render",
-                        json={"chart_type": "flowchart", "code": code,
-                              "skip_http": True})
+        r = client.post("/api/v1/charts/render", json={"chart_type": "flowchart", "code": code, "skip_http": True})
         assert "不是合法 JSON" not in r.text
 
     def test_empty_code_still_400_missing_code(self):
         """空 code 的既有 400（缺少图表代码）保持不变。"""
         from app.main import app
+
         client = TestClient(app)
         r = client.post("/api/v1/charts/render", json={"chart_type": "flowchart", "code": ""})
         assert r.status_code == 400
@@ -98,18 +101,18 @@ class TestRendererCorruptPayloadDiagnostics:
 
     def test_corrupt_payload_logs_explicit_warning(self, caplog):
         from app.services.ai.mermaid_renderer import _chart_cache
+
         with caplog.at_level(logging.WARNING, logger="app.services.ai.mermaid_renderer"):
             out = _chart_cache.get_or_render(_TRUNCATED_GANTT, "flowchart", "png", True)
         assert out is None, "截断载荷必然渲染失败（返回 None）"
         assert "JSON 数据载荷非法" in caplog.text, (
-            "损坏载荷必须在渲染第一现场记明确 WARNING，"
-            "而不是只剩'建议检查 HTTP 服务'的误导性建议")
+            "损坏载荷必须在渲染第一现场记明确 WARNING，" "而不是只剩'建议检查 HTTP 服务'的误导性建议"
+        )
 
     def test_render_failure_advice_splits_json_vs_mermaid(self):
         """500 文案按载荷形态分流（源码锁）：JSON 载荷不再提示检查 Mermaid 语法。"""
         src = CHARTS_PY.read_text(encoding="utf-8")
-        assert "_advice" in src and 'startswith("{")' in src, (
-            "charts.py 必须按载荷形态分流 500 建议文案")
+        assert "_advice" in src and 'startswith("{")' in src, "charts.py 必须按载荷形态分流 500 建议文案"
 
 
 # ---------------------------------------------------------------- C 组：uvicorn trace
@@ -119,16 +122,18 @@ class TestUvicornAccessTraceFilter:
     def test_main_installs_filter_on_uvicorn_loggers(self):
         import app.main  # noqa: F401 - import 即触发模块级挂载
         from app.utils.log_context import TraceContextFilter
+
         for name in ("uvicorn", "uvicorn.access", "uvicorn.error"):
             lg = logging.getLogger(name)
             has = any(isinstance(f, TraceContextFilter) for f in lg.filters) or any(
-                isinstance(f, TraceContextFilter)
-                for h in lg.handlers for f in h.filters)
+                isinstance(f, TraceContextFilter) for h in lg.handlers for f in h.filters
+            )
             assert has, f"{name} 必须挂有 TraceContextFilter（R102）"
 
     def test_access_record_gets_trace_prefix(self):
         """功能实证：上下文有 trace 时，uvicorn.access 的记录带 [trace=…] 前缀。"""
         from app.utils.log_context import clear_context, set_context
+
         acc = logging.getLogger("uvicorn.access")
         buf = io.StringIO()
         h = logging.StreamHandler(buf)
@@ -139,23 +144,21 @@ class TestUvicornAccessTraceFilter:
         acc.setLevel(logging.INFO)
         try:
             set_context(trace_id="r102probe01")
-            acc.info('%s - "%s %s HTTP/%s" %d',
-                     "127.0.0.1:1", "GET", "/api/v1/health", "1.1", 200)
+            acc.info('%s - "%s %s HTTP/%s" %d', "127.0.0.1:1", "GET", "/api/v1/health", "1.1", 200)
         finally:
             clear_context()
             acc.removeHandler(h)
             acc.setLevel(_old_level)
-        assert "[trace=r102probe01]" in buf.getvalue(), (
-            "uvicorn.access 记录必须带 trace 前缀（grep 串链不断）")
+        assert "[trace=r102probe01]" in buf.getvalue(), "uvicorn.access 记录必须带 trace 前缀（grep 串链不断）"
 
     def test_install_filter_idempotent_on_reimport(self):
         """重复 import app.main 不重复挂 filter（幂等，无双重前缀）。"""
         import app.main  # noqa: F401
         from app.utils.log_context import TraceContextFilter
+
         acc = logging.getLogger("uvicorn.access")
         n_logger = sum(1 for f in acc.filters if isinstance(f, TraceContextFilter))
-        n_handler = sum(1 for h in acc.handlers for f in h.filters
-                        if isinstance(f, TraceContextFilter))
+        n_handler = sum(1 for h in acc.handlers for f in h.filters if isinstance(f, TraceContextFilter))
         assert n_logger + n_handler == 1, f"filter 必须恰好一个（实测 {n_logger}+{n_handler}）"
 
 
@@ -165,8 +168,7 @@ class TestLoggingEncodingAndSourceLocks:
 
     def test_main_reconfigures_non_tty_streams_to_utf8(self):
         src = MAIN_PY.read_text(encoding="utf-8")
-        assert "reconfigure" in src and 'encoding="utf-8"' in src, (
-            "main.py 必须对非 TTY 流 reconfigure 为 UTF-8")
+        assert "reconfigure" in src and 'encoding="utf-8"' in src, "main.py 必须对非 TTY 流 reconfigure 为 UTF-8"
         assert "isatty" in src, "必须按 TTY 判定，实时控制台保持 locale 零回归"
 
     def test_charts_guard_source_lock(self):

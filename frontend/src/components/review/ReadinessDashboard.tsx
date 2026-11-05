@@ -19,22 +19,52 @@
  */
 import { memo, useCallback, useEffect, useMemo, useRef, useState } from "react";
 import {
-  App, Alert, Button, Card, Col, Descriptions, Drawer, Empty, List, Progress,
-  Row, Segmented, Space, Spin, Table, Tag, Tooltip, Typography,
+  App,
+  Alert,
+  Button,
+  Card,
+  Col,
+  Descriptions,
+  Drawer,
+  Empty,
+  List,
+  Progress,
+  Row,
+  Segmented,
+  Space,
+  Spin,
+  Table,
+  Tag,
+  Tooltip,
+  Typography,
 } from "antd";
 import {
-  CheckCircleOutlined, CloseCircleOutlined, DownloadOutlined,
-  ExclamationCircleOutlined, FileTextOutlined, ReloadOutlined,
-  SafetyCertificateOutlined, ThunderboltOutlined, WarningOutlined,
+  CheckCircleOutlined,
+  CloseCircleOutlined,
+  DownloadOutlined,
+  ExclamationCircleOutlined,
+  FileTextOutlined,
+  ReloadOutlined,
+  SafetyCertificateOutlined,
+  ThunderboltOutlined,
+  WarningOutlined,
 } from "@ant-design/icons";
 import { complianceApi } from "../../api";
 import AutoFixModal from "./AutoFixModal";
 import BatchFixModal from "./BatchFixModal";
 import { useAntdMessageHub } from "../../utils/activityCenter";
 import {
-  GRADE_COLOR, SCORE_COLOR, SEVERITY_COLOR, SEVERITY_LABEL, SEVERITY_WEIGHT,
-  type AuditDimension, type AuditRule, type PreflightFinding,
-  type PreflightRunItem, type ReadinessOverview, type Severity,
+  GRADE_COLOR,
+  SCORE_COLOR,
+  SEVERITY_COLOR,
+  SEVERITY_LABEL,
+  SEVERITY_WEIGHT,
+  type AuditDimension,
+  type AuditRule,
+  type PreflightFinding,
+  type PreflightRunItem,
+  type ReadinessOverview,
+  type Severity,
 } from "../../types/audit";
 
 const { Text, Paragraph } = Typography;
@@ -67,12 +97,18 @@ export interface ReadinessDashboardProps {
    * 不传则只在组件内重新总检。
    */
   onContentFixed?: () => void;
+  /**
+   * ✅ R179（E12）：问题行「章节」定位跳转（跳到正文生成并选中该章节）。
+   *    不传时章节列只展示标题文本，不提供跳转按钮。
+   */
+  onLocateSection?: (sectionId: string) => void;
 }
 
 function ReadinessDashboard({
   schemeId,
   refreshKey = 0,
   onContentFixed,
+  onLocateSection,
 }: ReadinessDashboardProps) {
   const { message: _antdMsg } = App.useApp();
   const msg = useAntdMessageHub(_antdMsg, "审核预检");
@@ -149,46 +185,51 @@ function ReadinessDashboard({
   }, [overview, overviewTs, runs]);
   const effectiveReleased = Boolean(overview?.released && !isStale);
 
-  const runOverview = useCallback(async (force = false) => {
-    if (!schemeId) return;
-    const requestId = ++overviewRequestId.current;
-    setLoading(true);
-    try {
-      // ✅ G2：force=true 时跳过服务端缓存强制重算（缓存会在同内容指纹下
-      // 直接返回上次结论，避免连点污染分数趋势）
-      const { data } = await complianceApi.overview(schemeId, force);
-      if (requestId !== overviewRequestId.current) return;
-      setOverview(data as ReadinessOverview);
-      // 优先用后端落库时间戳；后端未返回时回退到本地时间
-      setOverviewTs(Date.parse((data.created_at || "").replace(" ", "T")) || Date.now());
-      const c = data.counts || {};
-      if (data.blocked) {
-        msg.warning(`总检完成：${data.total} 分（${data.grade} 级）— 存在 ${c.block ?? 0} 项交付阻断项，须整改后放行`);
-      } else {
-        msg.success(`总检完成：${data.total} 分（${data.grade} 级）— ${data.verdict}`);
+  const runOverview = useCallback(
+    async (force = false) => {
+      if (!schemeId) return;
+      const requestId = ++overviewRequestId.current;
+      setLoading(true);
+      try {
+        // ✅ G2：force=true 时跳过服务端缓存强制重算（缓存会在同内容指纹下
+        // 直接返回上次结论，避免连点污染分数趋势）
+        const { data } = await complianceApi.overview(schemeId, force);
+        if (requestId !== overviewRequestId.current) return;
+        setOverview(data as ReadinessOverview);
+        // 优先用后端落库时间戳；后端未返回时回退到本地时间
+        setOverviewTs(Date.parse((data.created_at || "").replace(" ", "T")) || Date.now());
+        const c = data.counts || {};
+        if (data.blocked) {
+          msg.warning(
+            `总检完成：${data.total} 分（${data.grade} 级）— 存在 ${c.block ?? 0} 项交付阻断项，须整改后放行`,
+          );
+        } else {
+          msg.success(`总检完成：${data.total} 分（${data.grade} 级）— ${data.verdict}`);
+        }
+        // ✅ G2：命中缓存时明确告知用户「本次没有重复落库」，避免出现
+        // 「点了几次总检，历史趋势却只多出一条」的困惑
+        if (data.cached && !force) {
+          msg.info("正文 / 图表与上次总检一致，已直接返回上次结论（未重复计入历史趋势）");
+        }
+        // ✅ 缺口修复（2026-09-24）：后端 unknown_dimension_count > 0 表示有发现
+        //    命中了六维之外的维度（已一律计入「可交付性」）—— 规则库与评分口径
+        //    发生漂移的数据质量信号。此前前端完全丢弃该字段，漂移永远无人知晓。
+        if (typeof data.unknown_dimension_count === "number" && data.unknown_dimension_count > 0) {
+          msg.warning(
+            `本次总检有 ${data.unknown_dimension_count} 条发现命中了未登记的评分维度，` +
+              `已统一计入「可交付性」——请核对规则库与后端 audit_rules.DIMENSIONS 是否一致`,
+          );
+        }
+        loadRuns();
+      } catch (e: unknown) {
+        const err = e as { message?: string };
+        msg.error(err?.message || "总检失败");
+      } finally {
+        if (requestId === overviewRequestId.current) setLoading(false);
       }
-      // ✅ G2：命中缓存时明确告知用户「本次没有重复落库」，避免出现
-      // 「点了几次总检，历史趋势却只多出一条」的困惑
-      if (data.cached && !force) {
-        msg.info("正文 / 图表与上次总检一致，已直接返回上次结论（未重复计入历史趋势）");
-      }
-      // ✅ 缺口修复（2026-09-24）：后端 unknown_dimension_count > 0 表示有发现
-      //    命中了六维之外的维度（已一律计入「可交付性」）—— 规则库与评分口径
-      //    发生漂移的数据质量信号。此前前端完全丢弃该字段，漂移永远无人知晓。
-      if (typeof data.unknown_dimension_count === "number" && data.unknown_dimension_count > 0) {
-        msg.warning(
-          `本次总检有 ${data.unknown_dimension_count} 条发现命中了未登记的评分维度，` +
-          `已统一计入「可交付性」——请核对规则库与后端 audit_rules.DIMENSIONS 是否一致`,
-        );
-      }
-      loadRuns();
-    } catch (e: unknown) {
-      const err = e as { message?: string };
-      msg.error(err?.message || "总检失败");
-    } finally {
-      if (requestId === overviewRequestId.current) setLoading(false);
-    }
-  }, [schemeId, msg, loadRuns]);
+    },
+    [schemeId, msg, loadRuns],
+  );
 
   const openRules = useCallback(async () => {
     setRuleOpen(true);
@@ -250,8 +291,10 @@ function ReadinessDashboard({
 
   // ✅ 批量修复入口（2026-10-01）：仅当有「阻断 + 可自动修复」项时开放按钮
   const blockingFixable = useMemo(
-    () => (overview?.findings || []).filter(
-      (f) => f.severity === "block" && (f.autofix as PreflightFinding["autofix"])?.fixable),
+    () =>
+      (overview?.findings || []).filter(
+        (f) => f.severity === "block" && (f.autofix as PreflightFinding["autofix"])?.fixable,
+      ),
     [overview],
   );
 
@@ -278,7 +321,9 @@ function ReadinessDashboard({
       }
       extra={
         <Space size={4} wrap>
-          <Button size="small" onClick={openRules}>规则说明</Button>
+          <Button size="small" onClick={openRules}>
+            规则说明
+          </Button>
           <Button
             size="small"
             icon={<DownloadOutlined />}
@@ -315,7 +360,8 @@ function ReadinessDashboard({
       style={{ marginBottom: 12 }}
     >
       <Text type="secondary" style={{ fontSize: 12 }}>
-        聚合「程序化规则预检 + 导出预检 + AI 规范符合性 + 一致性审计 + 专家论证预检」，按内容完整性、
+        聚合「程序化规则预检 + 导出预检 + AI 规范符合性 + 一致性审计 +
+        专家论证预检」，按内容完整性、
         规范符合性、安全措施有效性、全文一致性、可追溯性、可交付性六个维度加权评分，
         给出可否交付的明确结论。规则依据住建部令第37号、建办质〔2018〕31号及现行工程建设标准。
       </Text>
@@ -367,18 +413,27 @@ function ReadinessDashboard({
                   <Tag
                     color="transparent"
                     style={{
-                      color: "#fff", fontWeight: 700, fontSize: 14,
+                      color: "#fff",
+                      fontWeight: 700,
+                      fontSize: 14,
                       background: GRADE_COLOR[overview.grade] || "#999",
-                      border: "none", padding: "1px 10px",
+                      border: "none",
+                      padding: "1px 10px",
                     }}
                   >
                     {overview.grade} 级
                   </Tag>
-                  <Text strong style={{ fontSize: 14 }}>{overview.verdict}</Text>
+                  <Text strong style={{ fontSize: 14 }}>
+                    {overview.verdict}
+                  </Text>
                   {trend !== null && (
                     <Tooltip title="与上一次总检相比">
                       <Tag color={trend > 0 ? "green" : trend < 0 ? "red" : "default"}>
-                        {trend > 0 ? `↑ +${trend.toFixed(1)}` : trend < 0 ? `↓ ${trend.toFixed(1)}` : "持平"}
+                        {trend > 0
+                          ? `↑ +${trend.toFixed(1)}`
+                          : trend < 0
+                            ? `↓ ${trend.toFixed(1)}`
+                            : "持平"}
                       </Tag>
                     </Tooltip>
                   )}
@@ -391,7 +446,8 @@ function ReadinessDashboard({
                           export_issue_count（"这分里有几项来自导出预检"），
                           此前前端未消费，现挂到来源标签上显式告知。 */}
                       {s === "export_check" && (overview.stats?.export_issue_count ?? 0) > 0
-                        ? ` ${overview.stats!.export_issue_count} 项` : ""}
+                        ? ` ${overview.stats!.export_issue_count} 项`
+                        : ""}
                     </Tag>
                   ))}
                   <Text type="secondary" style={{ fontSize: 11 }}>
@@ -402,8 +458,8 @@ function ReadinessDashboard({
                   <Text type="secondary" style={{ fontSize: 12 }}>
                     最弱维度：
                     <Text strong>
-                      {overview.dimensions.find((d) => d.key === overview.weakest)?.label
-                        || overview.weakest}
+                      {overview.dimensions.find((d) => d.key === overview.weakest)?.label ||
+                        overview.weakest}
                     </Text>
                     —— 优先整改该维度收效最大
                   </Text>
@@ -428,8 +484,12 @@ function ReadinessDashboard({
                     <List.Item style={{ padding: "4px 0", border: "none" }}>
                       <Space direction="vertical" size={0} style={{ width: "100%" }}>
                         <Space size={4} wrap>
-                          <Tag color="volcano" style={{ marginRight: 0 }}>{b.rule_id}</Tag>
-                          <Text strong style={{ fontSize: 12 }}>{b.title}</Text>
+                          <Tag color="volcano" style={{ marginRight: 0 }}>
+                            {b.rule_id}
+                          </Tag>
+                          <Text strong style={{ fontSize: 12 }}>
+                            {b.title}
+                          </Text>
                           {b.section_title && (
                             <Text type="secondary" style={{ fontSize: 11 }}>
                               @{b.section_title}
@@ -452,15 +512,19 @@ function ReadinessDashboard({
 
           {/* ===== 六维得分 ===== */}
           <div style={{ marginTop: 12 }}>
-            <Text type="secondary" style={{ fontSize: 12 }}>维度得分（括号内为权重）</Text>
+            <Text type="secondary" style={{ fontSize: 12 }}>
+              维度得分（括号内为权重）
+            </Text>
             <Row gutter={[8, 8]} style={{ marginTop: 6 }}>
               {(overview.dimensions || []).map((d) => (
                 <Col span={8} key={d.key}>
                   <Tooltip title={`${d.label}：扣 ${d.penalty} 分，命中 ${d.issue_count} 个问题`}>
                     <div
                       style={{
-                        border: "1px solid #f0f0f0", borderRadius: 6,
-                        padding: "6px 8px", background: "#fafafa",
+                        border: "1px solid #f0f0f0",
+                        borderRadius: 6,
+                        padding: "6px 8px",
+                        background: "#fafafa",
                       }}
                     >
                       <div style={{ fontSize: 11, color: "#888" }}>
@@ -505,21 +569,29 @@ function ReadinessDashboard({
               </Col>
               <Col span={6}>
                 <div style={{ fontSize: 11, color: "#888" }}>空章节占比</div>
-                <div style={{
-                  fontSize: 15, fontWeight: 600,
-                  color: (overview.stats.empty_ratio || 0) > 20 ? "#E8836B" : "#52c41a",
-                }}>
+                <div
+                  style={{
+                    fontSize: 15,
+                    fontWeight: 600,
+                    color: (overview.stats.empty_ratio || 0) > 20 ? "#E8836B" : "#52c41a",
+                  }}
+                >
                   {overview.stats.empty_ratio || 0}%
                 </div>
               </Col>
               <Col span={6}>
                 <div style={{ fontSize: 11, color: "#888" }}>图表完成</div>
-                <div style={{
-                  fontSize: 15, fontWeight: 600,
-                  color: (overview.stats.chart_total || 0) > 0
-                    && (overview.stats.chart_done || 0) < (overview.stats.chart_total || 0)
-                    ? "#E8836B" : "#52c41a",
-                }}>
+                <div
+                  style={{
+                    fontSize: 15,
+                    fontWeight: 600,
+                    color:
+                      (overview.stats.chart_total || 0) > 0 &&
+                      (overview.stats.chart_done || 0) < (overview.stats.chart_total || 0)
+                        ? "#E8836B"
+                        : "#52c41a",
+                  }}
+                >
                   {overview.stats.chart_done || 0}/{overview.stats.chart_total || 0}
                 </div>
               </Col>
@@ -569,7 +641,9 @@ function ReadinessDashboard({
               showIcon
               icon={<ExclamationCircleOutlined />}
               style={{ marginTop: 12 }}
-              message={`以下 AI 检查结论对应的正文已变更，本次总检未采用：${(overview.stale_ai_sources || [])
+              message={`以下 AI 检查结论对应的正文已变更，本次总检未采用：${(
+                overview.stale_ai_sources || []
+              )
                 .map((s) => SOURCE_LABEL[s] || s)
                 .join("、")}`}
               description="请到对应功能页重新执行一次该 AI 检查，否则这些维度下的问题不会出现在清单里（当前评分可能因此偏高）。"
@@ -613,7 +687,9 @@ function ReadinessDashboard({
               </Space>
               <Table<PreflightFinding>
                 size="small"
-                rowKey={(r) => [r.rule_id || "f", r.section_id || "", r.title || "", r.detail || ""].join("|")}
+                rowKey={(r) =>
+                  [r.rule_id || "f", r.section_id || "", r.title || "", r.detail || ""].join("|")
+                }
                 pagination={filtered.length > 10 ? { pageSize: 10, size: "small" } : false}
                 // ✅ 性能优化：虚拟滚动。表体固定 320px，不开 virtual 时视口外的
                 // 行也会全量建 DOM 并参与 layout/paint，长列表滚动明显掉帧。
@@ -627,7 +703,9 @@ function ReadinessDashboard({
                         <div style={{ marginBottom: 4 }}>
                           <Text type="secondary">证据：</Text>
                           {r.evidence.map((e, i) => (
-                            <Tag key={i} color="orange" style={{ marginBottom: 2 }}>{e}</Tag>
+                            <Tag key={i} color="orange" style={{ marginBottom: 2 }}>
+                              {e}
+                            </Tag>
                           ))}
                         </div>
                       )}
@@ -643,13 +721,15 @@ function ReadinessDashboard({
                       )}
                     </div>
                   ),
-                  rowExpandable: (r) => Boolean(
-                    r.evidence?.length || r.suggestion || r.basis),
+                  rowExpandable: (r) => Boolean(r.evidence?.length || r.suggestion || r.basis),
                 }}
                 columns={[
                   {
-                    title: "严重度", dataIndex: "severity", width: 76,
-                    sorter: (a, b) => (SEVERITY_WEIGHT[b.severity] ?? 0) - (SEVERITY_WEIGHT[a.severity] ?? 0),
+                    title: "严重度",
+                    dataIndex: "severity",
+                    width: 76,
+                    sorter: (a, b) =>
+                      (SEVERITY_WEIGHT[b.severity] ?? 0) - (SEVERITY_WEIGHT[a.severity] ?? 0),
                     // ✅ 语义确认（2026-09-21）：sorter 用 `b - a`，返回负值 → a 排前。
                     //    与 defaultSortOrder:'ascend' 配合：权重大的先返回负值 → a 排前，
                     //    即「阻断」先、「提示」后——符合「阻断项置顶」的产品语义。
@@ -662,23 +742,66 @@ function ReadinessDashboard({
                     ),
                   },
                   {
-                    title: "规则", dataIndex: "rule_id", width: 78,
-                    render: (v: string) => v
-                      ? <Text code style={{ fontSize: 11 }}>{v}</Text>
-                      : "—",
+                    title: "规则",
+                    dataIndex: "rule_id",
+                    width: 78,
+                    render: (v: string) =>
+                      v ? (
+                        <Text code style={{ fontSize: 11 }}>
+                          {v}
+                        </Text>
+                      ) : (
+                        "—"
+                      ),
                   },
                   {
-                    title: "问题", dataIndex: "title", width: 160, ellipsis: true,
-                    render: (v: string, r) => (
-                      <Tooltip title={r.detail}>{v}</Tooltip>
-                    ),
+                    // ✅ R179（E12）：问题定位列。数据早已由后端返回（section_id /
+                    //    section_title），旧表格只展示文字说明，用户无法从总检
+                    //    直接跳到命中章节，需手工在目录里翻找。
+                    title: "章节",
+                    key: "section",
+                    width: 132,
+                    ellipsis: true,
+                    render: (_: unknown, r: PreflightFinding) => {
+                      const label = r.section_title || (r.section_id ? "（章节已删除）" : "跨章节");
+                      if (!r.section_id || !onLocateSection) {
+                        return (
+                          <Text type="secondary" style={{ fontSize: 11 }}>
+                            {label}
+                          </Text>
+                        );
+                      }
+                      return (
+                        <Tooltip title={`定位到「${r.section_title || r.section_id}」`}>
+                          <Button
+                            type="link"
+                            size="small"
+                            style={{ padding: 0, fontSize: 11 }}
+                            onClick={() => onLocateSection(r.section_id)}
+                          >
+                            {label}
+                          </Button>
+                        </Tooltip>
+                      );
+                    },
                   },
                   {
-                    title: "说明", dataIndex: "detail", ellipsis: true,
+                    title: "问题",
+                    dataIndex: "title",
+                    width: 160,
+                    ellipsis: true,
+                    render: (v: string, r) => <Tooltip title={r.detail}>{v}</Tooltip>,
+                  },
+                  {
+                    title: "说明",
+                    dataIndex: "detail",
+                    ellipsis: true,
                     render: (v: string) => v || "—",
                   },
                   {
-                    title: "来源", dataIndex: "mode", width: 68,
+                    title: "来源",
+                    dataIndex: "mode",
+                    width: 68,
                     render: (m: string) => (
                       <Tag style={{ marginRight: 0, fontSize: 11 }}>
                         {m === "ai" ? "AI" : "规则"}
@@ -688,12 +811,16 @@ function ReadinessDashboard({
                   {
                     // ✅ 自动修复入口（2026-09-30）：可用性完全取自后端
                     //    `finding.autofix`（能力表唯一事实源），前端不自行猜测。
-                    title: "修复", key: "autofix", width: 92,
+                    title: "修复",
+                    key: "autofix",
+                    width: 92,
                     render: (_: unknown, r: PreflightFinding) => {
                       const cap = r.autofix;
                       if (!cap) {
                         return (
-                          <Text type="secondary" style={{ fontSize: 11 }}>—</Text>
+                          <Text type="secondary" style={{ fontSize: 11 }}>
+                            —
+                          </Text>
                         );
                       }
                       if (!cap.fixable) {
@@ -706,9 +833,11 @@ function ReadinessDashboard({
                       }
                       return (
                         <Tooltip
-                          title={cap.mode === "auto"
-                            ? "程序化确定性修复，不调用 AI"
-                            : "定位矛盾位置后调用 AI 做最小必要修改"}
+                          title={
+                            cap.mode === "auto"
+                              ? "程序化确定性修复，不调用 AI"
+                              : "定位矛盾位置后调用 AI 做最小必要修改"
+                          }
                         >
                           <Button
                             size="small"
@@ -753,11 +882,16 @@ function ReadinessDashboard({
               >
                 <Tag
                   // ✅ G3：过期记录用 volcano 醒目标注，避免拿旧高分误判
-                  color={r.blocked || r.stale ? "volcano" : scoreColor(r.total) === "#52c41a" ? "green" : "blue"}
+                  color={
+                    r.blocked || r.stale
+                      ? "volcano"
+                      : scoreColor(r.total) === "#52c41a"
+                        ? "green"
+                        : "blue"
+                  }
                   style={{ marginRight: 0 }}
                 >
-                  {i === 0 ? "本次" : `#${i}`} {r.total}（{r.grade}）
-                  {r.stale ? " 已过期" : ""}
+                  {i === 0 ? "本次" : `#${i}`} {r.total}（{r.grade}）{r.stale ? " 已过期" : ""}
                 </Tag>
               </Tooltip>
             ))}
@@ -766,12 +900,7 @@ function ReadinessDashboard({
       )}
 
       {/* ===== 规则目录抽屉 ===== */}
-      <Drawer
-        title="审核规则说明"
-        width={720}
-        open={ruleOpen}
-        onClose={() => setRuleOpen(false)}
-      >
+      <Drawer title="审核规则说明" width={720} open={ruleOpen} onClose={() => setRuleOpen(false)}>
         <Paragraph type="secondary" style={{ fontSize: 12 }}>
           规则依据《危险性较大的分部分项工程安全管理规定》（住建部令第37号）、
           《关于实施〈危险性较大的分部分项工程安全管理规定〉有关问题的通知》
@@ -781,8 +910,12 @@ function ReadinessDashboard({
           <div key={d.key} style={{ marginBottom: 16 }}>
             <Space size={6} wrap>
               <Text strong>{d.label}</Text>
-              <Tag color="blue" style={{ marginRight: 0 }}>权重 {d.weight}</Tag>
-              <Text type="secondary" style={{ fontSize: 12 }}>{d.desc}</Text>
+              <Tag color="blue" style={{ marginRight: 0 }}>
+                权重 {d.weight}
+              </Tag>
+              <Text type="secondary" style={{ fontSize: 12 }}>
+                {d.desc}
+              </Text>
             </Space>
             <Table<AuditRule>
               size="small"
@@ -792,11 +925,19 @@ function ReadinessDashboard({
               dataSource={rules.filter((r) => r.dimension === d.key)}
               columns={[
                 {
-                  title: "编号", dataIndex: "rule_id", width: 74,
-                  render: (v: string) => <Text code style={{ fontSize: 11 }}>{v}</Text>,
+                  title: "编号",
+                  dataIndex: "rule_id",
+                  width: 74,
+                  render: (v: string) => (
+                    <Text code style={{ fontSize: 11 }}>
+                      {v}
+                    </Text>
+                  ),
                 },
                 {
-                  title: "规则", dataIndex: "title", width: 150,
+                  title: "规则",
+                  dataIndex: "title",
+                  width: 150,
                   render: (v: string, r) => (
                     <Tooltip title={r.detail}>
                       <Text style={{ fontSize: 12 }}>{v}</Text>
@@ -804,7 +945,9 @@ function ReadinessDashboard({
                   ),
                 },
                 {
-                  title: "严重度", dataIndex: "severity", width: 72,
+                  title: "严重度",
+                  dataIndex: "severity",
+                  width: 72,
                   render: (s: Severity) => (
                     <Tag color={SEVERITY_COLOR[s] || "default"} style={{ marginRight: 0 }}>
                       {SEVERITY_LABEL[s] || s}
@@ -812,17 +955,21 @@ function ReadinessDashboard({
                   ),
                 },
                 {
-                  title: "判定", dataIndex: "mode", width: 60,
+                  title: "判定",
+                  dataIndex: "mode",
+                  width: 60,
                   render: (m: string) => (
-                    <Tag style={{ marginRight: 0, fontSize: 11 }}>
-                      {m === "ai" ? "AI" : "规则"}
-                    </Tag>
+                    <Tag style={{ marginRight: 0, fontSize: 11 }}>{m === "ai" ? "AI" : "规则"}</Tag>
                   ),
                 },
                 {
-                  title: "行业依据", dataIndex: "basis", ellipsis: true,
+                  title: "行业依据",
+                  dataIndex: "basis",
+                  ellipsis: true,
                   render: (v: string) => (
-                    <Text type="secondary" style={{ fontSize: 11 }}>{v || "—"}</Text>
+                    <Text type="secondary" style={{ fontSize: 11 }}>
+                      {v || "—"}
+                    </Text>
                   ),
                 },
               ]}

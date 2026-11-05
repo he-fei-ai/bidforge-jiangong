@@ -17,6 +17,7 @@
 - export.py
     * _readiness_preflight_summary 的 SELECT 补 content_fingerprint 列
 """
+
 from __future__ import annotations
 
 import json
@@ -53,7 +54,8 @@ async def db_ctx(tmp_path):
     await db.execute("INSERT INTO projects(id,name) VALUES(?,?)", (pid, "p"))
     await db.execute(
         "INSERT INTO schemes(id,project_id,name,status,word_budget) VALUES(?,?,?,?,0)",
-        (sid, pid, "深基坑支护专项方案", "目录已确认"))
+        (sid, pid, "深基坑支护专项方案", "目录已确认"),
+    )
     await db.commit()
     # 模块级幂等缓存按用例隔离（不同 tmp_path 会生成不同 sid，双保险显式清理）
     _PREFLIGHT_RECENT.pop(sid, None)
@@ -62,29 +64,50 @@ async def db_ctx(tmp_path):
     await close_db()
 
 
-async def _insert_section(db, sid, title="第一章", content="", level=1,
-                          parent_id="", word_count=0, sort_order=0):
+async def _insert_section(db, sid, title="第一章", content="", level=1, parent_id="", word_count=0, sort_order=0):
     sec_id = uuid.uuid4().hex
     await db.execute(
         "INSERT INTO sections (id, scheme_id, project_id, parent_id, title,"
         " description, level, status, word_count, word_budget, content,"
         " review_status, sort_order) VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?)",
-        (sec_id, sid, "", parent_id, title, "", level,
-         "generated" if content else "empty",
-         word_count or len(content), 0, content, "", sort_order))
+        (
+            sec_id,
+            sid,
+            "",
+            parent_id,
+            title,
+            "",
+            level,
+            "generated" if content else "empty",
+            word_count or len(content),
+            0,
+            content,
+            "",
+            sort_order,
+        ),
+    )
     return sec_id
 
 
 def _mk_ctx(sections, charts=None, word_budget=0):
     return PreflightContext(
-        scheme_id="s", scheme_name="深基坑支护专项方案", scheme_type="基坑工程",
-        word_budget=word_budget, sections=sections, charts=charts or [])
+        scheme_id="s",
+        scheme_name="深基坑支护专项方案",
+        scheme_type="基坑工程",
+        word_budget=word_budget,
+        sections=sections,
+        charts=charts or [],
+    )
 
 
 def _mk_section(title, content, sid=None, parent_id=""):
     return {
-        "id": sid or uuid.uuid4().hex, "title": title, "content": content,
-        "word_count": len(content), "level": 1, "parent_id": parent_id,
+        "id": sid or uuid.uuid4().hex,
+        "title": title,
+        "content": content,
+        "word_count": len(content),
+        "level": 1,
+        "parent_id": parent_id,
         "status": "generated" if content else "empty",
     }
 
@@ -105,16 +128,39 @@ async def test_cmp09_double_fire_deduped_to_single_finding():
 
 async def test_dedup_keeps_higher_severity_finding():
     """同 rule_id 重复时保留严重度更高的一条。"""
+
     def _fake_completeness(ctx):
         return [
-            {"rule_id": "CMP-01", "dimension": "completeness", "severity": "medium",
-             "title": "轻的", "detail": "", "evidence": [], "section_id": "",
-             "section_title": "", "suggestion": "", "basis": "", "mode": "program"},
-            {"rule_id": "CMP-01", "dimension": "completeness", "severity": "block",
-             "title": "重的", "detail": "", "evidence": [], "section_id": "",
-             "section_title": "", "suggestion": "", "basis": "", "mode": "program"},
+            {
+                "rule_id": "CMP-01",
+                "dimension": "completeness",
+                "severity": "medium",
+                "title": "轻的",
+                "detail": "",
+                "evidence": [],
+                "section_id": "",
+                "section_title": "",
+                "suggestion": "",
+                "basis": "",
+                "mode": "program",
+            },
+            {
+                "rule_id": "CMP-01",
+                "dimension": "completeness",
+                "severity": "block",
+                "title": "重的",
+                "detail": "",
+                "evidence": [],
+                "section_id": "",
+                "section_title": "",
+                "suggestion": "",
+                "basis": "",
+                "mode": "program",
+            },
         ]
+
     import app.services.preflight_engine as pe
+
     orig = pe.check_completeness
     try:
         pe.check_completeness = _fake_completeness
@@ -128,9 +174,12 @@ async def test_dedup_keeps_higher_severity_finding():
 
 async def test_empty_rule_id_findings_not_deduped():
     """异常兜底行（rule_id 为空串）不参与去重，全部保留。"""
+
     def _boom(ctx):
         raise RuntimeError("模拟 checker 崩溃")
+
     import app.services.preflight_engine as pe
+
     orig = pe.check_standards
     try:
         # 两个位置都换成会崩的 checker → 产出两条 rule_id="" 的兜底行
@@ -155,8 +204,7 @@ async def test_preflight_and_overview_score_consistent_on_cmp09(db_ctx):
     ov = await readiness_overview(sid, db, force=True)
     pre_cmp09 = [f for f in pre["findings"] if f.get("rule_id") == "CMP-09"]
     ov_cmp09 = [f for f in ov["findings"] if f.get("rule_id") == "CMP-09"]
-    assert len(pre_cmp09) == 1 and len(ov_cmp09) == 1, \
-        "同一 CMP-09 缺陷在两条链路的发现清单中均应只计一次"
+    assert len(pre_cmp09) == 1 and len(ov_cmp09) == 1, "同一 CMP-09 缺陷在两条链路的发现清单中均应只计一次"
 
 
 # ===========================================================================
@@ -182,12 +230,22 @@ async def test_get_results_pagination_semantics(db_ctx):
             "INSERT INTO compliance_check (id, scheme_id, check_type, rule_id,"
             " item, severity, result, suggestion, created_at)"
             " VALUES (?,?,?,?,?,?,?,?,?)",
-            (uuid.uuid4().hex, sid, "compliance", f"CMP-{i:02d}", f"项{i}",
-             "high", json.dumps({"results": []}), "", now))
+            (
+                uuid.uuid4().hex,
+                sid,
+                "compliance",
+                f"CMP-{i:02d}",
+                f"项{i}",
+                "high",
+                json.dumps({"results": []}),
+                "",
+                now,
+            ),
+        )
     await db.execute(
-        "INSERT INTO compliance_check (id, scheme_id, check_type, result, created_at)"
-        " VALUES (?,?,?,?,?)",
-        (uuid.uuid4().hex, sid, "expert_review", "{}", now))
+        "INSERT INTO compliance_check (id, scheme_id, check_type, result, created_at)" " VALUES (?,?,?,?,?)",
+        (uuid.uuid4().hex, sid, "expert_review", "{}", now),
+    )
     await db.commit()
 
     page1 = await get_results(sid, "", 2, 0, db)
@@ -217,14 +275,12 @@ async def test_preflight_idempotent_cache_and_force(db_ctx):
     assert first["cached"] is False
     second = await run_preflight_check(sid, db)
     assert second["cached"] is True, "同内容指纹 TTL 内应命中幂等缓存"
-    cur = await db.execute(
-        "SELECT COUNT(*) AS n FROM preflight_runs WHERE scheme_id=?", (sid,))
+    cur = await db.execute("SELECT COUNT(*) AS n FROM preflight_runs WHERE scheme_id=?", (sid,))
     assert (await cur.fetchone())["n"] == 1, "命中缓存不应重复落库污染分数趋势"
     # force=true 强制重算并落库
     forced = await run_preflight_check(sid, db, force=True)
     assert forced["cached"] is False
-    cur = await db.execute(
-        "SELECT COUNT(*) AS n FROM preflight_runs WHERE scheme_id=?", (sid,))
+    cur = await db.execute("SELECT COUNT(*) AS n FROM preflight_runs WHERE scheme_id=?", (sid,))
     assert (await cur.fetchone())["n"] == 2
 
 
@@ -240,8 +296,10 @@ async def test_runs_and_report_stale_detection(db_ctx):
     assert runs["items"] and runs["items"][0]["stale"] is False
 
     # 正文变更后旧结论应判过期
-    await db.execute("UPDATE sections SET content=?, word_count=? WHERE id=?",
-                     ("彻底改过的正文" * 300, len("彻底改过的正文" * 300), sec))
+    await db.execute(
+        "UPDATE sections SET content=?, word_count=? WHERE id=?",
+        ("彻底改过的正文" * 300, len("彻底改过的正文" * 300), sec),
+    )
     await db.commit()
     runs = await list_preflight_runs(sid, 10, db)
     assert runs["items"][0]["stale"] is True, "正文变更后历史结论必须标记为已过期"
@@ -257,8 +315,21 @@ async def test_report_tolerates_null_total_and_malformed_json(db_ctx):
         "INSERT INTO preflight_runs (id, scheme_id, total, grade, verdict, released, blocked,"
         " counts, dimensions, findings, stats, created_at)"
         " VALUES (?,?,?,?,?,?,?,?,?,?,?,?)",
-        (uuid.uuid4().hex, sid, None, "", "历史记录", 0, 0,
-         "not-json", "not-json", "not-json", "{}", "2026-01-01T00:00:00"))
+        (
+            uuid.uuid4().hex,
+            sid,
+            None,
+            "",
+            "历史记录",
+            0,
+            0,
+            "not-json",
+            "not-json",
+            "not-json",
+            "{}",
+            "2026-01-01T00:00:00",
+        ),
+    )
     await db.commit()
     report = await readiness_report(sid, "json", db)
     assert report["total"] == 0
@@ -272,6 +343,7 @@ async def test_report_tolerates_null_total_and_malformed_json(db_ctx):
 async def test_export_summary_reads_fingerprint_column(db_ctx):
     """导出页摘要（G1 反向打通）也要能判出 stale —— 回归其 SELECT 缺列问题。"""
     from app.routers.export import _readiness_preflight_summary
+
     db, _pid, sid = db_ctx
     sec = await _insert_section(db, sid, title="工程概况", content="概况" * 300)
     await db.commit()
@@ -300,9 +372,7 @@ async def test_check_all_invalid_rule_ids_falls_back(db_ctx, monkeypatch):
 
     monkeypatch.setattr(_compliance_mod, "collect_json_response", _fake_collect)
     # 全部无效的 rule_ids + 空 checklist → 必须回退为规则库 AI 全集，而非空清单
-    await _compliance_mod.compliance_check(
-        ComplianceCheckIn(scheme_id=sid, rule_ids=["NOPE-99", ""], checklist=[]),
-        db)
+    await _compliance_mod.compliance_check(ComplianceCheckIn(scheme_id=sid, rule_ids=["NOPE-99", ""], checklist=[]), db)
     prompt = captured.get("prompt", "")
     assert prompt, "AI 提示词应被构造"
     assert "术语与工程名称前后一致" in prompt, "回退后应携带规则库 AI 清单（含 CON-02）"
@@ -314,10 +384,12 @@ async def test_check_all_invalid_rule_ids_falls_back(db_ctx, monkeypatch):
 async def test_preflight_stats_leaf_count_unchanged():
     parent = uuid.uuid4().hex
     child = uuid.uuid4().hex
-    ctx = _mk_ctx([
-        _mk_section("父章", "", sid=parent),
-        _mk_section("子章", "正文" * 100, sid=child, parent_id=parent),
-    ])
+    ctx = _mk_ctx(
+        [
+            _mk_section("父章", "", sid=parent),
+            _mk_section("子章", "正文" * 100, sid=child, parent_id=parent),
+        ]
+    )
     stats = preflight_stats(ctx)
     assert stats["section_count"] == 2
     assert stats["leaf_count"] == 1, "有子节点的章节不算叶子"

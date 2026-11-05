@@ -24,6 +24,7 @@ audit_scoring.py / audit_rules.py）的回归锁测试。
 - schema_sql.py
     * consistency_audit 注释修正（不再是"业务读写未实现"）
 """
+
 from __future__ import annotations
 
 import json
@@ -67,9 +68,7 @@ async def db_ctx(tmp_path, monkeypatch):
     pid = uuid.uuid4().hex
     sid = uuid.uuid4().hex
     await db.execute("INSERT INTO projects(id,name) VALUES(?,?)", (pid, "p"))
-    await db.execute(
-        "INSERT INTO schemes(id,project_id,name,status) VALUES(?,?,?,?)",
-        (sid, pid, "s", "目录已确认"))
+    await db.execute("INSERT INTO schemes(id,project_id,name,status) VALUES(?,?,?,?)", (sid, pid, "s", "目录已确认"))
     await db.commit()
     yield db, pid, sid
     # ✅ 关闭全局连接：aiosqlite worker 为非守护线程，不关闭会阻塞解释器退出
@@ -77,22 +76,29 @@ async def db_ctx(tmp_path, monkeypatch):
     await close_db()
 
 
-async def _insert_section(db, sid, title="第一章", content="", level=1,
-                          parent_id="", word_count=0, review_status="",
-                          sort_order=0, status="empty"):
+async def _insert_section(
+    db,
+    sid,
+    title="第一章",
+    content="",
+    level=1,
+    parent_id="",
+    word_count=0,
+    review_status="",
+    sort_order=0,
+    status="empty",
+):
     sec_id = uuid.uuid4().hex
     await db.execute(
         "INSERT INTO sections (id, scheme_id, project_id, parent_id, title,"
         " description, level, status, word_count, word_budget, content,"
         " review_status, sort_order) VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?)",
-        (sec_id, sid, "", parent_id, title, "", level, status, word_count,
-         0, content, review_status, sort_order))
+        (sec_id, sid, "", parent_id, title, "", level, status, word_count, 0, content, review_status, sort_order),
+    )
     return sec_id
 
 
-async def _insert_compliance_check(db, sid, check_type="compliance",
-                                   result_obj=None, rule_id="",
-                                   created_at=None):
+async def _insert_compliance_check(db, sid, check_type="compliance", result_obj=None, rule_id="", created_at=None):
     # ✅ BUG 修复（2026-09-21）：旧实现 `return db.execute(...)` —— async 函数里
     #    直接 return 一个协程对象不会被 await，INSERT 永远不执行（只产生
     #    "coroutine was never awaited" 警告）。下游断言 total==0 / ai_findings
@@ -100,13 +106,21 @@ async def _insert_compliance_check(db, sid, check_type="compliance",
     return await db.execute(
         "INSERT INTO compliance_check (id, scheme_id, check_type, rule_id, item,"
         " severity, result, suggestion, created_at) VALUES (?,?,?,?,?,?,?,?,?)",
-        (uuid.uuid4().hex, sid, check_type, rule_id, "", "",
-         json.dumps(result_obj or {}, ensure_ascii=False), "",
-         created_at or datetime.now().isoformat(timespec="seconds")))
+        (
+            uuid.uuid4().hex,
+            sid,
+            check_type,
+            rule_id,
+            "",
+            "",
+            json.dumps(result_obj or {}, ensure_ascii=False),
+            "",
+            created_at or datetime.now().isoformat(timespec="seconds"),
+        ),
+    )
 
 
-def _mk_section(title, content, word_count=None, status="generated",
-                parent_id="", sid=None):
+def _mk_section(title, content, word_count=None, status="generated", parent_id="", sid=None):
     return {
         "id": sid or uuid.uuid4().hex,
         "title": title,
@@ -123,10 +137,8 @@ def _mk_section(title, content, word_count=None, status="generated",
 # ===========================================================================
 def test_allowed_transitions_matrix_is_symmetric_and_complete():
     """状态机合法性矩阵：五个来源（含 '' 未纳入审核）都应有明确的目标集合。"""
-    assert set(_ALLOWED_TRANSITIONS.keys()) == {"", "pending", "reviewing",
-                                                 "approved", "rejected"}
-    assert set(_ALLOWED_TRANSITIONS[""]) == {"pending", "reviewing",
-                                              "approved", "rejected"}
+    assert set(_ALLOWED_TRANSITIONS.keys()) == {"", "pending", "reviewing", "approved", "rejected"}
+    assert set(_ALLOWED_TRANSITIONS[""]) == {"pending", "reviewing", "approved", "rejected"}
     for _s in ("pending", "reviewing", "approved", "rejected"):
         assert len(_ALLOWED_TRANSITIONS[_s]) >= 3
     # 四个非空状态都应允许自流转（前端「再次通过」/「重置为待审核」按钮需要）
@@ -139,17 +151,15 @@ def test_allowed_transitions_matrix_is_symmetric_and_complete():
 async def test_review_section_updates_review_status_only(db_ctx):
     """章节审核只写 sections.review_status，不触碰 compile status。"""
     from app.routers.review import review_section
+
     db, _pid, sid = db_ctx
-    sec_id = await _insert_section(db, sid, content="正文", word_count=100,
-                                   status="generated")
+    sec_id = await _insert_section(db, sid, content="正文", word_count=100, status="generated")
     await db.commit()
-    res = await review_section(sid, sec_id,
-                               SectionReviewIn(to_status="approved",
-                                               reviewer="张工",
-                                               comment="已审阅"), db)
+    res = await review_section(
+        sid, sec_id, SectionReviewIn(to_status="approved", reviewer="张工", comment="已审阅"), db
+    )
     assert res["ok"] is True
-    cur = await db.execute("SELECT status, review_status FROM sections WHERE id=?",
-                           (sec_id,))
+    cur = await db.execute("SELECT status, review_status FROM sections WHERE id=?", (sec_id,))
     row = await cur.fetchone()
     assert row["status"] == "generated"
     assert row["review_status"] == "approved"
@@ -157,21 +167,21 @@ async def test_review_section_updates_review_status_only(db_ctx):
 
 async def test_review_section_rejects_illegal_status(db_ctx):
     from app.routers.review import review_section
+
     db, _pid, sid = db_ctx
     sec_id = await _insert_section(db, sid, content="正文")
     await db.commit()
     with pytest.raises(HTTPException) as exc:
-        await review_section(sid, sec_id,
-                             SectionReviewIn(to_status="unknown", reviewer=""), db)
+        await review_section(sid, sec_id, SectionReviewIn(to_status="unknown", reviewer=""), db)
     assert exc.value.status_code == 400
 
 
 async def test_review_section_not_found_returns_404(db_ctx):
     from app.routers.review import review_section
+
     db, _pid, sid = db_ctx
     with pytest.raises(HTTPException) as exc:
-        await review_section(sid, "nonexistent",
-                             SectionReviewIn(to_status="approved"), db)
+        await review_section(sid, "nonexistent", SectionReviewIn(to_status="approved"), db)
     assert exc.value.status_code == 404
 
 
@@ -185,8 +195,15 @@ async def test_batch_review_sections_reports_skipped_and_not_found(db_ctx):
     s_dirty = await _insert_section(db, sid, title="C", review_status="draft")
     await db.commit()
     res = await batch_review_sections(
-        sid, {"section_ids": [s_already, s_ok, s_dirty, "nonexistent"],
-              "to_status": "approved", "reviewer": "张工", "comment": ""}, db)
+        sid,
+        {
+            "section_ids": [s_already, s_ok, s_dirty, "nonexistent"],
+            "to_status": "approved",
+            "reviewer": "张工",
+            "comment": "",
+        },
+        db,
+    )
     assert res["ok"] is True
     assert res["changed"] == 1
     assert s_ok in res["changed_ids"]
@@ -205,9 +222,8 @@ async def test_batch_review_sections_404_on_missing_scheme(db_ctx):
     db, _pid, _sid = db_ctx
     with pytest.raises(HTTPException) as exc:
         await batch_review_sections(
-            "nonexistent-scheme",
-            {"section_ids": ["a"], "to_status": "approved", "reviewer": "",
-             "comment": ""}, db)
+            "nonexistent-scheme", {"section_ids": ["a"], "to_status": "approved", "reviewer": "", "comment": ""}, db
+        )
     assert exc.value.status_code == 404
 
 
@@ -216,8 +232,8 @@ async def test_batch_review_sections_truncates_with_flag(db_ctx):
     db, _pid, sid = db_ctx
     ids = [uuid.uuid4().hex for _ in range(501)]
     res = await batch_review_sections(
-        sid, {"section_ids": ids, "to_status": "approved", "reviewer": "张工",
-              "comment": ""}, db)
+        sid, {"section_ids": ids, "to_status": "approved", "reviewer": "张工", "comment": ""}, db
+    )
     assert res["total_ids"] == 501
     assert res["truncated"] is True
     assert res["changed"] == 0
@@ -229,8 +245,8 @@ async def test_batch_review_sections_force_bypasses_state_machine(db_ctx):
     s1 = await _insert_section(db, sid, title="A", review_status="approved")
     await db.commit()
     res = await batch_review_sections(
-        sid, {"section_ids": [s1], "to_status": "pending", "reviewer": "张工",
-              "comment": "", "force": True}, db)
+        sid, {"section_ids": [s1], "to_status": "pending", "reviewer": "张工", "comment": "", "force": True}, db
+    )
     assert res["changed"] == 1
     cur = await db.execute("SELECT review_status FROM sections WHERE id=?", (s1,))
     assert (await cur.fetchone())["review_status"] == "pending"
@@ -282,10 +298,18 @@ async def test_review_summary_404_on_missing_scheme(db_ctx):
     assert exc.value.status_code == 404
 
 
-async def _seed_fresh_preflight(db, sid, blocked=0, total=90.0, grade="A",
-                                verdict="可直接交付", section_updated_at=None,
-                                released=None, content_fingerprint="",
-                                created_at=None):
+async def _seed_fresh_preflight(
+    db,
+    sid,
+    blocked=0,
+    total=90.0,
+    grade="A",
+    verdict="可直接交付",
+    section_updated_at=None,
+    released=None,
+    content_fingerprint="",
+    created_at=None,
+):
     """塞一条「最新一次总检已通过且晚于正文变更」的记录，绕开 submit 的两道门控。
 
     ``section_updated_at`` 晚于预检时间时，可复现「正文变更后未重跑总检」的
@@ -299,13 +323,25 @@ async def _seed_fresh_preflight(db, sid, blocked=0, total=90.0, grade="A",
         "INSERT INTO preflight_runs (id, scheme_id, content_fingerprint, rule_version, total, grade,"
         " verdict, released, blocked, counts, dimensions, findings, stats, created_at)"
         " VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?)",
-        (uuid.uuid4().hex, sid, content_fingerprint, RULE_VERSION, total, grade, verdict,
-         (not blocked) if released is None else released, blocked, "{}", "[]", "[]", "{}",
-         created_at or datetime.now().isoformat(timespec="seconds")))
+        (
+            uuid.uuid4().hex,
+            sid,
+            content_fingerprint,
+            RULE_VERSION,
+            total,
+            grade,
+            verdict,
+            (not blocked) if released is None else released,
+            blocked,
+            "{}",
+            "[]",
+            "[]",
+            "{}",
+            created_at or datetime.now().isoformat(timespec="seconds"),
+        ),
+    )
     if section_updated_at:
-        await db.execute(
-            "UPDATE sections SET updated_at=? WHERE scheme_id=?",
-            (section_updated_at, sid))
+        await db.execute("UPDATE sections SET updated_at=? WHERE scheme_id=?", (section_updated_at, sid))
 
 
 async def test_submit_scheme_review_returns_section_review_check(db_ctx):
@@ -314,8 +350,7 @@ async def test_submit_scheme_review_returns_section_review_check(db_ctx):
     await _insert_section(db, sid, title="A", content="正文", status="generated")
     await _seed_fresh_preflight(db, sid)
     await db.commit()
-    res = await submit_scheme_review(
-        sid, SchemeReviewIn(to_status="approved", reviewer="张工"), db)
+    res = await submit_scheme_review(sid, SchemeReviewIn(to_status="approved", reviewer="张工"), db)
     assert res["ok"] is True
     assert "section_review_check" in res
     assert res["section_review_check"]["unreviewed_count"] == 1
@@ -329,8 +364,8 @@ async def test_submit_scheme_review_force_all_reviewed_blocks_with_422(db_ctx):
     await db.commit()
     with pytest.raises(HTTPException) as exc:
         await submit_scheme_review(
-            sid, SchemeReviewIn(to_status="approved", reviewer="张工",
-                                require_all_sections_reviewed=True), db)
+            sid, SchemeReviewIn(to_status="approved", reviewer="张工", require_all_sections_reviewed=True), db
+        )
     assert exc.value.status_code == 422
     assert "未纳入审核" in exc.value.detail
     # 回滚后方案状态不应被写入
@@ -341,30 +376,27 @@ async def test_submit_scheme_review_force_all_reviewed_blocks_with_422(db_ctx):
 async def test_submit_scheme_review_force_all_reviewed_ok_when_all_reviewed(db_ctx):
     """require_all_sections_reviewed=True 且所有章节已审 → 通过。"""
     db, _pid, sid = db_ctx
-    await _insert_section(db, sid, title="A", content="正文", status="generated",
-                          review_status="approved")
+    await _insert_section(db, sid, title="A", content="正文", status="generated", review_status="approved")
     await _seed_fresh_preflight(db, sid)
     await db.commit()
     res = await submit_scheme_review(
-        sid, SchemeReviewIn(to_status="approved", reviewer="张工",
-                            require_all_sections_reviewed=True), db)
+        sid, SchemeReviewIn(to_status="approved", reviewer="张工", require_all_sections_reviewed=True), db
+    )
     assert res["ok"] is True
     assert res["section_review_check"]["unreviewed_count"] == 0
 
 
 @pytest.mark.parametrize("section_status", ["reviewing", "rejected"])
-async def test_submit_scheme_review_require_all_approved_rejects_reviewed_sections(
-        db_ctx, section_status):
+async def test_submit_scheme_review_require_all_approved_rejects_reviewed_sections(db_ctx, section_status):
     """已纳入审核但仍在审核中/已驳回，不等于已通过，严格门禁必须拒绝。"""
     db, _pid, sid = db_ctx
-    await _insert_section(db, sid, title="A", content="正文", status="generated",
-                          review_status=section_status)
+    await _insert_section(db, sid, title="A", content="正文", status="generated", review_status=section_status)
     await _seed_fresh_preflight(db, sid)
     await db.commit()
     with pytest.raises(HTTPException) as exc:
         await submit_scheme_review(
-            sid, SchemeReviewIn(to_status="approved", reviewer="张工",
-                                require_all_sections_reviewed=True), db)
+            sid, SchemeReviewIn(to_status="approved", reviewer="张工", require_all_sections_reviewed=True), db
+        )
     assert exc.value.status_code == 422
     assert "未通过" in exc.value.detail
 
@@ -374,22 +406,24 @@ async def test_submit_scheme_review_rejects_stale_content_fingerprint(db_ctx):
     from app.routers.compliance import _content_fingerprint
 
     db, _pid, sid = db_ctx
-    sec = await _insert_section(db, sid, title="A", content="原正文", status="generated",
-                                review_status="approved")
+    sec = await _insert_section(db, sid, title="A", content="原正文", status="generated", review_status="approved")
     await db.execute("UPDATE sections SET updated_at='2026-01-01T00:00:00' WHERE id=?", (sec,))
     await db.commit()
     stored_fp = await _content_fingerprint(db, sid)
     await _seed_fresh_preflight(
-        db, sid, content_fingerprint=stored_fp,
-        created_at="2026-01-02T00:00:00", section_updated_at="2026-01-01T00:00:00")
+        db,
+        sid,
+        content_fingerprint=stored_fp,
+        created_at="2026-01-02T00:00:00",
+        section_updated_at="2026-01-01T00:00:00",
+    )
     # 只改内容与缓存字数，不改 updated_at：确保命中的必须是内容指纹门禁。
-    await db.execute("UPDATE sections SET content=?, word_count=? WHERE id=?",
-                     ("变更后的正文", 6, sec))
+    await db.execute("UPDATE sections SET content=?, word_count=? WHERE id=?", ("变更后的正文", 6, sec))
     await db.commit()
     with pytest.raises(HTTPException) as exc:
         await submit_scheme_review(
-            sid, SchemeReviewIn(to_status="approved", reviewer="张工",
-                                require_all_sections_reviewed=True), db)
+            sid, SchemeReviewIn(to_status="approved", reviewer="张工", require_all_sections_reviewed=True), db
+        )
     assert exc.value.status_code == 422
     assert "过期" in exc.value.detail
 
@@ -397,15 +431,13 @@ async def test_submit_scheme_review_rejects_stale_content_fingerprint(db_ctx):
 async def test_submit_scheme_review_rejects_fresh_but_not_released_preflight(db_ctx):
     """最新总检未达到放行线时，方案级 approved 必须被门禁拒绝。"""
     db, _pid, sid = db_ctx
-    await _insert_section(db, sid, title="A", content="正文", status="generated",
-                          review_status="approved")
-    await _seed_fresh_preflight(
-        db, sid, blocked=0, released=0, total=69.9, grade="C", verdict="需整改后重新预检")
+    await _insert_section(db, sid, title="A", content="正文", status="generated", review_status="approved")
+    await _seed_fresh_preflight(db, sid, blocked=0, released=0, total=69.9, grade="C", verdict="需整改后重新预检")
     await db.commit()
     with pytest.raises(HTTPException) as exc:
         await submit_scheme_review(
-            sid, SchemeReviewIn(to_status="approved", reviewer="张工",
-                                require_all_sections_reviewed=True), db)
+            sid, SchemeReviewIn(to_status="approved", reviewer="张工", require_all_sections_reviewed=True), db
+        )
     assert exc.value.status_code == 422
     assert "未达到放行条件" in exc.value.detail
 
@@ -420,8 +452,7 @@ async def test_compliance_check_returns_404_on_missing_scheme(db_ctx, monkeypatc
     async def _fake_collect_json_response(*_a, **_k):
         return {"results": []}, None
 
-    monkeypatch.setattr("app.routers.compliance.collect_json_response",
-                        _fake_collect_json_response)
+    monkeypatch.setattr("app.routers.compliance.collect_json_response", _fake_collect_json_response)
     with pytest.raises(HTTPException) as exc:
         await compliance_check(ComplianceCheckIn(scheme_id="nonexistent"), db)
     assert exc.value.status_code == 404
@@ -434,8 +465,7 @@ async def test_expert_review_returns_404_on_missing_scheme(db_ctx, monkeypatch):
     async def _fake_collect_json_response(*_a, **_k):
         return {"score": 80}, None
 
-    monkeypatch.setattr("app.routers.compliance.collect_json_response",
-                        _fake_collect_json_response)
+    monkeypatch.setattr("app.routers.compliance.collect_json_response", _fake_collect_json_response)
     with pytest.raises(HTTPException) as exc:
         await expert_review(ExpertReviewIn(scheme_id="nonexistent"), db)
     assert exc.value.status_code == 404
@@ -444,6 +474,7 @@ async def test_expert_review_returns_404_on_missing_scheme(db_ctx, monkeypatch):
 async def test_expert_review_rejects_too_many_outline_nodes(db_ctx, monkeypatch):
     """BUG 修复：outline 节点超过 EXPERT_OUTLINE_MAX_NODES 明确 400。"""
     from app.routers.compliance import EXPERT_OUTLINE_MAX_NODES
+
     db, _pid, sid = db_ctx
     for _i in range(EXPERT_OUTLINE_MAX_NODES + 1):
         await _insert_section(db, sid, title=f"S{_i}")
@@ -452,8 +483,7 @@ async def test_expert_review_rejects_too_many_outline_nodes(db_ctx, monkeypatch)
     async def _fake_collect_json_response(*_a, **_k):
         return {"score": 80}, None
 
-    monkeypatch.setattr("app.routers.compliance.collect_json_response",
-                        _fake_collect_json_response)
+    monkeypatch.setattr("app.routers.compliance.collect_json_response", _fake_collect_json_response)
     with pytest.raises(HTTPException) as exc:
         await expert_review(ExpertReviewIn(scheme_id=sid), db)
     assert exc.value.status_code == 400
@@ -463,14 +493,14 @@ async def test_expert_review_rejects_too_many_outline_nodes(db_ctx, monkeypatch)
 async def test_expert_review_rejects_too_many_attachments(db_ctx, monkeypatch):
     """BUG 修复：附件数量超过上限返回 400。"""
     from app.routers.compliance import EXPERT_ATTACH_MAX_COUNT
+
     db, _pid, sid = db_ctx
     await db.commit()
 
     async def _fake_collect_json_response(*_a, **_k):
         return {"score": 80}, None
 
-    monkeypatch.setattr("app.routers.compliance.collect_json_response",
-                        _fake_collect_json_response)
+    monkeypatch.setattr("app.routers.compliance.collect_json_response", _fake_collect_json_response)
     too_many = ["a"] * (EXPERT_ATTACH_MAX_COUNT + 1)
     with pytest.raises(HTTPException) as exc:
         await expert_review(ExpertReviewIn(scheme_id=sid, attachments=too_many), db)
@@ -480,18 +510,17 @@ async def test_expert_review_rejects_too_many_attachments(db_ctx, monkeypatch):
 async def test_expert_review_rejects_long_attachment(db_ctx, monkeypatch):
     """BUG 修复：单条附件长度超过上限返回 400。"""
     from app.routers.compliance import EXPERT_ATTACH_MAX_LEN
+
     db, _pid, sid = db_ctx
     await db.commit()
 
     async def _fake_collect_json_response(*_a, **_k):
         return {"score": 80}, None
 
-    monkeypatch.setattr("app.routers.compliance.collect_json_response",
-                        _fake_collect_json_response)
+    monkeypatch.setattr("app.routers.compliance.collect_json_response", _fake_collect_json_response)
     too_long = "x" * (EXPERT_ATTACH_MAX_LEN + 1)
     with pytest.raises(HTTPException) as exc:
-        await expert_review(ExpertReviewIn(scheme_id=sid,
-                                           attachments=[too_long]), db)
+        await expert_review(ExpertReviewIn(scheme_id=sid, attachments=[too_long]), db)
     assert exc.value.status_code == 400
 
 
@@ -517,6 +546,7 @@ async def test_get_results_pagination_returns_total_and_limit(db_ctx):
 
 async def test_get_results_clamps_limit_to_max(db_ctx):
     from app.routers.compliance import RESULTS_MAX_LIMIT
+
     db, _pid, sid = db_ctx
     await db.commit()
     res = await get_results(sid, limit=10_000, db=db)
@@ -537,18 +567,27 @@ async def test_get_results_filters_by_check_type(db_ctx):
 async def test_readiness_overview_ignores_multiple_batches_correctly(db_ctx):
     """批次锚定验证：不同秒的两次 /check，overview 只取最新一批。"""
     db, _pid, sid = db_ctx
-    await _insert_compliance_check(db, sid,
-        result_obj={"hit": False, "rule_id": "CMP-01", "item": "A",
-                    "severity": "high"},
-        rule_id="CMP-01", created_at="2026-09-21 09:00:00")
-    await _insert_compliance_check(db, sid,
-        result_obj={"hit": False, "rule_id": "CMP-02", "item": "B",
-                    "severity": "medium"},
-        rule_id="CMP-02", created_at="2026-09-21 09:00:00")
-    await _insert_compliance_check(db, sid,
-        result_obj={"hit": False, "rule_id": "CMP-03", "item": "C",
-                    "severity": "low"},
-        rule_id="CMP-03", created_at="2026-09-21 10:00:00")
+    await _insert_compliance_check(
+        db,
+        sid,
+        result_obj={"hit": False, "rule_id": "CMP-01", "item": "A", "severity": "high"},
+        rule_id="CMP-01",
+        created_at="2026-09-21 09:00:00",
+    )
+    await _insert_compliance_check(
+        db,
+        sid,
+        result_obj={"hit": False, "rule_id": "CMP-02", "item": "B", "severity": "medium"},
+        rule_id="CMP-02",
+        created_at="2026-09-21 09:00:00",
+    )
+    await _insert_compliance_check(
+        db,
+        sid,
+        result_obj={"hit": False, "rule_id": "CMP-03", "item": "C", "severity": "low"},
+        rule_id="CMP-03",
+        created_at="2026-09-21 10:00:00",
+    )
     await db.commit()
 
     payload = await readiness_overview(sid, db)
@@ -563,28 +602,33 @@ async def test_readiness_overview_ignores_multiple_batches_correctly(db_ctx):
 async def test_persist_run_never_raises_on_insert_failure(db_ctx, caplog):
     """BUG 修复：_persist_run 不再静默吞错；INSERT 失败要 rollback + 记录日志。"""
     import logging
+
     db, _pid, sid = db_ctx
     # 先插入一条以占位主键，后面用同 id 触发 PK 违反
     await db.execute(
         "INSERT INTO preflight_runs (id, scheme_id, rule_version, total, grade,"
         " verdict, released, blocked, counts, dimensions, findings, stats)"
         " VALUES (?,?,?,?,?,?,?,?,?,?,?,?)",
-        ("dup-id", sid, RULE_VERSION, 0, "A", "", 1, 0,
-         "{}", "[]", "[]", "{}"))
+        ("dup-id", sid, RULE_VERSION, 0, "A", "", 1, 0, "{}", "[]", "[]", "{}"),
+    )
     await db.commit()
+
     # 用一个总是抛异常的 db wrapper，验证 _persist_run 内部吞掉异常并 log
     class _BoomDB:
         def __init__(self, _real):
             self._real = _real
+
         async def execute(self, *a, **k):
             raise RuntimeError("simulated disk full")
+
         async def commit(self):
             pass
+
         async def rollback(self):
             pass
+
     with caplog.at_level(logging.WARNING, logger="compliance"):
-        await _persist_run(_BoomDB(db), sid,
-                           {"total": 0, "grade": "D", "blocked": 1}, {})
+        await _persist_run(_BoomDB(db), sid, {"total": 0, "grade": "D", "blocked": 1}, {})
     msgs = [r.getMessage() for r in caplog.records]
     assert any("preflight_runs 写入失败" in m for m in msgs)
 
@@ -595,11 +639,10 @@ async def test_persist_run_never_raises_on_insert_failure(db_ctx, caplog):
 def test_con_05_uses_unique_rule_id_per_duplicate_pair():
     """BUG 修复：多对重复章节各自独立的 rule_id，避免 merge_findings 塌缩。"""
     body = "基坑支护采用排桩加内支撑方案，桩径 800，桩长 20 米。" * 40
-    sections = [_mk_section("第一章", body),
-                _mk_section("第二章", body),
-                _mk_section("第三章", body)]
-    ctx = PreflightContext(scheme_id="s", scheme_name="s", scheme_type="基坑",
-                           word_budget=0, sections=sections, charts=[])
+    sections = [_mk_section("第一章", body), _mk_section("第二章", body), _mk_section("第三章", body)]
+    ctx = PreflightContext(
+        scheme_id="s", scheme_name="s", scheme_type="基坑", word_budget=0, sections=sections, charts=[]
+    )
     findings = run_preflight(ctx)
     con_05s = [f for f in findings if f["rule_id"].startswith("CON-05")]
     assert len(con_05s) >= 2
@@ -613,11 +656,17 @@ def test_con_05_uses_unique_rule_id_per_duplicate_pair():
 def test_con_05_high_severity_when_near_identical():
     """近乎完全一致（>=95%）→ high 严重度。"""
     body = "基坑支护采用排桩加内支撑方案，桩径 800，桩长 20 米。" * 40
-    ctx = PreflightContext(scheme_id="s", scheme_name="s", scheme_type="基坑",
-                           word_budget=0, sections=[
-        _mk_section("第一章", body),
-        _mk_section("第二章", body),
-    ], charts=[])
+    ctx = PreflightContext(
+        scheme_id="s",
+        scheme_name="s",
+        scheme_type="基坑",
+        word_budget=0,
+        sections=[
+            _mk_section("第一章", body),
+            _mk_section("第二章", body),
+        ],
+        charts=[],
+    )
     findings = run_preflight(ctx)
     con_05s = [f for f in findings if f["rule_id"].startswith("CON-05")]
     assert len(con_05s) == 1
@@ -627,10 +676,19 @@ def test_con_05_high_severity_when_near_identical():
 def test_score_findings_blocks_prevent_release_even_if_high_score():
     """BUG 修复：阻断项存在时不会出现 grade=C + released=True 的矛盾。"""
     findings = [
-        {"rule_id": "STD-01", "dimension": "compliance", "severity": "block",
-         "title": "废止标准", "detail": "引用了 GB 50134-2001（已废止）",
-         "evidence": [], "section_id": "", "section_title": "",
-         "suggestion": "替换为现行标准", "basis": "", "mode": "program"},
+        {
+            "rule_id": "STD-01",
+            "dimension": "compliance",
+            "severity": "block",
+            "title": "废止标准",
+            "detail": "引用了 GB 50134-2001（已废止）",
+            "evidence": [],
+            "section_id": "",
+            "section_title": "",
+            "suggestion": "替换为现行标准",
+            "basis": "",
+            "mode": "program",
+        },
     ]
     res = score_findings(findings)
     assert res.blocked is True
@@ -645,10 +703,21 @@ def test_score_findings_released_requires_grade_A_or_B():
     assert res.grade == "A"
     assert res.released is True
 
-    findings = [{"rule_id": "X", "dimension": "completeness",
-                 "severity": "medium", "title": "", "detail": "",
-                 "evidence": [], "section_id": "", "section_title": "",
-                 "suggestion": "", "basis": "", "mode": "program"}]
+    findings = [
+        {
+            "rule_id": "X",
+            "dimension": "completeness",
+            "severity": "medium",
+            "title": "",
+            "detail": "",
+            "evidence": [],
+            "section_id": "",
+            "section_title": "",
+            "suggestion": "",
+            "basis": "",
+            "mode": "program",
+        }
+    ]
     res = score_findings(findings)
     assert res.total >= 90.0
     assert res.grade == "A"
@@ -657,10 +726,21 @@ def test_score_findings_released_requires_grade_A_or_B():
 
 def test_score_findings_unknown_dimension_falls_back_to_deliverability():
     """BUG 修复：未知 dimension 计入 deliverability 并统计 unknown_dimension_count。"""
-    findings = [{"rule_id": "ZZZ-01", "dimension": "unknown_dim",
-                 "severity": "low", "title": "", "detail": "", "evidence": [],
-                 "section_id": "", "section_title": "", "suggestion": "",
-                 "basis": "", "mode": "program"}]
+    findings = [
+        {
+            "rule_id": "ZZZ-01",
+            "dimension": "unknown_dim",
+            "severity": "low",
+            "title": "",
+            "detail": "",
+            "evidence": [],
+            "section_id": "",
+            "section_title": "",
+            "suggestion": "",
+            "basis": "",
+            "mode": "program",
+        }
+    ]
     res = score_findings(findings)
     assert res.unknown_dimension_count == 1
     deliverability = [d for d in res.dimensions if d.key == "deliverability"][0]
@@ -674,10 +754,19 @@ def test_score_findings_weight_normalization_total_bounded():
     assert res.total == 100.0
 
     many_blocks = [
-        {"rule_id": f"B-{i}", "dimension": "completeness", "severity": "block",
-         "title": "", "detail": "", "evidence": [], "section_id": "",
-         "section_title": "", "suggestion": "", "basis": "",
-         "mode": "program"}
+        {
+            "rule_id": f"B-{i}",
+            "dimension": "completeness",
+            "severity": "block",
+            "title": "",
+            "detail": "",
+            "evidence": [],
+            "section_id": "",
+            "section_title": "",
+            "suggestion": "",
+            "basis": "",
+            "mode": "program",
+        }
         for i in range(10)
     ]
     res = score_findings(many_blocks)
@@ -727,14 +816,18 @@ def test_run_preflight_empty_scheme_reports_deliverable_blocker():
 
 def test_run_preflight_detects_abolished_standard():
     """引用废止标准 → STD-01 block 级阻断项。"""
-    sections = [_mk_section("编制依据",
-                            # GB 50202-2002 在 standards_registry.ABOLISHED_STANDARDS
-                            # 中确有登记（已由 GB 50202-2018 替代）；旧实现用的
-                            # GB 50134-2001 并不在废止清单里，STD-01 永远不会命中。
-                            "本方案编制依据 GB 50202-2002《建筑地基基础工程施工质量"
-                            "验收规范》及 GB 50010-2010 相关条款。")]
-    ctx = PreflightContext(scheme_id="s", scheme_name="s", scheme_type="结构",
-                           word_budget=0, sections=sections, charts=[])
+    sections = [
+        _mk_section(
+            "编制依据",
+            # GB 50202-2002 在 standards_registry.ABOLISHED_STANDARDS
+            # 中确有登记（已由 GB 50202-2018 替代）；旧实现用的
+            # GB 50134-2001 并不在废止清单里，STD-01 永远不会命中。
+            "本方案编制依据 GB 50202-2002《建筑地基基础工程施工质量" "验收规范》及 GB 50010-2010 相关条款。",
+        )
+    ]
+    ctx = PreflightContext(
+        scheme_id="s", scheme_name="s", scheme_type="结构", word_budget=0, sections=sections, charts=[]
+    )
     findings = run_preflight(ctx)
     std_01 = [f for f in findings if f["rule_id"] == "STD-01"]
     assert std_01
@@ -743,9 +836,9 @@ def test_run_preflight_detects_abolished_standard():
 
 def test_run_preflight_detects_empty_leaf_sections():
     """空叶子章节 → DLV-01（high 严重度）。"""
-    ctx = PreflightContext(scheme_id="s", scheme_name="s", word_budget=0,
-                           sections=[_mk_section("第一章", "", status="empty")],
-                           charts=[])
+    ctx = PreflightContext(
+        scheme_id="s", scheme_name="s", word_budget=0, sections=[_mk_section("第一章", "", status="empty")], charts=[]
+    )
     findings = run_preflight(ctx)
     dlv_01 = [f for f in findings if f["rule_id"] == "DLV-01"]
     assert dlv_01
@@ -757,8 +850,7 @@ def test_dlv07_detects_unclosed_tilde_fence():
     现改用 find_unclosed_fences（CommonMark 口径），~~~ 未闭合也触发 DLV-07。
     """
     sections = [_mk_section("第一章", "~~~\n未完成的代码块", word_count=1000)]
-    ctx = PreflightContext(scheme_id="s", scheme_name="s", word_budget=0,
-                           sections=sections, charts=[])
+    ctx = PreflightContext(scheme_id="s", scheme_name="s", word_budget=0, sections=sections, charts=[])
     findings = run_preflight(ctx)
     dlv07 = [f for f in findings if f["rule_id"] == "DLV-07"]
     assert dlv07, "未闭合的 ~~~ 围栏必须触发 DLV-07（旧实现会漏检）"
@@ -768,8 +860,7 @@ def test_dlv07_no_false_positive_on_inline_backticks():
     """✅ 2026-09-22：正文内联 `code` 与字面 ``` 不应被奇偶计数误判为未闭合围栏。"""
     content = "用 `code` 内联代码；正文提到连续三个反引号 ``` 写法，均非围栏。"
     sections = [_mk_section("第一章", content, word_count=1000)]
-    ctx = PreflightContext(scheme_id="s", scheme_name="s", word_budget=0,
-                           sections=sections, charts=[])
+    ctx = PreflightContext(scheme_id="s", scheme_name="s", word_budget=0, sections=sections, charts=[])
     findings = run_preflight(ctx)
     assert not [f for f in findings if f["rule_id"] == "DLV-07"]
 
@@ -777,10 +868,10 @@ def test_dlv07_no_false_positive_on_inline_backticks():
 def test_dlv07_resolved_after_auto_fix():
     """✅ 2026-09-22：先 auto_fix_unclosed_fences 再预检，DLV-07 判据清零。"""
     from app.services.content_utils import auto_fix_unclosed_fences
+
     raw = "```mermaid\ngraph TD; A-->B"
     fixed, _ = auto_fix_unclosed_fences(raw)
     sections = [_mk_section("第一章", fixed, word_count=1000)]
-    ctx = PreflightContext(scheme_id="s", scheme_name="s", word_budget=0,
-                           sections=sections, charts=[])
+    ctx = PreflightContext(scheme_id="s", scheme_name="s", word_budget=0, sections=sections, charts=[])
     findings = run_preflight(ctx)
     assert not [f for f in findings if f["rule_id"] == "DLV-07"]

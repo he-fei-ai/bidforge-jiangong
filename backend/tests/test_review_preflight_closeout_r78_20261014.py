@@ -22,6 +22,7 @@ F-3 ``routers/consistency_repair.py`` 收口 R13 单一出口（此前是
     D 组 = rollback 的冲突状态回写必须带 ``AND scheme_id=`` 约束（静态 +
     跨方案同名历史行行为实证）。
 """
+
 from __future__ import annotations
 
 import ast
@@ -42,22 +43,24 @@ from fastapi import HTTPException
 # ===========================================================================
 # helpers
 # ===========================================================================
-async def _seed_scheme(db, *, pid=None, sid=None, name="深基坑支护专项方案",
-                       with_section: bool = True) -> tuple[str, str]:
+async def _seed_scheme(
+    db, *, pid=None, sid=None, name="深基坑支护专项方案", with_section: bool = True
+) -> tuple[str, str]:
     pid = pid or uuid.uuid4().hex
     sid = sid or uuid.uuid4().hex
     await db.execute("INSERT INTO projects(id,name) VALUES(?,?)", (pid, "p"))
     await db.execute(
-        "INSERT INTO schemes(id,project_id,name,status,word_budget)"
-        " VALUES(?,?,?,?,0)", (sid, pid, name, "目录已确认"))
+        "INSERT INTO schemes(id,project_id,name,status,word_budget)" " VALUES(?,?,?,?,0)",
+        (sid, pid, name, "目录已确认"),
+    )
     if with_section:
         await db.execute(
             "INSERT INTO sections (id, scheme_id, project_id, parent_id, title,"
             " description, level, status, word_count, word_budget, content,"
             " review_status, sort_order)"
             " VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?)",
-            (uuid.uuid4().hex, sid, pid, "", "第一章", "", 1, "generated",
-             20, 0, "本工程总工期为 120 日历天。", "", 0))
+            (uuid.uuid4().hex, sid, pid, "", "第一章", "", 1, "generated", 20, 0, "本工程总工期为 120 日历天。", "", 0),
+        )
     await db.commit()
     return pid, sid
 
@@ -100,27 +103,31 @@ class TestConsistencyAuditInsertColumnParamParity:
                 break
         assert target is not None, "run_consistency_audit 必须经 review_db.exec_write 写审计结果"
         sql = ast.literal_eval(target.args[1])
-        m = re.search(r"INSERT INTO consistency_audit \(([^)]*)\)\s*VALUES \(([^)]*)\)",
-                      sql, re.S)
+        m = re.search(r"INSERT INTO consistency_audit \(([^)]*)\)\s*VALUES \(([^)]*)\)", sql, re.S)
         assert m, "INSERT 必须是显式列清单形态"
         cols = [c.strip() for c in m.group(1).split(",")]
         placeholders = [p.strip() for p in m.group(2).split(",")]
-        assert len(cols) == len(placeholders) == len(target.args[2].elts), (
-            f"列数/占位符数/参数数必须一致: {cols} vs {placeholders}")
+        assert (
+            len(cols) == len(placeholders) == len(target.args[2].elts)
+        ), f"列数/占位符数/参数数必须一致: {cols} vs {placeholders}"
         pairs = dict(zip(cols, [ast.unparse(e) for e in target.args[2].elts]))
         assert "score_float" in pairs["score"], pairs["score"]
-        assert "_content_fingerprint" in pairs["content_fingerprint"], (
-            pairs["content_fingerprint"])
+        assert "_content_fingerprint" in pairs["content_fingerprint"], pairs["content_fingerprint"]
         assert "json.dumps" in pairs["issues"], pairs["issues"]
 
-    async def test_written_row_score_and_fingerprint_correct(self, db_conn,
-                                                             monkeypatch):
+    async def test_written_row_score_and_fingerprint_correct(self, db_conn, monkeypatch):
         """行为实证：端点落库后 score 列是分值、content_fingerprint 是指纹。"""
+
         async def fake_collect(*args, **kwargs):
-            return ({"score": 88.5,
-                     "issues": [{"dimension": "工期", "severity": "high",
-                                 "fact": "90 日历天",
-                                 "content_quote": "120 日历天"}]}, "raw")
+            return (
+                {
+                    "score": 88.5,
+                    "issues": [
+                        {"dimension": "工期", "severity": "high", "fact": "90 日历天", "content_quote": "120 日历天"}
+                    ],
+                },
+                "raw",
+            )
 
         async def fake_facts(db_, scheme_id_, **kwargs):
             return "本工程建设工期为 90 日历天"
@@ -133,24 +140,22 @@ class TestConsistencyAuditInsertColumnParamParity:
         assert out["score"] == 88.5
 
         cur = await db_conn.execute(
-            "SELECT score, content_fingerprint, issues FROM consistency_audit"
-            " WHERE scheme_id=?", (sid,))
-        row = dict(zip(("score", "content_fingerprint", "issues"),
-                       tuple(await cur.fetchone())))
+            "SELECT score, content_fingerprint, issues FROM consistency_audit" " WHERE scheme_id=?", (sid,)
+        )
+        row = dict(zip(("score", "content_fingerprint", "issues"), tuple(await cur.fetchone())))
         expect_fp = await cc._content_fingerprint(db_conn, sid)
         assert float(row["score"]) == 88.5, "score 列必须落分值（旧实现落指纹串）"
-        assert row["content_fingerprint"] == expect_fp, (
-            "content_fingerprint 列必须落当前正文指纹（旧实现落分值）")
+        assert row["content_fingerprint"] == expect_fp, "content_fingerprint 列必须落当前正文指纹（旧实现落分值）"
         assert json.loads(row["issues"])
 
         latest = await cc.latest_consistency_audit(sid, db=db_conn)
         assert float(latest["score"]) == 88.5
         assert latest["exists"] is True
 
-    async def test_overview_consistency_source_not_stale(self, db_conn,
-                                                          monkeypatch):
+    async def test_overview_consistency_source_not_stale(self, db_conn, monkeypatch):
         """消费端锁：刚写入的审计行在总检中**不得**被判 stale（旧实现恒 stale
         → consistency 来源永久漏报 + stale_ai_sources 恒误报）。"""
+
         async def fake_collect(*args, **kwargs):
             return ({"score": 90.0, "issues": []}, "raw")
 
@@ -162,10 +167,8 @@ class TestConsistencyAuditInsertColumnParamParity:
         _, sid = await _seed_scheme(db_conn)
         await cc.run_consistency_audit(sid, db=db_conn)
 
-        payload = await cc._readiness_overview_compute(db_conn, sid,
-                                                       persist=False)
-        assert "consistency" in payload["sources"], (
-            f"新鲜审计行必须计入总检来源: {payload['sources']}")
+        payload = await cc._readiness_overview_compute(db_conn, sid, persist=False)
+        assert "consistency" in payload["sources"], f"新鲜审计行必须计入总检来源: {payload['sources']}"
         assert "consistency" not in payload["stale_ai_sources"]
         assert "consistency" not in payload["failed_sources"]
 
@@ -189,8 +192,7 @@ class TestOverviewFingerprintReuse:
         tree = _module_tree(cc._readiness_overview_compute)
         guarded: set[int] = set()
         for node in ast.walk(tree):
-            if isinstance(node, ast.If) and ast.unparse(node.test).strip() \
-                    == "fingerprint is None":
+            if isinstance(node, ast.If) and ast.unparse(node.test).strip() == "fingerprint is None":
                 for inner in ast.walk(node):
                     guarded.add(id(inner))
         offenders = []
@@ -200,17 +202,14 @@ class TestOverviewFingerprintReuse:
             # 找到直接包含该调用的赋值（旧实现形态：无条件 fingerprint = await ...）
             for node in ast.walk(tree):
                 if isinstance(node, (ast.Assign, ast.NamedExpr)):
-                    if any(sub is call for sub in ast.walk(node)) \
-                            and id(node) not in guarded:
+                    if any(sub is call for sub in ast.walk(node)) and id(node) not in guarded:
                         offenders.append(ast.unparse(node))
         # 末尾 payload 里的三元回退（else await ...）不是重算路径的独立赋值，
         # 它只在 fingerprint is None 时才可达，由 B2/B3 行为实证保护。
-        offenders = [o for o in offenders
-                     if not o.lstrip().startswith("'content_fingerprint'")]
+        offenders = [o for o in offenders if not o.lstrip().startswith("'content_fingerprint'")]
         assert not offenders, f"存在未被 None 守卫的重算赋值: {offenders}"
 
-    async def test_passed_fingerprint_never_recomputed(self, db_conn,
-                                                       monkeypatch):
+    async def test_passed_fingerprint_never_recomputed(self, db_conn, monkeypatch):
         """行为实证：调用方传入指纹时，compute 全链路**一次都不**重算。"""
         _, sid = await _seed_scheme(db_conn)
         real_fp = await cc._content_fingerprint(db_conn, sid)
@@ -219,12 +218,10 @@ class TestOverviewFingerprintReuse:
             raise AssertionError("P1-4：传入 fingerprint 后不得再重算（旧实现覆盖参数）")
 
         monkeypatch.setattr(cc, "_content_fingerprint", boom)
-        payload = await cc._readiness_overview_compute(
-            db_conn, sid, persist=False, fingerprint=real_fp)
+        payload = await cc._readiness_overview_compute(db_conn, sid, persist=False, fingerprint=real_fp)
         assert payload["content_fingerprint"] == real_fp
 
-    async def test_default_fingerprint_computed_once(self, db_conn,
-                                                     monkeypatch):
+    async def test_default_fingerprint_computed_once(self, db_conn, monkeypatch):
         """缺省形态（review_autofix 三处调用方）：自行计算，行为逐字不变。"""
         _, sid = await _seed_scheme(db_conn)
         real_fp = await cc._content_fingerprint(db_conn, sid)
@@ -236,8 +233,7 @@ class TestOverviewFingerprintReuse:
             return await orig(db_, scheme_id_)
 
         monkeypatch.setattr(cc, "_content_fingerprint", spy)
-        payload = await cc._readiness_overview_compute(db_conn, sid,
-                                                       persist=False)
+        payload = await cc._readiness_overview_compute(db_conn, sid, persist=False)
         assert payload["content_fingerprint"] == real_fp
         assert len(calls) == 1, f"缺省形态只允许算一次，实际 {len(calls)} 次"
 
@@ -274,9 +270,13 @@ class TestConsistencyRepairReviewDbSingleSource:
     def test_review_db_imported_on_own_line(self):
         """R13 契约形态：``from app.services import review_db`` 必须单独一行。"""
         tree = ast.parse(inspect.getsource(cr))
-        hits = [n for n in ast.walk(tree)
-                if isinstance(n, ast.ImportFrom) and n.module == "app.services"
-                and [a.name for a in n.names] == ["review_db"]]
+        hits = [
+            n
+            for n in ast.walk(tree)
+            if isinstance(n, ast.ImportFrom)
+            and n.module == "app.services"
+            and [a.name for a in n.names] == ["review_db"]
+        ]
         assert len(hits) == 1, "review_db 必须以单独一行 ImportFrom 引入"
 
     async def test_read_with_none_cursor_is_503_not_500(self):
@@ -290,20 +290,21 @@ class TestConsistencyRepairReviewDbSingleSource:
         （章节行不存在）→ 必须 503，**不得**返回 confirmed 假成功。
         旧实现裸 db.execute 不校验 rowcount，照常返回 200。"""
         _, sid = await _seed_scheme(db_conn, with_section=False)
-        snap = await repair_record.create_snapshot(
-            db_conn, sid, [{"section_id": "S-GONE", "content_before": "旧文"}])
+        snap = await repair_record.create_snapshot(db_conn, sid, [{"section_id": "S-GONE", "content_before": "旧文"}])
         rep = await repair_record.save_repair(
-            db_conn, scheme_id=sid, scan_id="S1", mode="auto",
-            items=[{"conflict_id": "C1", "section_id": "S-GONE",
-                    "status": "repaired"}],
-            snapshot_id=snap, total_conflicts=1,
-            stats={"repaired": 1, "failed": 0, "skipped": 0})
+            db_conn,
+            scheme_id=sid,
+            scan_id="S1",
+            mode="auto",
+            items=[{"conflict_id": "C1", "section_id": "S-GONE", "status": "repaired"}],
+            snapshot_id=snap,
+            total_conflicts=1,
+            stats={"repaired": 1, "failed": 0, "skipped": 0},
+        )
         with pytest.raises(HTTPException) as exc:
             await cr.confirm(
-                scheme_id=sid,
-                body={"repair_id": rep["repair_id"], "accepted": [],
-                      "rejected": ["C1"]},
-                db=db_conn)
+                scheme_id=sid, body={"repair_id": rep["repair_id"], "accepted": [], "rejected": ["C1"]}, db=db_conn
+            )
         assert exc.value.status_code == 503
 
     async def test_confirm_status_write_allows_zero_rows(self, db_conn):
@@ -311,14 +312,18 @@ class TestConsistencyRepairReviewDbSingleSource:
         require_rows=False，不得误伤成 503。"""
         _, sid = await _seed_scheme(db_conn, with_section=False)
         rep = await repair_record.save_repair(
-            db_conn, scheme_id=sid, scan_id="S1", mode="auto", items=[],
-            snapshot_id="", total_conflicts=0,
-            stats={"repaired": 0, "failed": 0, "skipped": 0})
-        out = await cr.confirm(
+            db_conn,
             scheme_id=sid,
-            body={"repair_id": rep["repair_id"], "accepted": ["C-ABSENT"],
-                  "rejected": []},
-            db=db_conn)
+            scan_id="S1",
+            mode="auto",
+            items=[],
+            snapshot_id="",
+            total_conflicts=0,
+            stats={"repaired": 0, "failed": 0, "skipped": 0},
+        )
+        out = await cr.confirm(
+            scheme_id=sid, body={"repair_id": rep["repair_id"], "accepted": ["C-ABSENT"], "rejected": []}, db=db_conn
+        )
         assert out["status"] == "confirmed"
 
 
@@ -349,23 +354,25 @@ class TestRollbackSchemeScoped:
             "INSERT INTO consistency_conflicts (id, scheme_id, scan_id,"
             " conflict_type, severity, topic, occurrences, status, created_at)"
             " VALUES (?,?,?,?,?,?,?,?,datetime('now','localtime'))",
-            ("C001", sid_b, "scanB", "numeric", "high", "工期", "[]",
-             "repaired"))
+            ("C001", sid_b, "scanB", "numeric", "high", "工期", "[]", "repaired"),
+        )
         snap = await repair_record.create_snapshot(db_conn, sid_a, [])
         await repair_record.save_repair(
-            db_conn, scheme_id=sid_a, scan_id="scanA", mode="auto",
-            items=[{"conflict_id": "C001", "section_id": "S1",
-                    "status": "repaired"}],
-            snapshot_id=snap, total_conflicts=1,
-            stats={"repaired": 1, "failed": 0, "skipped": 0})
+            db_conn,
+            scheme_id=sid_a,
+            scan_id="scanA",
+            mode="auto",
+            items=[{"conflict_id": "C001", "section_id": "S1", "status": "repaired"}],
+            snapshot_id=snap,
+            total_conflicts=1,
+            stats={"repaired": 1, "failed": 0, "skipped": 0},
+        )
         await db_conn.commit()
 
         out = await cr.rollback(sid_a, {"snapshot_id": snap}, db=db_conn)
         assert out["status"] == "rolled_back"
-        cur = await db_conn.execute(
-            "SELECT status FROM consistency_conflicts WHERE id='C001'")
-        assert (await cur.fetchone())[0] == "repaired", (
-            "跨方案同名历史行被回滚误伤（旧实现 UPDATE 不带 scheme 约束）")
+        cur = await db_conn.execute("SELECT status FROM consistency_conflicts WHERE id='C001'")
+        assert (await cur.fetchone())[0] == "repaired", "跨方案同名历史行被回滚误伤（旧实现 UPDATE 不带 scheme 约束）"
 
 
 # ===========================================================================
@@ -379,20 +386,14 @@ class TestInsertColumnPlaceholderParity:
         for module in (cc, cr):
             tree = ast.parse(inspect.getsource(module))
             for node in ast.walk(tree):
-                if not (isinstance(node, ast.Constant)
-                        and isinstance(node.value, str)):
+                if not (isinstance(node, ast.Constant) and isinstance(node.value, str)):
                     continue
-                m = re.search(
-                    r"INSERT INTO \w+ ?\(([^)]*)\)\s*VALUES ?\(([^)]*)\)",
-                    node.value)
+                m = re.search(r"INSERT INTO \w+ ?\(([^)]*)\)\s*VALUES ?\(([^)]*)\)", node.value)
                 if not m:
                     continue
                 cols = [c.strip() for c in m.group(1).split(",") if c.strip()]
                 ph = [p.strip() for p in m.group(2).split(",") if p.strip()]
-                assert all(p == "?" for p in ph), (
-                    f"非纯 ? 占位的 INSERT 请人工核对: {node.value[:80]}")
-                assert len(cols) == len(ph), (
-                    f"列数 {len(cols)} != 占位符数 {len(ph)}:"
-                    f" {node.value[:120]}")
+                assert all(p == "?" for p in ph), f"非纯 ? 占位的 INSERT 请人工核对: {node.value[:80]}"
+                assert len(cols) == len(ph), f"列数 {len(cols)} != 占位符数 {len(ph)}:" f" {node.value[:120]}"
                 checked += 1
         assert checked > 0, "扫描必须实际命中 INSERT（防护栏空转）"

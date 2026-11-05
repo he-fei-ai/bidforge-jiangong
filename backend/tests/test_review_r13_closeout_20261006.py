@@ -51,8 +51,7 @@ def _bare_execute_calls(tree: ast.AST) -> list[tuple[str, int]]:
             continue
         v = node.value
         # 形如 ``await db.execute(...)``：直接 Await 一个 .execute 调用
-        if (isinstance(v, ast.Call) and isinstance(v.func, ast.Attribute)
-                and v.func.attr == "execute"):
+        if isinstance(v, ast.Call) and isinstance(v.func, ast.Attribute) and v.func.attr == "execute":
             hits.append((ast.unparse(v.func), node.lineno))
     return hits
 
@@ -72,8 +71,9 @@ def test_router_has_no_bare_db_execute(name):
 def test_review_db_is_imported(name):
     """A2：确认确实接的是单一出口，而非「恰好没有裸调用」。"""
     src = (ROUTERS_DIR / name).read_text(encoding="utf-8")
-    assert "from app.services import review_db" in src, (
-        f"{name} 未导入 review_db —— 裸调用被删光却没有统一出口，属于另一种漂移。")
+    assert (
+        "from app.services import review_db" in src
+    ), f"{name} 未导入 review_db —— 裸调用被删光却没有统一出口，属于另一种漂移。"
 
 
 def test_row_values_exists():
@@ -100,9 +100,12 @@ def test_no_positional_indexing_of_review_db_results(name):
         if isinstance(node, ast.Assign) and isinstance(node.value, ast.Await):
             v = node.value.value
             # ``await review_db.fetch_all(...)`` → func.value 是 Name('review_db')
-            if (isinstance(v, ast.Call) and isinstance(v.func, ast.Attribute)
-                    and isinstance(v.func.value, ast.Name)
-                    and v.func.value.id == "review_db"):
+            if (
+                isinstance(v, ast.Call)
+                and isinstance(v.func, ast.Attribute)
+                and isinstance(v.func.value, ast.Name)
+                and v.func.value.id == "review_db"
+            ):
                 for t in node.targets:
                     if isinstance(t, ast.Name):
                         bound.add(t.id)
@@ -122,7 +125,8 @@ def test_no_positional_indexing_of_review_db_results(name):
     assert offenders == [], (
         f"{name} 对 review_db 的结果做了下标取值：{offenders}。"
         "review_db 返回 dict，必须按列名取值（fetch_one 已加别名），"
-        "或用 review_db.row_values() 取列序值。")
+        "或用 review_db.row_values() 取列序值。"
+    )
 
 
 # ---------------------------------------------------------------------------
@@ -214,8 +218,7 @@ class TestWritePathNeverFakesSuccess:
 
     async def test_exec_write_allow_zero_when_caller_says_legitimate(self):
         """require_rows=False 时 0 行是合法结果（如记账回填），不得抛 503。"""
-        assert await review_db.exec_write(
-            _ZeroRowConn(), "UPDATE t SET x=1", what="单测记账", require_rows=False) == 0
+        assert await review_db.exec_write(_ZeroRowConn(), "UPDATE t SET x=1", what="单测记账", require_rows=False) == 0
 
     async def test_exec_write_does_not_commit_on_failure(self):
         """失败时不得 commit —— 否则「0 行」会被固化，且 get_db 的 rollback 失效。"""
@@ -238,14 +241,14 @@ async def _assert_write_endpoints_raise_503(scheme_id="s-13"):
     assert e.value.status_code == 503, "reset_review_on_content_change 不得返回 True"
 
     with pytest.raises(HTTPException) as e:
-        await rv._write_record(_NoneConn(), scheme_id, "sec-1", "t",
-                              "pending", "approved", "张三", "ok")
+        await rv._write_record(_NoneConn(), scheme_id, "sec-1", "t", "pending", "approved", "张三", "ok")
     assert e.value.status_code == 503, "评审留痕 INSERT 未生效必须抛出，不得静默"
 
     from app.models import SchemeReviewIn, SectionReviewIn
 
     class _OKConn(_ZeroRowConn):
         """方案/章节查询返回真行，让流程走到 UPDATE 那一步再失败。"""
+
         def __init__(self):
             super().__init__()
             self._n = 0
@@ -254,19 +257,19 @@ async def _assert_write_endpoints_raise_503(scheme_id="s-13"):
             self._n += 1
             # 章节 / 方案查询返回真行，让流程一路走到 UPDATE 那一步再失败
             if "review_status" in sql:
-                return _Row({"id": "sec-1", "title": "T", "name": "S",
-                             "status": "目录已确认", "review_status": "pending"})
+                return _Row(
+                    {"id": "sec-1", "title": "T", "name": "S", "status": "目录已确认", "review_status": "pending"}
+                )
             return await super().execute(sql, params)
 
     with pytest.raises(HTTPException) as e:
-        await rv.review_section(scheme_id, "sec-1",
-                                SectionReviewIn(to_status="approved", reviewer="张三"),
-                                _OKConn())
+        await rv.review_section(scheme_id, "sec-1", SectionReviewIn(to_status="approved", reviewer="张三"), _OKConn())
     assert e.value.status_code == 503, "章节审核不得返回 changed=True"
 
     with pytest.raises(HTTPException) as e:
-        await ra._persist_fixed(_NoneConn(), scheme_id=scheme_id, rule_id="DLV-05",
-                                pending=[("sec-1", "before", "after")])
+        await ra._persist_fixed(
+            _NoneConn(), scheme_id=scheme_id, rule_id="DLV-05", pending=[("sec-1", "before", "after")]
+        )
     assert e.value.status_code == 503, "自动修复落库不得返回快照 id（正文未改却报已修复）"
 
 
@@ -298,11 +301,13 @@ async def test_write_endpoints_raise_503_on_none_db():
 async def test_persist_run_is_fail_soft_but_observable(monkeypatch, caplog):
     """_persist_run 的契约：写失败**不得**影响评分结论返回，但必须留日志。"""
     from app.routers import compliance
+
     calls: list = []
 
     async def _boom(conn, scheme_id, payload, stats):
-        await compliance.review_db.exec_write(_NoneConn(), "INSERT INTO preflight_runs ...",
-                                              what="单测", require_rows=False)
+        await compliance.review_db.exec_write(
+            _NoneConn(), "INSERT INTO preflight_runs ...", what="单测", require_rows=False
+        )
 
     monkeypatch.setattr(compliance, "_persist_run", _boom)
     with caplog.at_level("WARNING", logger="review_db"):
@@ -318,6 +323,7 @@ async def test_persist_run_is_fail_soft_but_observable(monkeypatch, caplog):
 async def test_preflight_context_raises_503():
     """_build_preflight_context 不在任何 try 内 —— 旧实现命中 R13 直接 500。"""
     from app.routers import compliance
+
     with pytest.raises(HTTPException) as e:
         await compliance._build_preflight_context("s-13", _NoneConn())
     assert e.value.status_code == 503
@@ -325,6 +331,7 @@ async def test_preflight_context_raises_503():
 
 async def test_load_sections_raises_503():
     from app.routers import review_autofix as ra
+
     with pytest.raises(HTTPException) as e:
         await ra._load_sections(_NoneConn(), "s-13")
     assert e.value.status_code == 503
@@ -332,6 +339,7 @@ async def test_load_sections_raises_503():
 
 async def test_load_scheme_raises_503():
     from app.routers import review_autofix as ra
+
     with pytest.raises(HTTPException) as e:
         await ra._load_scheme(_NoneConn(), "s-13")
     assert e.value.status_code == 503
@@ -359,19 +367,20 @@ async def test_content_fingerprint_changes_with_content(tmp_path, monkeypatch):
         pid, sid = uuid.uuid4().hex, uuid.uuid4().hex
         await db.execute("INSERT INTO projects(id,name) VALUES(?,?)", (pid, "p"))
         await db.execute(
-            "INSERT INTO schemes(id,project_id,name,word_budget) VALUES(?,?,?,?)",
-            (sid, pid, "基坑工程", 30000))
+            "INSERT INTO schemes(id,project_id,name,word_budget) VALUES(?,?,?,?)", (sid, pid, "基坑工程", 30000)
+        )
         await db.execute(
-            "INSERT INTO sections (id,scheme_id,title,content,word_count,level,sort_order)"
-            " VALUES(?,?,?,?,?,?,?)", ("sec-1", sid, "工程概况", "原正文" * 50, 150, 1, 1))
+            "INSERT INTO sections (id,scheme_id,title,content,word_count,level,sort_order)" " VALUES(?,?,?,?,?,?,?)",
+            ("sec-1", sid, "工程概况", "原正文" * 50, 150, 1, 1),
+        )
         await db.commit()
 
         from app.routers import compliance
+
         fp1 = await compliance._content_fingerprint(db, sid)
         assert fp1, "指纹不应为空（空 = 无法判定过期）"
 
-        await db.execute("UPDATE sections SET content=? WHERE id=?",
-                         ("改写后的正文" * 50, "sec-1"))
+        await db.execute("UPDATE sections SET content=? WHERE id=?", ("改写后的正文" * 50, "sec-1"))
         await db.commit()
         fp2 = await compliance._content_fingerprint(db, sid)
         assert fp1 != fp2, "正文变更后指纹必须变化，否则 stale 判定永久失效"
@@ -388,13 +397,13 @@ async def test_content_fingerprint_changes_with_content(tmp_path, monkeypatch):
 # ---------------------------------------------------------------------------
 def test_review_db_never_imports_routers():
     src = Path(review_db.__file__).read_text(encoding="utf-8")
-    assert "from app.routers" not in src and "import app.routers" not in src, (
-        "services 层不得 import routers（见 tests/test_outline_name_line_20260927）")
+    assert (
+        "from app.routers" not in src and "import app.routers" not in src
+    ), "services 层不得 import routers（见 tests/test_outline_name_line_20260927）"
 
 
 def test_review_db_signature_is_stable():
     """三个出口的关键字参数 ``what`` 必须存在 —— 告警文案是唯一可观测手段。"""
-    for fn in (review_db.fetch_one, review_db.fetch_all, review_db.fetch_scalar,
-               review_db.exec_write):
+    for fn in (review_db.fetch_one, review_db.fetch_all, review_db.fetch_scalar, review_db.exec_write):
         sig = inspect.signature(fn)
         assert "what" in sig.parameters, f"{fn.__name__} 缺少 what 告警参数"

@@ -18,8 +18,7 @@ import {
 
 describe("审核与预检 · 类型契约（与后端字段同步）", () => {
   it("严重度标签 / 色板完整覆盖四档（含 block），杜绝未映射档位", () => {
-    expect(Object.keys(SEVERITY_LABEL).sort()).toEqual(
-      ["block", "high", "low", "medium"]);
+    expect(Object.keys(SEVERITY_LABEL).sort()).toEqual(["block", "high", "low", "medium"]);
     for (const k of ["block", "high", "medium", "low"] as Severity[]) {
       expect(SEVERITY_LABEL[k]).toBeTruthy();
       expect(SEVERITY_COLOR[k]).toBeTruthy();
@@ -50,9 +49,14 @@ describe("审核与预检 · 类型契约（与后端字段同步）", () => {
 
   it("PreflightStats 声明 /overview 返回的 export_issue_count（G1 数据链）", () => {
     const st: PreflightStats = {
-      section_count: 2, leaf_count: 1, generated_count: 2,
-      total_words: 100, word_budget: 0, empty_ratio: 0,
-      chart_total: 0, chart_done: 0,
+      section_count: 2,
+      leaf_count: 1,
+      generated_count: 2,
+      total_words: 100,
+      word_budget: 0,
+      empty_ratio: 0,
+      chart_total: 0,
+      chart_done: 0,
       export_issue_count: 3,
     };
     expect(st.export_issue_count).toBe(3);

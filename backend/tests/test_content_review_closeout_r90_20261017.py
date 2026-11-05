@@ -41,6 +41,7 @@
 ⇒ 本文件 C 组不逐路径抄锚点，而是**枚举全部终态 yield**后逐个断言
 「其后再无 finish_task」，把这类不变量从「点名式」升级为「全量式」。
 """
+
 from __future__ import annotations
 
 import ast
@@ -70,20 +71,27 @@ def _dup_sections() -> list[dict]:
     words = ["甲", "乙", "丙", "丁", "戊", "己", "庚"]
     secs: list[dict] = []
     for pair, w in enumerate(words):
-        shared = (f"专项条款{w}：基坑支护采用钻孔灌注桩，桩径九百毫米，"
-                  f"混凝土强度 C30，施工前进行图纸会审与技术交底。")
+        shared = (
+            f"专项条款{w}：基坑支护采用钻孔灌注桩，桩径九百毫米，" f"混凝土强度 C30，施工前进行图纸会审与技术交底。"
+        )
         for k in (pair * 2, pair * 2 + 1):
-            body = "\n\n".join([shared, filler,
-                                f"第 {k} 章独有内容 {k} 如下所述，逐条落实到位。"])
-            secs.append({"id": f"s{k}", "title": f"第{k}章 专项", "content": body,
-                         "word_count": len(body), "parent_id": None})
+            body = "\n\n".join([shared, filler, f"第 {k} 章独有内容 {k} 如下所述，逐条落实到位。"])
+            secs.append(
+                {"id": f"s{k}", "title": f"第{k}章 专项", "content": body, "word_count": len(body), "parent_id": None}
+            )
     return secs
 
 
 def _ctx() -> pf.PreflightContext:
-    return pf.PreflightContext(scheme_id="r90", scheme_name="护栏方案",
-                               scheme_type="decoration", word_budget=1500,
-                               sections=_dup_sections(), charts=[], facts=[])
+    return pf.PreflightContext(
+        scheme_id="r90",
+        scheme_name="护栏方案",
+        scheme_type="decoration",
+        word_budget=1500,
+        sections=_dup_sections(),
+        charts=[],
+        facts=[],
+    )
 
 
 @pytest.fixture
@@ -127,7 +135,7 @@ class TestFindingSeverityKwarg:
         """未登记编号（理论上不该再出现）走兜底分支时 override 仍生效。"""
         f = pf._finding("ZZ-99", "x", severity="low")
         assert f["severity"] == "low"
-        assert f["dimension"] == ""      # 兜底语义保持
+        assert f["dimension"] == ""  # 兜底语义保持
         assert f["title"] == "ZZ-99"
 
     @pytest.mark.parametrize("sev", sorted(SEVERITY_ORDER))
@@ -137,8 +145,7 @@ class TestFindingSeverityKwarg:
     def test_default_behaviour_unchanged_for_every_existing_call_shape(self):
         """回归锁：既有关键字组合下逐字不变（sse_handlers 的护栏依赖此性质）。"""
         base = pf._finding("CMP-02", "d")
-        rich = pf._finding("CMP-02", "d", evidence=["a", "b"], section_id="s1",
-                           section_title="t", suggestion="sg")
+        rich = pf._finding("CMP-02", "d", evidence=["a", "b"], section_id="s1", section_title="t", suggestion="sg")
         assert set(base) == set(rich)
         assert rich["severity"] == base["severity"] == "block"
         assert rich["evidence"] == ["a", "b"]
@@ -168,9 +175,7 @@ class TestNoSelfInventedRuleId:
         bad: list[str] = []
         checked = 0
         for node in ast.walk(tree):
-            if not (isinstance(node, ast.Call)
-                    and isinstance(node.func, ast.Name)
-                    and node.func.id == "_finding"):
+            if not (isinstance(node, ast.Call) and isinstance(node.func, ast.Name) and node.func.id == "_finding"):
                 continue
             if not node.args or not isinstance(node.args[0], ast.Constant):
                 continue  # 动态编号（CON-06-{idx}）单独由「派生形态」用例覆盖
@@ -188,28 +193,24 @@ class TestNoSelfInventedRuleId:
         assert pf._resolve_rule("CON-05-12") is not None
 
     def test_registry_and_emitted_set_stay_healthy(self):
-        assert validate_rule_registry(
-            emitted_rule_ids=ar._PROGRAM_EMITTED_RULE_IDS) == []
+        assert validate_rule_registry(emitted_rule_ids=ar._PROGRAM_EMITTED_RULE_IDS) == []
 
 
 class TestTruncationBranchDoesNotKillChecker:
     """BUG-RV-1 的行为层：截断形态下 CON-06 结论**不得**整体丢失。"""
 
     def test_checker_does_not_raise_when_truncated(self, truncated_copies):
-        out = pf.check_duplication(_ctx())          # 修复前在此抛 TypeError
+        out = pf.check_duplication(_ctx())  # 修复前在此抛 TypeError
         assert out, "截断提示必须可见（旧实现设计意图）"
 
     def test_real_copy_groups_are_not_lost(self, truncated_copies):
-        baseline = {f["rule_id"] for f in pf.check_duplication(_ctx())
-                    if f["rule_id"].startswith("CON-06-")}
-        truncated = {f["rule_id"] for f in pf.check_duplication(_ctx())
-                     if f["rule_id"].startswith("CON-06-")}
+        baseline = {f["rule_id"] for f in pf.check_duplication(_ctx()) if f["rule_id"].startswith("CON-06-")}
+        truncated = {f["rule_id"] for f in pf.check_duplication(_ctx()) if f["rule_id"].startswith("CON-06-")}
         assert baseline, "前提自证：语料本应产生真实搬运组"
         assert truncated == baseline, "真实成段雷同结论被截断分支吞掉"
 
     def test_truncation_notice_has_registered_dimension_and_basis(self, truncated_copies):
-        notice = [f for f in pf.check_duplication(_ctx())
-                  if f["rule_id"] == "CON-06"]
+        notice = [f for f in pf.check_duplication(_ctx()) if f["rule_id"] == "CON-06"]
         assert len(notice) == 1
         rule = ar.get_rule("CON-06")
         assert notice[0]["dimension"] == rule.dimension
@@ -217,13 +218,11 @@ class TestTruncationBranchDoesNotKillChecker:
         assert notice[0]["title"] == rule.title
 
     def test_truncation_notice_is_low_severity(self, truncated_copies):
-        notice = [f for f in pf.check_duplication(_ctx())
-                  if f["rule_id"] == "CON-06"][0]
+        notice = [f for f in pf.check_duplication(_ctx()) if f["rule_id"] == "CON-06"][0]
         assert notice["severity"] == "low", "元信息按 medium 报会虚增扣分"
 
     def test_truncation_notice_carries_actionable_suggestion(self, truncated_copies):
-        notice = [f for f in pf.check_duplication(_ctx())
-                  if f["rule_id"] == "CON-06"][0]
+        notice = [f for f in pf.check_duplication(_ctx()) if f["rule_id"] == "CON-06"][0]
         assert len(notice["suggestion"]) >= 10, "修复建议必须可执行，不是空串"
 
     def test_run_preflight_emits_no_engine_error(self, truncated_copies):
@@ -232,12 +231,14 @@ class TestTruncationBranchDoesNotKillChecker:
 
     def test_unknown_dimension_stays_zero(self, truncated_copies):
         from app.services import audit_scoring as sc
+
         allf = pf.run_preflight(_ctx())
         assert sc.score_findings(allf).unknown_dimension_count == 0
 
     def test_truncation_does_not_inflate_the_consistency_score(self, truncated_copies):
         """回归锁根因最恶劣的一面：检查器崩溃曾让 consistency **涨到 100**。"""
         from app.services import audit_scoring as sc
+
         scores = {}
         for label, cap in (("ok", 60000), ("truncated", 0)):
             dd.MAX_PAIRWISE_COMPARISONS = cap
@@ -246,8 +247,7 @@ class TestTruncationBranchDoesNotKillChecker:
                 scores[label] = {d.key: d.score for d in res.dimensions}["consistency"]
             finally:
                 dd.MAX_PAIRWISE_COMPARISONS = 60000
-        assert scores["truncated"] <= scores["ok"], (
-            "截断形态的 consistency 分数不得高于正常形态（说明搬运结论被吞了）")
+        assert scores["truncated"] <= scores["ok"], "截断形态的 consistency 分数不得高于正常形态（说明搬运结论被吞了）"
 
 
 # ===========================================================================
@@ -273,8 +273,7 @@ class TestContentTerminalOrderingAllPaths:
     def _fn_ast(self):
         tree = ast.parse(inspect.getsource(sh.generate_content))
         for node in ast.walk(tree):
-            if (isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef))
-                    and node.name == "generate_content"):
+            if isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef)) and node.name == "generate_content":
                 return node
         raise AssertionError("未定位到 generate_content")
 
@@ -291,8 +290,7 @@ class TestContentTerminalOrderingAllPaths:
     def _finish_lines(node: ast.AST) -> set[int]:
         out: set[int] = set()
         for n in ast.walk(node):
-            if (isinstance(n, ast.Call) and isinstance(n.func, ast.Name)
-                    and n.func.id == "finish_task"):
+            if isinstance(n, ast.Call) and isinstance(n.func, ast.Name) and n.func.id == "finish_task":
                 out.add(n.lineno)
         return out
 
@@ -311,10 +309,9 @@ class TestContentTerminalOrderingAllPaths:
                     if not self._is_terminal_yield(st, src):
                         continue
                     found += 1
-                    later = {ln for st2 in lst[i + 1:] for ln in self._finish_lines(st2)}
+                    later = {ln for st2 in lst[i + 1 :] for ln in self._finish_lines(st2)}
                     for ln in sorted(later):
-                        violations.append(
-                            (type(body_owner).__name__, st.lineno, ln))
+                        violations.append((type(body_owner).__name__, st.lineno, ln))
         self._found = found
         return violations
 
@@ -329,7 +326,8 @@ class TestContentTerminalOrderingAllPaths:
         assert self._found >= 4
         assert self._scan() == [], (
             "终态 yield 之后仍有同一语句列表内的 finish_task —— 该行会被 "
-            "GeneratorExit 跳过，任务终态将被 finally 兜底改写为 stopped")
+            "GeneratorExit 跳过，任务终态将被 finally 兜底改写为 stopped"
+        )
 
     def test_finally_cleanup_is_still_allowed(self):
         """反向锁：确认判据没有过严到把合法的 finally 兜底也判红。
@@ -387,15 +385,17 @@ class TestContentEmptyLeavesTerminalStatus:
         conn = await _appdb.get_conn()
         try:
             import uuid as _uuid
+
             pid = f"test-r173-proj-{_uuid.uuid4().hex[:8]}"
             sid = f"test-r173-scheme-{_uuid.uuid4().hex[:8]}"
             await conn.execute(
                 "INSERT INTO projects(id, name, engineering_type) VALUES(?,?,?)",
-                (pid, "_pytest_scheme", "施工组织设计"))
+                (pid, "_pytest_scheme", "施工组织设计"),
+            )
             await conn.execute(
-                "INSERT INTO schemes(id, project_id, name, status) "
-                "VALUES(?,?,?,?)",
-                (sid, pid, "_pytest_scheme", "编制中"))
+                "INSERT INTO schemes(id, project_id, name, status) " "VALUES(?,?,?,?)",
+                (sid, pid, "_pytest_scheme", "编制中"),
+            )
             # ⚠️ 旧实现直接挑生产库 LIMIT 1 的方案：库被重建为空（2026-11-03）后
             #    该用例恒红，且属于环境依赖而非代码缺陷。现自建最小项目/方案。
             # ⚠️ 必须让 sections 表对该方案彻底为空（而不是「正文为空」）：
@@ -405,7 +405,7 @@ class TestContentEmptyLeavesTerminalStatus:
             await conn.execute("DELETE FROM sections WHERE scheme_id=?", (sid,))
             await conn.commit()
 
-            async def _boom(*a, **k):   # 绝不该被调用
+            async def _boom(*a, **k):  # 绝不该被调用
                 raise AssertionError("空章节早退路径不应触发任何 AI 调用")
 
             monkeypatch.setattr(sh, "chat_with_fallback", _boom, raising=False)
@@ -424,8 +424,7 @@ class TestContentEmptyLeavesTerminalStatus:
                     if m:
                         events.append(_json.loads(m.group(1)))
                     # 模拟前端：收到终态事件立即断开（break + aclose）
-                    if events and events[-1].get("event") in (
-                            "completed", "stopped", "error"):
+                    if events and events[-1].get("event") in ("completed", "stopped", "error"):
                         break
             finally:
                 aclose = getattr(stream, "aclose", None)
@@ -433,11 +432,9 @@ class TestContentEmptyLeavesTerminalStatus:
                     await aclose()
 
             assert events, "未收到任何 SSE 事件"
-            assert events[-1]["event"] == "completed", (
-                f"终态事件应为 completed，实得 {events[-1]['event']}")
+            assert events[-1]["event"] == "completed", f"终态事件应为 completed，实得 {events[-1]['event']}"
             tid = events[-1].get("task_id") or ""
-            assert tid not in tr._tasks, (
-                "任务已 finish_task 清理，不应仍留在 _tasks（否则 finally 会改写）")
+            assert tid not in tr._tasks, "任务已 finish_task 清理，不应仍留在 _tasks（否则 finally 会改写）"
         finally:
             await _appdb.close_db()
             _appdb.DB_PATH = prev_path
@@ -506,14 +503,17 @@ class TestExportIssueReadStrictness:
         故下方同时断言「至少 4 个调用点」作为扫描器自证。
         """
         tree = ast.parse(inspect.getsource(ex.collect_export_issues))
-        calls = [n for n in ast.walk(tree)
-                 if isinstance(n, ast.Call) and isinstance(n.func, ast.Name)
-                 and n.func.id in ("_db_fetch_all", "_db_fetch_one")]
+        calls = [
+            n
+            for n in ast.walk(tree)
+            if isinstance(n, ast.Call)
+            and isinstance(n.func, ast.Name)
+            and n.func.id in ("_db_fetch_all", "_db_fetch_one")
+        ]
         assert len(calls) >= 4, f"查询出口数不足（{len(calls)}），请同步本护栏"
         for n in calls:
             kw = {k.arg for k in n.keywords}
-            assert "strict" in kw, (
-                f"{n.func.id} 调用未传 strict（第 {n.lineno} 行）")
+            assert "strict" in kw, f"{n.func.id} 调用未传 strict（第 {n.lineno} 行）"
 
 
 class TestReadinessOverviewSeesExportSourceFailure:
@@ -527,30 +527,45 @@ class TestReadinessOverviewSeesExportSourceFailure:
         「实参是否真的传了」零判别力，AST 关键字节点才认。
         """
         from app.routers import compliance as cmp_mod
+
         tree = ast.parse(inspect.getsource(cmp_mod._readiness_overview_compute))
-        calls = [n for n in ast.walk(tree)
-                 if isinstance(n, ast.Call) and isinstance(n.func, ast.Name)
-                 and n.func.id == "collect_export_issues"]
+        calls = [
+            n
+            for n in ast.walk(tree)
+            if isinstance(n, ast.Call) and isinstance(n.func, ast.Name) and n.func.id == "collect_export_issues"
+        ]
         assert len(calls) == 1, f"总检侧 collect_export_issues 调用点数异常：{len(calls)}"
         kw = {k.arg: k.value for k in calls[0].keywords}
-        assert "strict_read" in kw, (
-            "总检侧必须传 strict_read=True，否则 failed_sources 对 DB 读失败不可达")
-        assert isinstance(kw["strict_read"], ast.Constant) and \
-            kw["strict_read"].value is True
+        assert "strict_read" in kw, "总检侧必须传 strict_read=True，否则 failed_sources 对 DB 读失败不可达"
+        assert isinstance(kw["strict_read"], ast.Constant) and kw["strict_read"].value is True
 
-    def test_export_page_call_site_keeps_default(self):
-        """导出页**不得**改成严格读（否则 DB 抖动会让导出预检 500）。
+    def test_export_page_call_site_uses_strict_read(self):
+        """导出页预检改用严格读（R178 翻转，语义有据）。
 
-        同样走 AST：反向文本判据会被注释里的同名串误伤（判据过严比过宽更糟，
+        旧语义（R90 当时）：导出页不得传 ``strict_read``，沿用 fail-soft 缺省，
+        避免 DB 抖动导致导出预检 500。
+        新语义（B1-1 · R176）：fail-soft 会把 DB 读失败降级成空结果集，页面直接
+        渲染「预检通过」——即**假绿**；审计判定这比 500 更糟（用户以为没问题）。
+        现改为 ``strict_read=True`` + 捕获 ``DBReadError`` → 503 并回传
+        ``read_degraded=true`` / ``Retry-After``，「确实无问题」与「没读到数据」
+        在响应体层面可区分。行为侧由 test_degrade_fix_b1_r176_20261104 覆盖。
+
+        仍走 AST：反向文本判据会被注释里的同名串误伤（判据过严比过宽更糟，
         它会逼着后人把护栏改松）。
         """
         tree = ast.parse(inspect.getsource(ex.export_check))
-        calls = [n for n in ast.walk(tree)
-                 if isinstance(n, ast.Call) and isinstance(n.func, ast.Name)
-                 and n.func.id == "collect_export_issues"]
+        calls = [
+            n
+            for n in ast.walk(tree)
+            if isinstance(n, ast.Call) and isinstance(n.func, ast.Name) and n.func.id == "collect_export_issues"
+        ]
         assert len(calls) == 1, f"导出页调用点数异常：{len(calls)}"
-        assert not calls[0].keywords, (
-            "导出页必须沿用 fail-soft 缺省（不得传 strict_read=True）")
+        kw = {k.arg: k.value for k in calls[0].keywords}
+        assert "strict_read" in kw, "导出预检必须传 strict_read=True，否则 DB 读失败会退化成假通过"
+        assert isinstance(kw["strict_read"], ast.Constant) and kw["strict_read"].value is True
+        assert "DBReadError" in inspect.getsource(
+            ex.export_check
+        ), "严格读必须配套捕获 DBReadError，否则读失败会变成 500"
 
 
 # ===========================================================================
@@ -563,11 +578,13 @@ class TestRepairRecordSingleExit:
         tree = ast.parse(src)
         offenders = []
         for node in ast.walk(tree):
-            if (isinstance(node, ast.Call)
-                    and isinstance(node.func, ast.Attribute)
-                    and node.func.attr == "execute"
-                    and isinstance(node.func.value, ast.Name)
-                    and node.func.value.id == "db"):
+            if (
+                isinstance(node, ast.Call)
+                and isinstance(node.func, ast.Attribute)
+                and node.func.attr == "execute"
+                and isinstance(node.func.value, ast.Name)
+                and node.func.value.id == "db"
+            ):
                 offenders.append(node.lineno)
         assert offenders == [], f"仍存在裸 db.execute（行号）：{offenders}"
 
@@ -578,6 +595,7 @@ class TestRepairRecordSingleExit:
     async def test_mark_repair_status_raises_instead_of_false_success(self):
         from app.services import repair_record as rr
         from fastapi import HTTPException
+
         with pytest.raises(HTTPException) as ei:
             await rr.mark_repair_status(_NoneCursorDB(), "R_1", "confirmed")
         assert ei.value.status_code == 503
@@ -586,6 +604,7 @@ class TestRepairRecordSingleExit:
         """DB 不可用时不得谎报「快照不存在」（空结果会被当业务答案）。"""
         from app.services import repair_record as rr
         from fastapi import HTTPException
+
         with pytest.raises(HTTPException) as ei:
             await rr.get_snapshot(_NoneCursorDB(), "ver_x")
         assert ei.value.status_code == 503
@@ -593,6 +612,7 @@ class TestRepairRecordSingleExit:
     async def test_get_repair_raises_503(self):
         from app.services import repair_record as rr
         from fastapi import HTTPException
+
         with pytest.raises(HTTPException) as ei:
             await rr.get_repair(_NoneCursorDB(), "R_1")
         assert ei.value.status_code == 503
@@ -600,6 +620,7 @@ class TestRepairRecordSingleExit:
     async def test_list_repairs_raises_503(self):
         from app.services import repair_record as rr
         from fastapi import HTTPException
+
         with pytest.raises(HTTPException) as ei:
             await rr.list_repairs(_NoneCursorDB(), "s1")
         assert ei.value.status_code == 503
@@ -607,26 +628,34 @@ class TestRepairRecordSingleExit:
     async def test_save_repair_insert_verified(self):
         from app.services import repair_record as rr
         from fastapi import HTTPException
+
         with pytest.raises(HTTPException):
-            await rr.save_repair(rr.db if False else _NoneCursorDB(),
-                                 scheme_id="s1", scan_id="c1", mode="m",
-                                 items=[], snapshot_id="v1", total_conflicts=0)
+            await rr.save_repair(
+                rr.db if False else _NoneCursorDB(),
+                scheme_id="s1",
+                scan_id="c1",
+                mode="m",
+                items=[],
+                snapshot_id="v1",
+                total_conflicts=0,
+            )
 
     async def test_create_snapshot_insert_verified(self):
         from app.services import repair_record as rr
         from fastapi import HTTPException
+
         with pytest.raises(HTTPException):
-            await rr.create_snapshot(_NoneCursorDB(), "s1",
-                                     [{"section_id": "a", "content_before": "x"}])
+            await rr.create_snapshot(_NoneCursorDB(), "s1", [{"section_id": "a", "content_before": "x"}])
 
     def test_callers_do_not_swallow_the_503_into_success(self):
         """反向锁：调用点不得用 `except Exception` 把 503 吞成成功体。"""
         for rel in ("app/routers/consistency_repair.py", "app/routers/review_autofix.py"):
             src = (_BACKEND / rel).read_text(encoding="utf-8")
             for m in re.finditer(r"mark_repair_status\(", src):
-                window = src[max(0, m.start() - 260):m.start() + 120]
-                assert "except Exception" not in window, (
-                    f"{rel}: mark_repair_status 附近存在裸 except，503 会被吞成假成功")
+                window = src[max(0, m.start() - 260) : m.start() + 120]
+                assert (
+                    "except Exception" not in window
+                ), f"{rel}: mark_repair_status 附近存在裸 except，503 会被吞成假成功"
 
 
 # ===========================================================================

@@ -25,6 +25,7 @@ R55 只锁了**数组形**的单一出口（``test_review_autofix_closeout_r55_2
 （用真实拦截器回调，非字符串比对）；跨语言静态 parity 放这里 —— 前端测试
 无法读 ``.py``（仓库未装 @types/node，同 R71/R75b 惯例）。
 """
+
 import io
 import re
 from pathlib import Path
@@ -49,8 +50,12 @@ def _read(rel: str) -> str:
 def _page_sources() -> str:
     """facade 页面 + schemeWorkbench/ 子模块聚合源码（拆分后等价读取范围）。"""
     parts = [_read(PAGE_TSX)]
-    for p in sorted(list((_ROOT / PAGE_WB_DIR).glob("*.ts"))
-                    + list((_ROOT / PAGE_WB_DIR).glob("*.tsx"))):
+    wb = _ROOT / PAGE_WB_DIR
+    assert wb.is_dir(), f"拆分目录缺失：{PAGE_WB_DIR}"
+    # R176（2026-11-04）：拆分仍在继续，非递归 glob 会漏掉 tabs/ —— 递归 + 非空兜底。
+    sub = sorted(set(wb.rglob("*.ts")) | set(wb.rglob("*.tsx")))
+    assert sub, f"拆分目录未被递归扫描到（0 个 ts/tsx）：{PAGE_WB_DIR}"
+    for p in sub:
         parts.append(io.open(p, encoding="utf-8-sig").read())
     return "\n".join(parts)
 
@@ -63,7 +68,7 @@ def _fn_body(src: str, name: str) -> str:
     assert m, f"未找到函数 {name}"
     pad = len(m.group(1))
     out = []
-    for line in src[m.end():].splitlines()[1:]:
+    for line in src[m.end() :].splitlines()[1:]:
         if line.strip() and len(line) - len(line.lstrip()) <= pad:
             break
         out.append(line)
@@ -75,7 +80,7 @@ def _handle_body(src: str, const_name: str) -> str:
     m = re.search(r"const %s = async \(\) => \{" % re.escape(const_name), src)
     assert m, f"未找到 {const_name}"
     depth, out = 1, []
-    for line in src[m.end():].splitlines()[1:]:
+    for line in src[m.end() :].splitlines()[1:]:
         depth += line.count("{") - line.count("}")
         out.append(line)
         if depth <= 0:
@@ -89,18 +94,14 @@ class TestBackendConsistencyAudit422:
     def test_both_422s_live_in_the_audit_endpoint(self):
         src = _read(COMP_PY)
         body = _fn_body(src, "run_consistency_audit")
-        assert body.count("HTTPException(422") == 2, (
-            "一致性审计端点的业务失败数量漂移（应为 2 条：无正文 / 无事实）"
-        )
+        assert body.count("HTTPException(422") == 2, "一致性审计端点的业务失败数量漂移（应为 2 条：无正文 / 无事实）"
 
     def test_422_detail_is_string_not_validation_array(self):
         # 业务失败必须走字符串 detail —— 只有字符串才会被前端拦截器逐字透传
         body = _fn_body(_read(COMP_PY), "run_consistency_audit")
         for m in re.finditer(r"raise HTTPException\(422,\s*(.+?)\)", body):
             arg = m.group(1).strip()
-            assert arg.startswith('"') and arg.endswith('"'), (
-                f"422 的 detail 必须是纯字符串文案，实际为 {arg!r}"
-            )
+            assert arg.startswith('"') and arg.endswith('"'), f"422 的 detail 必须是纯字符串文案，实际为 {arg!r}"
 
     def test_no_content_422_names_the_missing_input(self):
         assert "方案尚无正文内容，无法审计" in _read(COMP_PY)
@@ -119,21 +120,16 @@ class TestFrontendStringDetailChain:
         s = _read(API_TS)
         # 两个形态在**同一行三元**里分流 —— 任何"字符串形只认 detail 字符串"的
         # 回退都会让这行消失（这是 R55 只锁数组形留下的洞）
-        assert (
-            "Array.isArray(rawDetail) ? detailArrayToText(rawDetail) : rawDetail"
-        ) in s
+        assert ("Array.isArray(rawDetail) ? detailArrayToText(rawDetail) : rawDetail") in s
         # any 类型整改后 data 收敛为类型化别名 body —— 二者语义等价（同一载荷），
         # 仍要求同一标识符在三元两侧成对出现，不允许分裂成两个来源。
-        m = re.search(
-            r"const rawDetail = (data|body)\?\.detail \?\? \1\?\.message", s)
+        m = re.search(r"const rawDetail = (data|body)\?\.detail \?\? \1\?\.message", s)
         assert m, "未找到 rawDetail 单出口三元（data/body 别名形态均未命中）"
 
     def test_string_branch_writes_error_message_exactly_once(self):
         s = _read(API_TS)
-        assert "if (detail && typeof detail === \"string\")" in s
-        assert s.count("error.message = detail") == 1, (
-            "字符串形 detail 的写入点必须是唯一出口；出现第二份 = 判据分叉"
-        )
+        assert 'if (detail && typeof detail === "string")' in s
+        assert s.count("error.message = detail") == 1, "字符串形 detail 的写入点必须是唯一出口；出现第二份 = 判据分叉"
 
     def test_translation_has_a_single_implementation(self):
         s = _read(API_TS)
@@ -150,8 +146,7 @@ class TestAuditHandlerConsumesInterceptorMessage:
         # 捕获参数由 e 更名 err，且 message 与兜底文案合并为同一表达式：
         #   msg.error(err.message || "一致性审计失败")
         # 语义等价且更严（message 必须在 || 之前 = 主路径优先消费拦截器文案）。
-        merged = re.search(
-            r"msg\.error\(\s*\w+\.message\s*\|\|\s*[\"']一致性审计失败[\"']\s*\)", body)
+        merged = re.search(r"msg\.error\(\s*\w+\.message\s*\|\|\s*[\"']一致性审计失败[\"']\s*\)", body)
         legacy = "msg.error(e.message" in body and '"一致性审计失败"' in body
         assert merged or legacy, (
             "一致性审计失败提示必须消费拦截器写入的 message（主路径在前），"
@@ -217,4 +212,3 @@ class TestByteHealth:
                     lone += 1
                 i += 1
             assert lone == 0, f"{rel}: {lone} 个孤立 CR（行尾被混改）"
-

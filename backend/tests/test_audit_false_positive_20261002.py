@@ -18,6 +18,7 @@ P1-1 ``consistency_scanner._PERSON_RE`` 把岗位后的**谓语**当成人名
 （effective content / ``program_prescan`` 候选），而不是碰巧含关键字的一切字符串
 （AGENTS.md §5.14 教训）。
 """
+
 from __future__ import annotations
 
 import pytest
@@ -39,8 +40,7 @@ BODY = "本节依据现行标准与设计文件编制，明确施工工艺参数
 
 
 def _mk(sid, title, parent="", content="", wc=0):
-    return {"id": sid, "title": title, "parent_id": parent,
-            "content": content, "word_count": wc}
+    return {"id": sid, "title": title, "parent_id": parent, "content": content, "word_count": wc}
 
 
 def _production_shape():
@@ -61,7 +61,7 @@ def _production_shape():
     n = 0
     for i, (parent, kids) in enumerate(tree.items(), 1):
         pid = f"P{i}"
-        sections.append(_mk(pid, parent))          # 父节点：正文为空（结构必然）
+        sections.append(_mk(pid, parent))  # 父节点：正文为空（结构必然）
         for kid in kids:
             n += 1
             sections.append(_mk(f"L{n}", kid, pid, BODY, 600))
@@ -142,8 +142,7 @@ class TestCmpNoFalseBlockOnParentNodes:
 
     def test_really_absent_chapter_still_reported(self):
         """反向断言：章节根本不存在，仍报「未找到」。"""
-        ctx = PreflightContext(scheme_id="s",
-                               sections=[_mk("L1", "1.1 概述", "", BODY, 600)])
+        ctx = PreflightContext(scheme_id="s", sections=[_mk("L1", "1.1 概述", "", BODY, 600)])
         fs = check_completeness(ctx)
         assert any("未找到" in f["detail"] for f in fs)
 
@@ -182,7 +181,9 @@ class TestPreflightStatsDenominator:
 
     def test_real_empty_leaf_still_counted(self):
         sections = [
-            _mk("P", "父"), _mk("L1", "叶1", "P", BODY, 600), _mk("L2", "叶2", "P", "", 0),
+            _mk("P", "父"),
+            _mk("L1", "叶1", "P", BODY, 600),
+            _mk("L2", "叶2", "P", "", 0),
         ]
         st = preflight_stats(PreflightContext(scheme_id="s", sections=sections))
         assert st["generated_count"] == 2
@@ -193,9 +194,7 @@ class TestPreflightStatsDenominator:
         sections, _ = _production_shape()
         ctx = PreflightContext(scheme_id="s", sections=sections)
         st = preflight_stats(ctx)
-        dlv_empty = [
-            f for f in check_deliverability(ctx) if "空章节" in (f.get("title") or "")
-        ]
+        dlv_empty = [f for f in check_deliverability(ctx) if "空章节" in (f.get("title") or "")]
         assert st["empty_ratio"] == 0.0 and not dlv_empty
 
 
@@ -203,10 +202,21 @@ class TestPreflightStatsDenominator:
 # P1-1 人名判定（谓语不得当人名）
 # ---------------------------------------------------------------------------
 class TestPersonNamePredicate:
-    @pytest.mark.parametrize("phrase", [
-        "组织各专", "审核后归", "批准后", "签发", "重排对应", "接到报告",
-        "或专职安", "会同安全", "组织验收", "批准",
-    ])
+    @pytest.mark.parametrize(
+        "phrase",
+        [
+            "组织各专",
+            "审核后归",
+            "批准后",
+            "签发",
+            "重排对应",
+            "接到报告",
+            "或专职安",
+            "会同安全",
+            "组织验收",
+            "批准",
+        ],
+    )
     def test_predicate_not_person_name(self, phrase):
         assert _looks_like_person_name(phrase) is False
 
@@ -275,6 +285,7 @@ class TestNoCriteriaFork:
         import inspect
 
         from app.services import preflight_engine as pe
+
         src = inspect.getsource(pe.check_completeness)
         assert "build_section_tree_index" in src
 
@@ -282,26 +293,28 @@ class TestNoCriteriaFork:
         import inspect
 
         from app.services import preflight_engine as pe
+
         assert "build_section_tree_index" in inspect.getsource(pe.preflight_stats)
 
     def test_person_scan_uses_name_guard(self):
         import inspect
 
         from app.services import consistency_scanner as cs
+
         assert "_looks_like_person_name" in inspect.getsource(cs.program_prescan)
 
     def test_tree_index_exported(self):
         import app.services.preflight_engine as pe
+
         assert "build_section_tree_index" in pe.__all__
 
         """两处「空章节」判据必须同源（单一事实源护栏）。"""
         sections, _ = _production_shape()
         ctx = PreflightContext(scheme_id="s", sections=sections)
         st = preflight_stats(ctx)
-        dlv_empty = [
-            f for f in check_deliverability(ctx) if "空章节" in (f.get("title") or "")
-        ]
+        dlv_empty = [f for f in check_deliverability(ctx) if "空章节" in (f.get("title") or "")]
         assert st["empty_ratio"] == 0.0 and not dlv_empty
+
 
 # ---------------------------------------------------------------------------
 # R49 P0 TRC-01 必须按「有效正文」判定（2026-10-07 · 生产库实证）
@@ -348,7 +361,7 @@ class TestTrc01UsesEffectiveContent:
         sections = [
             _mk("P6", "六、计算书及相关图纸"),
             _mk("L1", "6.1 受力计算", "P6", FORMULA, 100),
-            _mk("P7", "七、稳定性验算"),          # 整体有过程、此章节真缺过程
+            _mk("P7", "七、稳定性验算"),  # 整体有过程、此章节真缺过程
         ]
         ctx = PreflightContext(scheme_id="s", sections=sections)
         fs = [f for f in check_traceability(ctx) if f["rule_id"] == "TRC-01"]
@@ -357,8 +370,7 @@ class TestTrc01UsesEffectiveContent:
 
     def test_all_calc_sections_empty_still_no_trc01(self):
         """全部计算书章节都无过程时不报 TRC-01（CMP-09 职责，防跨维度双扣）。"""
-        sections = [_mk("P6", "六、计算书及相关图纸"),
-                    _mk("L1", "6.1 受力计算", "P6")]
+        sections = [_mk("P6", "六、计算书及相关图纸"), _mk("L1", "6.1 受力计算", "P6")]
         ctx = PreflightContext(scheme_id="s", sections=sections)
         assert not [f for f in check_traceability(ctx) if f["rule_id"] == "TRC-01"]
 
@@ -381,14 +393,109 @@ class TestTrc01UsesEffectiveContent:
         还原旧实现后 4 failed / 2 passed，还原后 sha256 字节一致。
         """
         import app.services.preflight_engine as pe
-        sections = [_mk("P6", "六、计算书及相关图纸"),
-                    _mk("L1", "6.1 受力计算", "P6", FORMULA, 100)]
+
+        sections = [_mk("P6", "六、计算书及相关图纸"), _mk("L1", "6.1 受力计算", "P6", FORMULA, 100)]
         # 旧口径：effective = 章节自身 content（不向上卷子节）
         monkeypatch.setattr(
-            pe, "build_section_tree_index",
-            lambda secs: ({}, {s["id"]: s.get("content") or "" for s in secs}))
-        fs = [f for f in pe.check_traceability(
-            PreflightContext(scheme_id="s", sections=sections))
-            if f["rule_id"] == "TRC-01"]
+            pe, "build_section_tree_index", lambda secs: ({}, {s["id"]: s.get("content") or "" for s in secs})
+        )
+        fs = [
+            f
+            for f in pe.check_traceability(PreflightContext(scheme_id="s", sections=sections))
+            if f["rule_id"] == "TRC-01"
+        ]
         assert len(fs) == 1, fs
 
+
+# ============================================================
+# ✅ R175 修复护栏（2026-11-03）
+# ============================================================
+NOW = "本项目按专项施工方案组织施工，严格执行现行规范与设计文件要求。"
+
+
+def test_legal_titles_are_not_blocked():
+    """法定常见标题「安全技术措施」「应急救援预案」不得被判缺失（B-11）。"""
+    secs = [
+        _mk("1", "1 工程概况", content=NOW),
+        _mk("2", "2 编制依据", content=NOW),
+        _mk("3", "3 施工工艺", content=NOW),
+        _mk("4", "4 安全技术措施", content=NOW),
+        _mk("5", "5 应急救援预案", content=NOW),
+        _mk("6", "6 计算书", content=NOW),
+    ]
+    fs = check_completeness(PreflightContext(scheme_name="模板工程专项施工方案", scheme_type="模板", sections=secs))
+    bad = [f for f in fs if f["rule_id"] in ("CMP-05", "CMP-08")]
+    assert not bad, bad
+
+
+def test_non_calc_scheme_skips_cmp09_and_std02():
+    """非受力验算类方案不报「缺计算书」「未引 GB55xxx」（B-12）。"""
+    from app.services.preflight_engine import check_standards
+
+    secs = [
+        _mk("1", "1 工程概况", content=NOW),
+        _mk("2", "2 编制依据", content="本工程执行 GB 50210-2018。"),
+        _mk("3", "3 施工工艺", content=NOW),
+    ]
+    ctx = PreflightContext(scheme_name="装饰装修专项施工方案", scheme_type="装饰", sections=secs)
+    assert not [f for f in check_completeness(ctx) if f["rule_id"] == "CMP-09"]
+    assert not [f for f in check_standards(ctx) if f["rule_id"] == "STD-02"]
+
+
+def test_con01_con07_same_conflict_counted_once():
+    """同一数值冲突 CON-01/CON-07 只计一条；不同冲突各自保留（B-13）。"""
+    from app.services.audit_scoring import merge_findings
+
+    ev = ["总工期 90 天（工程概况）", "总工期 120 天（进度计划）"]
+    a = {"rule_id": "CON-01", "severity": "high", "evidence": list(ev)}
+    b = {"rule_id": "CON-07", "severity": "high", "evidence": list(ev)}
+    assert len(merge_findings([a], [b])) == 1
+    c = {"rule_id": "CON-07", "severity": "high", "evidence": ["混凝土强度 C40", "混凝土强度 C30"]}
+    assert len(merge_findings([a], [c])) == 2
+
+
+def test_locate_targets_falls_back_to_title():
+    """补充类 finding 无 section_id 时按标题定位目标章节（B-05）。"""
+    from app.services import review_autofix
+
+    secs = [{"id": "s1", "title": "安全技术措施", "content": NOW}]
+    f = {"rule_id": "CMP-05", "section_id": "", "section_title": "", "evidence": []}
+    targets = review_autofix.locate_targets(f, secs)
+    assert targets and targets[0]["section_id"] == "s1"
+
+
+def test_incomplete_review_never_released():
+    """有来源失败 / 只覆盖部分正文时，即使分数达标也不得放行（B-04）。"""
+    from app.services.audit_scoring import score_findings
+
+    one_low = [
+        {
+            "rule_id": "CMP-01",
+            "dimension": "completeness",
+            "severity": "low",
+            "title": "t",
+            "detail": "d",
+            "evidence": [],
+            "section_id": "s1",
+            "suggestion": "",
+            "basis": "",
+            "mode": "program",
+        }
+    ]
+    clean = score_findings(one_low)
+    assert clean.released is True and clean.incomplete is False
+    failed = score_findings(one_low, failed_sources=["export_check"])
+    assert failed.released is False and failed.incomplete is True
+    assert "检查不完整" in failed.verdict
+    partial = score_findings(one_low, partial_sources=["compliance"])
+    assert partial.released is False and partial.incomplete is True
+
+
+def test_standard_code_spacing_tolerant_locate():
+    """``GB 50202-2002`` 与正文 ``GB50202-2002`` 视为同一编号（B-05）。"""
+    from app.services import review_autofix
+
+    secs = [{"id": "s1", "title": "编制依据", "content": "本工程执行 GB50202-2002 等标准。"}]
+    f = {"rule_id": "STD-01", "section_id": "", "evidence": ["GB 50202-2002"]}
+    targets = review_autofix.locate_targets(f, secs)
+    assert targets and targets[0]["section_id"] == "s1"

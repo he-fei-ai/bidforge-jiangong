@@ -12,6 +12,7 @@
 
 路由层与业务层统一从本模块导入，避免审计逻辑散落在多个路由文件。
 """
+
 from __future__ import annotations
 
 import json
@@ -54,8 +55,19 @@ _DETAIL_MAX = 500
 #:   在增删配置后重排，恢复一个过期序号会留下空洞或重复）。快照留存它们只为**审计
 #:   可追溯**（「这次改动发生时该配置排在降级链第几」），不参与回滚写入。
 SNAPSHOT_FIELDS: tuple[str, ...] = (
-    "provider_name", "plan", "base_url", "model", "max_tokens", "temperature",
-    "timeout", "concurrency", "request_mode", "env", "remark", "is_active",
+    "provider_name",
+    "plan",
+    "base_url",
+    "model",
+    "max_tokens",
+    "temperature",
+    "timeout",
+    "concurrency",
+    "request_mode",
+    "env",
+    "remark",
+    "is_active",
+    "enabled",
     "priority",
 )
 
@@ -73,6 +85,7 @@ FIELD_LABELS: dict[str, str] = {
     "env": "环境",
     "remark": "备注",
     "is_active": "当前使用",
+    "enabled": "参与调用",
     "priority": "降级链顺序",
 }
 
@@ -98,7 +111,7 @@ def sanitize_config_snapshot(cfg: dict | None) -> dict | None:
             continue
         value = cfg.get(f)
         if f in _SNAPSHOT_STRING_LIMITS and isinstance(value, str):
-            value = value[:_SNAPSHOT_STRING_LIMITS[f]]
+            value = value[: _SNAPSHOT_STRING_LIMITS[f]]
         out[f] = value
     enc = cfg.get("api_key_encrypted") or ""
     # 与 GET /ai/config 的 has_key 口径一致：「有密文且能解密」才算已设置
@@ -131,19 +144,24 @@ def diff_snapshots(snapshot: dict | None) -> list[dict]:
         b, a = before.get(f), after.get(f)
         if b == a:
             continue
-        changes.append({
-            "field": f,
-            "label": FIELD_LABELS.get(f, f),
-            "before": "" if b is None else b,
-            "after": "" if a is None else a,
-        })
+        changes.append(
+            {
+                "field": f,
+                "label": FIELD_LABELS.get(f, f),
+                "before": "" if b is None else b,
+                "after": "" if a is None else a,
+            }
+        )
     if "has_key" in before or "has_key" in after:
         if before.get("has_key") != after.get("has_key"):
-            changes.append({
-                "field": "has_key", "label": "API Key",
-                "before": "已设置" if before.get("has_key") else "未设置",
-                "after": "已设置" if after.get("has_key") else "未设置",
-            })
+            changes.append(
+                {
+                    "field": "has_key",
+                    "label": "API Key",
+                    "before": "已设置" if before.get("has_key") else "未设置",
+                    "after": "已设置" if after.get("has_key") else "未设置",
+                }
+            )
     return changes
 
 
@@ -153,10 +171,7 @@ def client_ip_of(request: Request | None) -> str:
         return ""
     try:
         peer = (request.client.host if request.client else "") or ""
-        trusted = {
-            ip.strip() for ip in (settings.trusted_proxy_ips or "").split(",")
-            if ip.strip()
-        }
+        trusted = {ip.strip() for ip in (settings.trusted_proxy_ips or "").split(",") if ip.strip()}
         if peer in trusted:
             fwd = request.headers.get("x-forwarded-for", "") or ""
             if fwd:
@@ -169,23 +184,39 @@ def client_ip_of(request: Request | None) -> str:
 _AUDIT_INSERT_FULL = (
     "INSERT INTO ai_config_audit_logs"
     " (id, action, config_id, provider_name, model, detail, client_ip, snapshot_json, created_at)"
-    " VALUES (?,?,?,?,?,?,?,?,?)")
+    " VALUES (?,?,?,?,?,?,?,?,?)"
+)
 # 旧库尚未 _migrate 出 snapshot_json 列时的降级写入（审计行不丢，仅无 diff/回滚信息）
 _AUDIT_INSERT_LEGACY = (
     "INSERT INTO ai_config_audit_logs"
     " (id, action, config_id, provider_name, model, detail, client_ip, created_at)"
-    " VALUES (?,?,?,?,?,?,?,?)")
+    " VALUES (?,?,?,?,?,?,?,?)"
+)
 
 
-async def record_config_audit(db, action: str, *, config_id: str = "",
-                              provider_name: str = "", model: str = "",
-                              detail: str = "", request: Request | None = None,
-                              snapshot: dict | None = None,
-                              commit: bool = True) -> None:
+async def record_config_audit(
+    db,
+    action: str,
+    *,
+    config_id: str = "",
+    provider_name: str = "",
+    model: str = "",
+    detail: str = "",
+    request: Request | None = None,
+    snapshot: dict | None = None,
+    commit: bool = True,
+) -> None:
     """写入一条配置变更审计（尽力而为，失败不影响主流程）。"""
-    base = (str(uuid.uuid4()), action, config_id or "", provider_name or "",
-            model or "", (detail or "")[:_DETAIL_MAX], client_ip_of(request),
-            datetime.now().isoformat())
+    base = (
+        str(uuid.uuid4()),
+        action,
+        config_id or "",
+        provider_name or "",
+        model or "",
+        (detail or "")[:_DETAIL_MAX],
+        client_ip_of(request),
+        datetime.now().isoformat(),
+    )
     snap_json = _json_snapshot(snapshot)
     try:
         if snap_json:
@@ -212,6 +243,7 @@ async def record_config_audit(db, action: str, *, config_id: str = "",
 def prompt_content_hash(content: str) -> str:
     """提示词内容 SHA-256（用于审计比对，不保存正文）。"""
     import hashlib
+
     return hashlib.sha256((content or "").encode("utf-8")).hexdigest()
 
 
@@ -268,16 +300,17 @@ def prompt_snapshot_json(before: str, after: str) -> str:
 #: 无法回滚时的统一原因文案（前端 tooltip / HTTP 400 detail 共用同一份）。
 ROLLBACK_BLOCKED_REASONS = {
     "no_snapshot": "该变更记录没有可用的变更前正文（旧记录只存哈希，无法回滚）",
-    "truncated": ("该变更记录的变更前正文已被截断，不是完整提示词，"
-                  "为避免写入损坏模板已拒绝回滚。"
-                  "请改用「恢复出厂默认」或手动重新编辑。"),
+    "truncated": (
+        "该变更记录的变更前正文已被截断，不是完整提示词，"
+        "为避免写入损坏模板已拒绝回滚。"
+        "请改用「恢复出厂默认」或手动重新编辑。"
+    ),
     "too_long": "快照正文超长，已拒绝回滚",
     "malformed": "该变更记录的快照格式异常，无法回滚",
 }
 
 
-def prompt_snapshot_is_rollbackable(snapshot, max_chars: int = 200000
-                                    ) -> tuple[bool, str]:
+def prompt_snapshot_is_rollbackable(snapshot, max_chars: int = 200000) -> tuple[bool, str]:
     """快照是否可回滚 → ``(是否可回滚, 不可回滚时的原因)``。
 
     ✅ 2026-09-27（BUG-P1-E · 「能不能回滚」判据曾有两份实现）：
@@ -319,8 +352,7 @@ def diff_prompt_snapshot(snapshot: dict | None) -> list[dict]:
     changes: list[dict] = []
     b, a = snapshot.get("before") or "", snapshot.get("after") or ""
     if len(b) != len(a):
-        changes.append({"field": "length", "label": "字数",
-                        "before": len(b), "after": len(a)})
+        changes.append({"field": "length", "label": "字数", "before": len(b), "after": len(a)})
     try:
         # ✅ 2026-09-25（BUG-E · 变量口径不统一）：diff 与路由 / 编辑器一律用
         #   extract_user_variables（排除 {SHARED_*} 运行时解析的共享片段引用）。
@@ -328,32 +360,43 @@ def diff_prompt_snapshot(snapshot: dict | None) -> list[dict]:
         #   与 audit_service.record_prompt_audit 里 before_vars/after_vars
         #   的口径（extract_user_variables）分叉。
         from app.services.ai.prompts._registry import extract_user_variables
+
         b_vars, a_vars = set(extract_user_variables(b)), set(extract_user_variables(a))
     except Exception:
         b_vars, a_vars = set(), set()
     added, removed = sorted(a_vars - b_vars), sorted(b_vars - a_vars)
     if added:
-        changes.append({"field": "added_variables", "label": "新增变量",
-                        "before": "", "after": ", ".join(added)})
+        changes.append({"field": "added_variables", "label": "新增变量", "before": "", "after": ", ".join(added)})
     if removed:
-        changes.append({"field": "removed_variables", "label": "删除变量",
-                        "before": ", ".join(removed), "after": ""})
+        changes.append({"field": "removed_variables", "label": "删除变量", "before": ", ".join(removed), "after": ""})
     return changes
 
 
-async def record_prompt_audit(db, key: str, action: str, before: str, after: str,
-                              before_vars: list[str], after_vars: list[str],
-                              request: Request | None = None) -> None:
+async def record_prompt_audit(
+    db,
+    key: str,
+    action: str,
+    before: str,
+    after: str,
+    before_vars: list[str],
+    after_vars: list[str],
+    request: Request | None = None,
+) -> None:
     """写入一条提示词变更审计（指纹 + 变量集合 + 正文快照）。
 
     由调用方事务提交；本函数不 commit，保证「内容更新 + 审计」原子性。
     快照写入失败时**降级写入无快照行**（宁可丢回滚能力，也不丢审计行）。
     """
-    vals = (uuid.uuid4().hex, key, action,
-            prompt_content_hash(before), prompt_content_hash(after),
-            json.dumps(sorted(set(before_vars)), ensure_ascii=False),
-            json.dumps(sorted(set(after_vars)), ensure_ascii=False),
-            client_ip_of(request))
+    vals = (
+        uuid.uuid4().hex,
+        key,
+        action,
+        prompt_content_hash(before),
+        prompt_content_hash(after),
+        json.dumps(sorted(set(before_vars)), ensure_ascii=False),
+        json.dumps(sorted(set(after_vars)), ensure_ascii=False),
+        client_ip_of(request),
+    )
     snap = ""
     if getattr(settings, "prompt_audit_snapshot_enabled", True):
         snap = prompt_snapshot_json(before, after)
@@ -364,7 +407,8 @@ async def record_prompt_audit(db, key: str, action: str, before: str, after: str
                 " (id,prompt_key,action,before_hash,after_hash,"
                 "variables_before,variables_after,client_ip,snapshot_json)"
                 " VALUES (?,?,?,?,?,?,?,?,?)",
-                vals + (snap,))
+                vals + (snap,),
+            )
             return
         except Exception:
             # 旧库尚未 _migrate 出 snapshot_json 列 → 降级写入
@@ -374,11 +418,11 @@ async def record_prompt_audit(db, key: str, action: str, before: str, after: str
         " (id,prompt_key,action,before_hash,after_hash,"
         "variables_before,variables_after,client_ip)"
         " VALUES (?,?,?,?,?,?,?,?)",
-        vals)
+        vals,
+    )
 
 
-async def list_prompt_audit_logs(db, key: str, limit: int = 50,
-                                 offset: int = 0) -> dict:
+async def list_prompt_audit_logs(db, key: str, limit: int = 50, offset: int = 0) -> dict:
     """查询提示词审计记录（指纹、变量集合、结构化 diff、是否可回滚）。"""
     key = (key or "").strip()
     if not key:
@@ -393,13 +437,14 @@ async def list_prompt_audit_logs(db, key: str, limit: int = 50,
         offset = max(0, int(offset or 0))
     except (TypeError, ValueError):
         offset = 0
-    cur = await db.execute(
-        "SELECT COUNT(*) FROM prompt_audit_logs WHERE prompt_key=?", (key,))
+    cur = await db.execute("SELECT COUNT(*) FROM prompt_audit_logs WHERE prompt_key=?", (key,))
     total = int((await cur.fetchone())[0] or 0)
     cur = await db.execute(
         "SELECT id,prompt_key,action,before_hash,after_hash,variables_before,variables_after,"
         "client_ip,created_at,snapshot_json FROM prompt_audit_logs WHERE prompt_key=?"
-        " ORDER BY created_at DESC, rowid DESC LIMIT ? OFFSET ?", (key, limit, offset))
+        " ORDER BY created_at DESC, rowid DESC LIMIT ? OFFSET ?",
+        (key, limit, offset),
+    )
     items = []
     for row in await cur.fetchall():
         item = dict(row)
@@ -408,8 +453,7 @@ async def list_prompt_audit_logs(db, key: str, limit: int = 50,
                 item[field] = json.loads(item.get(field) or "[]")
             except Exception:
                 item[field] = []
-        item["action_label"] = PROMPT_AUDIT_ACTIONS.get(
-            item.get("action", ""), item.get("action", ""))
+        item["action_label"] = PROMPT_AUDIT_ACTIONS.get(item.get("action", ""), item.get("action", ""))
         # 解析快照生成结构化 diff（历史行无快照 → 空列表，前端按摘要展示）
         snap = {}
         raw = item.get("snapshot_json") or ""
@@ -429,7 +473,9 @@ async def list_prompt_audit_logs(db, key: str, limit: int = 50,
         item.pop("snapshot_json", None)
         items.append(item)
     return {
-        "items": items, "total": total, "limit": limit, "offset": offset,
+        "items": items,
+        "total": total,
+        "limit": limit,
+        "offset": offset,
         "actions": [{"value": k, "label": v} for k, v in PROMPT_AUDIT_ACTIONS.items()],
     }
-

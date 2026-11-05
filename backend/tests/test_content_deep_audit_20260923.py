@@ -20,6 +20,7 @@
 - 纯函数行为直接调用；
 - 手动保存图表同步用内存 sqlite（conftest.db_conn）直调路由函数。
 """
+
 import inspect
 import json
 import re
@@ -42,7 +43,7 @@ from app.services.content_utils import (
 # generate_content 全量源码（含嵌套的 event_stream / gen_one / _persist_section）
 _GSRC = inspect.getsource(sse_handlers.generate_content)
 # event_stream 起始之后的切片（本文件全部源码断言的作用域）
-_ES = _GSRC[_GSRC.index("async def event_stream()"):]
+_ES = _GSRC[_GSRC.index("async def event_stream()") :]
 
 
 # ============================================================
@@ -56,17 +57,19 @@ class TestEarlyFailureGuard:
         """total/done_ids/_failed_ids/_failed_reasons/gen_runner 在外层 try 前预初始化"""
         assert self._OUTER_TRY, "event_stream 外层 try 结构变化，需同步调整断言"
         t = self._OUTER_TRY.start()
-        for marker in ("total = 0", "done_ids: set = set()",
-                       "_failed_ids: set = set()",
-                       "_failed_reasons: dict",
-                       "gen_runner = None"):
+        for marker in (
+            "total = 0",
+            "done_ids: set = set()",
+            "_failed_ids: set = set()",
+            "_failed_reasons: dict",
+            "gen_runner = None",
+        ):
             assert marker in _ES, f"缺少预初始化标记：{marker}"
             assert _ES.index(marker) < t, f"{marker} 必须在外层 try 之前"
 
     def test_ckpt_payload_defined_once_before_try(self):
         """_content_ckpt_payload 唯一定义点且上提到 try 前（早期 except 可用）"""
-        assert _ES.count("def _content_ckpt_payload") == 1, \
-            "拼装点必须唯一（防回退到手写字段拼装的分叉实现）"
+        assert _ES.count("def _content_ckpt_payload") == 1, "拼装点必须唯一（防回退到手写字段拼装的分叉实现）"
         assert _ES.index("def _content_ckpt_payload") < self._OUTER_TRY.start()
 
     def test_finally_cancels_gen_runner_with_none_guard(self):
@@ -78,7 +81,9 @@ class TestEarlyFailureGuard:
         m = re.search(
             r"if not leaves:.*?_save_content_checkpoint\(\s*task_id,\s*"
             r"_content_ckpt_payload\(\"completed\",\s*\"没有待生成的章节\"\)\s*\)",
-            _ES, re.S)
+            _ES,
+            re.S,
+        )
         assert m, "not-leaves 分支缺少 _save_content_checkpoint 收尾"
 
 
@@ -95,18 +100,17 @@ class TestRequestAndTerminalContract:
 
     def test_boolean_options_use_coercion_not_python_truthiness(self):
         src = inspect.getsource(sse_handlers.generate_content)
-        for field in ("force_rewrite", "auto_shrink_over",
-                      "auto_consistency_repair", "force_full_repair"):
+        for field in ("force_rewrite", "auto_shrink_over", "auto_consistency_repair", "force_full_repair"):
             assert re.search(
                 rf'_coerce_bool\(\s*body\.get\("{field}"\)', src
             ), f"{field} 必须走字符串/数字安全的布尔归一"
 
     def test_completed_event_contains_final_progress_and_counts(self):
         src = inspect.getsource(sse_handlers.generate_content)
-        block = src[src.index("completed_payload = {"):]
-        block = block[:block.index("yield f\"data:")]
-        for field in ("'progress': 1.0", "'total': total"):
-            assert field in block
+        block = src[src.index("completed_payload = {") :]
+        block = block[: block.index('yield f"data:')]
+        assert re.search(r"['\"]progress['\"]:\s*1\.0", block)
+        assert re.search(r"['\"]total['\"]:\s*total\b", block)
 
     def test_completed_done_is_success_count_not_total(self):
         """✅ 2026-10-11 · R70：终态 ``done`` 必须是**成功章节数**，不得再写死 total。
@@ -117,16 +121,19 @@ class TestRequestAndTerminalContract:
         此处钉住「终态 done 取成功计数」，与 ``_content_ckpt_payload`` 同口径。
         """
         src = inspect.getsource(sse_handlers.generate_content)
-        block = src[src.index("completed_payload = {"):]
-        block = block[:block.index("yield f\"data:")]
-        assert "'done': len(done_ids)" in block, (
-            "终态 done 必须取成功章节数 len(done_ids)，与 checkpoint 同口径")
-        assert "'done': total" not in block, (
-            "终态 done 不得再写死 total（与 failed_count 自相矛盾）")
+        block = src[src.index("completed_payload = {") :]
+        block = block[: block.index('yield f"data:')]
+        assert re.search(
+            r"['\"]done['\"]:\s*len\(done_ids\)", block
+        ), "终态 done 必须取成功章节数 len(done_ids)，与 checkpoint 同口径"
+        assert not re.search(
+            r"['\"]done['\"]:\s*total\b", block
+        ), "终态 done 不得再写死 total（与 failed_count 自相矛盾）"
         # checkpoint 侧同样是成功计数（成功落库才自增）
         ck = inspect.getsource(sse_handlers.generate_content)
-        assert '_ckpt["done"] = _ckpt.get("done", 0) + 1' in ck, (
-            "checkpoint done 必须保持在成功落库路径自增，两处口径才一致")
+        assert (
+            '_ckpt["done"] = _ckpt.get("done", 0) + 1' in ck
+        ), "checkpoint done 必须保持在成功落库路径自增，两处口径才一致"
 
 
 # ============================================================================
@@ -135,9 +142,10 @@ class TestRequestAndTerminalContract:
 class TestContinueEmptyCountsFailure:
     def test_continue_empty_marks_failed(self):
         m = re.search(
-            r"该章节暂无正文，无法续写.*?await _mark_section_failed\("
-            r"leaf_id, title, _reason\)\s*\n\s*return",
-            _ES, re.S)
+            r"该章节暂无正文，无法续写.*?await _mark_section_failed\(" r"leaf_id, title, _reason\)\s*\n\s*return",
+            _ES,
+            re.S,
+        )
         assert m, "continue 空正文分支未走 _mark_section_failed 失败计数"
 
 
@@ -146,12 +154,9 @@ class TestContinueEmptyCountsFailure:
 # ============================================================
 class TestUnclosedFenceGuardInPersist:
     def test_persist_fixes_fences_before_write(self):
-        assert "auto_fix_unclosed_fences(content)" in _ES, \
-            "落库前缺少未闭合围栏修复调用"
+        assert "auto_fix_unclosed_fences(content)" in _ES, "落库前缺少未闭合围栏修复调用"
         # 修复失败必须降级（不阻断落库）
-        m = re.search(
-            r"auto_fix_unclosed_fences\(content\).*?except Exception",
-            _ES, re.S)
+        m = re.search(r"auto_fix_unclosed_fences\(content\).*?except Exception", _ES, re.S)
         assert m, "未闭合围栏修复缺少降级保护"
 
 
@@ -168,23 +173,18 @@ class TestSectionPartialStageFill:
 
     def test_uses_stage_started_at(self):
         """persist 阶段：填充按阶段起点耗时，而不是整章耗时"""
-        rec = {"stage": "persist", "started_at": 100.0,
-               "stage_started_at": self.NOW - 6.0}
-        assert _section_partial(rec, self.NOW) == pytest.approx(
-            self._expect_fill("persist", 6.0))
+        rec = {"stage": "persist", "started_at": 100.0, "stage_started_at": self.NOW - 6.0}
+        assert _section_partial(rec, self.NOW) == pytest.approx(self._expect_fill("persist", 6.0))
 
     def test_falls_back_to_started_at(self):
         """旧调用方只传 started_at → 回退兼容（既有单测不破坏）"""
         rec = {"stage": "persist", "started_at": self.NOW - 6.0}
-        assert _section_partial(rec, self.NOW) == pytest.approx(
-            self._expect_fill("persist", 6.0))
+        assert _section_partial(rec, self.NOW) == pytest.approx(self._expect_fill("persist", 6.0))
 
     def test_whole_chapter_elapsed_no_longer_caps_stage(self):
         """整章已跑很久但阶段刚起步 → 进度停在阶段基准，不得开局封顶"""
-        rec = {"stage": "persist", "started_at": 0.0,
-               "stage_started_at": self.NOW}
-        assert _section_partial(rec, self.NOW) == pytest.approx(
-            _STAGE_MODEL["persist"]["base"])
+        rec = {"stage": "persist", "started_at": 0.0, "stage_started_at": self.NOW}
+        assert _section_partial(rec, self.NOW) == pytest.approx(_STAGE_MODEL["persist"]["base"])
 
     def test_bad_override_falls_back_to_factory(self):
         """校准值脏（非数值）→ 回退出厂 expect，不抛异常"""
@@ -197,16 +197,26 @@ class TestSectionPartialStageFill:
 # B4：word_budget_override 归一化
 # ============================================================
 class TestWordBudgetNormalize:
-    @pytest.mark.parametrize("raw,expected", [
-        (None, None),                       # 缺省 → 不覆盖（旧行为）
-        ("", None), ("   ", None),          # 空串
-        (2000, 2000),                       # int 原样
-        (1500.0, 1500),                     # float 取整
-        ("2000", 2000), ("2000.9", 2000),   # 数字字符串（旧实现炸点）
-        (0, None), (-5, None), ("-3", None),  # 非正数无效
-        (True, None), (False, None),        # bool 不是字数
-        ("abc", None), ({}, None), ([], None),  # 非法类型不抛异常
-    ])
+    @pytest.mark.parametrize(
+        "raw,expected",
+        [
+            (None, None),  # 缺省 → 不覆盖（旧行为）
+            ("", None),
+            ("   ", None),  # 空串
+            (2000, 2000),  # int 原样
+            (1500.0, 1500),  # float 取整
+            ("2000", 2000),
+            ("2000.9", 2000),  # 数字字符串（旧实现炸点）
+            (0, None),
+            (-5, None),
+            ("-3", None),  # 非正数无效
+            (True, None),
+            (False, None),  # bool 不是字数
+            ("abc", None),
+            ({}, None),
+            ([], None),  # 非法类型不抛异常
+        ],
+    )
     def test_normalize(self, raw, expected):
         assert normalize_word_budget_override(raw) == expected
 
@@ -221,15 +231,13 @@ class TestSectionNumberForPrompt:
 
     def test_missing_number_returns_explicit_placeholder(self):
         """编号缺失 → 显式兜底文案（不得渲染空串诱导模型编造章号）"""
-        for bad in ({}, {"outline_json": ""}, {"outline_json": "{}"},
-                    {"outline_json": json.dumps({"id": "不是编号"})}):
+        for bad in ({}, {"outline_json": ""}, {"outline_json": "{}"}, {"outline_json": json.dumps({"id": "不是编号"})}):
             out = _section_number_for_prompt(bad)
             assert "未提供" in out and out != ""
 
     def test_uuid_id_not_leaked(self):
         """UUID 主键不得作为章节编号注入提示词（回归锁定）"""
-        sec = {"outline_json": json.dumps(
-            {"id": "550e8400-e29b-41d4-a716-446655440000"})}
+        sec = {"outline_json": json.dumps({"id": "550e8400-e29b-41d4-a716-446655440000"})}
         assert "550e8400" not in _section_number_for_prompt(sec)
 
 
@@ -240,28 +248,24 @@ VALID_FLOWCHART = "flowchart TD\n    A --> B\n    B --> C"
 
 
 async def _seed_section(db, sid="s1", pid="p1", sec_id="c1"):
-    await db.execute("INSERT OR IGNORE INTO projects (id, name) VALUES (?,?)",
-                     (pid, "项目"))
-    await db.execute(
-        "INSERT OR IGNORE INTO schemes (id, project_id, name) VALUES (?,?,?)",
-        (sid, pid, "方案"))
+    await db.execute("INSERT OR IGNORE INTO projects (id, name) VALUES (?,?)", (pid, "项目"))
+    await db.execute("INSERT OR IGNORE INTO schemes (id, project_id, name) VALUES (?,?,?)", (sid, pid, "方案"))
     await db.execute(
         "INSERT INTO sections (id, scheme_id, project_id, parent_id, title,"
         " level, sort_order, status, word_budget)"
         " VALUES (?,?,?,?,?,?,?,?,?)",
-        (sec_id, sid, pid, "", "第一章", 1, 0, "empty", 1500))
+        (sec_id, sid, pid, "", "第一章", 1, 0, "empty", 1500),
+    )
     await db.commit()
 
 
 async def _chart_rows(db, sec_id="c1"):
-    cur = await db.execute(
-        "SELECT chart_type FROM chart_predictions WHERE section_id=?", (sec_id,))
+    cur = await db.execute("SELECT chart_type FROM chart_predictions WHERE section_id=?", (sec_id,))
     return [r["chart_type"] for r in await cur.fetchall()]
 
 
 async def _section_row(db, sec_id="c1"):
-    cur = await db.execute(
-        "SELECT content, word_count, status FROM sections WHERE id=?", (sec_id,))
+    cur = await db.execute("SELECT content, word_count, status FROM sections WHERE id=?", (sec_id,))
     return await cur.fetchone()
 
 
@@ -270,8 +274,7 @@ class TestManualSaveChartSync:
         """手动保存含合法 mermaid 的正文 → 同步登记 1 个图表，正文原样入库"""
         await _seed_section(db_conn)
         content = f"总体流程如下：\n```mermaid\n{VALID_FLOWCHART}\n```\n后续说明。"
-        r = await update_section("s1", "c1", SectionUpdate(content=content),
-                                 db=db_conn)
+        r = await update_section("s1", "c1", SectionUpdate(content=content), db=db_conn)
         assert r["ok"] is True
         assert await _chart_rows(db_conn) == ["flowchart"]
         row = await _section_row(db_conn)
@@ -284,19 +287,16 @@ class TestManualSaveChartSync:
         """再次保存删掉图表的正文 → 历史登记同步清空（不留幽灵图）"""
         await _seed_section(db_conn)
         content = f"流程：\n```mermaid\n{VALID_FLOWCHART}\n```"
-        await update_section("s1", "c1", SectionUpdate(content=content),
-                             db=db_conn)
+        await update_section("s1", "c1", SectionUpdate(content=content), db=db_conn)
         assert len(await _chart_rows(db_conn)) == 1
-        await update_section("s1", "c1", SectionUpdate(content="纯文字，无图表。"),
-                             db=db_conn)
+        await update_section("s1", "c1", SectionUpdate(content="纯文字，无图表。"), db=db_conn)
         assert await _chart_rows(db_conn) == []
 
     async def test_save_invalid_chart_removes_block(self, db_conn):
         """修复失败的坏图：块从正文删除、不登记，但保存本身不失败"""
         await _seed_section(db_conn)
         content = "前文\n```mermaid\ngraph TD\nA-[坏\n```\n后文"
-        r = await update_section("s1", "c1", SectionUpdate(content=content),
-                                 db=db_conn)
+        r = await update_section("s1", "c1", SectionUpdate(content=content), db=db_conn)
         assert r["ok"] is True
         assert await _chart_rows(db_conn) == []
         row = await _section_row(db_conn)
@@ -306,8 +306,7 @@ class TestManualSaveChartSync:
     async def test_pure_text_save_noop_chart_table(self, db_conn):
         """无图表正文保存：不产生任何登记，行为与旧版一致（向后兼容）"""
         await _seed_section(db_conn)
-        await update_section("s1", "c1", SectionUpdate(content="普通正文。"),
-                             db=db_conn)
+        await update_section("s1", "c1", SectionUpdate(content="普通正文。"), db=db_conn)
         assert await _chart_rows(db_conn) == []
         row = await _section_row(db_conn)
         assert row["content"] == "普通正文。"
@@ -324,8 +323,7 @@ class TestManualSaveChartSync:
         """
         await _seed_section(db_conn)
         content = f"总体流程如下：\n```mermaid\n{VALID_FLOWCHART}"
-        r = await update_section("s1", "c1", SectionUpdate(content=content),
-                                 db=db_conn)
+        r = await update_section("s1", "c1", SectionUpdate(content=content), db=db_conn)
         assert r["ok"] is True
         row = await _section_row(db_conn)
         assert row["content"].rstrip().endswith("```")
@@ -340,10 +338,8 @@ class TestManualSaveChartSync:
         A/B 承重反向：若接线退化为无条件重写/重复追加，本用例即失败。
         """
         await _seed_section(db_conn)
-        content = (f"总体流程如下：\n```mermaid\n{VALID_FLOWCHART}\n```\n"
-                   "后续说明不得被吞进代码块。")
-        await update_section("s1", "c1", SectionUpdate(content=content),
-                             db=db_conn)
+        content = f"总体流程如下：\n```mermaid\n{VALID_FLOWCHART}\n```\n" "后续说明不得被吞进代码块。"
+        await update_section("s1", "c1", SectionUpdate(content=content), db=db_conn)
         row = await _section_row(db_conn)
         assert row["content"] == content
         assert await _chart_rows(db_conn) == ["flowchart"]

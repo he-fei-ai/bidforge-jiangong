@@ -15,11 +15,23 @@
  */
 import { useCallback, useState } from "react";
 import {
-  Alert, App, Button, Descriptions, Divider, Empty, Modal, Space, Spin, Tag,
+  Alert,
+  App,
+  Button,
+  Descriptions,
+  Divider,
+  Empty,
+  Modal,
+  Space,
+  Spin,
+  Tag,
   Typography,
 } from "antd";
 import {
-  CheckCircleOutlined, CloseCircleOutlined, RollbackOutlined, ThunderboltOutlined,
+  CheckCircleOutlined,
+  CloseCircleOutlined,
+  RollbackOutlined,
+  ThunderboltOutlined,
 } from "@ant-design/icons";
 import { reviewAutoFixApi } from "../../api";
 import { useAntdMessageHub } from "../../utils/activityCenter";
@@ -92,7 +104,7 @@ function AutoFixModal({ schemeId, finding, open, onClose, onFixed }: AutoFixModa
         const s = res.stats;
         msg.success(
           `修复完成：${s?.repaired ?? 0} 章已更新` +
-          (s?.skipped ? `，${s.skipped} 章因单次上限跳过` : "")
+            (s?.skipped ? `，${s.skipped} 章因单次上限跳过` : ""),
         );
         onFixed?.(res.snapshot_id || "");
       } else if (res.status === "not_located") {
@@ -111,20 +123,23 @@ function AutoFixModal({ schemeId, finding, open, onClose, onFixed }: AutoFixModa
   }, [finding, schemeId, msg, onFixed]);
 
   // 回滚：还原修复前正文
-  const rollback = useCallback(async (snapshotId: string) => {
-    setRolling(true);
-    try {
-      await reviewAutoFixApi.rollback(schemeId, { snapshot_id: snapshotId });
-      msg.success("已回滚到修复前正文");
-      setResult(null);
-      onFixed?.("");
-    } catch (e: unknown) {
-      const err = e as { message?: string };
-      msg.error(`回滚失败：${err?.message || err}`);
-    } finally {
-      setRolling(false);
-    }
-  }, [schemeId, msg, onFixed]);
+  const rollback = useCallback(
+    async (snapshotId: string) => {
+      setRolling(true);
+      try {
+        await reviewAutoFixApi.rollback(schemeId, { snapshot_id: snapshotId });
+        msg.success("已回滚到修复前正文");
+        setResult(null);
+        onFixed?.("");
+      } catch (e: unknown) {
+        const err = e as { message?: string };
+        msg.error(`回滚失败：${err?.message || err}`);
+      } finally {
+        setRolling(false);
+      }
+    },
+    [schemeId, msg, onFixed],
+  );
 
   if (!finding) return null;
   const cap = finding.autofix;
@@ -148,7 +163,9 @@ function AutoFixModal({ schemeId, finding, open, onClose, onFixed }: AutoFixModa
         </Space>
       }
       footer={[
-        <Button key="close" onClick={close}>关闭</Button>,
+        <Button key="close" onClick={close}>
+          关闭
+        </Button>,
         result?.snapshot_id ? (
           <Button
             key="rollback"
@@ -175,9 +192,7 @@ function AutoFixModal({ schemeId, finding, open, onClose, onFixed }: AutoFixModa
       <Descriptions size="small" column={1} bordered style={{ marginBottom: 8 }}>
         <Descriptions.Item label="问题">{finding.detail || "—"}</Descriptions.Item>
         <Descriptions.Item label="整改建议">{finding.suggestion || "—"}</Descriptions.Item>
-        {finding.basis && (
-          <Descriptions.Item label="行业依据">{finding.basis}</Descriptions.Item>
-        )}
+        {finding.basis && <Descriptions.Item label="行业依据">{finding.basis}</Descriptions.Item>}
       </Descriptions>
 
       {cap?.mode === "manual" && (
@@ -202,7 +217,9 @@ function AutoFixModal({ schemeId, finding, open, onClose, onFixed }: AutoFixModa
       {/* ---------- 步骤 1：定位矛盾位置 ---------- */}
       {!plan && fixable && (
         <div style={{ textAlign: "center", padding: "12px 0" }}>
-          {loading ? <Spin /> : (
+          {loading ? (
+            <Spin />
+          ) : (
             <Button type="primary" icon={<ThunderboltOutlined />} onClick={locate}>
               定位矛盾位置
             </Button>
@@ -230,8 +247,10 @@ function AutoFixModal({ schemeId, finding, open, onClose, onFixed }: AutoFixModa
                 type="info"
                 showIcon
                 style={{ marginBottom: 8 }}
-                message={`已定位到 ${plan.targets.length} 处矛盾位置` +
-                  (plan.max_sections ? `（本次最多修复 ${plan.max_sections} 章）` : "")}
+                message={
+                  `已定位到 ${plan.targets.length} 处矛盾位置` +
+                  (plan.max_sections ? `（本次最多修复 ${plan.max_sections} 章）` : "")
+                }
                 description="确认无误后点击右下角按钮，AI 将在这些位置做最小必要修改，其余内容保持原样。"
               />
               <div style={{ maxHeight: 260, overflowY: "auto", marginBottom: 8 }}>
@@ -239,25 +258,41 @@ function AutoFixModal({ schemeId, finding, open, onClose, onFixed }: AutoFixModa
                   <div
                     key={`${t.section_id}-${t.line}-${i}`}
                     style={{
-                      border: "1px solid #f0f0f0", borderRadius: 6,
-                      padding: "6px 8px", marginBottom: 6, background: "#fafafa",
+                      border: "1px solid #f0f0f0",
+                      borderRadius: 6,
+                      padding: "6px 8px",
+                      marginBottom: 6,
+                      background: "#fafafa",
                     }}
                   >
                     <Space size={4} wrap style={{ marginBottom: 2 }}>
-                      <Tag color="blue" style={{ marginRight: 0 }}>第 {i + 1} 处</Tag>
+                      <Tag color="blue" style={{ marginRight: 0 }}>
+                        第 {i + 1} 处
+                      </Tag>
                       <Text strong style={{ fontSize: 12 }}>
                         {t.section_title || "（未命名章节）"}
                       </Text>
-                      <Text type="secondary" style={{ fontSize: 11 }}>第 {t.line} 行</Text>
+                      <Text type="secondary" style={{ fontSize: 11 }}>
+                        第 {t.line} 行
+                      </Text>
                     </Space>
                     {t.why && (
-                      <Text type="secondary" style={{ fontSize: 11 }}>{t.why}</Text>
+                      <Text type="secondary" style={{ fontSize: 11 }}>
+                        {t.why}
+                      </Text>
                     )}
                     {t.context && (
-                      <pre style={{
-                        margin: "4px 0 0", fontSize: 11, whiteSpace: "pre-wrap",
-                        wordBreak: "break-all", color: "#555",
-                      }}>{t.context}</pre>
+                      <pre
+                        style={{
+                          margin: "4px 0 0",
+                          fontSize: 11,
+                          whiteSpace: "pre-wrap",
+                          wordBreak: "break-all",
+                          color: "#555",
+                        }}
+                      >
+                        {t.context}
+                      </pre>
                     )}
                   </div>
                 ))}
@@ -276,13 +311,17 @@ function AutoFixModal({ schemeId, finding, open, onClose, onFixed }: AutoFixModa
               key={it.section_id}
               style={{
                 border: `1px solid ${it.status === "repaired" ? "#b7eb8f" : "#ffa39e"}`,
-                borderRadius: 6, padding: "6px 8px", marginBottom: 6,
+                borderRadius: 6,
+                padding: "6px 8px",
+                marginBottom: 6,
               }}
             >
               <Space size={4} wrap style={{ marginBottom: 4 }}>
-                {it.status === "repaired"
-                  ? <CheckCircleOutlined style={{ color: "#52c41a" }} />
-                  : <CloseCircleOutlined style={{ color: "#ff4d4f" }} />}
+                {it.status === "repaired" ? (
+                  <CheckCircleOutlined style={{ color: "#52c41a" }} />
+                ) : (
+                  <CloseCircleOutlined style={{ color: "#ff4d4f" }} />
+                )}
                 <Text strong style={{ fontSize: 12 }}>
                   {it.section_title || "（未命名章节）"}
                 </Text>
@@ -292,23 +331,41 @@ function AutoFixModal({ schemeId, finding, open, onClose, onFixed }: AutoFixModa
               </Space>
               {it.problems.length > 0 && (
                 <ul style={{ margin: "4px 0", paddingLeft: 18, fontSize: 11, color: "#cf1322" }}>
-                  {it.problems.map((p, i) => <li key={i}>{p}</li>)}
+                  {it.problems.map((p, i) => (
+                    <li key={i}>{p}</li>
+                  ))}
                 </ul>
               )}
               {it.status === "repaired" && (
                 <div style={{ fontSize: 11 }}>
                   <Text type="secondary">修复前：</Text>
-                  <pre style={{
-                    margin: "2px 0", fontSize: 11, whiteSpace: "pre-wrap",
-                    wordBreak: "break-all", color: "#999",
-                    maxHeight: 120, overflowY: "auto",
-                  }}>{it.before}</pre>
+                  <pre
+                    style={{
+                      margin: "2px 0",
+                      fontSize: 11,
+                      whiteSpace: "pre-wrap",
+                      wordBreak: "break-all",
+                      color: "#999",
+                      maxHeight: 120,
+                      overflowY: "auto",
+                    }}
+                  >
+                    {it.before}
+                  </pre>
                   <Text type="secondary">修复后：</Text>
-                  <pre style={{
-                    margin: "2px 0 0", fontSize: 11, whiteSpace: "pre-wrap",
-                    wordBreak: "break-all", color: "#333",
-                    maxHeight: 120, overflowY: "auto",
-                  }}>{it.after}</pre>
+                  <pre
+                    style={{
+                      margin: "2px 0 0",
+                      fontSize: 11,
+                      whiteSpace: "pre-wrap",
+                      wordBreak: "break-all",
+                      color: "#333",
+                      maxHeight: 120,
+                      overflowY: "auto",
+                    }}
+                  >
+                    {it.after}
+                  </pre>
                 </div>
               )}
             </div>
@@ -333,4 +390,3 @@ function AutoFixModal({ schemeId, finding, open, onClose, onFixed }: AutoFixModa
 }
 
 export default AutoFixModal;
-

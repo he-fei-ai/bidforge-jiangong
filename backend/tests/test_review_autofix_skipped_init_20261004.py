@@ -11,6 +11,7 @@
 本护栏锁住「函数内所有在末尾被无条件读取的局部变量，都必须在循环外初始化」
 这条一般性不变量，用 AST 静态判定而非依赖具体路径。
 """
+
 from __future__ import annotations
 
 import ast
@@ -21,9 +22,7 @@ RA = Path(__file__).resolve().parents[1] / "app" / "routers" / "review_autofix.p
 
 def _fn(name: str):
     tree = ast.parse(RA.read_text(encoding="utf-8"))
-    return next(n for n in ast.walk(tree)
-                if isinstance(n, (ast.FunctionDef, ast.AsyncFunctionDef))
-                and n.name == name)
+    return next(n for n in ast.walk(tree) if isinstance(n, (ast.FunctionDef, ast.AsyncFunctionDef)) and n.name == name)
 
 
 def _loop_nodes(fn):
@@ -37,14 +36,11 @@ def test_confirm_initializes_skipped_outside_loops():
     assert loops, "confirm 里没有循环，判据失效（请复核本护栏）"
 
     for name in ("skipped",):
-        stores = [n for n in ast.walk(fn)
-                  if isinstance(n, ast.Name) and n.id == name
-                  and isinstance(n.ctx, ast.Store)]
+        stores = [n for n in ast.walk(fn) if isinstance(n, ast.Name) and n.id == name and isinstance(n.ctx, ast.Store)]
         assert stores, "confirm 不再使用 %s（本护栏需同步）" % name
         for st in stores:
             for loop in loops:
-                assert st not in list(ast.walk(loop)), (
-                    "%s 在循环体内初始化，末尾无条件读取会 UnboundLocalError" % name)
+                assert st not in list(ast.walk(loop)), "%s 在循环体内初始化，末尾无条件读取会 UnboundLocalError" % name
 
 
 def test_confirm_returns_skipped_field():
@@ -67,9 +63,7 @@ def test_confirm_has_no_unconditionally_read_unbound_names():
     """
     fn = _fn("confirm")
     # 无条件赋值：不在任何循环/条件体内的 Store
-    loops_and_ifs = [n for n in ast.walk(fn)
-                     if isinstance(n, (ast.For, ast.While, ast.If,
-                                       ast.Try, ast.With))]
+    loops_and_ifs = [n for n in ast.walk(fn) if isinstance(n, (ast.For, ast.While, ast.If, ast.Try, ast.With))]
     unconditional = set()
     for n in ast.walk(fn):
         if isinstance(n, ast.Name) and isinstance(n.ctx, ast.Store):

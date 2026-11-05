@@ -15,6 +15,7 @@
 - 评审记录：每次状态流转落一条 ``review_records``，可回溯完整评审轨迹；
 - 与预检联动：存在交付阻断项时提交审核会被拒绝（带阻断项的方案不应进入审核）。
 """
+
 import logging
 import uuid
 from datetime import datetime
@@ -81,7 +82,8 @@ def _validate_transition(from_status: str, to_status: str):
         raise HTTPException(
             400,
             f"不允许的流转：{REVIEW_STATUS_LABEL.get(from_status, '未纳入审核')}"
-            f" → {REVIEW_STATUS_LABEL.get(to_status, to_status)}")
+            f" → {REVIEW_STATUS_LABEL.get(to_status, to_status)}",
+        )
 
 
 def _validate_review_payload(reviewer: str, comment: str, to_status: str):
@@ -92,10 +94,17 @@ def _validate_review_payload(reviewer: str, comment: str, to_status: str):
         raise HTTPException(422, "驳回时必须填写驳回理由")
 
 
-async def _write_record(db, scheme_id: str, section_id: str, section_title: str,
-                        from_status: str, to_status: str,
-                        reviewer: str, comment: str,
-                        project_id: str | None = None):
+async def _write_record(
+    db,
+    scheme_id: str,
+    section_id: str,
+    section_title: str,
+    from_status: str,
+    to_status: str,
+    reviewer: str,
+    comment: str,
+    project_id: str | None = None,
+):
     """落一条评审留痕（不提交事务，由调用方统一 commit）。
 
     ✅ G4/G5（2026-09-21）：补齐 project_id 列。review_records 此前没有该列，
@@ -114,9 +123,19 @@ async def _write_record(db, scheme_id: str, section_id: str, section_title: str,
         db,
         "INSERT INTO review_records (id, scheme_id, project_id, section_id, section_title,"
         " from_status, to_status, reviewer, comment) VALUES (?,?,?,?,?,?,?,?,?)",
-        (str(uuid.uuid4()), scheme_id, project_id or "", section_id, section_title,
-         from_status, to_status, reviewer, comment),
-        what="写入评审留痕")
+        (
+            str(uuid.uuid4()),
+            scheme_id,
+            project_id or "",
+            section_id,
+            section_title,
+            from_status,
+            to_status,
+            reviewer,
+            comment,
+        ),
+        what="写入评审留痕",
+    )
 
 
 async def _scheme_project_id(db, scheme_id: str) -> str:
@@ -127,14 +146,11 @@ async def _scheme_project_id(db, scheme_id: str) -> str:
     降级为空串（fail-soft 语义不变）。
     """
     try:
-        row = await review_db.fetch_one(
-            db, SCHEME_PROJECT_ID_SQL, (scheme_id,),
-            what="反查方案所属项目")
+        row = await review_db.fetch_one(db, SCHEME_PROJECT_ID_SQL, (scheme_id,), what="反查方案所属项目")
         if row and row["project_id"]:
             return str(row["project_id"])
     except Exception as e:
-        logger.warning("反查方案项目失败（留痕 project_id 留空）: scheme=%s err=%s",
-                       scheme_id, e)
+        logger.warning("反查方案项目失败（留痕 project_id 留空）: scheme=%s err=%s", scheme_id, e)
     return ""
 
 
@@ -143,9 +159,9 @@ async def _scheme_project_id(db, scheme_id: str) -> str:
 REVIEW_STATUS_NEED_RESET = ("reviewing", "approved", "rejected")
 
 
-async def reset_review_on_content_change(db, scheme_id: str, section_id: str,
-                                         title: str = "", actor: str = "",
-                                         comment: str = "") -> bool:
+async def reset_review_on_content_change(
+    db, scheme_id: str, section_id: str, title: str = "", actor: str = "", comment: str = ""
+) -> bool:
     """正文被改写后，把该章节审核状态退回「待审核」并落一条评审轨迹。
 
     ✅ G9（2026-09-21）修复：全库只有本模块写 sections.review_status。
@@ -173,8 +189,11 @@ async def reset_review_on_content_change(db, scheme_id: str, section_id: str,
     #    汇报「审核结论已自动退回待审核」，而库里状态**仍是 approved**，
     #    「这份正文审过了」继续成立，属比 500 更危险的假绿。
     row = await review_db.fetch_one(
-        db, "SELECT review_status, title FROM sections WHERE id=? AND scheme_id=?",
-        (section_id, scheme_id), what="章节审核状态回退：读取章节")
+        db,
+        "SELECT review_status, title FROM sections WHERE id=? AND scheme_id=?",
+        (section_id, scheme_id),
+        what="章节审核状态回退：读取章节",
+    )
     if not row:
         return False
     current = (row["review_status"] or "").strip()
@@ -184,10 +203,18 @@ async def reset_review_on_content_change(db, scheme_id: str, section_id: str,
         db,
         "UPDATE sections SET review_status='pending', updated_at=? WHERE id=?",
         (datetime.now().isoformat(), section_id),
-        what=f"章节审核状态回退（section={section_id[:8]}）")
-    await _write_record(db, scheme_id, section_id, row["title"] or title,
-                        current, "pending", actor or "系统",
-                        comment or "正文已变更，原审核结论失效，自动退回待审核（请重新送审）")
+        what=f"章节审核状态回退（section={section_id[:8]}）",
+    )
+    await _write_record(
+        db,
+        scheme_id,
+        section_id,
+        row["title"] or title,
+        current,
+        "pending",
+        actor or "系统",
+        comment or "正文已变更，原审核结论失效，自动退回待审核（请重新送审）",
+    )
     return True
 
 
@@ -195,36 +222,48 @@ async def reset_review_on_content_change(db, scheme_id: str, section_id: str,
 # 按向后兼容原则保留，大版本评估清理。
 @router.get("/statuses", deprecated=True)
 async def list_statuses():
-    return {"items": [{"key": k, "label": v} for k, v in REVIEW_STATUS_LABEL.items()],
-            "allowed": {k: sorted(v) for k, v in _ALLOWED_TRANSITIONS.items()}}
+    return {
+        "items": [{"key": k, "label": v} for k, v in REVIEW_STATUS_LABEL.items()],
+        "allowed": {k: sorted(v) for k, v in _ALLOWED_TRANSITIONS.items()},
+    }
 
 
 @router.get("/summary")
 async def review_summary(scheme_id: str, db=Depends(get_db)):
     """审核进度概览：各状态章节数 + 最近评审记录 + 方案整体状态。"""
     scheme = await review_db.fetch_one(
-        db, "SELECT name, status, review_status FROM schemes WHERE id=?", (scheme_id,),
-        what="审核概览：读取方案")
+        db, "SELECT name, status, review_status FROM schemes WHERE id=?", (scheme_id,), what="审核概览：读取方案"
+    )
     if not scheme:
         raise HTTPException(404, "方案不存在")
 
     rows = await review_db.fetch_all(
         db,
         "SELECT review_status, COUNT(*) c FROM sections WHERE scheme_id=? GROUP BY review_status",
-        (scheme_id,), what="审核概览：统计章节审核状态")
+        (scheme_id,),
+        what="审核概览：统计章节审核状态",
+    )
     counts = {r["review_status"] or "": r["c"] for r in rows}
 
-    generated = int(await review_db.fetch_scalar(
-        db,
-        "SELECT COUNT(*) c FROM sections WHERE scheme_id=? AND COALESCE(content,'')!=''",
-        (scheme_id,), 0, what="审核概览：统计已生成章节") or 0)
+    generated = int(
+        await review_db.fetch_scalar(
+            db,
+            "SELECT COUNT(*) c FROM sections WHERE scheme_id=? AND COALESCE(content,'')!=''",
+            (scheme_id,),
+            0,
+            what="审核概览：统计已生成章节",
+        )
+        or 0
+    )
 
     records = await review_db.fetch_all(
         db,
         "SELECT id, section_id, section_title, from_status, to_status, reviewer,"
         " comment, created_at FROM review_records WHERE scheme_id=?"
-        " ORDER BY created_at DESC, rowid DESC LIMIT 20", (scheme_id,),
-        what="审核概览：读取最近评审记录")
+        " ORDER BY created_at DESC, rowid DESC LIMIT 20",
+        (scheme_id,),
+        what="审核概览：读取最近评审记录",
+    )
 
     total = sum(counts.values())
     approved = counts.get("approved", 0)
@@ -280,8 +319,10 @@ async def review_checklist(scheme_id: str, db=Depends(get_db)):
     sections = await review_db.fetch_all(
         db,
         "SELECT id, title, level, word_count, review_status, parent_id FROM sections"
-        " WHERE scheme_id=? ORDER BY sort_order", (scheme_id,),
-        what="审核清单：读取章节")
+        " WHERE scheme_id=? ORDER BY sort_order",
+        (scheme_id,),
+        what="审核清单：读取章节",
+    )
     if not sections:
         return {"items": []}
 
@@ -295,25 +336,29 @@ async def review_checklist(scheme_id: str, db=Depends(get_db)):
         db,
         "SELECT section_id, to_status, reviewer, comment, created_at FROM review_records"
         " WHERE scheme_id=? AND section_id!='' ORDER BY created_at DESC, rowid DESC",
-        (scheme_id,), what="审核清单：读取最近评审意见"):
+        (scheme_id,),
+        what="审核清单：读取最近评审意见",
+    ):
         # 已按时间倒序，首次出现即该章节最近一次评审
         latest.setdefault(r["section_id"], r)
 
     items = []
     for s in sections:
         rec = latest.get(s["id"], {})
-        items.append({
-            "id": s["id"],
-            "title": s["title"],
-            "level": s["level"],
-            "parent_id": s.get("parent_id") or "",
-            "word_count": s.get("word_count") or 0,
-            "review_status": s.get("review_status") or "",
-            "review_status_label": REVIEW_STATUS_LABEL.get(s.get("review_status") or ""),
-            "last_reviewer": rec.get("reviewer") or "",
-            "last_comment": rec.get("comment") or "",
-            "last_reviewed_at": rec.get("created_at") or "",
-        })
+        items.append(
+            {
+                "id": s["id"],
+                "title": s["title"],
+                "level": s["level"],
+                "parent_id": s.get("parent_id") or "",
+                "word_count": s.get("word_count") or 0,
+                "review_status": s.get("review_status") or "",
+                "review_status_label": REVIEW_STATUS_LABEL.get(s.get("review_status") or ""),
+                "last_reviewer": rec.get("reviewer") or "",
+                "last_comment": rec.get("comment") or "",
+                "last_reviewed_at": rec.get("created_at") or "",
+            }
+        )
     return {"items": items}
 
 
@@ -343,8 +388,8 @@ async def batch_review_sections(scheme_id: str, body: dict, db=Depends(get_db)):
     #    用户误以为「都成功了」；现补 404，与 /summary / /review_section 一致。
     #    ✅ R13（2026-10-06）：走 review_db 单一出口（读失败 503，绝不 404）。
     if not await review_db.fetch_one(
-            db, "SELECT id FROM schemes WHERE id=?", (scheme_id,),
-            what="批量审核：校验方案存在"):
+        db, "SELECT id FROM schemes WHERE id=?", (scheme_id,), what="批量审核：校验方案存在"
+    ):
         raise HTTPException(404, "方案不存在")
     _validate_review_payload(reviewer, comment, to_status)
     # ✅ G4/G5：留痕的项目维度一次查好复用（批量可达 500 条，不能每条反查）
@@ -356,21 +401,25 @@ async def batch_review_sections(scheme_id: str, body: dict, db=Depends(get_db)):
     truncated = total_ids > BATCH_REVIEW_MAX_IDS
     processed_ids = ids[:BATCH_REVIEW_MAX_IDS]
     if truncated:
-        logger.warning("batch_review: 收到 %d 个 section_id，截断至 %d（scheme=%s）",
-                       total_ids, BATCH_REVIEW_MAX_IDS, scheme_id)
+        logger.warning(
+            "batch_review: 收到 %d 个 section_id，截断至 %d（scheme=%s）", total_ids, BATCH_REVIEW_MAX_IDS, scheme_id
+        )
 
     # ✅ BUG 修复（2026-09-21）：旧实现仅返回 changed 数，前端无法区分
     #    "章节不存在" 与 "被状态机拦截" 两种失败原因；现分别收集并回传。
     changed = 0
     changed_ids: list = []  # 本次实际发生状态变化的章节（供前端精确回显）
-    skipped: list = []     # 状态机拦截的章节
-    not_found: list = []   # 不存在或不属于该方案的章节
-    nochange: list = []    # 已是目标状态（幂等），不落痕
-    conflicts: list = []   # ✅ R95：读后写竞态（状态被并发方改写），本条未生效
+    skipped: list = []  # 状态机拦截的章节
+    not_found: list = []  # 不存在或不属于该方案的章节
+    nochange: list = []  # 已是目标状态（幂等），不落痕
+    conflicts: list = []  # ✅ R95：读后写竞态（状态被并发方改写），本条未生效
     for sid in processed_ids:
         row = await review_db.fetch_one(
-            db, "SELECT id, title, review_status FROM sections WHERE id=? AND scheme_id=?",
-            (sid, scheme_id), what=f"批量审核：读取章节（section={sid[:8]}）")
+            db,
+            "SELECT id, title, review_status FROM sections WHERE id=? AND scheme_id=?",
+            (sid, scheme_id),
+            what=f"批量审核：读取章节（section={sid[:8]}）",
+        )
         if not row:
             not_found.append(sid)
             continue
@@ -394,16 +443,18 @@ async def batch_review_sections(scheme_id: str, body: dict, db=Depends(get_db)):
         #    WHERE 带上读到的期望状态，0 行 = 状态已被并发方改写，记入 conflicts
         #    （响应体加法式新键，老调用方忽略不受影响），绝不落痕、绝不假成功。
         n = await review_db.exec_write(
-            db, "UPDATE sections SET review_status=? WHERE id=?"
-                " AND COALESCE(review_status,'')=?",
+            db,
+            "UPDATE sections SET review_status=? WHERE id=?" " AND COALESCE(review_status,'')=?",
             (to_status, sid, from_status),
             what=f"批量审核：更新章节状态（section={sid[:8]}）",
-            require_rows=False)
+            require_rows=False,
+        )
         if n <= 0:
             conflicts.append(sid)
             continue
-        await _write_record(db, scheme_id, sid, row["title"] or "",
-                            from_status, to_status, reviewer, comment, project_id)
+        await _write_record(
+            db, scheme_id, sid, row["title"] or "", from_status, to_status, reviewer, comment, project_id
+        )
         changed += 1
         changed_ids.append(sid)
     await db.commit()
@@ -421,12 +472,14 @@ async def batch_review_sections(scheme_id: str, body: dict, db=Depends(get_db)):
 
 
 @router.post("/sections/{section_id}")
-async def review_section(scheme_id: str, section_id: str, body: SectionReviewIn,
-                         db=Depends(get_db)):
+async def review_section(scheme_id: str, section_id: str, body: SectionReviewIn, db=Depends(get_db)):
     """章节级审核（状态流转 + 评审意见）。"""
     row = await review_db.fetch_one(
-        db, "SELECT id, title, review_status FROM sections WHERE id=? AND scheme_id=?",
-        (section_id, scheme_id), what="章节审核：读取章节")
+        db,
+        "SELECT id, title, review_status FROM sections WHERE id=? AND scheme_id=?",
+        (section_id, scheme_id),
+        what="章节审核：读取章节",
+    )
     if not row:
         raise HTTPException(404, "章节不存在")
     if body.to_status not in REVIEW_STATUSES:
@@ -439,8 +492,13 @@ async def review_section(scheme_id: str, section_id: str, body: SectionReviewIn,
     #    否则评审轨迹里会堆满「approved → approved」的噪音记录，反而破坏
     #    「谁在何时做了什么结论」的可追溯性（同一次点击重复落痕 = 伪造证据）。
     if from_status == body.to_status:
-        return {"ok": True, "from_status": from_status, "to_status": body.to_status,
-                "idempotent": True, "changed": False}
+        return {
+            "ok": True,
+            "from_status": from_status,
+            "to_status": body.to_status,
+            "idempotent": True,
+            "changed": False,
+        }
 
     # ✅ R13（2026-10-06）：写路径经 exec_write，本次写没生效时抛 503，
     #    旧实现返回 changed=True 而库里状态未变（假成功）。
@@ -449,17 +507,19 @@ async def review_section(scheme_id: str, section_id: str, body: SectionReviewIn,
     #    0 行不再假成功，如实 409 让用户刷新后按最新状态重做决定
     #    （503 保留给「连接瞬时异常」，两者语义不混）。
     n = await review_db.exec_write(
-        db, "UPDATE sections SET review_status=? WHERE id=?"
-            " AND COALESCE(review_status,'')=?",
+        db,
+        "UPDATE sections SET review_status=? WHERE id=?" " AND COALESCE(review_status,'')=?",
         (body.to_status, section_id, from_status),
-        what="章节审核：更新章节状态", require_rows=False)
+        what="章节审核：更新章节状态",
+        require_rows=False,
+    )
     if n <= 0:
         raise HTTPException(409, "该章节审核状态已被并发操作修改，请刷新后重试")
-    await _write_record(db, scheme_id, section_id, row["title"] or "",
-                        from_status, body.to_status, body.reviewer, body.comment)
+    await _write_record(
+        db, scheme_id, section_id, row["title"] or "", from_status, body.to_status, body.reviewer, body.comment
+    )
     await db.commit()
-    return {"ok": True, "from_status": from_status, "to_status": body.to_status,
-            "idempotent": False, "changed": True}
+    return {"ok": True, "from_status": from_status, "to_status": body.to_status, "idempotent": False, "changed": True}
 
 
 def _parse_dt(ts):
@@ -473,16 +533,18 @@ def _parse_dt(ts):
 
 
 @router.post("/submit")
-async def submit_scheme_review(scheme_id: str, body: SchemeReviewIn,
-                               db=Depends(get_db)):
+async def submit_scheme_review(scheme_id: str, body: SchemeReviewIn, db=Depends(get_db)):
     """方案级评审提交。
 
     ✅ 与预检联动：存在交付阻断项时拒绝提交 —— 带"引用已废止标准""缺计算书"
     这类硬伤的方案进评审只是浪费评审人时间。
     """
     row = await review_db.fetch_one(
-        db, "SELECT id, name, status, review_status FROM schemes WHERE id=?", (scheme_id,),
-        what="方案评审提交：读取方案")
+        db,
+        "SELECT id, name, status, review_status FROM schemes WHERE id=?",
+        (scheme_id,),
+        what="方案评审提交：读取方案",
+    )
     if not row:
         raise HTTPException(404, "方案不存在")
     if body.to_status not in REVIEW_STATUSES:
@@ -499,10 +561,16 @@ async def submit_scheme_review(scheme_id: str, body: SchemeReviewIn,
     # reviewing / rejected 虽已进入审核流，但并未通过，不能放行方案级 approved。
     unapproved_ids: list = []
     if body.to_status == "approved":
-        unapproved_ids = [r["id"] for r in await review_db.fetch_all(
-            db,
-            "SELECT id FROM sections WHERE scheme_id=? AND COALESCE(review_status,'')!='approved'"
-            " ORDER BY sort_order", (scheme_id,), what="方案评审提交：统计未通过章节")]
+        unapproved_ids = [
+            r["id"]
+            for r in await review_db.fetch_all(
+                db,
+                "SELECT id FROM sections WHERE scheme_id=? AND COALESCE(review_status,'')!='approved'"
+                " ORDER BY sort_order",
+                (scheme_id,),
+                what="方案评审提交：统计未通过章节",
+            )
+        ]
 
     section_review_check = {
         # 保留旧字段名以兼容既有调用方；其值现表示所有未通过章节。
@@ -515,7 +583,8 @@ async def submit_scheme_review(scheme_id: str, body: SchemeReviewIn,
         raise HTTPException(
             422,
             f"尚有 {len(unapproved_ids)} 个章节未通过审核（包含未纳入审核、审核中或已驳回），"
-            "请先完成章节级审核（或改用 require_all_sections_reviewed=false 强制提交）")
+            "请先完成章节级审核（或改用 require_all_sections_reviewed=false 强制提交）",
+        )
 
     # 放行门禁（仅在推进到 approved 时校验）
     if body.to_status == "approved":
@@ -533,38 +602,43 @@ async def submit_scheme_review(scheme_id: str, body: SchemeReviewIn,
         pf = await review_db.fetch_one(
             db,
             "SELECT blocked, released, content_fingerprint, total, created_at FROM preflight_runs"
-            " WHERE scheme_id=? ORDER BY created_at DESC, rowid DESC LIMIT 1", (scheme_id,),
-            what="方案评审提交：读取最近预检结论")
+            " WHERE scheme_id=? ORDER BY created_at DESC, rowid DESC LIMIT 1",
+            (scheme_id,),
+            what="方案评审提交：读取最近预检结论",
+        )
         if pf and pf["blocked"]:
-            raise HTTPException(
-                422, "最近一次预检存在交付阻断项，请先整改后再提交审核")
+            raise HTTPException(422, "最近一次预检存在交付阻断项，请先整改后再提交审核")
         if not pf:
-            raise HTTPException(
-                422, "尚未执行审核预检，请先完成「一键总检」再提交审核")
+            raise HTTPException(422, "尚未执行审核预检，请先完成「一键总检」再提交审核")
         # 指纹是正文 / 图表 / 事实状态的统一版本锚点；历史记录没有指纹时，
         # 继续用章节 updated_at 兜底，保持旧库可用。
         if pf["content_fingerprint"]:
             from app.routers.compliance import _content_fingerprint
+
             current_fp = await _content_fingerprint(db, scheme_id)
             if current_fp and pf["content_fingerprint"] != current_fp:
                 raise HTTPException(
-                    422, "正文、图表或事实已变更，最近一次预检结论已过期，"
-                         "请先重新运行「一键总检」再提交审核")
+                    422, "正文、图表或事实已变更，最近一次预检结论已过期，" "请先重新运行「一键总检」再提交审核"
+                )
         else:
             _sec_max = await review_db.fetch_scalar(
-                db, "SELECT MAX(updated_at) AS m FROM sections WHERE scheme_id=?",
-                (scheme_id,), None, what="方案评审提交：读取引擎最新变更时间")
+                db,
+                "SELECT MAX(updated_at) AS m FROM sections WHERE scheme_id=?",
+                (scheme_id,),
+                None,
+                what="方案评审提交：读取引擎最新变更时间",
+            )
             if _sec_max:
                 _pf_t = _parse_dt(pf["created_at"])
                 _sec_t = _parse_dt(_sec_max)
                 if _pf_t and _sec_t and _pf_t < _sec_t:
                     raise HTTPException(
-                        422, "正文已变更，最近一次预检结论可能已过期，"
-                             "请先重新运行「一键总检」再提交审核")
+                        422, "正文已变更，最近一次预检结论可能已过期，" "请先重新运行「一键总检」再提交审核"
+                    )
         if not pf["released"]:
             raise HTTPException(
-                422, f"最近一次总检结论为 {pf['total'] or 0} 分，未达到放行条件，"
-                     "请整改后重新执行「一键总检」")
+                422, f"最近一次总检结论为 {pf['total'] or 0} 分，未达到放行条件，" "请整改后重新执行「一键总检」"
+            )
 
     # ✅ 修复（2026-09-17）：审核状态改走独立列 review_status。旧实现直接
     #    UPDATE schemes SET status=?，评审通过后把编译状态（草稿/目录已确认）
@@ -583,16 +657,25 @@ async def submit_scheme_review(scheme_id: str, body: SchemeReviewIn,
     #    放行门禁基于的是「读取时刻」的预检结论，绝不能套用在已被并发
     #    流转过的行上（否则出现 rejected → approved 绕过状态机的伪流转）。
     n = await review_db.exec_write(
-        db, "UPDATE schemes SET review_status=?, updated_at=? WHERE id=?"
-            " AND (? = '' OR COALESCE(review_status,'') = ?)",
-        (body.to_status, datetime.now().isoformat(), scheme_id,
-         from_status, from_status),
-        what="方案评审提交：更新方案审核状态", require_rows=False)
+        db,
+        "UPDATE schemes SET review_status=?, updated_at=? WHERE id=?" " AND (? = '' OR COALESCE(review_status,'') = ?)",
+        (body.to_status, datetime.now().isoformat(), scheme_id, from_status, from_status),
+        what="方案评审提交：更新方案审核状态",
+        require_rows=False,
+    )
     if n <= 0:
         raise HTTPException(409, "方案审核状态已被并发操作修改，请刷新后重试")
-    await _write_record(db, scheme_id, "", row["name"] or "",
-                        from_status, body.to_status, body.reviewer, body.comment,
-                        await _scheme_project_id(db, scheme_id))
+    await _write_record(
+        db,
+        scheme_id,
+        "",
+        row["name"] or "",
+        from_status,
+        body.to_status,
+        body.reviewer,
+        body.comment,
+        await _scheme_project_id(db, scheme_id),
+    )
 
     # ✅ BUG 修复（2026-09-21）：方案级 /submit 此前不校验章节审核完整性 ——
     #    即使大量章节仍「未纳入审核」，方案也能被推为 approved。现引入
@@ -611,8 +694,7 @@ async def submit_scheme_review(scheme_id: str, body: SchemeReviewIn,
 
 
 @router.get("/records")
-async def review_records(scheme_id: str, section_id: str = "", limit: int = 50,
-                         offset: int = 0, db=Depends(get_db)):
+async def review_records(scheme_id: str, section_id: str = "", limit: int = 50, offset: int = 0, db=Depends(get_db)):
     """评审轨迹（可下钻到单章）。
 
     ✅ G8（2026-09-21）：旧实现只有 limit（上限 200）没有 offset —— 单方案评审
@@ -631,9 +713,12 @@ async def review_records(scheme_id: str, section_id: str = "", limit: int = 50,
         where += " AND section_id=?"
         params.append(section_id)
     # 总数（同一过滤条件），用于前端判断是否还有下一页
-    total = int(await review_db.fetch_scalar(
-        db, f"SELECT COUNT(*) AS c FROM review_records {where}", params, 0,
-        what="评审轨迹：统计总数") or 0)
+    total = int(
+        await review_db.fetch_scalar(
+            db, f"SELECT COUNT(*) AS c FROM review_records {where}", params, 0, what="评审轨迹：统计总数"
+        )
+        or 0
+    )
     items = await review_db.fetch_all(
         db,
         "SELECT id, section_id, section_title, from_status, to_status, reviewer,"
@@ -646,9 +731,10 @@ async def review_records(scheme_id: str, section_id: str = "", limit: int = 50,
         #    分页固定为真实写入的逆序。与同文件 review_checklist 的
         #    「ORDER BY created_at DESC, rowid DESC」及合规侧口径一致。
         " ORDER BY created_at DESC, rowid DESC LIMIT ? OFFSET ?",
-        (*params, limit, offset), what="评审轨迹：读取记录")
+        (*params, limit, offset),
+        what="评审轨迹：读取记录",
+    )
     for it in items:
         it["from_label"] = REVIEW_STATUS_LABEL.get(it.get("from_status") or "", "未纳入审核")
         it["to_label"] = REVIEW_STATUS_LABEL.get(it.get("to_status") or "", "")
-    return {"items": items, "total": total, "limit": limit, "offset": offset,
-            "has_more": total > offset + len(items)}
+    return {"items": items, "total": total, "limit": limit, "offset": offset, "has_more": total > offset + len(items)}

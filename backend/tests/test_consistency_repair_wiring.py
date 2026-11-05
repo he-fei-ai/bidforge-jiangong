@@ -11,6 +11,7 @@
 本文件用**真库（in-memory schema）+ 假 AI** 端到端跑 `run_repair`，
 调用的是未打桩的 `repair_section`（签名即护栏），因此第一条缺陷会被直接暴露。
 """
+
 import inspect
 import json
 
@@ -22,42 +23,68 @@ SCHEME = "sch-1"
 PROJ = "prj-1"
 SEC = "sec-1"
 
-_BEFORE = ("本工程总工期为 120 日历天，混凝土强度等级为 C30。"
-           "架体搭设高度 50 m，扣件螺栓拧紧力矩 40~65N·m。\n\n"
-           "```mermaid\ngraph TD; A[开工]-->B[竣工]\n```\n")
+_BEFORE = (
+    "本工程总工期为 120 日历天，混凝土强度等级为 C30。"
+    "架体搭设高度 50 m，扣件螺栓拧紧力矩 40~65N·m。\n\n"
+    "```mermaid\ngraph TD; A[开工]-->B[竣工]\n```\n"
+)
 # 修复后：错误取值 120 → 权威值 90，其余保持不变（通过 validate_repair 各条校验）
-_AFTER = ("本工程总工期为 90 日历天，混凝土强度等级为 C30。"
-          "架体搭设高度 50 m，扣件螺栓拧紧力矩 40~65N·m。\n\n"
-          "```mermaid\ngraph TD; A[开工]-->B[竣工]\n```\n")
+_AFTER = (
+    "本工程总工期为 90 日历天，混凝土强度等级为 C30。"
+    "架体搭设高度 50 m，扣件螺栓拧紧力矩 40~65N·m。\n\n"
+    "```mermaid\ngraph TD; A[开工]-->B[竣工]\n```\n"
+)
 # 落库正文是 `_clean_repair_output` 后的形态（首尾空白被 strip）
 _AFTER_CLEAN = _AFTER.strip()
 
 
 async def _seed(db, *, budget: int = 50, content: str = _BEFORE) -> None:
     await db.execute("INSERT INTO projects(id,name) VALUES(?,?)", (PROJ, "P"))
-    await db.execute("INSERT INTO schemes(id,project_id,name) VALUES(?,?,?)",
-                     (SCHEME, PROJ, "S"))
+    await db.execute("INSERT INTO schemes(id,project_id,name) VALUES(?,?,?)", (SCHEME, PROJ, "S"))
     await db.execute(
         "INSERT INTO sections(id,scheme_id,project_id,title,content,word_count,"
         "word_status,word_budget,status,level,sort_order) "
         "VALUES(?,?,?,?,?,?,?,?,?,?,?)",
-        (SEC, SCHEME, PROJ, "工程概况", content, text_word_count(content),
-         word_status_for(text_word_count(content), budget), budget,
-         "generated", 1, 0))
+        (
+            SEC,
+            SCHEME,
+            PROJ,
+            "工程概况",
+            content,
+            text_word_count(content),
+            word_status_for(text_word_count(content), budget),
+            budget,
+            "generated",
+            1,
+            0,
+        ),
+    )
     await db.commit()
 
 
-def _conflict(cid: str, *, value: str = "120 日历天", severity: str = "high",
-              auth: str = "90 日历天") -> dict:
+def _conflict(cid: str, *, value: str = "120 日历天", severity: str = "high", auth: str = "90 日历天") -> dict:
     return {
-        "id": cid, "scheme_id": SCHEME, "scan_id": "S1",
-        "conflict_type": "numeric", "severity": severity, "topic": "项目总工期",
-        "occurrences": [{"section_id": SEC, "section_title": "工程概况",
-                         "text": "本工程总工期为 120 日历天", "position": 0,
-                         "value": value, "conflict_id": cid}],
-        "authoritative_value": auth, "authoritative_source": "全局事实变量 · 工期",
+        "id": cid,
+        "scheme_id": SCHEME,
+        "scan_id": "S1",
+        "conflict_type": "numeric",
+        "severity": severity,
+        "topic": "项目总工期",
+        "occurrences": [
+            {
+                "section_id": SEC,
+                "section_title": "工程概况",
+                "text": "本工程总工期为 120 日历天",
+                "position": 0,
+                "value": value,
+                "conflict_id": cid,
+            }
+        ],
+        "authoritative_value": auth,
+        "authoritative_source": "全局事实变量 · 工期",
         "repair_instruction": f"将「{value}」改为「{auth}」",
-        "reason": "全局事实变量明确工期", "status": "pending",
+        "reason": "全局事实变量明确工期",
+        "status": "pending",
     }
 
 
@@ -85,8 +112,8 @@ class TestRepairCallSite:
         monkeypatch.setattr(repair_agent, "chat_with_fallback", fake_chat)
 
         res = await repair_agent.run_repair(
-            db_conn, scheme_id=SCHEME, scan_id="S1",
-            conflicts=[_conflict("C1")], severity_threshold="high")
+            db_conn, scheme_id=SCHEME, scan_id="S1", conflicts=[_conflict("C1")], severity_threshold="high"
+        )
 
         assert seen, "修复必须真正调用 AI（旧实现因漏传 section_id 直接 TypeError）"
         assert res["repaired"] == 1, res
@@ -107,11 +134,10 @@ class TestRepairWordCountConsistency:
 
         monkeypatch.setattr(repair_agent, "chat_with_fallback", fake_chat)
         await repair_agent.run_repair(
-            db_conn, scheme_id=SCHEME, scan_id="S1",
-            conflicts=[_conflict("C1")], severity_threshold="high")
+            db_conn, scheme_id=SCHEME, scan_id="S1", conflicts=[_conflict("C1")], severity_threshold="high"
+        )
 
-        cur = await db_conn.execute(
-            "SELECT content, word_count, word_status FROM sections WHERE id=?", (SEC,))
+        cur = await db_conn.execute("SELECT content, word_count, word_status FROM sections WHERE id=?", (SEC,))
         row = await cur.fetchone()
         expect = text_word_count(_AFTER_CLEAN)
         assert row[1] == expect, "word_count 必须剔除```图表代码块"
@@ -135,34 +161,51 @@ class TestRepairStatistics:
         monkeypatch.setattr(repair_agent, "chat_with_fallback", fake_chat)
 
         conflicts = [
-            _conflict("C1"),                                      # high → 修复
-            _conflict("C2", value="150 日历天", severity="low"),   # 低于阈值 → 不修
-            {"id": "C3", "scheme_id": SCHEME, "scan_id": "S1",
-             "conflict_type": "numeric", "severity": "high", "topic": "无权威值",
-             "occurrences": [{"section_id": SEC, "section_title": "工程概况",
-                              "text": "x", "position": 0, "value": "x"}],
-             "authoritative_value": "", "authoritative_source": "",
-             "repair_instruction": "", "reason": "", "status": "pending"},
+            _conflict("C1"),  # high → 修复
+            _conflict("C2", value="150 日历天", severity="low"),  # 低于阈值 → 不修
+            {
+                "id": "C3",
+                "scheme_id": SCHEME,
+                "scan_id": "S1",
+                "conflict_type": "numeric",
+                "severity": "high",
+                "topic": "无权威值",
+                "occurrences": [
+                    {"section_id": SEC, "section_title": "工程概况", "text": "x", "position": 0, "value": "x"}
+                ],
+                "authoritative_value": "",
+                "authoritative_source": "",
+                "repair_instruction": "",
+                "reason": "",
+                "status": "pending",
+            },
         ]
         res = await repair_agent.run_repair(
-            db_conn, scheme_id=SCHEME, scan_id="S1", conflicts=conflicts,
-            severity_threshold="high")
+            db_conn, scheme_id=SCHEME, scan_id="S1", conflicts=conflicts, severity_threshold="high"
+        )
 
         assert res["total_conflicts"] == 3
         assert res["repaired"] == 1
-        assert res["skipped"] == 2                 # 低于阈值 1 + 无权威值 1
+        assert res["skipped"] == 2  # 低于阈值 1 + 无权威值 1
         assert res["failed"] == 0
         assert res["repaired"] + res["failed"] + res["skipped"] == res["total_conflicts"]
 
     async def test_save_repair_accepts_explicit_stats(self, db_conn):
         await _seed(db_conn)
         out = await repair_record.save_repair(
-            db_conn, scheme_id=SCHEME, scan_id="S1", mode="auto",
-            items=[{"conflict_id": "C1", "status": "repaired"},
-                   {"conflict_id": "C1", "status": "repaired"},   # 同冲突出现在两章
-                   {"conflict_id": "C2", "status": "failed"}],
-            snapshot_id="ver_x", total_conflicts=2,
-            stats={"repaired": 1, "failed": 1, "skipped": 0})
+            db_conn,
+            scheme_id=SCHEME,
+            scan_id="S1",
+            mode="auto",
+            items=[
+                {"conflict_id": "C1", "status": "repaired"},
+                {"conflict_id": "C1", "status": "repaired"},  # 同冲突出现在两章
+                {"conflict_id": "C2", "status": "failed"},
+            ],
+            snapshot_id="ver_x",
+            total_conflicts=2,
+            stats={"repaired": 1, "failed": 1, "skipped": 0},
+        )
         assert (out["repaired"], out["failed"], out["skipped"]) == (1, 1, 0)
 
 
@@ -171,20 +214,18 @@ class TestRollbackWordCount:
 
     async def test_rollback_recomputes_word_count(self, db_conn):
         await _seed(db_conn, budget=50, content=_AFTER_CLEAN)
-        snap = await repair_record.create_snapshot(
-            db_conn, SCHEME, [{"section_id": SEC, "content_before": _BEFORE}])
+        snap = await repair_record.create_snapshot(db_conn, SCHEME, [{"section_id": SEC, "content_before": _BEFORE}])
         # 模拟"修复后"的库状态（字数被写成含图表代码的长度）
         await db_conn.execute(
-            "UPDATE sections SET word_count=?, word_status='over' WHERE id=?",
-            (len(_AFTER_CLEAN), SEC))
+            "UPDATE sections SET word_count=?, word_status='over' WHERE id=?", (len(_AFTER_CLEAN), SEC)
+        )
         await db_conn.commit()
 
         await repair_record.rollback_snapshot(db_conn, snap)
 
-        cur = await db_conn.execute(
-            "SELECT content, word_count, word_status FROM sections WHERE id=?", (SEC,))
+        cur = await db_conn.execute("SELECT content, word_count, word_status FROM sections WHERE id=?", (SEC,))
         row = await cur.fetchone()
-        assert row[0] == _BEFORE                    # 快照原文原样恢复
+        assert row[0] == _BEFORE  # 快照原文原样恢复
         expect = text_word_count(_BEFORE)
         assert row[1] == expect
         assert row[2] == word_status_for(expect, 50)
@@ -206,37 +247,37 @@ class TestConfirmRejectWordCount:
         await _seed(db_conn, budget=50, content=_BEFORE)
         # 制造"修复后"落库状态：正文被改成更长，字数被写成 len(after)（污染）
         await db_conn.execute(
-            "UPDATE sections SET content=?, word_count=?, word_status='over' "
-            "WHERE id=?", (_AFTER_CLEAN, len(_AFTER_CLEAN), SEC))
+            "UPDATE sections SET content=?, word_count=?, word_status='over' " "WHERE id=?",
+            (_AFTER_CLEAN, len(_AFTER_CLEAN), SEC),
+        )
         await db_conn.commit()
 
         # 快照 + 修复批次记录
-        snap = await repair_record.create_snapshot(
-            db_conn, SCHEME, [{"section_id": SEC, "content_before": _BEFORE}])
+        snap = await repair_record.create_snapshot(db_conn, SCHEME, [{"section_id": SEC, "content_before": _BEFORE}])
         rep = await repair_record.save_repair(
-            db_conn, scheme_id=SCHEME, scan_id="S1", mode="auto",
-            items=[{"conflict_id": "C1", "section_id": SEC, "status": "repaired",
-                    "problems": []}],
-            snapshot_id=snap, total_conflicts=1,
-            stats={"repaired": 1, "failed": 0, "skipped": 0})
+            db_conn,
+            scheme_id=SCHEME,
+            scan_id="S1",
+            mode="auto",
+            items=[{"conflict_id": "C1", "section_id": SEC, "status": "repaired", "problems": []}],
+            snapshot_id=snap,
+            total_conflicts=1,
+            stats={"repaired": 1, "failed": 0, "skipped": 0},
+        )
 
         # 通过 /confirm 拒绝该冲突 —— 章节应整体恢复快照原文
         result = await confirm(
-            scheme_id=SCHEME,
-            body={"repair_id": rep["repair_id"], "accepted": [], "rejected": ["C1"]},
-            db=db_conn)
+            scheme_id=SCHEME, body={"repair_id": rep["repair_id"], "accepted": [], "rejected": ["C1"]}, db=db_conn
+        )
         assert result["status"] == "rejected"
         assert result["restored_sections"] == [SEC]
 
-        cur = await db_conn.execute(
-            "SELECT content, word_count, word_status FROM sections WHERE id=?", (SEC,))
+        cur = await db_conn.execute("SELECT content, word_count, word_status FROM sections WHERE id=?", (SEC,))
         row = await cur.fetchone()
         expect = text_word_count(_BEFORE)
         assert row[0] == _BEFORE, "拒绝后应恢复快照原文"
-        assert row[1] == expect, (
-            "拒绝后 word_count 必须剔除```图表代码块，不得停留在修复后 len(content)")
-        assert row[2] == word_status_for(expect, 50), (
-            "拒绝后 word_status 必须与恢复后的正文一致，不得假 over")
+        assert row[1] == expect, "拒绝后 word_count 必须剔除```图表代码块，不得停留在修复后 len(content)"
+        assert row[2] == word_status_for(expect, 50), "拒绝后 word_status 必须与恢复后的正文一致，不得假 over"
 
 
 class TestRepairFailureKeepsOriginal:
@@ -250,10 +291,9 @@ class TestRepairFailureKeepsOriginal:
 
         monkeypatch.setattr(repair_agent, "chat_with_fallback", boom)
         res = await repair_agent.run_repair(
-            db_conn, scheme_id=SCHEME, scan_id="S1",
-            conflicts=[_conflict("C1")], severity_threshold="high")
+            db_conn, scheme_id=SCHEME, scan_id="S1", conflicts=[_conflict("C1")], severity_threshold="high"
+        )
         assert res["failed"] == 1
         assert "模型不可用" in json.dumps(res["items"], ensure_ascii=False)
         cur = await db_conn.execute("SELECT content FROM sections WHERE id=?", (SEC,))
         assert (await cur.fetchone())[0] == _BEFORE
-

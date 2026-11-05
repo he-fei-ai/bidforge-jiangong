@@ -38,6 +38,7 @@
       "basis": "行业依据"
     }
 """
+
 from __future__ import annotations
 
 import logging
@@ -46,12 +47,14 @@ import unicodedata
 from dataclasses import dataclass, field
 
 from app.config import settings
+from app.services import l3_standard
 from app.services.audit_rules import (
     RULE_VERSION,
     SEVERITY_ORDER,
     _resolve_base_rule,
     get_rule,
 )
+from app.services.chapter_keywords import title_matches as _title_matches
 from app.services.content_polish import find_colloquial_hits
 from app.services.content_utils import (
     LEAF_MIN_WORD_BUDGET,
@@ -71,6 +74,11 @@ from app.services.facts_classification import danger_check as facts_danger_check
 # 的分派不在本模块重做）。content_utils.find_unclosed_fences 在本模块已无其它用途，
 # 不再导入（避免"预检自己持有一份判据入口"的观感，也满足 ruff F401）。
 from app.services.fence_common import classify_fence_defects
+
+# ✅ B-16（R175，判定源统一）：数值主题表现由 services/numeric_topics.py 单一维护，
+#    本模块与 consistency_scanner 都从这里派生，杜绝两套正则分叉。
+from app.services.numeric_topics import compiled_num_topics
+from app.services.placeholder_sections import is_placeholder_section
 from app.services.scheme_classification import is_hazardous_by_keywords
 from app.services.standards_registry import (
     ABOLISHED_STANDARDS,
@@ -107,8 +115,7 @@ CHART_DONE_STATUSES = ("done", "generated")
 
 # 标准编号提取（GB / JGJ / JTG / DBJ / CECS / CJJ 等，含年号）
 _STANDARD_CODE_RE = re.compile(
-    r"(?:GB/T|GB|JGJ/T|JGJ|JTG/T|JTG|DBJ|CECS|CJJ/T|CJJ)\s*"
-    r"[0-9]{2,5}(?:\.[0-9]{1,3})?(?:[—\-－]\s*[0-9]{4})?",
+    r"(?:GB/T|GB|JGJ/T|JGJ|JTG/T|JTG|DBJ|CECS|CJJ/T|CJJ)\s*" r"[0-9]{2,5}(?:\.[0-9]{1,3})?(?:[—\-－]\s*[0-9]{4})?",
     re.IGNORECASE,
 )
 # 全文强制性工程建设规范（GB 55xxx 系列）
@@ -116,17 +123,15 @@ _MANDATORY_CODE_RE = re.compile(r"GB\s*55[0-9]{3}(?:[—\-－]\s*[0-9]{4})?", re
 
 # 计算过程特征：公式、等号计算式、参数代入
 _FORMULA_RES = (
-    re.compile(r"\$\$?[^$\n]{2,200}\$\$?"),                     # LaTeX
-    re.compile(r"\\\(.{2,200}?\\\)|\\\[.{2,400}?\\\]"),          # \( \) \[ \]
+    re.compile(r"\$\$?[^$\n]{2,200}\$\$?"),  # LaTeX
+    re.compile(r"\\\(.{2,200}?\\\)|\\\[.{2,400}?\\\]"),  # \( \) \[ \]
     re.compile(r"[α-ωΑ-ΩA-Za-z_]{1,12}\s*=\s*[^=；;\n]{1,80}\d"),  # 变量 = 数值
-    re.compile(r"(?:承载力|抗倾覆|抗滑移|稳定系数|安全系数|弯矩|剪力|挠度|应力)"
-               r"[^。\n]{0,20}(?:计算|验算|校核)"),
+    re.compile(r"(?:承载力|抗倾覆|抗滑移|稳定系数|安全系数|弯矩|剪力|挠度|应力)" r"[^。\n]{0,20}(?:计算|验算|校核)"),
 )
 #: 计算书 / 验算类章节的标题关键词（CMP-09 追加条款与 TRC-01 共用）。
 #: ✅ 2026-10-02（第二十五轮 · 判据同源）：提取为模块级常量供目录侧检查点
 #: ``services/outline_checkpoint`` 共用（**取值逐字不变**，审核行为零变化）。
-CALC_TITLE_KEYWORDS: tuple[str, ...] = (
-    "计算书", "验算", "受力计算", "承载力计算", "稳定性验算", "安全系数")
+CALC_TITLE_KEYWORDS: tuple[str, ...] = ("计算书", "验算", "受力计算", "承载力计算", "稳定性验算", "安全系数")
 
 # 控制字符：C0（除 \t \n \r）+ C1 + 替换字符 U+FFFD
 _CTRL_CHARS_RE = re.compile("[\x00-\x08\x0b\x0c\x0e-\x1f\x7f-\x9f\ufffd\ufffe\uffff]")
@@ -139,50 +144,7 @@ _CTRL_CHARS_RE = re.compile("[\x00-\x08\x0b\x0c\x0e-\x1f\x7f-\x9f\ufffd\ufffe\uf
 #    「塔吊 2 台 + 施工电梯 2 台」被判为「出现 2 种不同取值」→ CON-01（high）
 #    误报 + consistency 维度扣 20 分，正常列出多种设备的方案必然中招。
 #    「混凝土强度」同理：柱 C40 与梁 C30 属不同构件设计值，不是矛盾。
-_NUM_TOPICS: tuple[tuple[str, re.Pattern, tuple[int, ...], int | None], ...] = (
-    ("工期", re.compile(
-        r"(?:总工期|工期|建设工期|施工工期)[^0-9]{0,12}(\d+(?:\.\d+)?)\s*(日历天|天|个月|月)"),
-     (0, 1), None),
-    ("基坑深度", re.compile(
-        r"(?:开挖|基坑)[^。\n]{0,8}深度[^0-9]{0,8}(\d+(?:\.\d+)?)\s*(?:m|米|M)"),
-     (0,), None),
-    ("搭设高度", re.compile(
-        r"(?:支撑|脚手架|支架|模板)[^。\n]{0,8}高度[^0-9]{0,8}(\d+(?:\.\d+)?)\s*(?:m|米|M)"),
-     (0,), None),
-    # 可选「构件/部位」前缀作为对象标识（捕获组 1），强度等级为组 2。
-    # 前缀用非贪婪 `{0,6}?` 让引擎回溯，兼容「柱混凝土强度等级为C40」
-    # 「梁的混凝土强度等级C30」两种写法。
-    # 注意：下标与 m.group(i) 一致（1 = 第一个捕获组），m.group(0) 是整体匹配。
-    ("混凝土强度", re.compile(
-        r"((?:柱|梁|板|墙|基础|承台|桩|楼板|底板|顶板)[^0-9，。；、\n]{0,6}?)?"
-        r"\s*(?:混凝土强度等级|混凝土为|砼)\s*[:：]?\s*C(\d{2,3})"),
-     (2,), 1),
-    # 设备名（组 1）= 对象标识；数量 + 单位（组 2、3）= 取值
-    ("设备数量", re.compile(
-        r"(塔吊|塔式起重机|施工电梯|升降机|挖掘机|起重机)[^0-9]{0,10}(\d+)\s*(台|套)"),
-     (2, 3), 1),
-    # ✅ 2026-10-17（文档质量报告 六·2 数据矛盾）：与 consistency_scanner._NUM_TOPICS
-    #    同口径补入报告实证互相矛盾的主题（用工年龄 / 缺陷责任期 / 模板面板厚度 /
-    #    钢管壁厚 / 拆模强度）。两侧表格必须**同向**（见 content_data_contract 注释）：
-    #    生成侧自检与预检 CON-01 的判据口径一致，才不会「自检全绿、预检照报」。
-    ("用工年龄", re.compile(
-        r"(一般|危大工程)[^0-9。\n]{0,16}?(\d{2})\s*周岁"),
-     (2,), 1),
-    ("缺陷责任期", re.compile(
-        r"(整体工程|防水工程|防水|缺陷责任期)[^0-9。\n]{0,12}?(\d+)\s*个月"),
-     (2,), 1),
-    ("模板面板厚度", re.compile(
-        r"(\d+(?:\.\d+)?)\s*(?:mm|毫米)\s*厚"
-        r"|厚度[^0-9。\n]{0,4}?(\d+(?:\.\d+)?)\s*(?:mm|毫米)"),
-     (1, 2), None),
-    ("钢管壁厚", re.compile(
-        r"(?:[φΦ]\s*48(?:\.3)?\s*[×xX*]\s*(\d+(?:\.\d+)?)"
-        r"|壁厚(?!偏差)[^0-9。\n]{0,8}?(\d+(?:\.\d+)?)\s*(?:mm|毫米))"),
-     (1, 2), None),
-    ("拆模强度", re.compile(
-        r"(悬臂构件|悬臂|楼板|板|梁|拱)[^0-9。\n]{0,6}?(?:强度)?\s*[≥>=]{1,2}\s*(\d+)\s*%"),
-     (2,), 1),
-)
+_NUM_TOPICS = compiled_num_topics()
 
 
 @dataclass
@@ -193,13 +155,13 @@ class PreflightContext:
     scheme_name: str = ""
     scheme_type: str = ""
     word_budget: int = 0
-    sections: list = field(default_factory=list)   # id/title/content/word_count/parent_id
-    charts: list = field(default_factory=list)     # chart_type/status
+    sections: list = field(default_factory=list)  # id/title/content/word_count/parent_id
+    charts: list = field(default_factory=list)  # chart_type/status
     # ✅ 2026-10-03（全局事实桥接）：已确认可注入的全局事实（由路由层经
     #    facts_extractor.load_resolved_facts_for_scope 装配，同一 fail-closed
     #    门控）。默认空 → 未装配时 check_hazard_params 零开销跳过，
     #    既有直接构造 ctx 的调用方与测试行为逐字不变。
-    facts: list = field(default_factory=list)      # fact dict（name/value/fact_key…）
+    facts: list = field(default_factory=list)  # fact dict（name/value/fact_key…）
 
     @property
     def body_text(self) -> str:
@@ -226,9 +188,16 @@ def _resolve_rule(rule_id: str):
     return _resolve_base_rule(rule_id)
 
 
-def _finding(rule_id: str, detail: str, *, evidence=None, section_id: str = "",
-             section_title: str = "", suggestion: str = "",
-             severity: str | None = None) -> dict:
+def _finding(
+    rule_id: str,
+    detail: str,
+    *,
+    evidence=None,
+    section_id: str = "",
+    section_title: str = "",
+    suggestion: str = "",
+    severity: str | None = None,
+) -> dict:
     """构造一条发现（自动补全规则的维度 / 严重度 / 标题 / 行业依据）。
 
     ``severity`` 为**加法式**覆盖：缺省（``None``）一律取注册表值，与本函数
@@ -284,13 +253,10 @@ has_calc_process = _has_calc_process
 
 def _shingles(text: str) -> set:
     """中文 4-gram 集合（剔除空白与标点，降低格式差异带来的噪声）。"""
-    cleaned = "".join(
-        ch for ch in text
-        if not unicodedata.category(ch).startswith(("Z", "P", "S", "C"))
-    )
+    cleaned = "".join(ch for ch in text if not unicodedata.category(ch).startswith(("Z", "P", "S", "C")))
     if len(cleaned) < SHINGLE_SIZE:
         return set()
-    return {cleaned[i:i + SHINGLE_SIZE] for i in range(len(cleaned) - SHINGLE_SIZE + 1)}
+    return {cleaned[i : i + SHINGLE_SIZE] for i in range(len(cleaned) - SHINGLE_SIZE + 1)}
 
 
 def _jaccard(a: set, b: set) -> float:
@@ -364,7 +330,7 @@ def build_section_tree_index(sections: list) -> tuple[set, dict]:
         if node is None:
             return ""
         own = node.get("content") or ""
-        if sid in stack:            # 环：退化为只看自身正文，绝不无限递归
+        if sid in stack:  # 环：退化为只看自身正文，绝不无限递归
             return own
         parts = [own]
         for child in children_map.get(sid, []):
@@ -384,6 +350,32 @@ def build_section_tree_index(sections: list) -> tuple[set, dict]:
 # ---------------------------------------------------------------------------
 # 一、内容完整性（CMP-*）：专项方案九项法定内容
 # ---------------------------------------------------------------------------
+# ✅ B-16（R175）：标题匹配（关键词 → 词族 → 语义兜底）收敛到
+# services/chapter_keywords.py，预检判定与修复定位共用同一实现。
+
+#: ✅ B-12（R175，误报治理）：需要「计算书 / 安全验算」的工程类别。
+#:    装饰、防水、混凝土、钢筋等非受力验算方案不应因「无计算书章节」被判 block。
+_CALC_BOOK_REQUIRED_CATEGORIES = {"基坑", "模板", "脚手架", "起重机械"}
+
+
+def _calc_book_required(ctx: "PreflightContext") -> bool:
+    """本方案是否属于「必须有计算书」的类别（危大或受力验算类）。"""
+    cats = set(match_categories(ctx.scheme_name, ctx.scheme_type))
+    return bool(cats & _CALC_BOOK_REQUIRED_CATEGORIES) or is_hazardous_by_keywords(
+        f"{ctx.scheme_name} {ctx.scheme_type}"
+    )
+
+
+def _gb55_required(ctx: "PreflightContext") -> bool:
+    """是否应要求引用 GB 55xxx 全文强制规范。
+
+    ✅ B-12（R175）：``STD-02`` 旧实现无门控 —— 纯装饰 / 防水 / 机电等
+    非危大方案也被报 high「未引用 GB 55xxx」。现仅对危大或受力验算类
+    （基坑/模板/脚手架/起重机械）要求，与 GB 55034/55032 的适用范围一致。
+    """
+    return _calc_book_required(ctx)
+
+
 def check_completeness(ctx: PreflightContext) -> list:
     """检查住建部令第37号第十七条规定的九项内容是否齐备（按章节标题关键词匹配）。"""
     findings: list = []
@@ -402,40 +394,59 @@ def check_completeness(ctx: PreflightContext) -> list:
         sid = s.get("id")
         eff = effective.get(sid) if sid else None
         contents_by_title.setdefault(s.get("title") or "", []).append(
-            eff if eff is not None else (s.get("content") or ""))
+            eff if eff is not None else (s.get("content") or "")
+        )
 
     for idx in range(1, 10):
         rule_id = f"CMP-{idx:02d}"
         rule = get_rule(rule_id)
         if not rule or not rule.keywords:
             continue
-        hit_titles = [t for t in titles if any(kw in t for kw in rule.keywords)]
+        hit_titles = [t for t in titles if _title_matches(t, rule_id, rule.keywords)]
         if not hit_titles:
-            findings.append(_finding(
-                rule_id,
-                f"未找到与「{rule.title}」相关的章节（期望标题含：{'/'.join(rule.keywords[:3])}）",
-                suggestion=f"建议增设「{rule.keywords[0]}」章节，{rule.detail}",
-            ))
+            # ✅ B-12（R175）：非受力验算类方案不要求计算书章节，不得报 block。
+            if rule_id == "CMP-09" and not _calc_book_required(ctx):
+                continue
+            findings.append(
+                _finding(
+                    rule_id,
+                    f"未找到与「{rule.title}」相关的章节（期望标题含：{'/'.join(rule.keywords[:3])}）",
+                    suggestion=f"建议增设「{rule.keywords[0]}」章节，{rule.detail}",
+                )
+            )
             continue
         if not any((c or "").strip() for t in hit_titles for c in contents_by_title.get(t) or []):
-            findings.append(_finding(
-                rule_id, f"存在「{hit_titles[0]}」章节，但正文为空",
-                section_title=hit_titles[0],
-                suggestion="请在「正文生成」页生成该章节内容后重新预检",
-            ))
+            findings.append(
+                _finding(
+                    rule_id,
+                    f"存在「{hit_titles[0]}」章节，但正文为空",
+                    section_title=hit_titles[0],
+                    suggestion="请在「正文生成」页生成该章节内容后重新预检",
+                )
+            )
 
     # CMP-09 追加：有计算书章节但无实际计算过程 → "有标题无实质"
-    calc_titles = [t for t in titles if any(k in t for k in CALC_TITLE_KEYWORDS)]
+    # ✅ 2026-11-05（目录占位章节）：已登记「另行补充内容」的计算书/图纸章节
+    #    按新规则不生成正文，文本中天然不会有计算过程；若仍按标题聚合会把
+    #    「规则性跳过」误报成「有标题无实质」，故从聚合口径中剔除占位章节。
+    calc_sections = [
+        s
+        for s in ctx.sections
+        if any(k in (s.get("title") or "") for k in CALC_TITLE_KEYWORDS)
+        and not is_placeholder_section(s)
+    ]
+    calc_titles = [s.get("title") or "" for s in calc_sections]
     if calc_titles and not _has_calc_process(
-            "\n\n".join(c for t in calc_titles
-                         for c in contents_by_title.get(t) or [])):
-        findings.append(_finding(
-            "CMP-09",
-            f"「{calc_titles[0]}」章节未见可识别的计算过程（无公式、无参数代入、无验算步骤）",
-            section_title=calc_titles[0],
-            suggestion="计算书应给出计算简图说明、参数取值、计算公式与结论"
-                       "（建办质〔2018〕31号论证要点②）",
-        ))
+        "\n\n".join(effective.get(s.get("id")) or "" for s in calc_sections)
+    ):
+        findings.append(
+            _finding(
+                "CMP-09",
+                f"「{calc_titles[0]}」章节未见可识别的计算过程（无公式、无参数代入、无验算步骤）",
+                section_title=calc_titles[0],
+                suggestion="计算书应给出计算简图说明、参数取值、计算公式与结论" "（建办质〔2018〕31号论证要点②）",
+            )
+        )
     return findings
 
 
@@ -456,39 +467,56 @@ def check_standards(ctx: PreflightContext) -> list:
     abolished = find_abolished_codes(text)
     if abolished:
         sug = "；".join(f"{c} → {ABOLISHED_STANDARDS[c]}" for c in abolished[:5])
-        findings.append(_finding(
-            "STD-01", f"正文引用了 {len(abolished)} 个已废止 / 已被替代的标准编号",
-            evidence=abolished, suggestion=f"请替换为现行版本：{sug}"))
+        findings.append(
+            _finding(
+                "STD-01",
+                f"正文引用了 {len(abolished)} 个已废止 / 已被替代的标准编号",
+                evidence=abolished,
+                suggestion=f"请替换为现行版本：{sug}",
+            )
+        )
 
     codes = {m.group(0).strip() for m in _STANDARD_CODE_RE.finditer(text)}
 
     if not any(_MANDATORY_CODE_RE.search(c) for c in codes):
-        findings.append(_finding(
-            "STD-02", "正文未引用任何全文强制性工程建设规范（GB 55xxx 系列）",
-            suggestion="施工安全与质量控制相关章节应引用 GB 55034-2022 / GB 55032-2022 等全文强制规范"))
+        # ✅ B-12（R175）：非危大 / 非受力验算类方案不要求 GB 55xxx，不得误报。
+        if _gb55_required(ctx):
+            findings.append(
+                _finding(
+                    "STD-02",
+                    "正文未引用任何全文强制性工程建设规范（GB 55xxx 系列）",
+                    suggestion="施工安全与质量控制相关章节应引用 GB 55034-2022 / GB 55032-2022 等全文强制规范",
+                )
+            )
 
     # ✅ BUG 修复（2026-10-02，生产库 STD-03 证据驱动）：正文裸写无年号编号
     #    （GB 55032 / GB 55034 / GB 50210）是在库标准的常见省略写法，旧判据含年号
     #    全等比较恒不命中 → 误报「未收录」。现按基号豁免（与标准库同源判据），
     #    真正编造 / 库外无年号编号仍照报。
-    unknown = sorted(c for c in codes
-                     if not is_known_standard(c) and not is_known_base_number(c))
+    unknown = sorted(c for c in codes if not is_known_standard(c) and not is_known_base_number(c))
     if len(unknown) >= 3:
-        findings.append(_finding(
-            "STD-03",
-            f"检出 {len(unknown)} 个未收录于现行标准库的编号，请人工核实其编号与年号是否真实有效",
-            evidence=unknown,
-            suggestion="确需引用清单外标准时，必须同时给出完整标准编号与现行年号"))
+        findings.append(
+            _finding(
+                "STD-03",
+                f"检出 {len(unknown)} 个未收录于现行标准库的编号，请人工核实其编号与年号是否真实有效",
+                evidence=unknown,
+                suggestion="确需引用清单外标准时，必须同时给出完整标准编号与现行年号",
+            )
+        )
 
     # ✅ 收口（2026-10-02）：37 号令 / 31 号文仅适用于危大工程，非危大方案
     #    （如纯临电 / 装饰）被无门控地报 STD-04 是误报。改按危大单一事实源
     #    is_hazardous_by_keywords 门控，与正文生成侧 STD-04 前置约束同口径。
     if is_hazardous_by_keywords(f"{ctx.scheme_name} {ctx.scheme_type}") and not any(
-            k in text for k in ("住建部令第37号", "37号令", "建办质〔2018〕31号",
-                                "危险性较大的分部分项工程安全管理规定")):
-        findings.append(_finding(
-            "STD-04", "正文未引用危大工程安全管理相关法规（住建部令第37号 / 建办质〔2018〕31号）",
-            suggestion="编制依据章节应列明上述法定依据"))
+        k in text for k in ("住建部令第37号", "37号令", "建办质〔2018〕31号", "危险性较大的分部分项工程安全管理规定")
+    ):
+        findings.append(
+            _finding(
+                "STD-04",
+                "正文未引用危大工程安全管理相关法规（住建部令第37号 / 建办质〔2018〕31号）",
+                suggestion="编制依据章节应列明上述法定依据",
+            )
+        )
 
     cats = match_categories(ctx.scheme_name, ctx.scheme_type)[:2]
     missing: list = []
@@ -497,13 +525,16 @@ def check_standards(ctx: PreflightContext) -> list:
     _norm_text = normalize_standard_code(text)
     for cat in cats:
         cat_codes = [s.code for s in CATEGORY_STANDARDS.get(cat, [])]
-        if cat_codes and not any(
-                normalize_standard_code(c) in _norm_text for c in cat_codes):
+        if cat_codes and not any(normalize_standard_code(c) in _norm_text for c in cat_codes):
             missing.append(cat)
     if missing:
-        findings.append(_finding(
-            "STD-05", f"本方案属于「{'/'.join(missing)}」类，但未引用该类现行专业技术标准",
-            suggestion="请在编制依据中补充对应专业技术标准（见现行标准库专业类别清单）"))
+        findings.append(
+            _finding(
+                "STD-05",
+                f"本方案属于「{'/'.join(missing)}」类，但未引用该类现行专业技术标准",
+                suggestion="请在编制依据中补充对应专业技术标准（见现行标准库专业类别清单）",
+            )
+        )
     return findings
 
 
@@ -556,8 +587,7 @@ def check_safety(ctx: PreflightContext) -> list:
         eff = effective.get(sid) if sid else None
         return eff if eff is not None else (s.get("content") or "")
 
-    emer = [s for s in ctx.sections
-            if any(k in (s.get("title") or "") for k in EMERGENCY_TITLE_KEYWORDS)]
+    emer = [s for s in ctx.sections if any(k in (s.get("title") or "") for k in EMERGENCY_TITLE_KEYWORDS)]
     emer_text = "\n".join(_eff(s) for s in emer)
     if emer and emer_text.strip():
         emer_title = emer[0].get("title") or ""
@@ -567,27 +597,35 @@ def check_safety(ctx: PreflightContext) -> list:
             ("SAF-05", SAF05_TITLE_KEYWORDS, "应急预案演练要求"),
         ):
             if not any(k in emer_text for k in kws):
-                findings.append(_finding(
-                    rule_id, f"应急处置章节缺少「{what}」相关内容",
-                    section_title=emer_title,
-                    suggestion=f"按 GB/T 29639-2020 要求补充{what}"))
+                findings.append(
+                    _finding(
+                        rule_id,
+                        f"应急处置章节缺少「{what}」相关内容",
+                        section_title=emer_title,
+                        suggestion=f"按 GB/T 29639-2020 要求补充{what}",
+                    )
+                )
 
     cats = set(match_categories(ctx.scheme_name, ctx.scheme_type))
     if cats & MONITOR_CATEGORIES:
-        mon = [s for s in ctx.sections
-               if any(k in (s.get("title") or "") for k in SAF06_MONITOR_TITLE_KEYWORDS)]
+        mon = [s for s in ctx.sections if any(k in (s.get("title") or "") for k in SAF06_MONITOR_TITLE_KEYWORDS)]
         if not mon:
-            findings.append(_finding(
-                "SAF-06",
-                f"本方案属「{'/'.join(sorted(cats & MONITOR_CATEGORIES))}」类危大工程，"
-                "但未检出监测监控方案章节",
-                suggestion="应明确监测项目、点位布置、监测频次与预警值"))
-        elif not any(k in "".join(_eff(s) for s in mon)
-                     for k in SAF06_THRESHOLD_KEYWORDS):
-            findings.append(_finding(
-                "SAF-06", "监测方案未给出预警值 / 控制值",
-                section_title=mon[0].get("title") or "",
-                suggestion="监测方案应明确预警值与报警值，否则无法指导现场处置"))
+            findings.append(
+                _finding(
+                    "SAF-06",
+                    f"本方案属「{'/'.join(sorted(cats & MONITOR_CATEGORIES))}」类危大工程，" "但未检出监测监控方案章节",
+                    suggestion="应明确监测项目、点位布置、监测频次与预警值",
+                )
+            )
+        elif not any(k in "".join(_eff(s) for s in mon) for k in SAF06_THRESHOLD_KEYWORDS):
+            findings.append(
+                _finding(
+                    "SAF-06",
+                    "监测方案未给出预警值 / 控制值",
+                    section_title=mon[0].get("title") or "",
+                    suggestion="监测方案应明确预警值与报警值，否则无法指导现场处置",
+                )
+            )
     return findings
 
 
@@ -614,12 +652,11 @@ def check_hazard_params(ctx: PreflightContext) -> list:
         return []
     # 事实名+值兼作类目匹配文本（与 danger-check 的 extra_text 同参数语义：
     # 名称信息不足时由事实内容兜底命中子类，如「基坑开挖深度 16m」命中基坑类）。
-    extra_text = " ".join(
-        f"{f.get('name') or ''} {f.get('value') or ''}" for f in ctx.facts
-        if isinstance(f, dict))[:2000]
+    extra_text = " ".join(f"{f.get('name') or ''} {f.get('value') or ''}" for f in ctx.facts if isinstance(f, dict))[
+        :2000
+    ]
     try:
-        out = facts_danger_check(ctx.scheme_name or "", ctx.facts,
-                                 extra_text=extra_text)
+        out = facts_danger_check(ctx.scheme_name or "", ctx.facts, extra_text=extra_text)
     except Exception as exc:  # pragma: no cover - 判定异常不阻断预检主流程
         logger.warning("SAF-08 事实反哺判定失败（跳过）: %s", exc)
         return []
@@ -635,14 +672,16 @@ def check_hazard_params(ctx: PreflightContext) -> list:
     reasons = "; ".join(r for h in hits for r in (h.get("hazard_reasons") or []))
     params = out.get("threshold_params") or {}
     evidence = [f"{k}={v}" for k, v in sorted(params.items())]
-    return [_finding(
-        "SAF-08",
-        f"已确认事实参数达到危大阈值（{'；'.join(reasons) or subs}），"
-        f"但方案名称与类型未体现危大工程特征"
-        + (f"（命中子类：{subs}）" if subs else ""),
-        evidence=evidence,
-        suggestion="核对方案定位与名称表述；若确属危大工程，"
-                   "应按危大工程要求编制（含安全验算、监测监控与应急预案）")]
+    return [
+        _finding(
+            "SAF-08",
+            f"已确认事实参数达到危大阈值（{'；'.join(reasons) or subs}），"
+            f"但方案名称与类型未体现危大工程特征" + (f"（命中子类：{subs}）" if subs else ""),
+            evidence=evidence,
+            suggestion="核对方案定位与名称表述；若确属危大工程，"
+            "应按危大工程要求编制（含安全验算、监测监控与应急预案）",
+        )
+    ]
 
 
 # ---------------------------------------------------------------------------
@@ -652,21 +691,30 @@ def check_hazard_params(ctx: PreflightContext) -> list:
 #    「5m」与「5米」被误判为两种取值而误报 CON-01（high）。按「长串优先」顺序替换，
 #    保证 cm/km/mm 等不被 m 误伤。
 _UNIT_CANON: list[tuple[str, str]] = [
-    ("日历天", "天"), ("自然天", "天"),
-    ("km", "千米"), ("cm", "厘米"), ("mm", "毫米"),
-    ("m²", "平方米"), ("m2", "平方米"), ("m", "米"),
+    ("日历天", "天"),
+    ("自然天", "天"),
+    ("km", "千米"),
+    ("cm", "厘米"),
+    ("mm", "毫米"),
+    ("m²", "平方米"),
+    ("m2", "平方米"),
+    ("m", "米"),
     ("平方米", "平方米"),
     # 「个月」必须排在「小时/h」之前，且早于任何可能吃掉它的规则；
     # 不加这条则「24 个月」与「24 月」被当成两个不同取值（生产事实里
     # 「缺陷责任期 24 个月」与「缺陷责任期最长期限 24 月」并存，实测会误判冲突）。
     ("个月", "月"),
-    ("小时", "时"), ("h", "时"),
+    ("小时", "时"),
+    ("h", "时"),
 ]
+
+
 def _norm_unit(text: str) -> str:
     s = (text or "").strip()
     for a, b in _UNIT_CANON:
         s = s.replace(a, b)
     return s
+
 
 # 公开别名：跨模块复用同一份单位归一口径（与 has_calc_process 同模式 ——
 # 保留私有实现、只额外暴露别名，模块内既有调用点零改动）。
@@ -704,9 +752,7 @@ def numeric_consistency_findings(sections: list, *, limit: int = 1) -> list:
             for m in rx.finditer(s.get("content") or ""):
                 # 只拼接「取值」捕获组（对象标识组除外），避免 group 越界；
                 # 归一化单位后再作为一致性判定的 key，避免单位写法差异造成误报。
-                key = _norm_unit(
-                    "".join((m.group(i) or "") for i in val_groups
-                            if i <= rx.groups).strip())
+                key = _norm_unit("".join((m.group(i) or "") for i in val_groups if i <= rx.groups).strip())
                 if not key:
                     continue
                 if obj_group is None:
@@ -727,12 +773,14 @@ def numeric_consistency_findings(sections: list, *, limit: int = 1) -> list:
                     conflict_values = d
                     break
         if conflict_values:
-            findings.append(_finding(
-                "CON-01",
-                f"「{conflict_label}」在正文中出现 {len(conflict_values)} 种不同取值",
-                evidence=[f"{k}（{v}）"
-                          for k, v in list(conflict_values.items())[:6]],
-                suggestion=f"请统一{topic}口径；以全局事实 / 设计文件为准"))
+            findings.append(
+                _finding(
+                    "CON-01",
+                    f"「{conflict_label}」在正文中出现 {len(conflict_values)} 种不同取值",
+                    evidence=[f"{k}（{v}）" for k, v in list(conflict_values.items())[:6]],
+                    suggestion=f"请统一{topic}口径；以全局事实 / 设计文件为准",
+                )
+            )
             if limit > 0 and len(findings) >= limit:
                 break  # 同一批次只报一个主题，避免刷屏
     return findings
@@ -755,8 +803,10 @@ def check_consistency(ctx: PreflightContext) -> list:
         f = _finding(
             f"CON-05-{_idx}",
             f"「{dup['a_title']}」与「{dup['b_title']}」内容相似度 {dup['similarity']:.0%}",
-            section_title=dup["a_title"], section_id=dup["a_id"] or "",
-            suggestion="两章内容高度雷同，建议合并或分别聚焦不同工艺/部位，避免评审质疑")
+            section_title=dup["a_title"],
+            section_id=dup["a_id"] or "",
+            suggestion="两章内容高度雷同，建议合并或分别聚焦不同工艺/部位，避免评审质疑",
+        )
         if dup["similarity"] >= DUP_IDENTICAL_THRESHOLD:
             f["severity"] = "high"
             f["detail"] += "（近乎完全一致，疑似重复生成）"
@@ -766,9 +816,9 @@ def check_consistency(ctx: PreflightContext) -> list:
 
 def _find_duplicates(sections: list) -> list:
     """章节两两相似度检测（中文 4-gram Jaccard）。"""
-    candidates = [s for s in sections
-                  if (s.get("word_count") or 0) >= DUP_MIN_WORDS
-                  and (s.get("content") or "").strip()]
+    candidates = [
+        s for s in sections if (s.get("word_count") or 0) >= DUP_MIN_WORDS and (s.get("content") or "").strip()
+    ]
     if len(candidates) < 2:
         return []
     candidates.sort(key=lambda s: s.get("word_count") or 0, reverse=True)
@@ -777,14 +827,18 @@ def _find_duplicates(sections: list) -> list:
 
     out: list = []
     for i, (si, sa) in enumerate(shingles):
-        for sj, sb in shingles[i + 1:]:
+        for sj, sb in shingles[i + 1 :]:
             sim = _jaccard(sa, sb)
             if sim >= DUP_SIMILARITY_THRESHOLD:
-                out.append({
-                    "a_id": si.get("id"), "a_title": si.get("title"),
-                    "b_id": sj.get("id"), "b_title": sj.get("title"),
-                    "similarity": round(sim, 3),
-                })
+                out.append(
+                    {
+                        "a_id": si.get("id"),
+                        "a_title": si.get("title"),
+                        "b_id": sj.get("id"),
+                        "b_title": sj.get("title"),
+                        "similarity": round(sim, 3),
+                    }
+                )
     out.sort(key=lambda x: x["similarity"], reverse=True)
     return out[:10]
 
@@ -812,11 +866,9 @@ def check_duplication(ctx: PreflightContext) -> list:
     「大段照抄」升级 high；否则 medium。派生编号 ``CON-06-N`` 与 CON-05 同法，
     避免 ``merge_findings`` 按 rule_id 去重时把多组搬运塌缩成一条。
     """
-    exclude_pairs = [(d.get("a_id"), d.get("b_id"))
-                     for d in _find_duplicates(ctx.sections)]
+    exclude_pairs = [(d.get("a_id"), d.get("b_id")) for d in _find_duplicates(ctx.sections)]
     try:
-        res = find_cross_section_copies(ctx.sections,
-                                        exclude_pairs=exclude_pairs)
+        res = find_cross_section_copies(ctx.sections, exclude_pairs=exclude_pairs)
     except Exception as exc:  # 防御性兜底：查重异常不应拖垮整轮预检
         logger.warning("跨章节段落搬运检测异常: %s", exc, exc_info=True)
         return []
@@ -829,23 +881,26 @@ def check_duplication(ctx: PreflightContext) -> list:
         #    ⚠️ 2026-10-17：该分支原用自造串 ``CON-06-TRUNC`` + ``severity=`` 形参，
         #    二者各有一处缺陷（见下方与 _finding docstring），一并修掉。
         logger.warning(
-            "跨章节段落搬运检测触顶截断（pairwise=%d），"
-            "结论可能不完整——部分搬运组可能漏报",
-            res.get("pairwise_compared", 0))
-        findings.append(_finding(
-            # ⚠️ 必须是**已登记的基编号** ``CON-06``，不得用 ``CON-06-TRUNC``
-            #    这类自造串：``_resolve_base_rule`` 只剥离「-<数字>」序号后缀，
-            #    遇到 ``-TRUNC`` 直接 break → 返回 None → ``dimension=""``
-            #    （污染 unknown_dimension_count）、``title`` 退化成裸串、
-            #    ``basis`` 为空 —— 正是本函数 :195 注释记载的 CON-05-N 同款病。
-            #    基编号 ``CON-06`` 已登记（consistency 维度 / 有依据），
-            #    且派生编号走 ``CON-06-1`` 形态，与本条不会撞键去重。
-            "CON-06",
-            f"跨章节段落搬运检测因两两比对量过大（{res.get('pairwise_compared', 0)} 对）"
-            "已截断，结论可能不完整，部分搬运组可能漏报",
-            suggestion="本方案的跨章节搬运检测已触顶，建议缩短章节数或分段核查；"
-                       "本次结论可能不完整，个别搬运组可能漏报",
-            severity="low"))
+            "跨章节段落搬运检测触顶截断（pairwise=%d），" "结论可能不完整——部分搬运组可能漏报",
+            res.get("pairwise_compared", 0),
+        )
+        findings.append(
+            _finding(
+                # ⚠️ 必须是**已登记的基编号** ``CON-06``，不得用 ``CON-06-TRUNC``
+                #    这类自造串：``_resolve_base_rule`` 只剥离「-<数字>」序号后缀，
+                #    遇到 ``-TRUNC`` 直接 break → 返回 None → ``dimension=""``
+                #    （污染 unknown_dimension_count）、``title`` 退化成裸串、
+                #    ``basis`` 为空 —— 正是本函数 :195 注释记载的 CON-05-N 同款病。
+                #    基编号 ``CON-06`` 已登记（consistency 维度 / 有依据），
+                #    且派生编号走 ``CON-06-1`` 形态，与本条不会撞键去重。
+                "CON-06",
+                f"跨章节段落搬运检测因两两比对量过大（{res.get('pairwise_compared', 0)} 对）"
+                "已截断，结论可能不完整，部分搬运组可能漏报",
+                suggestion="本方案的跨章节搬运检测已触顶，建议缩短章节数或分段核查；"
+                "本次结论可能不完整，个别搬运组可能漏报",
+                severity="low",
+            )
+        )
 
     for idx, g in enumerate(res.get("groups") or [], 1):
         pairs = g.get("section_pairs") or []
@@ -856,11 +911,9 @@ def check_duplication(ctx: PreflightContext) -> list:
         a_title = a_title or "（未命名章节）"
         b_title = b_title or "（未命名章节）"
         dice = float(g.get("dice") or 0.0)
-        detail = (f"「{a_title}」与「{b_title}」存在成段照抄"
-                  f"（骨架归一后相似度 {dice:.0%}）")
+        detail = f"「{a_title}」与「{b_title}」存在成段照抄" f"（骨架归一后相似度 {dice:.0%}）"
         if len(pairs) > 1:
-            extra = "、".join(f"「{p[2] or '（未命名章节）'}」"
-                             for p in pairs[1:4])
+            extra = "、".join(f"「{p[2] or '（未命名章节）'}」" for p in pairs[1:4])
             detail += f"；同一段文本还出现在：{extra}"
         f = _finding(
             f"CON-06-{idx}",
@@ -869,7 +922,7 @@ def check_duplication(ctx: PreflightContext) -> list:
             section_id=a_id or "",
             evidence=list(g.get("sentences") or [])[:3],
             suggestion="成段雷同属评审硬伤：请改写为各章节针对性的表述"
-                       "（换章节侧重、工艺细节与工程条件），不要复用同一段文字",
+            "（换章节侧重、工艺细节与工程条件），不要复用同一段文字",
         )
         if g.get("large"):
             f["severity"] = "high"
@@ -893,40 +946,104 @@ def check_traceability(ctx: PreflightContext) -> list:
     #    统一到 build_section_tree_index 的「有效正文」（自身 + 全部子孙）。
     _parent_ids, effective = build_section_tree_index(ctx.sections)
 
-    calc_secs = [s for s in ctx.sections
-                 if any(k in (s.get("title") or "") for k in CALC_TITLE_KEYWORDS)]
+    # ✅ 2026-11-05（目录占位章节）：规则性跳过正文的计算书章节不参与
+    #    「个别章节缺计算过程」判定，避免把「另行补充内容」当实质缺失。
+    calc_secs = [
+        s
+        for s in ctx.sections
+        if any(k in (s.get("title") or "") for k in CALC_TITLE_KEYWORDS)
+        and not is_placeholder_section(s)
+    ]
     if not calc_secs:
         # ⚠️ 不在此处重复报"完全缺失" —— 该情形已由 CMP-09（内容完整性维度）以
         #    阻断级报告。同一缺陷在两个维度各扣一次 40 分会让总分失真，
         #    本条只负责"个别章节缺计算过程"这一独立缺陷面。
         pass
     else:
-        no_calc = [s for s in calc_secs
-                   if not _has_calc_process(effective.get(s.get("id")) or "")]
+        no_calc = [s for s in calc_secs if not _has_calc_process(effective.get(s.get("id")) or "")]
         # ✅ 跨维度双扣修复（2026-09-23）：当**全部**计算书章节都无计算过程时，
         #    CMP-09 已按「聚合口径」以 block 级报同一缺陷（-40），此处再逐章报
         #    high（-20）即同一缺陷双扣 60。TRC-01 改为只在"整体有过程、个别章节
         #    缺失"时报告（与 CMP-09 严格互斥：聚合文本集与 CMP-09 追加条款同源，
         #    均为标题命中 CALC_TITLE_KEYWORDS 的全部章节，「聚合无过程 ⇔ CMP-09 必报」）。
-        if no_calc and _has_calc_process(
-                "\n\n".join(effective.get(s.get("id")) or "" for s in calc_secs)):
-            findings.append(_finding(
-                "TRC-01", f"「{no_calc[0].get('title')}」未见计算公式或参数代入过程",
-                section_title=no_calc[0].get("title") or "",
-                section_id=no_calc[0].get("id") or "",
-                suggestion="计算书须包含：计算依据、参数取值及其来源、计算过程、结论与安全系数"))
+        if no_calc and _has_calc_process("\n\n".join(effective.get(s.get("id")) or "" for s in calc_secs)):
+            findings.append(
+                _finding(
+                    "TRC-01",
+                    f"「{no_calc[0].get('title')}」未见计算公式或参数代入过程",
+                    section_title=no_calc[0].get("title") or "",
+                    section_id=no_calc[0].get("id") or "",
+                    suggestion="计算书须包含：计算依据、参数取值及其来源、计算过程、结论与安全系数",
+                )
+            )
 
-    if not any(any(k in t for k in TRC03_TITLE_KEYWORDS)
-               for t in titles):
-        findings.append(_finding(
-            "TRC-03", "未检出附图 / 节点详图相关章节或引用",
-            suggestion="专项方案应附相关图纸（平面布置、节点详图、监测点布置等）"))
+    if not any(any(k in t for k in TRC03_TITLE_KEYWORDS) for t in titles):
+        findings.append(
+            _finding(
+                "TRC-03",
+                "未检出附图 / 节点详图相关章节或引用",
+                suggestion="专项方案应附相关图纸（平面布置、节点详图、监测点布置等）",
+            )
+        )
     return findings
 
 
 # ---------------------------------------------------------------------------
 # 六、可交付性（DLV-*）
 # ---------------------------------------------------------------------------
+def _l3_outline_stats(sections: list) -> dict:
+    """从落库章节行统计 L3 目录规模（DLV-17 的唯一判据入口）。
+
+    level 字段缺失/为 0 的旧数据整条规则沉默（返回 ``available=False``），
+    避免把「元数据不全」误报成「目录超限」。
+    """
+    by_id = {str(s.get("id") or ""): s for s in sections if s.get("id")}
+    l3_nodes = [s for s in sections if int(s.get("level") or 0) == 3]
+    max_level = max((int(s.get("level") or 0) for s in sections), default=0)
+    if not l3_nodes and max_level <= 0:
+        return {"available": False, "l3_total": 0, "max_level": 0, "over_depth": 0, "per_section": [], "per_chapter": []}
+
+    per_section: dict[str, dict] = {}
+    per_chapter: dict[str, dict] = {}
+    over_depth = sum(1 for s in sections if int(s.get("level") or 0) > 3)
+
+    for node in l3_nodes:
+        pid = str(node.get("parent_id") or "")
+        parent = by_id.get(pid)
+        if parent is not None:
+            key = pid
+            entry = per_section.setdefault(
+                key, {"title": str(parent.get("title") or ""), "count": 0}
+            )
+            entry["count"] += 1
+        chapter = parent
+        seen = {id(node)}
+        while chapter is not None and int(chapter.get("level") or 0) > 1:
+            if id(chapter) in seen:
+                chapter = None
+                break
+            seen.add(id(chapter))
+            chapter = by_id.get(str(chapter.get("parent_id") or ""))
+        if chapter is not None:
+            ctitle = str(chapter.get("title") or "")
+            entry = per_chapter.setdefault(ctitle, {"count": 0, "section_ids": set()})
+            entry["count"] += 1
+            if parent is not None and int(parent.get("level") or 0) == 2:
+                entry["section_ids"].add(pid)
+
+    return {
+        "available": True,
+        "l3_total": len(l3_nodes),
+        "max_level": max_level,
+        "over_depth": over_depth,
+        "per_section": list(per_section.values()),
+        "per_chapter": [
+            {"title": k, "count": v["count"], "sections": len(v["section_ids"])}
+            for k, v in per_chapter.items()
+        ],
+    }
+
+
 def check_deliverability(ctx: PreflightContext) -> list:
     """空章节 / 字数 / 孤立节点 / 图表 / 控制字符 / 口语化 / 围栏 / 篇幅。"""
     findings: list = []
@@ -954,6 +1071,9 @@ def check_deliverability(ctx: PreflightContext) -> list:
         _wc_tol = 0.1
     wc_audit_rows: list = []
     wc_off_band: list = []
+    # 《L3以下“少目录、多正文”编制标准》DLV-18：三级正文单薄（字数 / 自然段）
+    thin_l3_words: list = []
+    thin_l3_paras: list = []
 
     for s in sections:
         title = s.get("title") or ""
@@ -961,17 +1081,49 @@ def check_deliverability(ctx: PreflightContext) -> list:
         wc = s.get("word_count") or 0
         total_words += wc
         has_children = s.get("id") in parent_ids
+        # ✅ 2026-11-05（目录占位章节）：已登记「另行补充内容」的章节不参与
+        #    空章节 / 低字数 / 字数偏差 / 字符与口语化检查，避免规则性跳过
+        #    被误报成"正文缺失"；其 word_count 已置 0，对总字数无影响。
+        is_ph = is_placeholder_section(s)
 
         try:
             _s_wb = int(s.get("word_budget") or 0)
         except (TypeError, ValueError):
             _s_wb = 0
-        if not has_children and _s_wb > 0 and content.strip():
-            wc_audit_rows.append({
-                "section_id": s.get("id", ""), "title": title,
-                "level": s.get("level") or 0,
-                "word_budget": _s_wb, "word_count": wc,
-            })
+        # DLV-18：三级叶子正文厚度（与预算是否设置无关，只看标准下限）。
+        # 占位章节（计算书/附图等登记「另行补充内容」）不参与，避免规则性跳过
+        # 被误报成「正文单薄」。
+        if (
+            l3_standard.standard_enabled()
+            and not has_children
+            and not is_ph
+            and int(s.get("level") or 0) >= 3
+            and str(content).strip()
+        ):
+            _floor = l3_standard.word_floor(title)
+            try:
+                _wc_int = int(wc or 0)
+            except (TypeError, ValueError):
+                _wc_int = 0
+            # 存量行可能 content 有值但 word_count 未回填：此时按内容现算，
+            # 避免把「元数据缺失」误报成「正文单薄」。
+            if _wc_int <= 0:
+                _wc_int = int(readable_word_count(content) or 0)
+            if _wc_int < _floor:
+                thin_l3_words.append(f"{title}（{_wc_int}/{_floor} 字）")
+            _paras = l3_standard.count_body_paragraphs(content)
+            if _paras < l3_standard.min_paragraphs():
+                thin_l3_paras.append(f"{title}（{_paras}/{l3_standard.min_paragraphs()} 段）")
+        if not has_children and not is_ph and _s_wb > 0 and content.strip():
+            wc_audit_rows.append(
+                {
+                    "section_id": s.get("id", ""),
+                    "title": title,
+                    "level": s.get("level") or 0,
+                    "word_budget": _s_wb,
+                    "word_count": wc,
+                }
+            )
             _wc_dev = word_deviation_of(wc, _s_wb, tolerance=_wc_tol)
             if not _wc_dev["within_band"]:
                 if wc < LEAF_MIN_WORD_BUDGET:
@@ -989,26 +1141,20 @@ def check_deliverability(ctx: PreflightContext) -> list:
                 #    仅当正文含 CJK 且两口径确有差异时追加：纯 ASCII 语料
                 #    （测试 fixture 常见的 "x" * wc）按词合并只剩 1 个 token，
                 #    给它会误导用户；同时保证既有 evidence 串逐字不变。
-                _rw_txt = (
-                    readable_word_count(content)
-                    if has_cjk(content) else None
-                )
-                _rw_note = (
-                    f"，按可读字数约 {_rw_txt} 字"
-                    if _rw_txt is not None and _rw_txt != wc else ""
-                )
+                _rw_txt = readable_word_count(content) if has_cjk(content) else None
+                _rw_note = f"，按可读字数约 {_rw_txt} 字" if _rw_txt is not None and _rw_txt != wc else ""
                 wc_off_band.append(
-                    f"{title}（实际 {wc}/目标 {_s_wb} 字，{_wc_note} "
-                    f"{_wc_dev['ratio']:.0%}{_rw_note}）")
+                    f"{title}（实际 {wc}/目标 {_s_wb} 字，{_wc_note} " f"{_wc_dev['ratio']:.0%}{_rw_note}）"
+                )
 
-        if not has_children and not content.strip():
+        if not has_children and not is_ph and not content.strip():
             empty.append(title)
-        if not has_children and 0 < wc < LOW_WORD_THRESHOLD:
+        if not has_children and not is_ph and 0 < wc < LOW_WORD_THRESHOLD:
             low_word.append(f"{title}（{wc} 字）")
         pid = s.get("parent_id") or ""
         if pid and pid not in section_ids:
             orphan.append(title)
-        if content:
+        if content and not is_ph:
             ctrl = _CTRL_CHARS_RE.findall(content)
             if ctrl:
                 ctrl_hits.append({"title": title, "count": len(ctrl)})
@@ -1030,38 +1176,65 @@ def check_deliverability(ctx: PreflightContext) -> list:
                 fence_bad.append({"title": title, "kind": _fence_defect["kind"]})
 
     if empty:
-        findings.append(_finding(
-            "DLV-01", f"{len(empty)} 个叶子章节为空", evidence=empty,
-            suggestion="请在「正文生成」页补全生成，或删除多余空章节"))
+        findings.append(
+            _finding(
+                "DLV-01",
+                f"{len(empty)} 个叶子章节为空",
+                evidence=empty,
+                suggestion="请在「正文生成」页补全生成，或删除多余空章节",
+            )
+        )
     if low_word:
-        findings.append(_finding(
-            "DLV-02", f"{len(low_word)} 个章节字数不足 {LOW_WORD_THRESHOLD} 字",
-            evidence=low_word, suggestion="可使用「扩写」补充内容，或调整该章节字数预算"))
+        findings.append(
+            _finding(
+                "DLV-02",
+                f"{len(low_word)} 个章节字数不足 {LOW_WORD_THRESHOLD} 字",
+                evidence=low_word,
+                suggestion="可使用「扩写」补充内容，或调整该章节字数预算",
+            )
+        )
     if orphan:
-        findings.append(_finding(
-            "DLV-03", f"{len(orphan)} 个章节父节点不存在（孤立节点）",
-            evidence=orphan, suggestion="孤立节点会导致目录编号错乱，请重新挂载或删除"))
+        findings.append(
+            _finding(
+                "DLV-03",
+                f"{len(orphan)} 个章节父节点不存在（孤立节点）",
+                evidence=orphan,
+                suggestion="孤立节点会导致目录编号错乱，请重新挂载或删除",
+            )
+        )
 
     total_charts = len(ctx.charts)
     if total_charts:
-        undone = [c.get("chart_type") or "?" for c in ctx.charts
-                  if (c.get("status") or "") not in CHART_DONE_STATUSES]
+        undone = [c.get("chart_type") or "?" for c in ctx.charts if (c.get("status") or "") not in CHART_DONE_STATUSES]
         if undone:
-            findings.append(_finding(
-                "DLV-04", f"{len(undone)}/{total_charts} 个图表未完成生成",
-                evidence=undone, suggestion="未生成的图表在交付文档中会缺图或显示占位"))
+            findings.append(
+                _finding(
+                    "DLV-04",
+                    f"{len(undone)}/{total_charts} 个图表未完成生成",
+                    evidence=undone,
+                    suggestion="未生成的图表在交付文档中会缺图或显示占位",
+                )
+            )
 
     if ctrl_hits:
         total_ctrl = sum(h["count"] for h in ctrl_hits)
-        findings.append(_finding(
-            "DLV-05", f"{len(ctrl_hits)} 个章节含控制字符 / 替换字符（共 {total_ctrl} 处）",
-            evidence=[f"{h['title']}（{h['count']} 处）" for h in ctrl_hits],
-            suggestion="控制字符导出后表现为乱码或方框，请清除后重新预检"))
+        findings.append(
+            _finding(
+                "DLV-05",
+                f"{len(ctrl_hits)} 个章节含控制字符 / 替换字符（共 {total_ctrl} 处）",
+                evidence=[f"{h['title']}（{h['count']} 处）" for h in ctrl_hits],
+                suggestion="控制字符导出后表现为乱码或方框，请清除后重新预检",
+            )
+        )
     if colloquial:
-        findings.append(_finding(
-            "DLV-06", f"{len(colloquial)} 个章节残留口语化 / AI 腔表达",
-            evidence=[f"{h['title']}：{'、'.join(h['hits'])}" for h in colloquial],
-            suggestion="交付文本应为工程书面语，请改写为规范表述"))
+        findings.append(
+            _finding(
+                "DLV-06",
+                f"{len(colloquial)} 个章节残留口语化 / AI 腔表达",
+                evidence=[f"{h['title']}：{'、'.join(h['hits'])}" for h in colloquial],
+                suggestion="交付文本应为工程书面语，请改写为规范表述",
+            )
+        )
     if fence_bad:
         # ✅ R76（BUG-F1 文案侧）：两类缺陷的**修复路径不同**，必须分开说，
         # 否则出现「预检报警 → 用户点一键修复 → 修复答无东西可修 → finding 不闭环」。
@@ -1074,37 +1247,115 @@ def check_deliverability(ctx: PreflightContext) -> list:
             _parts.append(f"{len(_mismatch)} 处闭合标记短于开围栏（图表仍可渲染，属格式错配）")
         _sug = []
         if _hard:
-            _sug.append("真未闭合请补全与开围栏同种等长的结束标记；「一键修复」只能在文末补齐、"
-                        "无法救回已被吞进的正文，请人工核对")
+            _sug.append(
+                "真未闭合请补全与开围栏同种等长的结束标记；「一键修复」只能在文末补齐、"
+                "无法救回已被吞进的正文，请人工核对"
+            )
         if _mismatch:
             _sug.append("长度错配可直接「一键修复」自动归一闭合标记，无需手工改动正文")
-        findings.append(_finding(
-            "DLV-07",
-            f"{len(fence_bad)} 个章节存在未闭合的 Markdown 代码围栏：" + "；".join(_parts),
-            evidence=[
-                f"{h['title']}（{'真未闭合' if h['kind'] == 'unclosed' else '闭合标记长度错配'}）"
-                for h in fence_bad
-            ],
-            suggestion="；".join(_sug)))
+        findings.append(
+            _finding(
+                "DLV-07",
+                f"{len(fence_bad)} 个章节存在未闭合的 Markdown 代码围栏：" + "；".join(_parts),
+                evidence=[
+                    f"{h['title']}（{'真未闭合' if h['kind'] == 'unclosed' else '闭合标记长度错配'}）"
+                    for h in fence_bad
+                ],
+                suggestion="；".join(_sug),
+            )
+        )
 
-    if ctx.word_budget and total_words < ctx.word_budget * WORD_BUDGET_OK_RATIO:
-        findings.append(_finding(
-            "DLV-08",
-            f"方案总字数 {total_words} 字，低于字数预算 {ctx.word_budget} 字的 "
-            f"{WORD_BUDGET_OK_RATIO:.0%}",
-            suggestion="可使用「补全生成」扩充内容，或调整方案字数预算"))
+    # ✅ 2026-11-05（目录占位章节）：这些章节按规则不产生字数，其既有预算
+    #    不应继续计入「方案总字数」分母，否则会把规则性跳过误报成总字数不足。
+    _ph_budget = 0
+    for s in sections:
+        if is_placeholder_section(s):
+            try:
+                _ph_budget += int(s.get("word_budget") or 0)
+            except (TypeError, ValueError):
+                pass
+    _eff_word_budget = max(int(ctx.word_budget or 0) - _ph_budget, 0)
+    if _eff_word_budget and total_words < _eff_word_budget * WORD_BUDGET_OK_RATIO:
+        findings.append(
+            _finding(
+                "DLV-08",
+                f"方案总字数 {total_words} 字，低于字数预算 {_eff_word_budget} 字的 " f"{WORD_BUDGET_OK_RATIO:.0%}",
+                suggestion="可使用「补全生成」扩充内容，或调整方案字数预算",
+            )
+        )
 
     # DLV-16：全部偏离章节**聚合成 1 条**发现（审核问题数量不因字数控制而膨胀），
     # evidence 最多列 10 条明细；达标率来自 word_audit_summary（与生成侧同一真源）。
     if wc_off_band:
         _wc_sum = word_audit_summary(wc_audit_rows, tolerance=_wc_tol)
-        findings.append(_finding(
-            "DLV-16",
-            f"{len(wc_off_band)} 个三级目录字数偏离目标容差带"
-            f"（±{_wc_tol:.0%}，达标 {_wc_sum['in_band']}/{_wc_sum['total']}）",
-            evidence=wc_off_band[:10],
-            suggestion="可在正文生成页选择字数档位（简短800/标准1200/详细2000/超长2500）"
-                       "重新生成，或对偏差章节单独重写；偏差不影响其余检查结论"))
+        findings.append(
+            _finding(
+                "DLV-16",
+                f"{len(wc_off_band)} 个三级目录字数偏离目标容差带"
+                f"（±{_wc_tol:.0%}，达标 {_wc_sum['in_band']}/{_wc_sum['total']}）",
+                evidence=wc_off_band[:10],
+                suggestion="可在正文生成页选择字数档位（简短800/标准1200/详细2000/超长2500）"
+                "重新生成，或对偏差章节单独重写；偏差不影响其余检查结论",
+            )
+        )
+
+    # DLV-17：《L3以下“少目录、多正文”编制标准》——目录层级与节点规模。
+    # 只报「可确定的超限」：层级 >3、单节 >5、单章超过调和上限、全文 >40。
+    # level 元数据缺失时不判定（available=False），避免误报。
+    if l3_standard.standard_enabled():
+        _ost = _l3_outline_stats(sections)
+        if _ost["available"]:
+            _o_issues: list[str] = []
+            _max_sec = l3_standard.max_l3_per_section()
+            _max_total = l3_standard.max_l3_total()
+            _min_sec = l3_standard.min_l3_per_section()
+            if _ost["over_depth"]:
+                _o_issues.append(f"出现 {_ost['over_depth']} 个第四级及更深层级节点（标准要求 L4 及以下目录为 0）")
+            if _ost["l3_total"] > _max_total:
+                _o_issues.append(f"全文三级条目 {_ost['l3_total']} 个，超过标准 {_max_total} 个")
+            for _item in _ost["per_section"]:
+                if _item["count"] > _max_sec:
+                    _o_issues.append(f"「{_item['title']}」下三级条目 {_item['count']} 个，超过每节 {_max_sec} 个")
+            for _ch in _ost["per_chapter"]:
+                _limit = max(l3_standard.max_l3_per_chapter(), _min_sec * int(_ch.get("sections") or 0))
+                if _ch["count"] > _limit:
+                    _o_issues.append(
+                        f"「{_ch['title']}」章三级条目 {_ch['count']} 个，超过单章上限 {_limit} 个"
+                    )
+            if _o_issues:
+                findings.append(
+                    _finding(
+                        "DLV-17",
+                        detail="；".join(_o_issues[:5])
+                        + (f"；另 {len(_o_issues) - 5} 项" if len(_o_issues) > 5 else ""),
+                        evidence=_o_issues[:5],
+                        suggestion="合并同类三级小节、把可合并内容并入上层正文；"
+                        "目录只保留到 L3（章—节—小节），不要设置 L4 及更深层级",
+                        severity="low",
+                    )
+                )
+
+    # DLV-18：三级正文单薄（字数未达标准下限 / 自然段不足）。聚合成 1 条，
+    # 占位章节已排除；不硬删内容，只提示补全或合并。
+    if thin_l3_words or thin_l3_paras:
+        _parts: list[str] = []
+        _evidence: list[str] = []
+        if thin_l3_words:
+            _parts.append(f"{len(thin_l3_words)} 个三级目录字数不足标准下限")
+            _evidence.extend(f"字数不足：{x}" for x in thin_l3_words[:8])
+        if thin_l3_paras:
+            _parts.append(f"{len(thin_l3_paras)} 个三级目录自然段不足 {l3_standard.min_paragraphs()} 段")
+            _evidence.extend(f"段落不足：{x}" for x in thin_l3_paras[:8])
+        findings.append(
+            _finding(
+                "DLV-18",
+                detail="；".join(_parts),
+                evidence=_evidence[:10],
+                suggestion="按标准补足：普通 L3 ≥1500 字、关键 L3（加固/拆除/危大/消防/调试/"
+                "质量/安全/监测/监控）≥2500 字，至少 3-5 个自然段；内容确实不足时合并相邻同类小节",
+                severity="low",
+            )
+        )
     return findings
 
 
@@ -1121,20 +1372,31 @@ def run_preflight(ctx: PreflightContext) -> list:
     if not ctx.sections:
         # 零章节不是“没有问题”，而是交付物根本不存在。普通空叶子仍沿用
         # DLV-01 的 high 严重度；整个方案没有目录时升级为 block，禁止 A 级放行。
-        findings.append({
-            "rule_id": "DLV-01", "dimension": "deliverability", "severity": "block",
-            "title": "方案未生成任何章节",
-            "detail": "方案目录为空，无法执行内容完整性、规范符合性与交付形态检查",
-            "evidence": [], "section_id": "", "section_title": "",
-            "suggestion": "请先生成或保存完整目录，再执行正文生成与一键总检",
-            "basis": "《危险性较大的分部分项工程安全管理规定》第十七条",
-            "mode": "program",
-        })
+        findings.append(
+            {
+                "rule_id": "DLV-01",
+                "dimension": "deliverability",
+                "severity": "block",
+                "title": "方案未生成任何章节",
+                "detail": "方案目录为空，无法执行内容完整性、规范符合性与交付形态检查",
+                "evidence": [],
+                "section_id": "",
+                "section_title": "",
+                "suggestion": "请先生成或保存完整目录，再执行正文生成与一键总检",
+                "basis": "《危险性较大的分部分项工程安全管理规定》第十七条",
+                "mode": "program",
+            }
+        )
         return findings
     for checker in (
-        check_completeness, check_standards, check_safety, check_hazard_params,
-        check_consistency, check_duplication,
-        check_traceability, check_deliverability,
+        check_completeness,
+        check_standards,
+        check_safety,
+        check_hazard_params,
+        check_consistency,
+        check_duplication,
+        check_traceability,
+        check_deliverability,
     ):
         try:
             findings.extend(checker(ctx))
@@ -1150,19 +1412,30 @@ def run_preflight(ctx: PreflightContext) -> list:
             #    rule_id 为空（空 rule_id 不参与去重，多个检查项同时异常时
             #    不会被塌缩成一条 —— 这一点必须保留），severity 仍为 low
             #    （体检项失败不应阻断交付，语义不变）。
-            logger.warning("预检检查项 %s 执行异常（降级为 engine_error 条目，"
-                           "该项结论缺失）: %s", checker.__name__, exc, exc_info=True)
-            findings.append({
-                "rule_id": "", "dimension": "", "severity": "low",
-                "title": f"检查项 {checker.__name__} 执行异常（该项未参与本次预检）",
-                "detail": str(exc)[:200], "evidence": [], "section_id": "",
-                "section_title": "", "suggestion": "该项检查未能完成，请查看后端日志或重跑一键总检",
-                "basis": "",
-                "mode": "program",
-                # ✅ 新增：显式标记为「引擎故障」而非真实问题，供前端/统计区分
-                "engine_error": True,
-                "checker": checker.__name__,
-            })
+            logger.warning(
+                "预检检查项 %s 执行异常（降级为 engine_error 条目，" "该项结论缺失）: %s",
+                checker.__name__,
+                exc,
+                exc_info=True,
+            )
+            findings.append(
+                {
+                    "rule_id": "",
+                    "dimension": "",
+                    "severity": "low",
+                    "title": f"检查项 {checker.__name__} 执行异常（该项未参与本次预检）",
+                    "detail": str(exc)[:200],
+                    "evidence": [],
+                    "section_id": "",
+                    "section_title": "",
+                    "suggestion": "该项检查未能完成，请查看后端日志或重跑一键总检",
+                    "basis": "",
+                    "mode": "program",
+                    # ✅ 新增：显式标记为「引擎故障」而非真实问题，供前端/统计区分
+                    "engine_error": True,
+                    "checker": checker.__name__,
+                }
+            )
     # ✅ BUG 修复（2026-09-23）：按 rule_id 去重（保留首条，同严重度下信息已足够；
     #    若后续条严重度更高则替换，位置保持首次出现处）。背景：正文为空的计算书
     #    章节会被 CMP-09 双发（「正文为空」+「无计算过程」），score_findings 不去重
@@ -1181,8 +1454,7 @@ def run_preflight(ctx: PreflightContext) -> list:
         if pos is None:
             index_by_rid[rid] = len(deduped)
             deduped.append(f)
-        elif SEVERITY_ORDER.get(f.get("severity"), 0) > \
-                SEVERITY_ORDER.get(deduped[pos].get("severity"), 0):
+        elif SEVERITY_ORDER.get(f.get("severity"), 0) > SEVERITY_ORDER.get(deduped[pos].get("severity"), 0):
             deduped[pos] = f
     return _sort_findings(deduped)
 
@@ -1190,10 +1462,8 @@ def run_preflight(ctx: PreflightContext) -> list:
 def _sort_findings(findings: list) -> list:
     """按严重度降序、规则号升序排序（前端表格默认顺序即处理优先级）。"""
     from app.services.audit_rules import SEVERITY_ORDER
-    return sorted(
-        findings,
-        key=lambda f: (-SEVERITY_ORDER.get(f.get("severity"), 0),
-                       f.get("rule_id") or "zzz"))
+
+    return sorted(findings, key=lambda f: (-SEVERITY_ORDER.get(f.get("severity"), 0), f.get("rule_id") or "zzz"))
 
 
 def content_coverage_stats(sections: list) -> dict:
@@ -1213,14 +1483,8 @@ def content_coverage_stats(sections: list) -> dict:
     """
     parent_ids, effective = build_section_tree_index(sections)
     leaf = [s for s in (sections or []) if s.get("id") not in parent_ids]
-    generated = sum(
-        1 for s in (sections or [])
-        if (effective.get(s.get("id")) or s.get("content") or "").strip()
-    )
-    leaf_filled = sum(
-        1 for s in leaf
-        if (effective.get(s.get("id")) or s.get("content") or "").strip()
-    )
+    generated = sum(1 for s in (sections or []) if (effective.get(s.get("id")) or s.get("content") or "").strip())
+    leaf_filled = sum(1 for s in leaf if (effective.get(s.get("id")) or s.get("content") or "").strip())
     return {
         "section_count": len(sections or []),
         "leaf_count": len(leaf),
@@ -1244,8 +1508,7 @@ def preflight_stats(ctx: PreflightContext) -> dict:
     #    唯一实现，export.collect_export_issues 与本函数共用（两侧数字恒等）。
     _cov = content_coverage_stats(ctx.sections)
     wc = sum(s.get("word_count") or 0 for s in ctx.sections)
-    chart_done = sum(1 for c in ctx.charts
-                     if (c.get("status") or "") in CHART_DONE_STATUSES)
+    chart_done = sum(1 for c in ctx.charts if (c.get("status") or "") in CHART_DONE_STATUSES)
     return {
         "section_count": _cov["section_count"],
         "leaf_count": _cov["leaf_count"],
@@ -1257,13 +1520,20 @@ def preflight_stats(ctx: PreflightContext) -> dict:
         "empty_ratio": _cov["empty_ratio"],
         "chart_total": len(ctx.charts),
         "chart_done": chart_done,
-        "standard_db_version": None,   # 由路由层填充（避免本模块依赖版本常量来源）
+        "standard_db_version": None,  # 由路由层填充（避免本模块依赖版本常量来源）
     }
 
 
 __all__ = [
-    "PreflightContext", "run_preflight", "preflight_stats", "RULE_VERSION",
-    "LOW_WORD_THRESHOLD", "DUP_MIN_WORDS", "DUP_SIMILARITY_THRESHOLD",
-    "check_duplication", "build_section_tree_index", "content_coverage_stats",
+    "PreflightContext",
+    "run_preflight",
+    "preflight_stats",
+    "RULE_VERSION",
+    "LOW_WORD_THRESHOLD",
+    "DUP_MIN_WORDS",
+    "DUP_SIMILARITY_THRESHOLD",
+    "check_duplication",
+    "build_section_tree_index",
+    "content_coverage_stats",
     "has_calc_process",
 ]

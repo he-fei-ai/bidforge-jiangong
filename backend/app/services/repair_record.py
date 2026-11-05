@@ -44,6 +44,7 @@ R78 已把四个 router 收口到同一处；本模块是当时漏网的 service
      ``routers/review_autofix.py``）均**未**包裹 ``except Exception``，
      503 会如实冒泡到 HTTP 层。
 """
+
 from __future__ import annotations
 
 import json
@@ -70,9 +71,7 @@ def new_id(prefix: str) -> str:
     return f"{prefix}_{uuid.uuid4().hex[:12]}"
 
 
-async def create_snapshot(
-    db, scheme_id: str, sections: list[dict], snapshot_type: str = "consistency_repair"
-) -> str:
+async def create_snapshot(db, scheme_id: str, sections: list[dict], snapshot_type: str = "consistency_repair") -> str:
     """为指定章节（dict 需含 id/content）保存修复前快照，返回 snapshot_id。
 
     sections: [{"section_id": ..., "content_before": ...}, ...] 或含 id/content 的字典。
@@ -80,18 +79,19 @@ async def create_snapshot(
     payload = []
     for s in sections:
         sid = s.get("section_id") or s.get("id")
-        payload.append({
-            "section_id": sid,
-            "content_before": s.get("content_before", s.get("content", "")),
-        })
+        payload.append(
+            {
+                "section_id": sid,
+                "content_before": s.get("content_before", s.get("content", "")),
+            }
+        )
     snapshot_id = new_id("ver")
     await exec_write(
         db,
-        "INSERT INTO scheme_snapshots (id, scheme_id, type, sections, created_at)"
-        " VALUES (?,?,?,?,?)",
-        (snapshot_id, scheme_id, snapshot_type,
-         json.dumps(payload, ensure_ascii=False), _now()),
-        what="repair_record.create_snapshot:INSERT")
+        "INSERT INTO scheme_snapshots (id, scheme_id, type, sections, created_at)" " VALUES (?,?,?,?,?)",
+        (snapshot_id, scheme_id, snapshot_type, json.dumps(payload, ensure_ascii=False), _now()),
+        what="repair_record.create_snapshot:INSERT",
+    )
     await db.commit()
     return snapshot_id
 
@@ -100,7 +100,9 @@ async def get_snapshot(db, snapshot_id: str) -> dict | None:
     item = await fetch_one(
         db,
         "SELECT id, scheme_id, type, sections, created_at FROM scheme_snapshots WHERE id=?",
-        (snapshot_id,), what="repair_record.get_snapshot")
+        (snapshot_id,),
+        what="repair_record.get_snapshot",
+    )
     if not item:
         return None
     try:
@@ -110,9 +112,7 @@ async def get_snapshot(db, snapshot_id: str) -> dict | None:
     return item
 
 
-async def rollback_snapshot(db, snapshot_id: str, *,
-                            undo_type: str = "consistency_rollback",
-                            resync_fn=None) -> dict:
+async def rollback_snapshot(db, snapshot_id: str, *, undo_type: str = "consistency_rollback", resync_fn=None) -> dict:
     """一键回滚：把快照涉及章节的正文恢复为 content_before。
 
     回滚前再存一个"回滚前"快照，保证回滚本身也可撤销；只更新快照内章节。
@@ -138,11 +138,14 @@ async def rollback_snapshot(db, snapshot_id: str, *,
         if not sid:
             continue
         cur_content = await fetch_scalar(
-            db, "SELECT content FROM sections WHERE id=?", (sid,),
-            default="", what="repair_record.rollback_snapshot:读当前正文")
+            db,
+            "SELECT content FROM sections WHERE id=?",
+            (sid,),
+            default="",
+            what="repair_record.rollback_snapshot:读当前正文",
+        )
         current.append({"section_id": sid, "content_before": cur_content or ""})
-    undo_id = await create_snapshot(db, snap["scheme_id"], current,
-                                    snapshot_type=undo_type)
+    undo_id = await create_snapshot(db, snap["scheme_id"], current, snapshot_type=undo_type)
 
     restored = 0
     for sec in sections:
@@ -150,8 +153,8 @@ async def rollback_snapshot(db, snapshot_id: str, *,
         if not sid:
             continue
         srow = await fetch_one(
-            db, "SELECT id, word_budget FROM sections WHERE id=?", (sid,),
-            what="repair_record.rollback_snapshot:读章节")
+            db, "SELECT id, word_budget FROM sections WHERE id=?", (sid,), what="repair_record.rollback_snapshot:读章节"
+        )
         if not srow:
             continue
         # ✅ BUG 修复（2026-09-16 · 与 repair_agent 同一字数口径问题）：
@@ -164,12 +167,10 @@ async def rollback_snapshot(db, snapshot_id: str, *,
         #    `restored += 1` 不看写入结果，DB 写未生效时仍汇报「已恢复 N 章」。
         await exec_write(
             db,
-            "UPDATE sections SET content=?, word_count=?, word_status=?, updated_at=? "
-            "WHERE id=?",
-            (restored_content, wc,
-             word_status_for(wc, srow["word_budget"] or DEFAULT_WORD_BUDGET),
-             _now(), sid),
-            what="repair_record.rollback_snapshot:恢复正文")
+            "UPDATE sections SET content=?, word_count=?, word_status=?, updated_at=? " "WHERE id=?",
+            (restored_content, wc, word_status_for(wc, srow["word_budget"] or DEFAULT_WORD_BUDGET), _now(), sid),
+            what="repair_record.rollback_snapshot:恢复正文",
+        )
         # ✅ R92：正文恢复后同事务重登记本章内联图表（缺省 resync_fn=None 时不执行，
         #    与引入前逐字一致）。快照原文当初均经管线落库，重登记为幂等操作。
         if resync_fn is not None:
@@ -177,19 +178,25 @@ async def rollback_snapshot(db, snapshot_id: str, *,
                 await resync_fn(db, sid, restored_content)
             except Exception as _re:  # noqa: BLE001 - 登记失败不阻断回滚
                 logger.warning(
-                    "repair_record.rollback_snapshot:章节 %s 图表重登记失败（保留恢复正文）: %s",
-                    str(sid)[:8], _re)
+                    "repair_record.rollback_snapshot:章节 %s 图表重登记失败（保留恢复正文）: %s", str(sid)[:8], _re
+                )
         restored += 1
     await db.commit()
-    logger.info("快照 %s 已回滚：恢复 %d 章（撤销快照 %s）",
-                snapshot_id, restored, undo_id)
+    logger.info("快照 %s 已回滚：恢复 %d 章（撤销快照 %s）", snapshot_id, restored, undo_id)
     return {"snapshot_id": snapshot_id, "restored": restored, "undo_snapshot_id": undo_id}
 
 
-async def save_repair(db, *, scheme_id: str, scan_id: str, mode: str,
-                      items: list[dict], snapshot_id: str,
-                      total_conflicts: int,
-                      stats: dict | None = None) -> dict:
+async def save_repair(
+    db,
+    *,
+    scheme_id: str,
+    scan_id: str,
+    mode: str,
+    items: list[dict],
+    snapshot_id: str,
+    total_conflicts: int,
+    stats: dict | None = None,
+) -> dict:
     """落库一次修复批次，返回统计与 repair_id（状态 pending_confirm，等待用户确认）。
 
     stats：可选，显式指定 repaired/failed/skipped（**按冲突 id 计数**）。
@@ -211,25 +218,40 @@ async def save_repair(db, *, scheme_id: str, scan_id: str, mode: str,
         "(id, scheme_id, scan_id, mode, total_conflicts, repaired, skipped, failed,"
         " items, snapshot_id, status, created_at)"
         " VALUES (?,?,?,?,?,?,?,?,?,?,?,?)",
-        (repair_id, scheme_id, scan_id, mode, total_conflicts,
-         repaired, skipped, failed,
-         json.dumps(items, ensure_ascii=False), snapshot_id,
-         "pending_confirm", _now()),
-        what="repair_record.save_repair:INSERT")
+        (
+            repair_id,
+            scheme_id,
+            scan_id,
+            mode,
+            total_conflicts,
+            repaired,
+            skipped,
+            failed,
+            json.dumps(items, ensure_ascii=False),
+            snapshot_id,
+            "pending_confirm",
+            _now(),
+        ),
+        what="repair_record.save_repair:INSERT",
+    )
     await db.commit()
     return {
-        "repair_id": repair_id, "scan_id": scan_id,
+        "repair_id": repair_id,
+        "scan_id": scan_id,
         "total_conflicts": total_conflicts,
-        "repaired": repaired, "skipped": skipped, "failed": failed,
-        "snapshot_id": snapshot_id, "status": "pending_confirm",
+        "repaired": repaired,
+        "skipped": skipped,
+        "failed": failed,
+        "snapshot_id": snapshot_id,
+        "status": "pending_confirm",
         "items": items,
     }
 
 
 async def get_repair(db, repair_id: str) -> dict | None:
     item = await fetch_one(
-        db, "SELECT * FROM consistency_repairs WHERE id=?", (repair_id,),
-        what="repair_record.get_repair")
+        db, "SELECT * FROM consistency_repairs WHERE id=?", (repair_id,), what="repair_record.get_repair"
+    )
     if not item:
         return None
     try:
@@ -247,9 +269,11 @@ async def mark_repair_status(db, repair_id: str, status: str):
     #    而 consistency_repairs.status 未变。改走 exec_write（require_rows=True）
     #    → 未生效即抛 503，**绝不汇报假成功**。
     await exec_write(
-        db, "UPDATE consistency_repairs SET status=? WHERE id=?",
+        db,
+        "UPDATE consistency_repairs SET status=? WHERE id=?",
         (status, repair_id),
-        what=f"repair_record.mark_repair_status({status})")
+        what=f"repair_record.mark_repair_status({status})",
+    )
     await db.commit()
 
 
@@ -261,4 +285,5 @@ async def list_repairs(db, scheme_id: str, limit: int = 20) -> list[dict]:
         " snapshot_id, status, created_at FROM consistency_repairs "
         "WHERE scheme_id=? ORDER BY created_at DESC, rowid DESC LIMIT ?",
         (scheme_id, limit),
-        what="repair_record.list_repairs")
+        what="repair_record.list_repairs",
+    )

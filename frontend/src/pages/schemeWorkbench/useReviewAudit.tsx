@@ -10,6 +10,18 @@ import type { AuditRule } from "../../types/audit";
 //    未知字段一律 ? 修饰，不虚构。
 // =========================================================================
 
+/** 一致性修复确认结果（POST /consistency/confirm；R179 消费恢复三态字段） */
+export interface ConsistencyConfirmResult {
+  repair_id?: string;
+  status?: string;
+  accepted?: string[];
+  rejected?: string[];
+  restored_sections?: string[];
+  /** R179 加法式：快照缺失、正文未真正回滚的章节 */
+  restore_skipped_sections?: string[];
+  rescan_required?: boolean;
+}
+
 /** 合规检查单条结果（POST /compliance/check 响应 results[]；本域读 hit/severity） */
 export interface ComplianceResultItem {
   rule_id?: string;
@@ -169,16 +181,40 @@ export interface ReviewAuditDeps {
 
 export function useReviewAudit(deps: ReviewAuditDeps) {
   const {
-    id, msg, modal,
-    expertAbortRef, expertRunning, setExpertRunning, setExpertResult,
-    checkAbortRef, setCheckingCompliance, checklistText, checklistDirty,
-    aiRules, setComplianceResults, loadComplianceHistory,
+    id,
+    msg,
+    modal,
+    expertAbortRef,
+    expertRunning,
+    setExpertRunning,
+    setExpertResult,
+    checkAbortRef,
+    setCheckingCompliance,
+    checklistText,
+    checklistDirty,
+    aiRules,
+    setComplianceResults,
+    loadComplianceHistory,
     auditAbortRef,
-    consistencySeverity, forceFullRepair,
-    crScanning, setCrScanning, crRepairing, setCrRepairing, crScanId,
-    setCrRepair, crRepair, setCrConflicts, setCrSummary, setCrScanId,
-    setCrHistory, setCrOpen, setCrLoading,
-    selectedSectionRef, setSelectedSection, load, setReviewTick,
+    consistencySeverity,
+    forceFullRepair,
+    crScanning,
+    setCrScanning,
+    crRepairing,
+    setCrRepairing,
+    crScanId,
+    setCrRepair,
+    crRepair,
+    setCrConflicts,
+    setCrSummary,
+    setCrScanId,
+    setCrHistory,
+    setCrOpen,
+    setCrLoading,
+    selectedSectionRef,
+    setSelectedSection,
+    load,
+    setReviewTick,
   } = deps;
 
   // ===== ✅ 全文一致性审计（§3.12.1）：事实 vs 正文比对，0-100 评分 + 不一致项 =====
@@ -241,8 +277,7 @@ export function useReviewAudit(deps: ReviewAuditDeps) {
     try {
       // ✅ 清单未被手工改动时携带 rule_ids 提交 —— 让落库的 rule_id 指向规则注册表，
       //    历史结果才能跨版本比对并归并进六维评分（否则 AI 自造的 "R1" 无语义）
-      const useRules = !checklistDirty && aiRules.length > 0
-        && checklist.length === aiRules.length;
+      const useRules = !checklistDirty && aiRules.length > 0 && checklist.length === aiRules.length;
       const payload = useRules
         ? { scheme_id: id, rule_ids: aiRules.map((r) => r.rule_id) }
         : { scheme_id: id, checklist };
@@ -250,6 +285,26 @@ export function useReviewAudit(deps: ReviewAuditDeps) {
       if (controller.signal.aborted) return;
       const results = data.results || [];
       setComplianceResults(results);
+      // ✅ D-41（R176 · 2026-11-04）：合规检查截断此后端已标记（`partial` +
+      //    `truncated_sections`），但前端全仓零消费 —— 用户看到「检查完成」，
+      //    实际后几章根本没送审（静默失真）。现显式告警并写入消息中心
+      //    （历史可查、不会因气泡消失而丢失）。
+      if (data.partial === true) {
+        const truncated: { section_title?: string }[] = Array.isArray(data.truncated_sections)
+          ? data.truncated_sections
+          : [];
+        const titles = truncated
+          .slice(0, 5)
+          .map((s) => s.section_title || "未命名章节")
+          .join("、");
+        const checked = Number(data.checked_chars || 0);
+        const total = Number(data.total_chars || 0);
+        msg.warning(
+          `合规检查覆盖不完整：仅检查全文前 ${checked}/${total} 字，` +
+            `${truncated.length} 个章节未完整送审（${titles}` +
+            `${truncated.length > 5 ? " 等" : ""}）。结果不代表全书已合规。`,
+        );
+      }
       const miss = results.filter((r: ComplianceResultItem) => r.hit === false).length;
       const high = results.filter((r: ComplianceResultItem) => r.severity === "high").length;
       msg.success(`检查完成：${results.length} 项，疑似缺失 ${miss} 项，高风险 ${high} 项`);
@@ -282,8 +337,12 @@ export function useReviewAudit(deps: ReviewAuditDeps) {
       const { data } = await complianceApi.consistencyAudit(id, controller.signal);
       if (controller.signal.aborted) return;
       setConsistencyResult({ score: data.score, issues: data.issues || [] });
-      const high = (data.issues || []).filter((i: ConsistencyIssueItem) => i.severity === "high").length;
-      msg.success(`一致性审计完成：评分 ${data.score}，不一致项 ${data.issues?.length || 0}（高危 ${high}）`);
+      const high = (data.issues || []).filter(
+        (i: ConsistencyIssueItem) => i.severity === "high",
+      ).length;
+      msg.success(
+        `一致性审计完成：评分 ${data.score}，不一致项 ${data.issues?.length || 0}（高危 ${high}）`,
+      );
     } catch (e: unknown) {
       const err = e as { name?: string; code?: string; message?: string };
       if (err?.name === "AbortError" || err?.code === "ERR_CANCELED") msg.info("已取消一致性审计");
@@ -343,18 +402,24 @@ export function useReviewAudit(deps: ReviewAuditDeps) {
     setCrScanning(true);
     setCrRepair(null);
     try {
-      const { data } = await consistencyRepairApi.scan(id, {
-        scope: "full",
-        include_global_facts: true,
-        include_project_docs: true,
-        include_design_docs: true,
-      }, controller.signal);
+      const { data } = await consistencyRepairApi.scan(
+        id,
+        {
+          scope: "full",
+          include_global_facts: true,
+          include_project_docs: true,
+          include_design_docs: true,
+        },
+        controller.signal,
+      );
       if (controller.signal.aborted) return;
       setCrConflicts(data.conflicts || []);
       setCrSummary(data.summary || null);
       setCrScanId(data.scan_id || "");
       const s: CrSummary = data.summary || {};
-      msg.success(`扫描完成：发现 ${s.total ?? 0} 处冲突（高 ${s.high ?? 0} / 中 ${s.medium ?? 0} / 低 ${s.low ?? 0}）`);
+      msg.success(
+        `扫描完成：发现 ${s.total ?? 0} 处冲突（高 ${s.high ?? 0} / 中 ${s.medium ?? 0} / 低 ${s.low ?? 0}）`,
+      );
     } catch (e: unknown) {
       const err = e as { name?: string; code?: string; message?: string };
       if (err?.name === "AbortError" || err?.code === "ERR_CANCELED") msg.info("已取消一致性扫描");
@@ -378,14 +443,18 @@ export function useReviewAudit(deps: ReviewAuditDeps) {
     crRepairAbortRef.current = controller;
     setCrRepairing(true);
     try {
-      const { data } = await consistencyRepairApi.repair(id, {
-        scan_id: crScanId || undefined,
-        mode: "auto",
-        severity_threshold: opts?.severity || consistencySeverity,
-        conflict_ids: opts?.conflictIds,
-        // ✅ 强制全量重修：true 时不跳过「已修复且修复成果仍在正文里」的冲突
-        force_full_repair: forceFullRepair,
-      }, controller.signal);
+      const { data } = await consistencyRepairApi.repair(
+        id,
+        {
+          scan_id: crScanId || undefined,
+          mode: "auto",
+          severity_threshold: opts?.severity || consistencySeverity,
+          conflict_ids: opts?.conflictIds,
+          // ✅ 强制全量重修：true 时不跳过「已修复且修复成果仍在正文里」的冲突
+          force_full_repair: forceFullRepair,
+        },
+        controller.signal,
+      );
       if (controller.signal.aborted) return;
       setCrRepair(data);
       await loadCrConflicts();
@@ -394,17 +463,22 @@ export function useReviewAudit(deps: ReviewAuditDeps) {
       const curKey = selectedSectionRef.current?.key;
       if (curKey) {
         const hit = (data.items || []).find(
-          (x: CrRepairItem) => x.section_id === curKey && x.status === "repaired" && x.after);
+          (x: CrRepairItem) => x.section_id === curKey && x.status === "repaired" && x.after,
+        );
         if (hit?.after) {
           // ✅ F2（R71）：不再用 hit.after.length 伪造字符口径当「字」；
           //    保留章节原 word_count，下方 load() 随即回拉后端权威字数（一帧自纠）。
-          setSelectedSection((prev) => (prev && prev.key === curKey
-            ? { ...prev, content: hit.after, status: "generated" }
-            : prev));
+          setSelectedSection((prev) =>
+            prev && prev.key === curKey
+              ? { ...prev, content: hit.after, status: "generated" }
+              : prev,
+          );
         }
       }
       load();
-      msg.success(`修复完成：成功 ${data.repaired ?? 0} 处，失败 ${data.failed ?? 0} 处，跳过 ${data.skipped ?? 0} 处`);
+      msg.success(
+        `修复完成：成功 ${data.repaired ?? 0} 处，失败 ${data.failed ?? 0} 处，跳过 ${data.skipped ?? 0} 处`,
+      );
       // ✅ G11（2026-09-21）：修复改写了正文 → 审核结论与总检结论都已失效。
       // 旧实现只报"修复完成"，不提示重跑总检：用户以为分数没变即可交付，
       // 实际按旧结论放行会把新写进去的问题一起带出。
@@ -436,18 +510,35 @@ export function useReviewAudit(deps: ReviewAuditDeps) {
     if (!id || !crRepair?.repair_id) return;
     try {
       const { data } = await consistencyRepairApi.confirm(id, {
-        repair_id: crRepair.repair_id, accepted, rejected,
+        repair_id: crRepair.repair_id,
+        accepted,
+        rejected,
       });
-      msg.success(`已确认：接受 ${accepted.length} 条，拒绝 ${rejected.length} 条`);
+      const result = data as ConsistencyConfirmResult;
+      // ✅ R179（E4/E13）：以后端实际受理结果为准展示，而不是回显请求条数 ——
+      //    快照缺失时正文并没有回滚，旧文案「已恢复原文」会误导用户放心导出。
+      const acceptedCount = (result.accepted ?? accepted).length;
+      const rejectedCount = (result.rejected ?? rejected).length;
+      const restored = result.restored_sections ?? [];
+      const restoreSkipped = result.restore_skipped_sections ?? [];
+      msg.success(`已确认：接受 ${acceptedCount} 条，拒绝 ${rejectedCount} 条`);
       await loadCrConflicts();
       await loadCrHistory();
       load();
-      setCrRepair((prev) => (prev ? { ...prev, status: data.status } : prev));
-      // ✅ G11：拒绝回滚会把章节正文恢复为修复前版本 → 审核结论失效
-      if (accepted.length + rejected.length > 0) {
+      setCrRepair((prev) => (prev ? { ...prev, status: result.status ?? prev.status } : prev));
+      if (restoreSkipped.length > 0) {
+        msg.warning(
+          `${restoreSkipped.length} 章因修复快照缺失未回滚正文（仅回写冲突状态），请人工核对后再导出`,
+        );
+      }
+      // ✅ G11：拒绝回滚会把章节正文恢复为修复前版本 → 审核结论失效；
+      //    R179 起仅在**真的发生了正文回滚**时才宣称「已恢复原文」。
+      if (acceptedCount + rejectedCount > 0) {
         setReviewTick((t) => t + 1);
-        if (rejected.length > 0) {
+        if (restored.length > 0) {
           msg.warning("已拒绝部分修复并恢复原文，相关章节审核结论已失效，需重新送审并重新总检");
+        } else if (result.rescan_required) {
+          msg.warning("一致性结论需重新扫描后再判定");
         }
       }
     } catch (e: unknown) {
@@ -482,12 +573,24 @@ export function useReviewAudit(deps: ReviewAuditDeps) {
   };
 
   return {
-    handleExpertReview, handleCancelExpertReview,
-    handleComplianceCheck, handleCancelComplianceCheck,
-    auditRunning, consistencyResult, setConsistencyResult,
-    handleConsistencyAudit, handleCancelConsistencyAudit,
-    loadCrConflicts, loadCrHistory, openConsistencyWorkbench,
-    handleCrScan, handleCancelCrScan, handleCrRepair, handleCancelCrRepair,
-    crRepairItemIds, handleCrConfirm, handleCrRollback,
+    handleExpertReview,
+    handleCancelExpertReview,
+    handleComplianceCheck,
+    handleCancelComplianceCheck,
+    auditRunning,
+    consistencyResult,
+    setConsistencyResult,
+    handleConsistencyAudit,
+    handleCancelConsistencyAudit,
+    loadCrConflicts,
+    loadCrHistory,
+    openConsistencyWorkbench,
+    handleCrScan,
+    handleCancelCrScan,
+    handleCrRepair,
+    handleCancelCrRepair,
+    crRepairItemIds,
+    handleCrConfirm,
+    handleCrRollback,
   };
 }

@@ -11,6 +11,7 @@
 | E-5 | 超字数章节「只扩不缩」：新增生成后自动压缩（可选、默认关） | TestAutoShrink |
 | E-6 | `_render_facts_text` 组标题不过预算 ⇒ 末尾切片把组标题截成半截 | TestFactsBudget |
 """
+
 import asyncio
 import inspect
 import json
@@ -23,8 +24,7 @@ from app.routers import sse_handlers as sh
 from app.services import content_shrink as cs
 
 # B1 拆分（2026-11-03）：正文终态载荷拼装点下沉到该模块，结构断言改读其源码。
-_PAYLOADS_PATH = (Path(__file__).resolve().parents[1] / "app" / "routers"
-                  / "_sse_content_payloads.py")
+_PAYLOADS_PATH = Path(__file__).resolve().parents[1] / "app" / "routers" / "_sse_content_payloads.py"
 
 
 def _payload_src() -> str:
@@ -54,10 +54,9 @@ class TestTerminalOrdering:
         # ✅ degraded（2026-10-07）：终态字面量改为变量 _terminal_status
         #    （"degraded" if 一致性修复有失败 else "completed"），三处调用同步使用
         #    该变量，锚点随之更新；顺序不变量本身不变。
-        i_ckpt = src.index('_content_ckpt_payload(_terminal_status, _done_msg)')
-        i_finish = src.index('await finish_task(task_id, _terminal_status, _done_msg)')
-        i_yield = src.index("yield f\"data: {json.dumps(completed_payload",
-                            src.index("completed_payload = {"))
+        i_ckpt = src.index("_content_ckpt_payload(_terminal_status, _done_msg)")
+        i_finish = src.index("await finish_task(task_id, _terminal_status, _done_msg)")
+        i_yield = src.index('yield f"data: {json.dumps(completed_payload', src.index("completed_payload = {"))
         assert i_ckpt < i_finish < i_yield, "顺序必须为 checkpoint → finish_task → yield"
 
     def test_stopped_writes_checkpoint_before_finish_and_yield(self):
@@ -69,11 +68,10 @@ class TestTerminalOrdering:
         #    故「progress 携带 stop_progress」这条断言改锚到**调用点**——
         #    它比旧正则更强：同时锁住「必须走单一拼装点」与「必须传 stop_progress」
         #    两件事（旧实现只锁后者，且两条 stopped 路径字段并不一致）。
-        m_payload = re.search(
-            r"_stopped_payload\(\s*'用户已停止'\s*,\s*stop_progress\s*\)", src)
+        m_payload = re.search(r"_stopped_payload\(\s*'用户已停止'\s*,\s*stop_progress\s*\)", src)
         assert m_payload is not None, (
-            "用户停止路径的 stopped 事件必须由 _stopped_payload('用户已停止', "
-            "stop_progress) 产出")
+            "用户停止路径的 stopped 事件必须由 _stopped_payload('用户已停止', " "stop_progress) 产出"
+        )
         assert i_stop < i_finish < m_payload.start()
 
     def test_stopped_payload_carries_progress_and_summary(self):
@@ -93,8 +91,7 @@ class TestTerminalOrdering:
         i_end = src.index("\ndef build_error_payload(", i_def + 10)
         block = src[i_def:i_end]
         assert "'progress': progress" in block, "stopped 载荷必须带 progress"
-        assert "'standard_summary': standard_summary" in block, (
-            "stopped 载荷必须带 standard_summary")
+        assert "'standard_summary': standard_summary" in block, "stopped 载荷必须带 standard_summary"
         assert "'failed_count': max(total - len(done_ids), 0)" in block
 
     def test_cancelled_writes_checkpoint_before_finish_and_yield(self):
@@ -114,7 +111,7 @@ class TestTerminalOrdering:
         """取消路径的 checkpoint 事件类型是 'stopped'（不是 'failed'）"""
         src = self._src()
         i = src.index('_content_ckpt_payload("stopped", "任务已取消")')
-        block = src[i:i + 200]
+        block = src[i : i + 200]
         assert '"failed"' not in block
 
     def test_checkpoint_schema_matches_generated_ts(self):
@@ -126,17 +123,17 @@ class TestTerminalOrdering:
             CHECKPOINT_KINDS,
             generate_typescript_schema,
         )
+
         ts = generate_typescript_schema()
-        ts_path = (Path(__file__).resolve().parents[2] / "frontend"
-                   / "src" / "types" / "checkpointSchema.ts")
+        ts_path = Path(__file__).resolve().parents[2] / "frontend" / "src" / "types" / "checkpointSchema.ts"
         if ts_path.exists():
             generated = ts_path.read_text(encoding="utf-8")
             # 跳过文件头注释行，比较实际 interface 内容
             body = "\n".join(ts.split("\n", 3)[3:])
             gen_body = "\n".join(generated.split("\n", 3)[3:])
             assert gen_body.strip() == body.strip(), (
-                "checkpointSchema.ts 已过期，请重新运行 "
-                "python tools/generate_checkpoint_schema.py")
+                "checkpointSchema.ts 已过期，请重新运行 " "python tools/generate_checkpoint_schema.py"
+            )
         # 白名单结构完整性
         for task_type, (kind, fields) in CHECKPOINT_KINDS.items():
             assert kind in ts, f"{kind} interface 缺失"
@@ -146,7 +143,7 @@ class TestTerminalOrdering:
     def test_no_finish_task_after_completed_yield(self):
         """completed 事件之后不得再出现 finish_task（收尾必须在 yield 之前完成）。"""
         src = self._src()
-        tail = src[src.index("yield f\"data: {json.dumps(completed_payload"):]
+        tail = src[src.index('yield f"data: {json.dumps(completed_payload') :]
         assert "finish_task" not in tail.split("except asyncio.CancelledError")[0]
 
 
@@ -164,6 +161,7 @@ class TestContentCheckpoint:
         造成顺序依赖的间歇性失败（单文件跑过、全量跑挂）。
         """
         import app.db as _appdb
+
         _prev_path = _appdb.DB_PATH
         _appdb.DB_PATH = tmp_path / "content.sqlite"
         await _appdb.init_db()
@@ -175,11 +173,14 @@ class TestContentCheckpoint:
 
     async def test_roundtrip_and_kind_isolation(self, ctx):
         from app.services.ai.task_registry import finish_task, register_task
+
         tid = await register_task("content_generation", "p", "s")
         payload = {
-            "event": "stopped", "message": "用户已停止",
-            "done": 3, "total": 10, "failed_sections": [
-                {"section_id": "sec-1", "title": "施工准备", "reason": "AI 超时"}],
+            "event": "stopped",
+            "message": "用户已停止",
+            "done": 3,
+            "total": 10,
+            "failed_sections": [{"section_id": "sec-1", "title": "施工准备", "reason": "AI 超时"}],
             "words": 4200,
         }
         await sh._save_content_checkpoint(tid, payload)
@@ -195,9 +196,9 @@ class TestContentCheckpoint:
     async def test_outline_loader_still_works(self, ctx):
         """回归：泛化 checkpoint 读取后，目录成果读取语义不变。"""
         from app.services.ai.task_registry import finish_task, register_task
+
         tid = await register_task("outline_generation", "p", "s")
-        await sh._save_outline_checkpoint(tid, {"event": "completed",
-                                                "outline": [{"title": "工程概况"}]})
+        await sh._save_outline_checkpoint(tid, {"event": "completed", "outline": [{"title": "工程概况"}]})
         ckpt = await sh._load_outline_checkpoint(tid)
         assert ckpt["kind"] == "outline_result"
         assert ckpt["outline"][0]["title"] == "工程概况"
@@ -206,22 +207,40 @@ class TestContentCheckpoint:
 
     def test_task_status_whitelist_per_task_type(self):
         """task_status 只回传白名单字段（不泄漏 checkpoint 内部字段）。"""
-        row = {"task_type": "content_generation",
-               "checkpoint_json": json.dumps({
-                   "kind": "content_result", "event": "completed",
-                   "failed_sections": [{"section_id": "x"}], "internal_secret": 1,
-                   "words": 10, "total": 3, "done": 3, "failed_count": 1})}
+        row = {
+            "task_type": "content_generation",
+            "checkpoint_json": json.dumps(
+                {
+                    "kind": "content_result",
+                    "event": "completed",
+                    "failed_sections": [{"section_id": "x"}],
+                    "internal_secret": 1,
+                    "words": 10,
+                    "total": 3,
+                    "done": 3,
+                    "failed_count": 1,
+                }
+            ),
+        }
         result: dict = {}
         sh._attach_checkpoint_result(row, result)
         assert set(result["content_result"]) <= {
-            "event", "message", "done", "total", "failed_count",
-            "failed_sections", "words", "word_count"}
+            "event",
+            "message",
+            "done",
+            "total",
+            "failed_count",
+            "failed_sections",
+            "words",
+            "word_count",
+        }
         assert "internal_secret" not in result["content_result"]
 
     def test_task_status_ignores_kind_mismatch(self):
-        row = {"task_type": "content_generation",
-               "checkpoint_json": json.dumps({"kind": "outline_result",
-                                              "outline": [{"title": "x"}]})}
+        row = {
+            "task_type": "content_generation",
+            "checkpoint_json": json.dumps({"kind": "outline_result", "outline": [{"title": "x"}]}),
+        }
         result: dict = {}
         sh._attach_checkpoint_result(row, result)
         assert result == {}
@@ -229,8 +248,7 @@ class TestContentCheckpoint:
     def test_task_status_no_checkpoint_and_bad_json_are_safe(self):
         for raw in (None, "", "not-json", "[]"):
             result: dict = {}
-            sh._attach_checkpoint_result(
-                {"task_type": "content_generation", "checkpoint_json": raw}, result)
+            sh._attach_checkpoint_result({"task_type": "content_generation", "checkpoint_json": raw}, result)
             assert result == {}
 
 
@@ -260,7 +278,7 @@ class TestProgressWriteLock:
                 await gate.wait()
 
         h = asyncio.create_task(holder())
-        await asyncio.sleep(0.01)          # 让 holder 先拿到锁
+        await asyncio.sleep(0.01)  # 让 holder 先拿到锁
         pending = asyncio.create_task(update(0.5, "msg"))
         await asyncio.sleep(0.05)
         assert calls == [], "写锁被占用时不得落库进度"
@@ -278,15 +296,14 @@ class TestProgressWriteLock:
         monkeypatch.setattr(sh, "update_progress", fake_update)
         update = sh._locked_progress_updater(asyncio.Lock(), "task-x")
         await update(0.75, "第 2/5 章完成", event="progress")
-        assert seen == {"task_id": "task-x", "progress": 0.75,
-                        "message": "第 2/5 章完成", "event": "progress"}
+        assert seen == {"task_id": "task-x", "progress": 0.75, "message": "第 2/5 章完成", "event": "progress"}
 
     def test_content_path_uses_locked_updater(self):
         """源码级护栏：正文生成链路的进度写入不得绕过写锁。"""
         src = inspect.getsource(sh.generate_content)
         assert "_update_progress_safe = _locked_progress_updater(_db_write_lock, task_id)" in src
         # 章节阶段（_db_write_lock 之后）不得再直接调用 update_progress
-        phase_src = src[src.index("_db_write_lock = asyncio.Lock()"):]
+        phase_src = src[src.index("_db_write_lock = asyncio.Lock()") :]
         assert "await update_progress(task_id" not in phase_src
 
 
@@ -330,9 +347,9 @@ def _long_content() -> str:
 
 
 def _replace_ops(target: str, repl: str) -> str:
-    return json.dumps({"operations": [
-        {"operation": "replace", "target_text": target, "content": repl}]},
-        ensure_ascii=False)
+    return json.dumps(
+        {"operations": [{"operation": "replace", "target_text": target, "content": repl}]}, ensure_ascii=False
+    )
 
 
 class TestShrinkRoundsService:
@@ -348,22 +365,22 @@ class TestShrinkRoundsService:
             return _replace_ops("甲" * 400, "甲" * 100)
 
         out = await cs.shrink_content_rounds(
-            content, word_budget=200,
-            prompt_factory=lambda r, wc: "P", call_ai=call_ai)
+            content, word_budget=200, prompt_factory=lambda r, wc: "P", call_ai=call_ai
+        )
         assert out["applied"] is True
         assert out["before"] == 801
-        assert out["word_count"] == 111          # 100 甲 + 换行 + 10 乙
+        assert out["word_count"] == 111  # 100 甲 + 换行 + 10 乙
         assert out["rounds_used"] == 2
         assert out["stop_reason"] == "已收敛至目标区间"
         assert "甲" * 400 not in out["content"]
 
     async def test_no_progress_stops_early(self):
         async def call_ai(sys_prompt, user_payload):
-            return _replace_ops("甲" * 400, "丙" * 400)   # 等长替换 → 无进展
+            return _replace_ops("甲" * 400, "丙" * 400)  # 等长替换 → 无进展
 
         out = await cs.shrink_content_rounds(
-            _long_content(), word_budget=200,
-            prompt_factory=lambda r, wc: "P", call_ai=call_ai)
+            _long_content(), word_budget=200, prompt_factory=lambda r, wc: "P", call_ai=call_ai
+        )
         assert out["applied"] is False
         assert out["stop_reason"] == "无进展（压缩未减字）"
         assert out["rounds_used"] == 1
@@ -373,13 +390,12 @@ class TestShrinkRoundsService:
             raise RuntimeError("模型超时")
 
         out = await cs.shrink_content_rounds(
-            _long_content(), word_budget=200,
-            prompt_factory=lambda r, wc: "P", call_ai=call_ai)
+            _long_content(), word_budget=200, prompt_factory=lambda r, wc: "P", call_ai=call_ai
+        )
         assert out["applied"] is False
         assert out["content"] == _long_content()
         assert "AI 调用失败" in out["stop_reason"]
         assert out["rounds_used"] == 0
-
 
     async def test_prompt_factory_failure_stops_without_ai_call(self):
         called = []
@@ -391,10 +407,8 @@ class TestShrinkRoundsService:
         def boom(r, wc):
             raise RuntimeError("占位符缺失")
 
-        out = await cs.shrink_content_rounds(
-            _long_content(), word_budget=200,
-            prompt_factory=boom, call_ai=call_ai)
-        assert called == []                       # 提示词都渲染不出来，不得消耗 AI 调用
+        out = await cs.shrink_content_rounds(_long_content(), word_budget=200, prompt_factory=boom, call_ai=call_ai)
+        assert called == []  # 提示词都渲染不出来，不得消耗 AI 调用
         assert "提示词渲染失败" in out["stop_reason"]
 
     async def test_rounds_capped_and_callback_invoked(self):
@@ -410,8 +424,13 @@ class TestShrinkRoundsService:
             seen.append((round_no, cur_wc))
 
         out = await cs.shrink_content_rounds(
-            _long_content(), word_budget=100, max_rounds=2,
-            prompt_factory=lambda r, wc: "P", call_ai=call_ai, on_round=on_round)
+            _long_content(),
+            word_budget=100,
+            max_rounds=2,
+            prompt_factory=lambda r, wc: "P",
+            call_ai=call_ai,
+            on_round=on_round,
+        )
         assert out["rounds_used"] == 2
         assert out["stop_reason"] == "已达 2 轮上限"
         assert [r for r, _ in seen] == [1, 2]
@@ -425,9 +444,14 @@ class TestShrinkRoundsService:
             raise RuntimeError("上报炸了")
 
         out = await cs.shrink_content_rounds(
-            _long_content(), word_budget=200, max_rounds=1,
-            prompt_factory=lambda r, wc: "P", call_ai=call_ai, on_round=bad_cb)
-        assert out["applied"] is True          # 上报异常不影响压缩
+            _long_content(),
+            word_budget=200,
+            max_rounds=1,
+            prompt_factory=lambda r, wc: "P",
+            call_ai=call_ai,
+            on_round=bad_cb,
+        )
+        assert out["applied"] is True  # 上报异常不影响压缩
 
     async def test_empty_content_is_noop(self):
         async def call_ai(sys_prompt, user_payload):
@@ -435,14 +459,15 @@ class TestShrinkRoundsService:
 
         for blank in ("", "   ", "\n\n"):
             out = await cs.shrink_content_rounds(
-                blank, word_budget=200,
-                prompt_factory=lambda r, wc: "P", call_ai=call_ai)
+                blank, word_budget=200, prompt_factory=lambda r, wc: "P", call_ai=call_ai
+            )
             assert out["applied"] is False
             assert out["stop_reason"] == "章节正文为空"
 
     def test_sections_endpoint_reuses_the_service(self):
         """压缩参数与主循环单一来源：路由不得再抄一份轮次逻辑。"""
         from app.routers import sections
+
         src = inspect.getsource(sections.shrink_section)
         assert "shrink_content_rounds(" in src
         assert "for round_no in range" not in src
@@ -464,7 +489,7 @@ class TestFactsBudget:
                 assert gt not in text
         # 不得出现半截标题
         assert "### 甲" not in text.replace("### 甲组\n", "")
-        assert "### 乙" not in text.replace("### 乙组\n", "")          # 组标题要么完整、要么不出现
+        assert "### 乙" not in text.replace("### 乙组\n", "")  # 组标题要么完整、要么不出现
 
     def test_length_never_exceeds_budget(self):
         rows = [(f"组{i}", "t", "字" * 50) for i in range(50)]
@@ -481,8 +506,8 @@ class TestFactsBudget:
             return _replace_ops("不存在的片段", "x")
 
         out = await cs.shrink_content_rounds(
-            _long_content(), word_budget=200,
-            prompt_factory=lambda r, wc: "P", call_ai=call_ai)
+            _long_content(), word_budget=200, prompt_factory=lambda r, wc: "P", call_ai=call_ai
+        )
         assert out["applied"] is False
         assert "操作校验未通过" in out["stop_reason"]
 
@@ -493,11 +518,7 @@ class TestFactsBudget:
         async def call_ai(sys_prompt, user_payload):
             return _replace_ops("| 深度 | 8m |", "| 深度 | — |")
 
-        out = await cs.shrink_content_rounds(
-            content, word_budget=10,
-            prompt_factory=lambda r, wc: "P", call_ai=call_ai)
+        out = await cs.shrink_content_rounds(content, word_budget=10, prompt_factory=lambda r, wc: "P", call_ai=call_ai)
         assert out["applied"] is False
         assert out["content"] == content
         assert "图片、Mermaid、代码块或表格" in out["stop_reason"]
-
-

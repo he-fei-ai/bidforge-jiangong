@@ -12,12 +12,7 @@ export type Severity = "block" | "high" | "medium" | "low";
 
 /** 六个评分维度 */
 export type DimensionKey =
-  | "completeness"
-  | "compliance"
-  | "safety"
-  | "consistency"
-  | "traceability"
-  | "deliverability";
+  "completeness" | "compliance" | "safety" | "consistency" | "traceability" | "deliverability";
 
 /** 检查方式：program=程序化规则（离线秒级）；ai=AI 语义判定 */
 export type CheckMode = "program" | "ai";
@@ -198,7 +193,10 @@ export interface AutoFixConfirmResult {
   batch_id: string;
   // ✅ R55 F3：条目补 section_id（后端 confirm 的跳过明细带章节，逐项可定位）
   skipped?: Array<{
-    rule_id: string; section_id?: string; status: number; detail: string;
+    rule_id: string;
+    section_id?: string;
+    status: number;
+    detail: string;
   }>;
 }
 

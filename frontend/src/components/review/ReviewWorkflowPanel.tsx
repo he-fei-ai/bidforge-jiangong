@@ -15,18 +15,41 @@
  */
 import { memo, useCallback, useEffect, useMemo, useRef, useState } from "react";
 import {
-  App, Alert, Button, Card, Checkbox, Col, Drawer, Empty, Input, Modal, Progress, Row,
-  Space, Spin, Table, Tag, Timeline, Tooltip, Typography,
+  App,
+  Alert,
+  Button,
+  Card,
+  Checkbox,
+  Col,
+  Drawer,
+  Empty,
+  Input,
+  Modal,
+  Progress,
+  Row,
+  Space,
+  Spin,
+  Table,
+  Tag,
+  Timeline,
+  Tooltip,
+  Typography,
 } from "antd";
 import {
-  CheckCircleOutlined, ClockCircleOutlined, CloseCircleOutlined,
-  HistoryOutlined, UserOutlined,
+  CheckCircleOutlined,
+  ClockCircleOutlined,
+  CloseCircleOutlined,
+  HistoryOutlined,
+  UserOutlined,
 } from "@ant-design/icons";
 import { reviewApi } from "../../api";
 import { useAntdMessageHub } from "../../utils/activityCenter";
 import {
   REVIEW_STATUS_COLOR,
-  type ReviewChecklistItem, type ReviewRecord, type ReviewStatus, type ReviewSummary,
+  type ReviewChecklistItem,
+  type ReviewRecord,
+  type ReviewStatus,
+  type ReviewSummary,
 } from "../../types/audit";
 
 const { Text, Paragraph } = Typography;
@@ -36,10 +59,19 @@ const REVIEWER_STORAGE_KEY = "scheme_review_reviewer_name";
 const RECORDS_PAGE_SIZE = 50;
 
 const NEXT_ACTIONS: Record<string, Array<{ to: ReviewStatus; label: string }>> = {
-  "": [{ to: "approved", label: "通过" }, { to: "rejected", label: "驳回" }],
-  pending: [{ to: "reviewing", label: "开始审核" }, { to: "approved", label: "通过" },
-    { to: "rejected", label: "驳回" }],
-  reviewing: [{ to: "approved", label: "通过" }, { to: "rejected", label: "驳回" }],
+  "": [
+    { to: "approved", label: "通过" },
+    { to: "rejected", label: "驳回" },
+  ],
+  pending: [
+    { to: "reviewing", label: "开始审核" },
+    { to: "approved", label: "通过" },
+    { to: "rejected", label: "驳回" },
+  ],
+  reviewing: [
+    { to: "approved", label: "通过" },
+    { to: "rejected", label: "驳回" },
+  ],
   approved: [{ to: "rejected", label: "复审驳回" }],
   rejected: [{ to: "approved", label: "整改后通过" }],
 };
@@ -49,7 +81,10 @@ const NEXT_ACTIONS: Record<string, Array<{ to: ReviewStatus; label: string }>> =
 //    （pending）与「开始审核」（reviewing）都提示成「已标记为驳回」，
 //    与实际操作相反，误导用户。现按状态取全量文案。
 const STATUS_DONE_LABEL: Record<string, string> = {
-  pending: "待审核", reviewing: "审核中", approved: "通过", rejected: "驳回",
+  pending: "待审核",
+  reviewing: "审核中",
+  approved: "通过",
+  rejected: "驳回",
 };
 
 export interface ReviewWorkflowPanelProps {
@@ -60,19 +95,14 @@ export interface ReviewWorkflowPanelProps {
   onChanged?: () => void;
 }
 
-function ReviewWorkflowPanel({
-  schemeId,
-  refreshKey = 0,
-  onChanged,
-}: ReviewWorkflowPanelProps) {
+function ReviewWorkflowPanel({ schemeId, refreshKey = 0, onChanged }: ReviewWorkflowPanelProps) {
   const { message: _antdMsg, modal } = App.useApp();
   const msg = useAntdMessageHub(_antdMsg, "审核流程");
   const [loading, setLoading] = useState(false);
   const [items, setItems] = useState<ReviewChecklistItem[]>([]);
   const [summary, setSummary] = useState<ReviewSummary | null>(null);
   const [selected, setSelected] = useState<string[]>([]);
-  const [reviewer, setReviewer] = useState(
-    () => localStorage.getItem(REVIEWER_STORAGE_KEY) || "");
+  const [reviewer, setReviewer] = useState(() => localStorage.getItem(REVIEWER_STORAGE_KEY) || "");
   const [recordsOpen, setRecordsOpen] = useState(false);
   const [records, setRecords] = useState<ReviewRecord[]>([]);
   const [recordsLoading, setRecordsLoading] = useState(false);
@@ -159,7 +189,7 @@ function ReviewWorkflowPanel({
         msg.error(err?.message || "审核操作失败");
       }
     },
-    [schemeId, reviewer, msg, load, onChanged]
+    [schemeId, reviewer, msg, load, onChanged],
   );
 
   const askAndReview = useCallback(
@@ -215,7 +245,7 @@ function ReviewWorkflowPanel({
         },
       });
     },
-    [modal, reviewer, msg, setReview]
+    [modal, reviewer, msg, setReview],
   );
 
   const batchReview = useCallback(
@@ -238,7 +268,9 @@ function ReviewWorkflowPanel({
             rows={3}
             style={{ marginTop: 8 }}
             placeholder="统一评审意见（可选）"
-            onChange={(e) => { commentRef.current = e.target.value; }}
+            onChange={(e) => {
+              commentRef.current = e.target.value;
+            }}
           />
         ),
         okText: label,
@@ -269,8 +301,13 @@ function ReviewWorkflowPanel({
             if (nochangeN) parts.push(`${nochangeN} 个已是目标状态`);
             if (conflictN) parts.push(`${conflictN} 个被并发操作修改未生效，请刷新后重试`);
             if (data.truncated) {
-              const dropped = Math.max(0, (data.total_ids ?? 0) - changed - skippedN - notFoundN - nochangeN - conflictN);
-              parts.push(dropped > 0 ? `超出单次上限未处理 ${dropped} 个` : "超出单次上限部分未处理");
+              const dropped = Math.max(
+                0,
+                (data.total_ids ?? 0) - changed - skippedN - notFoundN - nochangeN - conflictN,
+              );
+              parts.push(
+                dropped > 0 ? `超出单次上限未处理 ${dropped} 个` : "超出单次上限部分未处理",
+              );
             }
             const detail = parts.length ? `，${parts.join("、")}` : "";
             if (changed > 0 && parts.length) {
@@ -290,23 +327,25 @@ function ReviewWorkflowPanel({
         },
       });
     },
-    [selected, schemeId, reviewer, modal, msg, load, onChanged]
+    [selected, schemeId, reviewer, modal, msg, load, onChanged],
   );
 
   // ✅ G8：按 offset 加载一页评审轨迹（首页替换、后续页追加）
-  const loadRecordsPage = useCallback(async (offset: number) => {
-    const requestId = ++recordsRequestId.current;
-    try {
-      const { data } = await reviewApi.records(schemeId, "", RECORDS_PAGE_SIZE, offset);
-      if (requestId !== recordsRequestId.current) return;
-      setRecords((prev) =>
-        offset === 0 ? data.items || [] : [...prev, ...(data.items || [])]);
-      setRecordsHasMore(!!data.has_more);
-    } catch (e: unknown) {
-      const err = e as { message?: string };
-      if (requestId === recordsRequestId.current) msg.error(err?.message || "评审轨迹加载失败");
-    }
-  }, [schemeId, msg]);
+  const loadRecordsPage = useCallback(
+    async (offset: number) => {
+      const requestId = ++recordsRequestId.current;
+      try {
+        const { data } = await reviewApi.records(schemeId, "", RECORDS_PAGE_SIZE, offset);
+        if (requestId !== recordsRequestId.current) return;
+        setRecords((prev) => (offset === 0 ? data.items || [] : [...prev, ...(data.items || [])]));
+        setRecordsHasMore(!!data.has_more);
+      } catch (e: unknown) {
+        const err = e as { message?: string };
+        if (requestId === recordsRequestId.current) msg.error(err?.message || "评审轨迹加载失败");
+      }
+    },
+    [schemeId, msg],
+  );
 
   const openRecords = useCallback(async () => {
     setRecordsOpen(true);
@@ -347,10 +386,9 @@ function ReviewWorkflowPanel({
       // 但可以用**已有数据**（items/summary）判断：只要有章节未审核完成，
       // 说明流程走得不彻底。这里在弹窗里给出明确警告，让用户知情而非被动 422。
       // 注：真正的"是否有阻断项"判断仍需依赖后端，本组件只提示已知的可推断情况。
-      const incompleteCount = items.filter(
-        (it) => it.review_status !== "approved"
-      ).length;
-      const allPending = items.length > 0 &&
+      const incompleteCount = items.filter((it) => it.review_status !== "approved").length;
+      const allPending =
+        items.length > 0 &&
         items.every((it) => !it.review_status || it.review_status === "pending");
       // ✅ 复用 ref 隔离；多个弹窗并存时不会互相命中
       const commentRef = { current: "" };
@@ -369,9 +407,7 @@ function ReviewWorkflowPanel({
                 showIcon
                 style={{ marginBottom: 8 }}
                 message={
-                  allPending
-                    ? "尚无任何章节完成审核"
-                    : `仍有 ${incompleteCount} 个章节未通过审核`
+                  allPending ? "尚无任何章节完成审核" : `仍有 ${incompleteCount} 个章节未通过审核`
                 }
                 description="建议先完成逐章评审，再提交方案级通过，以便评审轨迹完整。"
               />
@@ -379,7 +415,9 @@ function ReviewWorkflowPanel({
             <Input.TextArea
               rows={3}
               placeholder="评审意见（可选）"
-              onChange={(e) => { commentRef.current = e.target.value; }}
+              onChange={(e) => {
+                commentRef.current = e.target.value;
+              }}
             />
             {to === "approved" && (
               // ✅ G6（2026-09-21）：require_all_sections_reviewed 此前后端字段
@@ -389,7 +427,9 @@ function ReviewWorkflowPanel({
               <Checkbox
                 defaultChecked
                 style={{ marginTop: 8 }}
-                onChange={(e) => { requireAllRef.current = e.target.checked; }}
+                onChange={(e) => {
+                  requireAllRef.current = e.target.checked;
+                }}
               >
                 要求所有章节已通过审核后才允许提交（推荐）
               </Checkbox>
@@ -420,13 +460,15 @@ function ReviewWorkflowPanel({
         },
       });
     },
-    [schemeId, reviewer, items, modal, msg, load, onChanged]
+    [schemeId, reviewer, items, modal, msg, load, onChanged],
   );
 
   const columns = useMemo(
     () => [
       {
-        title: "章节", dataIndex: "title", ellipsis: true,
+        title: "章节",
+        dataIndex: "title",
+        ellipsis: true,
         render: (v: string, r: ReviewChecklistItem) => (
           <Tooltip title={r.last_comment ? `最近意见：${r.last_comment}` : undefined}>
             <span style={{ paddingLeft: Math.max(0, (r.level - 1) * 12) }}>{v}</span>
@@ -434,11 +476,15 @@ function ReviewWorkflowPanel({
         ),
       },
       {
-        title: "字数", dataIndex: "word_count", width: 80,
+        title: "字数",
+        dataIndex: "word_count",
+        width: 80,
         render: (v: number) => (v || 0).toLocaleString(),
       },
       {
-        title: "审核状态", dataIndex: "review_status", width: 100,
+        title: "审核状态",
+        dataIndex: "review_status",
+        width: 100,
         render: (s: ReviewStatus, r: ReviewChecklistItem) => (
           <Tag color={REVIEW_STATUS_COLOR[s] ?? "default"} style={{ marginRight: 0 }}>
             {r.review_status_label || "未纳入审核"}
@@ -446,7 +492,10 @@ function ReviewWorkflowPanel({
         ),
       },
       {
-        title: "最近评审", dataIndex: "last_reviewer", width: 150, ellipsis: true,
+        title: "最近评审",
+        dataIndex: "last_reviewer",
+        width: 150,
+        ellipsis: true,
         render: (v: string, r: ReviewChecklistItem) =>
           v ? (
             <Tooltip title={r.last_comment || "无意见"}>
@@ -458,10 +507,14 @@ function ReviewWorkflowPanel({
                 </Text>
               </Space>
             </Tooltip>
-          ) : "—",
+          ) : (
+            "—"
+          ),
       },
       {
-        title: "操作", key: "op", width: 190,
+        title: "操作",
+        key: "op",
+        width: 190,
         render: (_: unknown, r: ReviewChecklistItem) => (
           <Space size={2} wrap>
             {(NEXT_ACTIONS[r.review_status ?? ""] || []).map((a) => (
@@ -488,7 +541,7 @@ function ReviewWorkflowPanel({
         ),
       },
     ],
-    [askAndReview, setReview]
+    [askAndReview, setReview],
   );
 
   return (
@@ -526,7 +579,9 @@ function ReviewWorkflowPanel({
     >
       <Space direction="vertical" size={8} style={{ width: "100%" }}>
         <Space wrap>
-          <Text type="secondary" style={{ fontSize: 12 }}>评审人：</Text>
+          <Text type="secondary" style={{ fontSize: 12 }}>
+            评审人：
+          </Text>
           <Input
             size="small"
             style={{ width: 160 }}
@@ -555,7 +610,9 @@ function ReviewWorkflowPanel({
               <Space size={4} wrap>
                 {/* ✅ 2026-09-17：方案级审核状态（独立列 review_status，与编译状态解耦） */}
                 {summary.review_status && (
-                  <Tag color={REVIEW_STATUS_COLOR[summary.review_status as ReviewStatus] ?? "default"}>
+                  <Tag
+                    color={REVIEW_STATUS_COLOR[summary.review_status as ReviewStatus] ?? "default"}
+                  >
                     方案{summary.review_status_label || "未纳入审核"}
                   </Tag>
                 )}
@@ -591,7 +648,9 @@ function ReviewWorkflowPanel({
         )}
 
         {loading ? (
-          <div style={{ textAlign: "center", padding: 24 }}><Spin /></div>
+          <div style={{ textAlign: "center", padding: 24 }}>
+            <Spin />
+          </div>
         ) : items.length === 0 ? (
           <Empty
             image={Empty.PRESENTED_IMAGE_SIMPLE}
@@ -620,61 +679,60 @@ function ReviewWorkflowPanel({
         )}
       </Space>
 
-      <Drawer
-        title="评审轨迹"
-        width={560}
-        open={recordsOpen}
-        onClose={() => setRecordsOpen(false)}
-      >
+      <Drawer title="评审轨迹" width={560} open={recordsOpen} onClose={() => setRecordsOpen(false)}>
         {recordsLoading ? (
           <Spin />
         ) : records.length === 0 ? (
           <Empty image={Empty.PRESENTED_IMAGE_SIMPLE} description="尚无评审记录" />
         ) : (
           <>
-          <Timeline
-            items={records.map((r) => ({
-              color: r.to_status === "approved" ? "green"
-                : r.to_status === "rejected" ? "red" : "blue",
-              children: (
-                <div style={{ fontSize: 12 }}>
-                  <Space size={4} wrap>
-                    {r.section_title
-                      ? <Text strong>{r.section_title}</Text>
-                      : <Text strong>方案整体</Text>}
-                    <Text type="secondary">{r.from_label}</Text>
-                    <Text type="secondary">→</Text>
-                    <Tag
-                      color={REVIEW_STATUS_COLOR[r.to_status as ReviewStatus] ?? "default"}
-                      style={{ marginRight: 0 }}
-                    >
-                      {r.to_label}
-                    </Tag>
-                  </Space>
-                  <div style={{ color: "#999", marginTop: 2 }}>
-                    {r.reviewer ? `${r.reviewer} · ` : ""}
-                    {r.created_at?.replace("T", " ").slice(0, 19)}
+            <Timeline
+              items={records.map((r) => ({
+                color:
+                  r.to_status === "approved"
+                    ? "green"
+                    : r.to_status === "rejected"
+                      ? "red"
+                      : "blue",
+                children: (
+                  <div style={{ fontSize: 12 }}>
+                    <Space size={4} wrap>
+                      {r.section_title ? (
+                        <Text strong>{r.section_title}</Text>
+                      ) : (
+                        <Text strong>方案整体</Text>
+                      )}
+                      <Text type="secondary">{r.from_label}</Text>
+                      <Text type="secondary">→</Text>
+                      <Tag
+                        color={REVIEW_STATUS_COLOR[r.to_status as ReviewStatus] ?? "default"}
+                        style={{ marginRight: 0 }}
+                      >
+                        {r.to_label}
+                      </Tag>
+                    </Space>
+                    <div style={{ color: "#999", marginTop: 2 }}>
+                      {r.reviewer ? `${r.reviewer} · ` : ""}
+                      {r.created_at?.replace("T", " ").slice(0, 19)}
+                    </div>
+                    {r.comment && <div style={{ marginTop: 2 }}>意见：{r.comment}</div>}
                   </div>
-                  {r.comment && (
-                    <div style={{ marginTop: 2 }}>意见：{r.comment}</div>
-                  )}
-                </div>
-              ),
-            }))}
-          />
-          {/* ✅ G8：还有更多历史时提供「加载更多」，避免超过一页的早期轨迹不可见 */}
-          <div style={{ textAlign: "center", margin: "12px 0" }}>
-            <Button
-              size="small"
-              loading={recordsLoadingMore}
-              disabled={!recordsHasMore}
-              onClick={loadMoreRecords}
-            >
-              {recordsHasMore
-                ? `已显示 ${records.length} 条，加载更多`
-                : `共 ${records.length} 条，已全部显示`}
-            </Button>
-          </div>
+                ),
+              }))}
+            />
+            {/* ✅ G8：还有更多历史时提供「加载更多」，避免超过一页的早期轨迹不可见 */}
+            <div style={{ textAlign: "center", margin: "12px 0" }}>
+              <Button
+                size="small"
+                loading={recordsLoadingMore}
+                disabled={!recordsHasMore}
+                onClick={loadMoreRecords}
+              >
+                {recordsHasMore
+                  ? `已显示 ${records.length} 条，加载更多`
+                  : `共 ${records.length} 条，已全部显示`}
+              </Button>
+            </div>
           </>
         )}
       </Drawer>

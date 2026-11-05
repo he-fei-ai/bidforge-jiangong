@@ -16,6 +16,7 @@
 4. **静态扫引擎源码**：产出集合 ↔ 登记表**双向相等**（写死的字符串断言
    会被新增产出静默绕过，AST 扫描让任何新 _finding 编号必须过登记这一关）。
 """
+
 from __future__ import annotations
 
 import ast
@@ -34,9 +35,7 @@ from app.services.audit_rules import (
     validate_rule_registry,
 )
 
-_ENGINE_SRC = (
-    pathlib.Path(__file__).resolve().parent.parent
-    / "app" / "services" / "preflight_engine.py")
+_ENGINE_SRC = pathlib.Path(__file__).resolve().parent.parent / "app" / "services" / "preflight_engine.py"
 
 _BASE_RE = re.compile(r"^[A-Z]{3}-\d{2}$")
 _DERIVED_PREFIX_RE = re.compile(r"^([A-Z]{3}-\d{2})-$")
@@ -54,12 +53,14 @@ def _scan_engine_emitted() -> set[str]:
     tree = ast.parse(_ENGINE_SRC.read_text(encoding="utf-8"))
     doc_ids: set[int] = set()
     for node in ast.walk(tree):
-        if isinstance(node, (ast.Module, ast.ClassDef,
-                             ast.FunctionDef, ast.AsyncFunctionDef)):
+        if isinstance(node, (ast.Module, ast.ClassDef, ast.FunctionDef, ast.AsyncFunctionDef)):
             body = getattr(node, "body", [])
-            if (body and isinstance(body[0], ast.Expr)
-                    and isinstance(body[0].value, ast.Constant)
-                    and isinstance(body[0].value.value, str)):
+            if (
+                body
+                and isinstance(body[0], ast.Expr)
+                and isinstance(body[0].value, ast.Constant)
+                and isinstance(body[0].value.value, str)
+            ):
                 doc_ids.add(id(body[0].value))
     found: set[str] = set()
     for node in ast.walk(tree):
@@ -117,8 +118,7 @@ class TestEmittedSetHonesty:
             assert get_rule(rid).mode == CHECK_MODE_AI
 
     def test_registry_healthy(self):
-        assert validate_rule_registry(
-            emitted_rule_ids=_PROGRAM_EMITTED_RULE_IDS) == []
+        assert validate_rule_registry(emitted_rule_ids=_PROGRAM_EMITTED_RULE_IDS) == []
 
     def test_rule_version_bumped(self):
         assert tuple(int(x) for x in RULE_VERSION.split(".")[:2]) >= (1, 8)
@@ -139,10 +139,8 @@ class TestEngineScanParity:
         - 虚登记 → 「引擎产出全集」不再诚实，且若该规则仍是 ai 会误伤。"""
         scanned = _scan_engine_emitted()
         registered = set(_PROGRAM_EMITTED_RULE_IDS)
-        assert scanned - registered == set(), (
-            f"引擎产出但未登记: {sorted(scanned - registered)}")
-        assert registered - scanned == set(), (
-            f"登记为引擎产出但源码中找不到产出点: {sorted(registered - scanned)}")
+        assert scanned - registered == set(), f"引擎产出但未登记: {sorted(scanned - registered)}"
+        assert registered - scanned == set(), f"登记为引擎产出但源码中找不到产出点: {sorted(registered - scanned)}"
 
 
 # ===========================================================================
@@ -156,25 +154,22 @@ class TestModeInvariantGuard:
         saved = (ar.ALL_RULES, ar.RULE_MAP)
         try:
             drifted = tuple(
-                dataclasses.replace(r, mode=CHECK_MODE_AI)
-                if r.rule_id == "STD-05" else r
-                for r in saved[0])
+                dataclasses.replace(r, mode=CHECK_MODE_AI) if r.rule_id == "STD-05" else r for r in saved[0]
+            )
             ar.ALL_RULES = drifted
             ar.RULE_MAP = {r.rule_id: r for r in drifted}
-            problems = validate_rule_registry(
-                emitted_rule_ids=_PROGRAM_EMITTED_RULE_IDS)
-            assert any("STD-05" in p and "mode" in p for p in problems), \
-                f"STD-05 改回 ai 后自检未报 mode 漂移: {problems}"
+            problems = validate_rule_registry(emitted_rule_ids=_PROGRAM_EMITTED_RULE_IDS)
+            assert any(
+                "STD-05" in p and "mode" in p for p in problems
+            ), f"STD-05 改回 ai 后自检未报 mode 漂移: {problems}"
         finally:
             ar.ALL_RULES, ar.RULE_MAP = saved
         # 还原后必须重新健康（防残留）
-        assert validate_rule_registry(
-            emitted_rule_ids=_PROGRAM_EMITTED_RULE_IDS) == []
+        assert validate_rule_registry(emitted_rule_ids=_PROGRAM_EMITTED_RULE_IDS) == []
 
     def test_unresolved_emitted_id_still_reported(self):
         """既有「不可解析」断言不受新不变量影响（回退兼容）。"""
-        problems = validate_rule_registry(
-            emitted_rule_ids=_PROGRAM_EMITTED_RULE_IDS | {"ZZZ-99"})
+        problems = validate_rule_registry(emitted_rule_ids=_PROGRAM_EMITTED_RULE_IDS | {"ZZZ-99"})
         assert any("ZZZ-99" in p for p in problems)
 
 
@@ -224,13 +219,13 @@ class TestFamilyPrefixAlias:
 
         from app.services.audit_rules import _RULE_ID_ALIASES, RULE_MAP
 
-        src = (pathlib.Path(__file__).resolve().parents[1] / "app" /
-               "routers" / "compliance.py").read_text(encoding="utf-8")
+        src = (pathlib.Path(__file__).resolve().parents[1] / "app" / "routers" / "compliance.py").read_text(
+            encoding="utf-8"
+        )
         # f"XXX-YY-<n>" 形态的族前缀（两段大写字母 + 连字符）
         families = set(re.findall(r'f"([A-Z]{3}-[A-Z]+)-\{', src))
         for fam in families:
             assert fam in _RULE_ID_ALIASES or fam in RULE_MAP, (
-                f"生成侧产出族编号 {fam}-<n>，但既未登记也未建别名，"
-                f"「规则说明」抽屉将再次查不到该串")
+                f"生成侧产出族编号 {fam}-<n>，但既未登记也未建别名，" f"「规则说明」抽屉将再次查不到该串"
+            )
         assert "CON-SCAN" in families, "扫描基准样本失效（生成侧字符串已变？）"
-

@@ -38,6 +38,7 @@
 - ``ai``：定位矛盾位置后调 AI 改写（需要语义判断才能改对的各类）；
 - ``manual``：不支持自动修复，必须给出**用户可执行的下一步**。
 """
+
 from __future__ import annotations
 
 import hashlib
@@ -73,8 +74,7 @@ AUTOFIX_TIMEOUT = 120
 #: 低温度保证「最小必要修改」，不做创造性重写。
 AUTOFIX_TEMPERATURE = 0.2
 #: 单次修复涉及章节数上限（0 = 不限），防止「点了修复」把整方案重写一遍。
-AUTOFIX_MAX_SECTIONS = max(
-    0, int(getattr(settings, "review_autofix_max_sections", 10) or 0))
+AUTOFIX_MAX_SECTIONS = max(0, int(getattr(settings, "review_autofix_max_sections", 10) or 0))
 #: 单条 finding 最多返回多少个定位点（避免大方案 CON-01 刷屏）
 MAX_TARGETS = 8
 #: 定位回显的上下文行数（矛盾位置前后各取几行）
@@ -95,42 +95,42 @@ SUPPLEMENT_MIN_GROWTH = 600
 # ⚠️ 口径与 ``repair_agent.REPAIR_RETRY_ON_INVALID*`` 保持一致（不另立一套），
 #    但**默认值不同**：本仓实测自动修复的不合格多为「模型没按 must_contain
 #    补齐要点」，重试收益低于多花一次调用，故默认关闭、由用户显式开启。
-AUTOFIX_RETRY_ON_INVALID = bool(
-    getattr(settings, "review_autofix_retry_on_invalid", False))
-AUTOFIX_RETRY_ON_INVALID_BY_SEVERITY = bool(
-    getattr(settings, "review_autofix_retry_on_invalid_by_severity", False))
+AUTOFIX_RETRY_ON_INVALID = bool(getattr(settings, "review_autofix_retry_on_invalid", False))
+AUTOFIX_RETRY_ON_INVALID_BY_SEVERITY = bool(getattr(settings, "review_autofix_retry_on_invalid_by_severity", False))
 #: 开启分级重试时，哪些严重度值得再问一次（阻断/严重=不修就进交付文档）。
 #: 取自 ``audit_rules.SEVERITY_ORDER`` 的值域（判据单一来源）。
 AUTOFIX_RETRY_SEVERITIES = ("block", "high")
 
-FIX_MODE_AUTO = "auto"       # 纯程序化修复（不调 AI）
-FIX_MODE_AI = "ai"           # 定位后调 AI 改写
-FIX_MODE_MANUAL = "manual"   # 不支持自动修复（必须给出替代路径）
+FIX_MODE_AUTO = "auto"  # 纯程序化修复（不调 AI）
+FIX_MODE_AI = "ai"  # 定位后调 AI 改写
+FIX_MODE_MANUAL = "manual"  # 不支持自动修复（必须给出替代路径）
 
 #: 控制字符（与 ``preflight_engine._CTRL_CHARS_RE`` 逐字符一致 —— 判据单一来源；
 #: 两侧口径必须相同，否则会出现「预检报了、自动修复却定位不到」的分叉）
-_CTRL_CHARS_RE = re.compile(
-    "[\x00-\x08\x0b\x0c\x0e-\x1f\x7f-\x9f\ufffd\ufffe\uffff]")
+_CTRL_CHARS_RE = re.compile("[\x00-\x08\x0b\x0c\x0e-\x1f\x7f-\x9f\ufffd\ufffe\uffff]")
 
 
 @dataclass(frozen=True)
 class Capability:
     """一条规则的自动修复能力声明。"""
 
-    mode: str                                    # auto / ai / manual
-    reason: str = ""                             # manual 时的用户可执行替代路径
-    instruction: str = ""                        # ai 模式给模型的整改要求
-    must_contain: tuple = ()                     # 修复后必须出现的要点
-    must_not_contain: tuple = ()                 # 修复后不得残留的表述
-    anchor: str = ""                             # 定位方式（见 locate_targets）
+    mode: str  # auto / ai / manual
+    reason: str = ""  # manual 时的用户可执行替代路径
+    instruction: str = ""  # ai 模式给模型的整改要求
+    must_contain: tuple = ()  # 修复后必须出现的要点
+    must_not_contain: tuple = ()  # 修复后不得残留的表述
+    anchor: str = ""  # 定位方式（见 locate_targets）
 
 
-def _ai(*, instruction: str, anchor: str = "section",
-        must_contain=(), must_not_contain=()) -> Capability:
+def _ai(*, instruction: str, anchor: str = "section", must_contain=(), must_not_contain=()) -> Capability:
     """构造一条「AI 改写」能力（``ai`` 模式的统一入口，避免散落字面量）。"""
-    return Capability(mode=FIX_MODE_AI, anchor=anchor, instruction=instruction,
-                      must_contain=tuple(must_contain),
-                      must_not_contain=tuple(must_not_contain))
+    return Capability(
+        mode=FIX_MODE_AI,
+        anchor=anchor,
+        instruction=instruction,
+        must_contain=tuple(must_contain),
+        must_not_contain=tuple(must_not_contain),
+    )
 
 
 def _manual(reason: str) -> Capability:
@@ -148,156 +148,178 @@ _CAPABILITY: dict[str, Capability] = {
         instruction=(
             "把正文中已废止 / 已被替代的标准编号，替换为该标准的现行有效版本"
             "（现行版本见「现行有效标准参考清单」与全局事实）；标准名称同步更新；"
-            "不得保留任何废止编号，也不得凭空编造清单外的编号。"),
+            "不得保留任何废止编号，也不得凭空编造清单外的编号。"
+        ),
         # 与 STD-01 判据同源：修复后不得再出现任何废止编号
-        must_not_contain=tuple(ABOLISHED_STANDARDS.keys())),
+        must_not_contain=tuple(ABOLISHED_STANDARDS.keys()),
+    ),
     "STD-02": _ai(
         instruction=(
             "在「编制依据」相关章节补充现行全文强制性工程建设规范"
             "（GB 55xxx 系列）的引用，格式为《名称》（编号 年号），"
-            "只引用清单内标准；并写明该规范在本方案中控制什么内容。")),
+            "只引用清单内标准；并写明该规范在本方案中控制什么内容。"
+        )
+    ),
     "STD-03": _manual(
         "标准编号真伪需人工核实（系统无法判断某个清单外编号是否真实有效），"
-        "请对照全国标准信息公共服务平台核对后手工修正；确认无误的可保留原文。"),
+        "请对照全国标准信息公共服务平台核对后手工修正；确认无误的可保留原文。"
+    ),
     "STD-04": _ai(
         instruction=(
             "在「编制依据」章节补充危大工程安全管理法规的引用"
             "（《危险性较大的分部分项工程安全管理规定》住建部令第37号、"
             "《关于实施〈危险性较大的分部分项工程安全管理规定〉有关问题的通知》"
-            "建办质〔2018〕31号），并写明本方案据此执行的条款要点。")),
+            "建办质〔2018〕31号），并写明本方案据此执行的条款要点。"
+        )
+    ),
     "STD-05": _ai(
         instruction=(
             "在「编制依据」章节补充与本方案专业类别匹配的现行专业技术标准"
-            "（只取清单内标准），并写明各标准对应的施工工序或验收环节。")),
+            "（只取清单内标准），并写明各标准对应的施工工序或验收环节。"
+        )
+    ),
     # ---------- 二、安全措施有效性（SAF-*） ----------
     "SAF-03": _ai(
         instruction=(
             "在应急处置章节补充「应急组织机构及职责」：明确应急领导小组/指挥机构"
-            "组成、职责分工、响应启动与终止条件、报告与上报路径，职责写到岗位。")),
+            "组成、职责分工、响应启动与终止条件、报告与上报路径，职责写到岗位。"
+        )
+    ),
     "SAF-04": _ai(
         instruction=(
             "在应急处置章节补充「应急物资装备保障」：列明应急物资/装备的品种、"
-            "规格型号、数量、存放位置、责任人与检查维护周期。")),
+            "规格型号、数量、存放位置、责任人与检查维护周期。"
+        )
+    ),
     "SAF-05": _ai(
         instruction=(
             "在应急处置章节补充「应急预案演练要求」：明确演练类型"
-            "（综合/专项/现场处置）、频次、参演人员范围、演练评估与改进闭环。")),
+            "（综合/专项/现场处置）、频次、参演人员范围、演练评估与改进闭环。"
+        )
+    ),
     "SAF-06": _ai(
         instruction=(
             "在监测章节补充「预警值 / 报警值 / 控制值」：按监测项目（沉降、位移、"
             "倾角、支护内力等）分别给出三级控制指标、监测频次与超限处置动作；"
-            "数值须与本方案监测项目一致，不得编造与设计工况矛盾的指标。")),
+            "数值须与本方案监测项目一致，不得编造与设计工况矛盾的指标。"
+        )
+    ),
     # ---------- 三、全文一致性（CON-*） ----------
     "CON-01": _ai(
         anchor="value",
         instruction=(
             "统一该主题在全篇的取值口径：以「全局事实变量」中已确认的取值为权威值，"
             "把正文中与之矛盾的取值改为权威值（含单位），并保证同一主题在所有章节"
-            "表述一致；若权威值确实无法确定，保留原值并避免出现第二种表述。")),
-    "CON-02": _ai(
-        anchor="term",
-        instruction="统一全文对该专业术语的表述为行业规范用语，其余表述改为同一术语。"),
-    "CON-03": _ai(
-        anchor="term",
-        instruction="统一全文的计量单位与符号写法（如 m 与 米），同一含义只保留一种写法。"),
-    "CON-04": _ai(
-        anchor="value",
-        instruction="按全局事实变量修正正文中与已确认事实不一致的表述，只改冲突处。"),
+            "表述一致；若权威值确实无法确定，保留原值并避免出现第二种表述。"
+        ),
+    ),
+    "CON-02": _ai(anchor="term", instruction="统一全文对该专业术语的表述为行业规范用语，其余表述改为同一术语。"),
+    "CON-03": _ai(anchor="term", instruction="统一全文的计量单位与符号写法（如 m 与 米），同一含义只保留一种写法。"),
+    "CON-04": _ai(anchor="value", instruction="按全局事实变量修正正文中与已确认事实不一致的表述，只改冲突处。"),
     "CON-05": _manual(
         "两章内容高度重复需要人工判断「保留哪一份、另一份重写什么」，"
-        "自动改写有丢失独有内容的风险；建议人工合并或删除其一后调整目录。"),
+        "自动改写有丢失独有内容的风险；建议人工合并或删除其一后调整目录。"
+    ),
     # ---------- 四、可追溯性（TRC-*） ----------
     "TRC-01": _ai(
         instruction=(
             "在计算书章节补齐计算过程：计算简图说明、参数取值及其来源（规范条文号"
             "或设计参数）、计算公式与代入过程、结论与安全系数取值及验算结论；"
-            "参数必须来自全局事实或设计文件，不得编造。"),
-        must_contain=("计算依据", "计算过程")),
+            "参数必须来自全局事实或设计文件，不得编造。"
+        ),
+        must_contain=("计算依据", "计算过程"),
+    ),
     "TRC-03": _ai(
         instruction=(
             "在正文中补充与本方案相关的附图 / 节点详图 / 平面布置图引用"
-            "（含图号与图名），并说明各图对应的部位与用途；图表代码块保持原样。")),
+            "（含图号与图名），并说明各图对应的部位与用途；图表代码块保持原样。"
+        )
+    ),
     # ---------- 五、内容完整性（CMP-*） ----------
     "CMP-01": _ai(
-        instruction="在工程概况章节补充工程基本情况、周边环境（地质/水文/邻近建构筑物"
-                     "与管线）及危大工程特点。"),
+        instruction="在工程概况章节补充工程基本情况、周边环境（地质/水文/邻近建构筑物" "与管线）及危大工程特点。"
+    ),
     "CMP-02": _ai(
         instruction="在编制依据章节补齐法律、法规、规范性文件、标准、施工图设计文件与"
-                     "施工组织设计等编制依据清单（标准只取现行有效版本）。"),
+        "施工组织设计等编制依据清单（标准只取现行有效版本）。"
+    ),
     "CMP-03": _ai(
-        instruction="在施工计划章节补充进度计划（关键节点与工期安排）以及材料、设备计划"
-                     "（规格、数量、进场时间）。"),
+        instruction="在施工计划章节补充进度计划（关键节点与工期安排）以及材料、设备计划" "（规格、数量、进场时间）。"
+    ),
     "CMP-04": _ai(
-        instruction="在施工工艺技术章节补充技术参数、工艺流程、施工方法、操作要求与"
-                     "检查要求，工序需可落地执行。"),
+        instruction="在施工工艺技术章节补充技术参数、工艺流程、施工方法、操作要求与" "检查要求，工序需可落地执行。"
+    ),
     "CMP-05": _ai(
         instruction="在安全保证措施章节补充针对本工程主要风险源的具体措施：组织保障、"
-                     "技术措施、监测监控措施，措施要写到部位、责任人与频次。"),
+        "技术措施、监测监控措施，措施要写到部位、责任人与频次。"
+    ),
     "CMP-06": _ai(
         instruction="在人员配备章节补充管理人员、专职安全生产管理人员、特种作业人员"
-                     "及其他作业人员的配备数量、资格要求与分工职责。"),
+        "及其他作业人员的配备数量、资格要求与分工职责。"
+    ),
     "CMP-07": _ai(
         instruction="在验收要求章节补充可执行的验收标准与程序：检验批划分、验收项目与"
-                     "允许偏差、验收方法、验收人员与记录要求。"),
+        "允许偏差、验收方法、验收人员与记录要求。"
+    ),
     "CMP-08": _ai(
         instruction="在应急处置章节补齐 GB/T 29639-2020 要求的三要素：应急组织机构及职责、"
-                     "应急物资装备保障、应急预案演练要求。"),
+        "应急物资装备保障、应急预案演练要求。"
+    ),
     "CMP-09": _ai(
         instruction="为计算书章节补齐可识别的计算过程：计算依据、参数取值及来源、"
-                     "计算公式与代入、结论与安全系数（须含公式、参数代入或验算步骤）。",
-        must_contain=("计算依据",)),
+        "计算公式与代入、结论与安全系数（须含公式、参数代入或验算步骤）。",
+        must_contain=("计算依据",),
+    ),
     # ---------- 六、可交付性（DLV-*） ----------
     # 这三条**不调用 AI**：预检判据与清洗实现都已有唯一实现，走 AI 反而有
     # 「改坏正文 + 花钱」的双重损失。
     "DLV-05": Capability(
-        mode=FIX_MODE_AUTO, anchor="ctrl",
-        instruction="清除控制字符 / 替换字符（不改变任何技术内容）。"),
+        mode=FIX_MODE_AUTO, anchor="ctrl", instruction="清除控制字符 / 替换字符（不改变任何技术内容）。"
+    ),
     "DLV-06": Capability(
-        mode=FIX_MODE_AUTO, anchor="colloquial",
-        instruction="改写口语化 / AI 腔表述为工程书面语（不改变技术含义与数据）。"),
+        mode=FIX_MODE_AUTO,
+        anchor="colloquial",
+        instruction="改写口语化 / AI 腔表述为工程书面语（不改变技术含义与数据）。",
+    ),
     "DLV-07": Capability(
-        mode=FIX_MODE_AUTO, anchor="fence",
-        instruction="补齐未闭合的 Markdown 代码围栏（仅追加结束标记，不改正文）。"),
+        mode=FIX_MODE_AUTO, anchor="fence", instruction="补齐未闭合的 Markdown 代码围栏（仅追加结束标记，不改正文）。"
+    ),
     "DLV-01": _manual(
-        "空章节需要**生成**内容而非改写，自动修复会产出编造内容；"
-        "请到「正文生成」页补全生成，或删除多余空章节。"),
+        "空章节需要**生成**内容而非改写，自动修复会产出编造内容；" "请到「正文生成」页补全生成，或删除多余空章节。"
+    ),
     "DLV-02": _manual(
-        "字数不足属于内容缺失，需要按预算**扩写**而非改写；"
-        "请到「正文生成」页使用「补全生成 / 续写」。"),
+        "字数不足属于内容缺失，需要按预算**扩写**而非改写；" "请到「正文生成」页使用「补全生成 / 续写」。"
+    ),
     "DLV-03": _manual(
-        "孤立节点是**目录结构**问题（父节点不存在），与正文内容无关；"
-        "请在目录树中重新挂载或删除该章节。"),
+        "孤立节点是**目录结构**问题（父节点不存在），与正文内容无关；" "请在目录树中重新挂载或删除该章节。"
+    ),
     "DLV-04": _manual(
-        "图表在导出文档时自动生成，无需在正文改写；"
-        "请确认图表代码块是否完整，或在「图表」页单独修复。"),
-    "DLV-08": _manual(
-        "整体篇幅不足是方案级问题，需要逐章扩写；"
-        "请到「正文生成」页对目标章节执行「补全生成」。"),
-    "DLV-09": _manual(
-        "这是**人工审核**结论而非正文问题；请到「章节审核工作流」"
-        "逐章标记通过 / 驳回并填写评审意见。"),
+        "图表在导出文档时自动生成，无需在正文改写；" "请确认图表代码块是否完整，或在「图表」页单独修复。"
+    ),
+    "DLV-08": _manual("整体篇幅不足是方案级问题，需要逐章扩写；" "请到「正文生成」页对目标章节执行「补全生成」。"),
+    "DLV-09": _manual("这是**人工审核**结论而非正文问题；请到「章节审核工作流」" "逐章标记通过 / 驳回并填写评审意见。"),
     "DLV-10": _manual(
-        "章节状态与正文不一致属于数据一致性问题（多为生成中断残留）；"
-        "请重新生成该章节或重置该章节状态。"),
+        "章节状态与正文不一致属于数据一致性问题（多为生成中断残留）；" "请重新生成该章节或重置该章节状态。"
+    ),
     "DLV-11": _manual(
-        "上游项目资料结构化提取不完整，需回到「上传解析 · 项目提取」"
-        "补齐必选项，正文才会拿到真实参数。"),
-    "DLV-12": _manual(
-        "同级编号 / 标题重复属于**目录**问题，请到「目录生成」页检查"
-        "同级是否存在重名或重号章节。"),
+        "上游项目资料结构化提取不完整，需回到「上传解析 · 项目提取」" "补齐必选项，正文才会拿到真实参数。"
+    ),
+    "DLV-12": _manual("同级编号 / 标题重复属于**目录**问题，请到「目录生成」页检查" "同级是否存在重名或重号章节。"),
     "DLV-13": _manual(
-        "正文子标题与真实子章节撞号，请到「目录生成」页调整子章节结构，"
-        "或把正文内的点分子标题改为无编号小标题。"),
+        "正文子标题与真实子章节撞号，请到「目录生成」页调整子章节结构，" "或把正文内的点分子标题改为无编号小标题。"
+    ),
     "DLV-14": _manual(
         "交叉引用（图号 / 表号 / 节号）失效需人工确认应指向哪一处；"
-        "请在正文中修正引用，或在「图表」页确认该图是否仍需保留。"),
+        "请在正文中修正引用，或在「图表」页确认该图是否仍需保留。"
+    ),
     "DLV-15": _manual(
-        "全局事实存在未确认 / 模拟 / 冲突项，正文不会引用它们；"
-        "请到「全局事实」页核对并确认来源，或解决多来源冲突。"),
+        "全局事实存在未确认 / 模拟 / 冲突项，正文不会引用它们；" "请到「全局事实」页核对并确认来源，或解决多来源冲突。"
+    ),
     "DLV-16": _manual(
         "字数偏离目标容差带是**生成量**问题而非改写问题：扩写/缩写无法靠局部改写补齐。"
         "请到「正文生成」页选择字数档位（简短800/标准1200/详细2000/超长2500）"
-        "对偏差章节重新生成。"),
+        "对偏差章节重新生成。"
+    ),
 }
 
 #: 未登记规则的兜底文案（按前缀给出可执行的下一步，绝不只说"不支持"）
@@ -314,14 +336,14 @@ _FALLBACK_REASON = {
 def _unsupported(rule_id: str) -> Capability:
     prefix = (rule_id or "").split("-")[0].upper()
     return Capability(
-        mode=FIX_MODE_MANUAL,
-        reason=_FALLBACK_REASON.get(
-            prefix, "该问题暂不支持自动修复，请按整改建议人工处理。"))
+        mode=FIX_MODE_MANUAL, reason=_FALLBACK_REASON.get(prefix, "该问题暂不支持自动修复，请按整改建议人工处理。")
+    )
 
 
 def capability_of(rule_id: str) -> Capability:
     """按 rule_id 取修复能力（派生编号归一到基规则，勿另写一套解析）。"""
     from app.services.audit_rules import _resolve_base_rule
+
     base = _resolve_base_rule(rule_id or "")
     rid = base.rule_id if base else (rule_id or "")
     return _CAPABILITY.get(rid) or _unsupported(rid)
@@ -417,8 +439,7 @@ def _hit(content: str, pos: int, matched: str, why: str = "") -> dict:
     }
 
 
-def _target(s: dict, content: str, pos: int, matched: str,
-            why: str, value: str = "") -> dict:
+def _target(s: dict, content: str, pos: int, matched: str, why: str, value: str = "") -> dict:
     return {
         "section_id": s.get("id") or "",
         "section_title": s.get("title") or "",
@@ -465,17 +486,14 @@ def _locate_value(finding: dict, sections: list[dict]) -> list[dict]:
             content = s.get("content") or ""
             if not content:
                 continue
-            for m in (rx.finditer(content) if rx else []):
-                targets.append(_target(
-                    s, content, m.start(), m.group(0).strip(),
-                    "该主题在此处的取值", value=value))
+            for m in rx.finditer(content) if rx else []:
+                targets.append(_target(s, content, m.start(), m.group(0).strip(), "该主题在此处的取值", value=value))
                 if len(targets) >= MAX_TARGETS:
                     return targets
             if not rx:  # 无数字锚（如纯术语）→ 退回字面查找
                 pos = content.find(value)
                 if pos >= 0:
-                    targets.append(_target(
-                        s, content, pos, value, "该主题在此处的取值", value=value))
+                    targets.append(_target(s, content, pos, value, "该主题在此处的取值", value=value))
                 if len(targets) >= MAX_TARGETS:
                     return targets
     return targets
@@ -485,7 +503,7 @@ def _locate_term(finding: dict, sections: list[dict]) -> list[dict]:
     """CON-02 / CON-03：按 evidence 中的术语 / 单位写法定位。"""
     targets: list[dict] = []
     keys: list[str] = []
-    for ev in (finding.get("evidence") or []):
+    for ev in finding.get("evidence") or []:
         for part in re.split(r"[（(、,，/]", str(ev or "")):
             part = part.strip()
             # 术语 / 单位一般较短；过长的整句不做逐字定位（易误命中）
@@ -497,11 +515,39 @@ def _locate_term(finding: dict, sections: list[dict]) -> list[dict]:
             pos = content.find(key)
             if pos < 0:
                 continue
-            targets.append(_target(
-                s, content, pos, key, "该术语 / 单位写法在此处出现", value=key))
+            targets.append(_target(s, content, pos, key, "该术语 / 单位写法在此处出现", value=key))
             if len(targets) >= MAX_TARGETS:
                 return targets
     return targets
+
+
+def _norm_std_code(s: str) -> str:
+    """标准编号归一：去空白 / 各类连字符 / 全角破折号后大写。
+
+    ✅ B-05（R175）：``STD-01`` 的 evidence 常是 ``GB 50202-2002`` 而正文写
+    ``GB50202-2002`` / ``GB 50202—2002``，旧实现逐字 ``content.find`` 直接
+    定位失败（修复承诺与定位脱节）。归一后只按「字母数字序列」比较。
+    """
+    return re.sub(r"[\s\-－—–\u2014\u2013]", "", (s or "")).upper()
+
+
+def _find_span_tolerant(content: str, code: str) -> tuple[int, int] | None:
+    """容忍空白 / 连字符差异地在 ``content`` 中定位 ``code``，返回原文区间。"""
+    target = _norm_std_code(code)
+    if not target:
+        return None
+    norm_chars: list[str] = []
+    orig_idx: list[int] = []
+    for i, ch in enumerate(content or ""):
+        if re.match(r"[\s\-－—–\u2014\u2013]", ch):
+            continue
+        norm_chars.append(ch.upper())
+        orig_idx.append(i)
+    hay = "".join(norm_chars)
+    pos = hay.find(target)
+    if pos < 0:
+        return None
+    return orig_idx[pos], orig_idx[pos + len(target) - 1] + 1
 
 
 def _locate_standard(finding: dict, sections: list[dict]) -> list[dict]:
@@ -513,13 +559,12 @@ def _locate_standard(finding: dict, sections: list[dict]) -> list[dict]:
             continue
         for s in sections:
             content = s.get("content") or ""
-            # 写法不同（GB50202-2002 / GB 50202—2002）时逐字找不到就跳过，
-            # 不做模糊猜测 —— 宁可少定位，不可错定位（错定位会改坏正文）
-            pos = content.find(code)
-            if pos < 0:
+            span = _find_span_tolerant(content, code)
+            if span is None:
                 continue
-            targets.append(_target(
-                s, content, pos, code, "已废止标准编号出现在此", value=code))
+            start, end = span
+            matched = content[start:end].strip()
+            targets.append(_target(s, content, start, matched or code, "已废止标准编号出现在此", value=code))
             if len(targets) >= MAX_TARGETS:
                 return targets
     return targets
@@ -568,9 +613,24 @@ _ANCHORS = {
     "term": _locate_term,
     "standard": _locate_standard,
     "ctrl": lambda f, secs: _locate_first_hit(secs, _match_ctrl, "控制字符出现在此"),
-    "colloquial": lambda f, secs: _locate_first_hit(
-        secs, _match_colloquial, "口语化 / AI 腔表述出现在此"),
+    "colloquial": lambda f, secs: _locate_first_hit(secs, _match_colloquial, "口语化 / AI 腔表述出现在此"),
     "fence": lambda f, secs: _locate_first_hit(secs, _match_fence, "未闭合围栏的开围栏在此"),
+}
+
+
+#: 整章型规则在 finding 缺少 section_id / section_title 时的目标章节兜底关键词。
+#: ✅ B-05（R175）：补充类 finding（如 STD-02「未引用 GB 55xxx」、SAF-03
+#: 「缺组织机构」）由 preflight_engine 产出时不带 section_id，旧实现直接
+#: `_locate_whole_section` → 0 个 target → `/plan` 永远 ok=false，用户看到
+#: 「可 AI 修复」却点不动。现按规则语义落到对应章节。
+#: 注：CMP-01~09 / SAF-03~06 自带 ``AuditRule.keywords``，无需在此重复登记。
+_SECTION_TARGET_KEYWORDS: dict[str, tuple[str, ...]] = {
+    "STD-02": ("编制依据", "编制说明", "依据"),
+    "STD-04": ("编制依据", "编制说明", "依据"),
+    "STD-05": ("编制依据", "编制说明", "依据"),
+    "TRC-01": ("计算书", "验算", "计算"),
+    "TRC-03": ("附图", "图纸", "图表", "施工工艺"),
+    "SAF-06": ("监测", "监控", "量测"),
 }
 
 
@@ -578,24 +638,55 @@ def _locate_whole_section(finding: dict, sections: list[dict]) -> list[dict]:
     """补充类问题（anchor=section）：问题范围是整章，锚点取该章首段。
 
     「缺三要素 / 缺计算过程」不存在「矛盾的那一行」，故不做逐字定位。
+
+    ✅ B-05（R175）：找不到 ``section_id`` 时按 ``section_title`` → 规则
+    ``keywords`` → ``_SECTION_TARGET_KEYWORDS`` 三级兜底定位目标章节；
+    三级都落空才返回空列表（调用方会给出可执行的失败原因）。
     """
+    rid = str(finding.get("rule_id") or "")
     sid = finding.get("section_id") or ""
+    title = str(finding.get("section_title") or "").strip()
+    cands: list[dict] = []
+    if sid:
+        cands = [x for x in sections if x.get("id") == sid]
+    if not cands and title:
+        cands = [x for x in sections if (x.get("title") or "") == title]
+        if not cands:
+            cands = [x for x in sections if title in (x.get("title") or "")]
+    if not cands:
+        kws = tuple(_SECTION_TARGET_KEYWORDS.get(rid, ()))
+        if not kws:
+            try:
+                from app.services.audit_rules import get_rule
+
+                rule = get_rule(rid)
+                kws = tuple(rule.keywords or ()) if rule else ()
+            except Exception:  # 规则表加载异常不阻断定位
+                kws = ()
+        if kws:
+            # ✅ B-16（R175）：与预检判定共用同一标题匹配（词族 + 语义兜底），
+            #    否则「安全技术措施」在预检被认作已存在、在修复侧却定位不到。
+            from app.services.chapter_keywords import title_matches
+
+            cands = [x for x in sections if title_matches(x.get("title") or "", rid, kws)][:1]
     out = []
-    for s in [x for x in sections if x.get("id") == sid] if sid else []:
+    for s in cands:
         content = (s.get("content") or "").strip()
-        if not content:
-            continue
-        out.append({
-            "section_id": s.get("id") or "",
-            "section_title": s.get("title") or "",
-            "value": "", "line": 1,
-            # 整章型问题不存在「具体哪一句」，显式给 0 而非省略：
-            # 前端据此显示「整章」而不是「第 1 句」（那会误导用户逐句核对）。
-            "sentence_idx": 0, "sentence_total": 0,
-            "matched": content.split("\n")[0][:120],
-            "context": content[:200],
-            "why": "问题范围为整章（补充缺失内容，无单点矛盾位置）",
-        })
+        out.append(
+            {
+                "section_id": s.get("id") or "",
+                "section_title": s.get("title") or "",
+                "value": "",
+                "line": 1,
+                # 整章型问题不存在「具体哪一句」，显式给 0 而非省略：
+                # 前端据此显示「整章」而不是「第 1 句」（那会误导用户逐句核对）。
+                "sentence_idx": 0,
+                "sentence_total": 0,
+                "matched": content.split("\n")[0][:120] if content else "",
+                "context": content[:200],
+                "why": "问题范围为整章（补充缺失内容，无单点矛盾位置）",
+            }
+        )
     return out
 
 
@@ -618,6 +709,7 @@ def locate_targets(finding: dict, sections: list[dict]) -> list[dict]:
 def _clean_output(text: str, section_title: str) -> str:
     """剥离模型可能误加的代码块包裹与重复标题（与 repair_agent 同口径）。"""
     from app.services.repair_agent import _clean_repair_output
+
     return _clean_repair_output(text or "", section_title)
 
 
@@ -644,9 +736,9 @@ def fix_programmatic(cap: Capability, content: str) -> tuple[str, list[str]]:
     return content or "", ["该规则未配置程序化修复实现"]
 
 
-async def fix_by_ai(*, cap: Capability, finding: dict, scheme: dict,
-                    section: dict, targets: list[dict],
-                    facts: str, standards_text: str) -> tuple[str, list[str]]:
+async def fix_by_ai(
+    *, cap: Capability, finding: dict, scheme: dict, section: dict, targets: list[dict], facts: str, standards_text: str
+) -> tuple[str, list[str]]:
     """``ai`` 模式：把**定位结果**连同章节原文交给 AI 做最小必要改写。"""
     content = section.get("content") or ""
     system = render("review_autofix_system")
@@ -660,12 +752,15 @@ async def fix_by_ai(*, cap: Capability, finding: dict, scheme: dict,
         standards_text=standards_text or "（无）",
         rule_id=finding.get("rule_id") or "",
         rule_title=finding.get("title") or "",
-        issue=(f"{finding.get('detail') or ''}\n"
-               f"整改建议：{finding.get('suggestion') or '（无）'}"),
+        issue=(f"{finding.get('detail') or ''}\n" f"整改建议：{finding.get('suggestion') or '（无）'}"),
         targets=json.dumps(
-            [{"章节": t.get("section_title"), "行号": t.get("line"),
-              "原文": t.get("context"), "原因": t.get("why")}
-             for t in targets], ensure_ascii=False, indent=2),
+            [
+                {"章节": t.get("section_title"), "行号": t.get("line"), "原文": t.get("context"), "原因": t.get("why")}
+                for t in targets
+            ],
+            ensure_ascii=False,
+            indent=2,
+        ),
         instruction=cap.instruction,
         must_not_contain="、".join(cap.must_not_contain) or "（无）",
         must_contain="、".join(cap.must_contain) or "（无）",
@@ -673,8 +768,10 @@ async def fix_by_ai(*, cap: Capability, finding: dict, scheme: dict,
     )
     raw = await chat_with_fallback(
         [{"role": "system", "content": system}, {"role": "user", "content": user}],
-        temperature=AUTOFIX_TEMPERATURE, timeout=AUTOFIX_TIMEOUT,
-        scene="review_autofix")
+        temperature=AUTOFIX_TEMPERATURE,
+        timeout=AUTOFIX_TIMEOUT,
+        scene="review_autofix",
+    )
     return _clean_output(raw, section.get("title") or ""), []
 
 
@@ -691,8 +788,8 @@ def validate_fixed(before: str, after: str, cap: Capability) -> tuple[bool, list
     if re.sub(r"\s+", "", after) == re.sub(r"\s+", "", before):
         return False, ["修复后内容与原文一致，问题未消除"]
     ok, problems = validate_repair(
-        before=before, after=after,
-        wrong_values=list(cap.must_not_contain), authoritative_value="")
+        before=before, after=after, wrong_values=list(cap.must_not_contain), authoritative_value=""
+    )
     # 「权威值应出现」是面向数值冲突的判据，本模块无权威值概念 → 剔除
     problems = [p for p in problems if "权威值" not in p]
     # ⚠️ 篇幅判据按修复性质区分（实测踩坑）：``validate_repair`` 的
@@ -716,8 +813,8 @@ def validate_fixed(before: str, after: str, cap: Capability) -> tuple[bool, list
             allowed = max(lb * SUPPLEMENT_MAX_LEN_RATIO, lb + SUPPLEMENT_MIN_GROWTH)
             if len(after) > allowed:
                 problems.append(
-                    f"补充后篇幅 {len(after)} 字超过允许上限 {int(allowed)} 字，"
-                    "疑似大段重写而非定点补充")
+                    f"补充后篇幅 {len(after)} 字超过允许上限 {int(allowed)} 字，" "疑似大段重写而非定点补充"
+                )
             soft = length_problems
     ok = ok and not problems
     # ⚠️ must_contain 是**硬性**语义校验：结构没坏但没补上要点，问题依旧存在，
@@ -748,9 +845,15 @@ def should_retry_on_invalid(finding: dict) -> bool:
     return (finding.get("severity") or "") in AUTOFIX_RETRY_SEVERITIES
 
 
-async def _fix_each_section(finding: dict, sections: list[dict], cap: Capability,
-                            scheme: dict, facts: str, standards_text: str,
-                            targets: list[dict]):
+async def _fix_each_section(
+    finding: dict,
+    sections: list[dict],
+    cap: Capability,
+    scheme: dict,
+    facts: str,
+    standards_text: str,
+    targets: list[dict],
+):
     """逐章改写并校验，返回 (items, pending, skipped)。
 
     ``pending`` 只含**校验通过且确有变化**的章节 —— 失败章一律不进 pending，
@@ -786,17 +889,27 @@ async def _fix_each_section(finding: dict, sections: list[dict], cap: Capability
                     after, problems = fix_programmatic(cap, before)
                 else:
                     after, problems = await fix_by_ai(
-                        cap=cap, finding=finding, scheme=scheme, section=section,
-                        targets=tgts, facts=facts, standards_text=standards_text)
+                        cap=cap,
+                        finding=finding,
+                        scheme=scheme,
+                        section=section,
+                        targets=tgts,
+                        facts=facts,
+                        standards_text=standards_text,
+                    )
                     if not problems:
                         ok, problems = validate_fixed(before, after, cap)
                         if not ok:
                             after = before
             except Exception as exc:  # AI 异常 / 渲染失败 → 该章判失败，不写库
-                logger.warning("审核预检自动修复失败 rule=%s section=%s"
-                               "（第 %d 次）: %s",
-                               finding.get("rule_id") or "", sid[:8], attempt,
-                               exc, exc_info=True)
+                logger.warning(
+                    "审核预检自动修复失败 rule=%s section=%s" "（第 %d 次）: %s",
+                    finding.get("rule_id") or "",
+                    sid[:8],
+                    attempt,
+                    exc,
+                    exc_info=True,
+                )
                 after, problems = before, [f"修复过程异常：{exc}"]
                 raised = True
             if not problems:
@@ -804,24 +917,32 @@ async def _fix_each_section(finding: dict, sections: list[dict], cap: Capability
             # 仅「本可重试且还有次数」才继续：raised=异常恒重试；校验不合格看开关
             if attempt == 2 or not (raised or should_retry_on_invalid(finding)):
                 break
-            logger.info("审核预检自动修复第 1 次未通过，尝试重试：rule=%s section=%s：%s",
-                        finding.get("rule_id") or "", sid[:8], problems)
+            logger.info(
+                "审核预检自动修复第 1 次未通过，尝试重试：rule=%s section=%s：%s",
+                finding.get("rule_id") or "",
+                sid[:8],
+                problems,
+            )
         changed = not problems and after != before
         if changed:
             pending.append((sid, before, after))
-        items.append({
-            "section_id": sid, "section_title": section.get("title") or "",
-            "status": "repaired" if changed else "failed", "targets": tgts,
-            "before": before[:4000],
-            "after": (after if changed else before)[:4000],
-            "problems": problems,
-        })
+        items.append(
+            {
+                "section_id": sid,
+                "section_title": section.get("title") or "",
+                "status": "repaired" if changed else "failed",
+                "targets": tgts,
+                "before": before[:4000],
+                "after": (after if changed else before)[:4000],
+                "problems": problems,
+            }
+        )
     return items, pending, skipped
 
 
-async def apply_fix(db, *, scheme_id: str, finding: dict, sections: list[dict],
-                    scheme: dict, facts: str = "",
-                    standards_text: str = "") -> dict:
+async def apply_fix(
+    db, *, scheme_id: str, finding: dict, sections: list[dict], scheme: dict, facts: str = "", standards_text: str = ""
+) -> dict:
     """定位 → 改写 → 校验，返回修复结果与**待落库**内容。
 
     ⚠️ 分层约束（``tests/test_outline_name_line_20260927.py::test_services_never_import_routers``
@@ -835,42 +956,67 @@ async def apply_fix(db, *, scheme_id: str, finding: dict, sections: list[dict],
     cap = capability_of(finding.get("rule_id") or "")
     rule_id = finding.get("rule_id") or ""
     if cap.mode == FIX_MODE_MANUAL:
-        return {"ok": False, "status": "unsupported", "mode": cap.mode,
-                "rule_id": rule_id, "reason": cap.reason,
-                "items": [], "pending": [], "snapshot_id": ""}
+        return {
+            "ok": False,
+            "status": "unsupported",
+            "mode": cap.mode,
+            "rule_id": rule_id,
+            "reason": cap.reason,
+            "items": [],
+            "pending": [],
+            "snapshot_id": "",
+        }
 
     targets = locate_targets(finding, sections)
     if not targets:
         # 定位不到矛盾位置 → 拒绝盲改（否则 AI 会无依据地重写整章）
-        return {"ok": False, "status": "not_located", "mode": cap.mode,
-                "rule_id": rule_id, "targets": [],
-                "reason": "未能在正文中定位到该问题的具体位置，"
-                          "为避免无依据改写正文，请按整改建议人工处理。",
-                "items": [], "pending": [], "snapshot_id": ""}
+        return {
+            "ok": False,
+            "status": "not_located",
+            "mode": cap.mode,
+            "rule_id": rule_id,
+            "targets": [],
+            "reason": "未能在正文中定位到该问题的具体位置，" "为避免无依据改写正文，请按整改建议人工处理。",
+            "items": [],
+            "pending": [],
+            "snapshot_id": "",
+        }
 
-    items, pending, skipped = await _fix_each_section(
-        finding, sections, cap, scheme, facts, standards_text, targets)
+    items, pending, skipped = await _fix_each_section(finding, sections, cap, scheme, facts, standards_text, targets)
 
     repaired = sum(1 for i in items if i["status"] == "repaired")
-    stats = {"repaired": repaired, "failed": len(items) - repaired,
-             "skipped": skipped}
+    stats = {"repaired": repaired, "failed": len(items) - repaired, "skipped": skipped}
     # 留痕先落（快照 id 由调用方落库后回填），此处不写 sections.content
     result = await save_repair(
-        db, scheme_id=scheme_id, scan_id="", mode="review_autofix",
-        items=items, snapshot_id="", total_conflicts=len(items), stats=stats)
-    return {"ok": repaired > 0,
-            "status": "repaired" if repaired else "failed",
-            "mode": cap.mode, "rule_id": rule_id, "targets": targets,
-            "snapshot_id": "", "repair_id": result.get("repair_id", ""),
-            "items": items, "pending": pending, "stats": stats}
+        db,
+        scheme_id=scheme_id,
+        scan_id="",
+        mode="review_autofix",
+        items=items,
+        snapshot_id="",
+        total_conflicts=len(items),
+        stats=stats,
+    )
+    return {
+        "ok": repaired > 0,
+        "status": "repaired" if repaired else "failed",
+        "mode": cap.mode,
+        "rule_id": rule_id,
+        "targets": targets,
+        "snapshot_id": "",
+        "repair_id": result.get("repair_id", ""),
+        "items": items,
+        "pending": pending,
+        "stats": stats,
+    }
 
 
 # ---------------------------------------------------------------------------------------
 # 批量：同章多问题链式合并 + 暂存（不落库）
 # ---------------------------------------------------------------------------------------
-async def _chain_section_fixes(section: dict, findings_for_section: list[dict],
-                               scheme: dict, facts: str, standards_text: str
-                               ) -> tuple[str, list[dict]]:
+async def _chain_section_fixes(
+    section: dict, findings_for_section: list[dict], scheme: dict, facts: str, standards_text: str
+) -> tuple[str, list[dict]]:
     """把同一章节内的多条 fixable finding 按严重度顺序链式改写。
 
     与单条 ``apply_fix`` 的语义完全一致（复用 ``_fix_each_section`` +
@@ -897,50 +1043,80 @@ async def _chain_section_fixes(section: dict, findings_for_section: list[dict],
         rule_id = finding.get("rule_id") or ""
         cap = capability_of(rule_id)
         if cap.mode == FIX_MODE_MANUAL:
-            items.append({
-                "rule_id": rule_id, "section_id": section.get("id"),
-                "section_title": section.get("title") or "",
-                "mode": cap.mode, "status": "unsupported", "reason": cap.reason,
-                "targets": [], "before": content[:4000], "after": content[:4000],
-                "problems": [], "chain_index": idx,
-                "sentence_idx": 0, "sentence_total": 0,
-            })
+            items.append(
+                {
+                    "rule_id": rule_id,
+                    "section_id": section.get("id"),
+                    "section_title": section.get("title") or "",
+                    "mode": cap.mode,
+                    "status": "unsupported",
+                    "reason": cap.reason,
+                    "targets": [],
+                    "before": content[:4000],
+                    "after": content[:4000],
+                    "problems": [],
+                    "chain_index": idx,
+                    "sentence_idx": 0,
+                    "sentence_total": 0,
+                }
+            )
             continue
         targets = locate_targets(finding, [section])
         if not targets:
-            items.append({
-                "rule_id": rule_id, "section_id": section.get("id"),
-                "section_title": section.get("title") or "",
-                "mode": cap.mode, "status": "not_located",
-                "reason": "未能在正文中定位到该问题的具体位置，为避免无依据改写正文，"
-                          "请按整改建议人工处理。",
-                "targets": [], "before": content[:4000], "after": content[:4000],
-                "problems": [], "chain_index": idx,
-                "sentence_idx": 0, "sentence_total": 0,
-            })
+            items.append(
+                {
+                    "rule_id": rule_id,
+                    "section_id": section.get("id"),
+                    "section_title": section.get("title") or "",
+                    "mode": cap.mode,
+                    "status": "not_located",
+                    "reason": "未能在正文中定位到该问题的具体位置，为避免无依据改写正文，" "请按整改建议人工处理。",
+                    "targets": [],
+                    "before": content[:4000],
+                    "after": content[:4000],
+                    "problems": [],
+                    "chain_index": idx,
+                    "sentence_idx": 0,
+                    "sentence_total": 0,
+                }
+            )
             continue
         sec_items, _pending, _skipped = await _fix_each_section(
-            finding, [section], cap, scheme, facts, standards_text, targets)
+            finding, [section], cap, scheme, facts, standards_text, targets
+        )
         rec = sec_items[0] if sec_items else {}
         after = rec.get("after") or content
-        items.append({
-            "rule_id": rule_id, "section_id": section.get("id"),
-            "section_title": section.get("title") or "",
-            "mode": cap.mode, "status": rec.get("status", "failed"),
-            "targets": targets, "before": content[:4000],
-            "after": after[:4000], "problems": rec.get("problems", []),
-            "chain_index": idx,
-            "sentence_idx": targets[0].get("sentence_idx", 0) if targets else 0,
-            "sentence_total": targets[0].get("sentence_total", 0) if targets else 0,
-        })
+        items.append(
+            {
+                "rule_id": rule_id,
+                "section_id": section.get("id"),
+                "section_title": section.get("title") or "",
+                "mode": cap.mode,
+                "status": rec.get("status", "failed"),
+                "targets": targets,
+                "before": content[:4000],
+                "after": after[:4000],
+                "problems": rec.get("problems", []),
+                "chain_index": idx,
+                "sentence_idx": targets[0].get("sentence_idx", 0) if targets else 0,
+                "sentence_total": targets[0].get("sentence_total", 0) if targets else 0,
+            }
+        )
         if rec.get("status") == "repaired":
             content = after
     return content, items
 
 
-async def stage_fixes(db, *, scheme_id: str, findings: list[dict],
-                      sections: list[dict], scheme: dict, facts: str = "",
-                      standards_text: str = "") -> dict:
+async def stage_fixes(
+    db,
+    *,
+    scheme_id: str,
+    findings: list[dict],
+    sections: list[dict],
+    scheme: dict,
+    facts: str = "",
+    standards_text: str = "",
+) -> dict:
     """批量「定位 → 改写 → 校验」，**只暂存不落库**（落库由 ``/confirm`` 完成）。
 
     同章多条 finding 走 :func:`_chain_section_fixes` 链式合并；跨章各自独立。
@@ -978,21 +1154,24 @@ async def stage_fixes(db, *, scheme_id: str, findings: list[dict],
     max_sections = AUTOFIX_MAX_SECTIONS  # 读模块属性（测试可 monkeypatch）
     skipped_sections: list[dict] = []
     if max_sections and len(by_section) > max_sections:
-        ranked = sorted(by_section.items(), key=lambda kv: len(kv[1]),
-                        reverse=True)
+        ranked = sorted(by_section.items(), key=lambda kv: len(kv[1]), reverse=True)
         for sid, fs in ranked[max_sections:]:
             sec = sec_by_id.get(sid) or {}
-            skipped_sections.append({
-                "section_id": sid,
-                "section_title": sec.get("title") or "",
-                "finding_count": len(fs),
-                "rule_ids": sorted({str(f.get("rule_id") or "") for f in fs}),
-            })
+            skipped_sections.append(
+                {
+                    "section_id": sid,
+                    "section_title": sec.get("title") or "",
+                    "finding_count": len(fs),
+                    "rule_ids": sorted({str(f.get("rule_id") or "") for f in fs}),
+                }
+            )
         by_section = dict(ranked[:max_sections])
         logger.warning(
-            "批量修复：命中章节数上限 %d（配置 review_autofix_max_sections），"
-            "%d 个章节本轮未处理 scheme=%s",
-            max_sections, len(skipped_sections), scheme_id)
+            "批量修复：命中章节数上限 %d（配置 review_autofix_max_sections），" "%d 个章节本轮未处理 scheme=%s",
+            max_sections,
+            len(skipped_sections),
+            scheme_id,
+        )
 
     all_items: list[dict] = []
     for sid, fs in by_section.items():
@@ -1001,29 +1180,34 @@ async def stage_fixes(db, *, scheme_id: str, findings: list[dict],
             continue
         # 同章多条按严重度排序（单一事实源取 audit_rules.SEVERITY_ORDER，
         # 不用本仓另写一份映射 —— 判据分叉的典型来源）
-        fs_sorted = sorted(
-            fs, key=lambda x: SEVERITY_ORDER.get(x.get("severity") or "", 9))
-        _content, items = await _chain_section_fixes(
-            section, fs_sorted, scheme, facts, standards_text)
+        fs_sorted = sorted(fs, key=lambda x: SEVERITY_ORDER.get(x.get("severity") or "", 9))
+        _content, items = await _chain_section_fixes(section, fs_sorted, scheme, facts, standards_text)
         # ✅ R168（stage→confirm 竞态守卫）：暂存时记录本章**原始正文**指纹。
         #    暂存与确认之间正文被手动编辑 / 其它修复批次改写时，暂存的 after
         #    已基于过期正文 —— confirm 前缀路径落库前比对该指纹，漂移即跳过
         #    本章（加法式键，旧批次无此键保持旧行为）。
-        _sha = hashlib.sha256(
-            (section.get("content") or "").encode("utf-8")).hexdigest()[:16]
+        _sha = hashlib.sha256((section.get("content") or "").encode("utf-8")).hexdigest()[:16]
         for _it in items:
             _it["content_sha_before"] = _sha
         all_items.extend(items)
 
     repaired = sum(1 for i in all_items if i["status"] == "repaired")
-    stats = {"repaired": repaired, "failed": len(all_items) - repaired,
-             "skipped": len(skipped_sections)}
+    stats = {"repaired": repaired, "failed": len(all_items) - repaired, "skipped": len(skipped_sections)}
     result = await save_repair(
-        db, scheme_id=scheme_id, scan_id="", mode="review_autofix_batch",
-        items=all_items, snapshot_id="", total_conflicts=len(all_items), stats=stats)
+        db,
+        scheme_id=scheme_id,
+        scan_id="",
+        mode="review_autofix_batch",
+        items=all_items,
+        snapshot_id="",
+        total_conflicts=len(all_items),
+        stats=stats,
+    )
     return {
-        "batch_id": result["repair_id"], "items": all_items,
-        "stats": stats, "status": "pending_confirm",
+        "batch_id": result["repair_id"],
+        "items": all_items,
+        "stats": stats,
+        "status": "pending_confirm",
         # ✅ 加法式契约（R54 同族约定）：旧前端不消费也不报错
         "max_sections": max_sections,
         "skipped_sections": skipped_sections,
@@ -1031,10 +1215,23 @@ async def stage_fixes(db, *, scheme_id: str, findings: list[dict],
 
 
 __all__ = [
-    "AUTOFIX_MAX_SECTIONS", "AUTOFIX_RETRY_ON_INVALID",
-    "AUTOFIX_RETRY_ON_INVALID_BY_SEVERITY", "AUTOFIX_RETRY_SEVERITIES",
-    "FIX_MODE_AI", "FIX_MODE_AUTO", "FIX_MODE_MANUAL",
-    "MAX_TARGETS", "SUPPLEMENT_MAX_LEN_RATIO", "Capability", "apply_fix",
-    "capability_of", "capability_summary", "fix_by_ai", "fix_programmatic",
-    "locate_targets", "should_retry_on_invalid", "stage_fixes", "validate_fixed",
+    "AUTOFIX_MAX_SECTIONS",
+    "AUTOFIX_RETRY_ON_INVALID",
+    "AUTOFIX_RETRY_ON_INVALID_BY_SEVERITY",
+    "AUTOFIX_RETRY_SEVERITIES",
+    "FIX_MODE_AI",
+    "FIX_MODE_AUTO",
+    "FIX_MODE_MANUAL",
+    "MAX_TARGETS",
+    "SUPPLEMENT_MAX_LEN_RATIO",
+    "Capability",
+    "apply_fix",
+    "capability_of",
+    "capability_summary",
+    "fix_by_ai",
+    "fix_programmatic",
+    "locate_targets",
+    "should_retry_on_invalid",
+    "stage_fixes",
+    "validate_fixed",
 ]

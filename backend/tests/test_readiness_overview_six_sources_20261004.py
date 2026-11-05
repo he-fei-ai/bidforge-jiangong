@@ -15,6 +15,7 @@
       降级顺序（某源不可用不影响总检返回）、缓存与 force 语义、
       stale 判定与 content_fingerprint、六源全失效时仍返回 200。
 """
+
 from __future__ import annotations
 
 import json
@@ -46,9 +47,9 @@ async def ov_db(tmp_path):
     pid, sid = uuid.uuid4().hex, uuid.uuid4().hex
     await db.execute("INSERT INTO projects(id,name) VALUES(?,?)", (pid, "p"))
     await db.execute(
-        "INSERT INTO schemes(id,project_id,name,status,word_budget)"
-        " VALUES(?,?,?,?,0)",
-        (sid, pid, "深基坑支护专项方案", "目录已确认"))
+        "INSERT INTO schemes(id,project_id,name,status,word_budget)" " VALUES(?,?,?,?,0)",
+        (sid, pid, "深基坑支护专项方案", "目录已确认"),
+    )
     await db.commit()
     _OVERVIEW_RECENT.pop(sid, None)
     yield db, sid
@@ -56,23 +57,34 @@ async def ov_db(tmp_path):
     await close_db()
 
 
-async def _add_section(db, sid, *, title="第一章", content="", level=1,
-                       parent_id="", sort_order=0):
+async def _add_section(db, sid, *, title="第一章", content="", level=1, parent_id="", sort_order=0):
     sec_id = uuid.uuid4().hex
     await db.execute(
         "INSERT INTO sections (id, scheme_id, project_id, parent_id, title,"
         " description, level, status, word_count, word_budget, content,"
         " review_status, sort_order)"
         " VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?)",
-        (sec_id, sid, "", parent_id, title, "", level,
-         "generated" if content else "empty",
-         len(content), 0, content, "", sort_order))
+        (
+            sec_id,
+            sid,
+            "",
+            parent_id,
+            title,
+            "",
+            level,
+            "generated" if content else "empty",
+            len(content),
+            0,
+            content,
+            "",
+            sort_order,
+        ),
+    )
     return sec_id
 
 
 def _now(offset_seconds: int = 0) -> str:
-    return (datetime.now() + timedelta(seconds=offset_seconds)).isoformat(
-        timespec="seconds")
+    return (datetime.now() + timedelta(seconds=offset_seconds)).isoformat(timespec="seconds")
 
 
 async def _insert_ai_batch(db, sid, *, batch_id, created_at, results):
@@ -82,18 +94,26 @@ async def _insert_ai_batch(db, sid, *, batch_id, created_at, results):
             "INSERT INTO compliance_check (id, scheme_id, project_id,"
             " check_type, rule_id, item, severity, result, batch_id, created_at)"
             " VALUES (?,?,?,?,?,?,?,?,?,?)",
-            (uuid.uuid4().hex, sid, "", "compliance",
-             r["rule_id"], r["item"], r["severity"],
-             json.dumps({"results": [r]}, ensure_ascii=False),
-             batch_id, created_at))
+            (
+                uuid.uuid4().hex,
+                sid,
+                "",
+                "compliance",
+                r["rule_id"],
+                r["item"],
+                r["severity"],
+                json.dumps({"results": [r]}, ensure_ascii=False),
+                batch_id,
+                created_at,
+            ),
+        )
 
 
 async def _insert_consistency_audit(db, sid, *, score, issues, created_at):
     await db.execute(
-        "INSERT INTO consistency_audit (id, scheme_id, project_id, score,"
-        " issues, created_at) VALUES (?,?,?,?,?,?)",
-        (uuid.uuid4().hex, sid, "", score, json.dumps(issues, ensure_ascii=False),
-         created_at))
+        "INSERT INTO consistency_audit (id, scheme_id, project_id, score," " issues, created_at) VALUES (?,?,?,?,?,?)",
+        (uuid.uuid4().hex, sid, "", score, json.dumps(issues, ensure_ascii=False), created_at),
+    )
 
 
 async def _insert_consistency_conflicts(db, sid, *, scan_id, rows, created_at):
@@ -104,14 +124,22 @@ async def _insert_consistency_conflicts(db, sid, *, scan_id, rows, created_at):
             " authoritative_value, authoritative_source, repair_instruction,"
             " reason, status,"
             " created_at) VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?)",
-            (c.get("id") or uuid.uuid4().hex, sid, scan_id,
-             c["conflict_type"], c["severity"], c["topic"],
-             json.dumps(c.get("occurrences", []), ensure_ascii=False),
-             c.get("authoritative_value", ""),
-             c.get("authoritative_source", ""),
-             c.get("repair_instruction", ""),
-             c.get("reason", ""),
-             c.get("status", "pending"), created_at))
+            (
+                c.get("id") or uuid.uuid4().hex,
+                sid,
+                scan_id,
+                c["conflict_type"],
+                c["severity"],
+                c["topic"],
+                json.dumps(c.get("occurrences", []), ensure_ascii=False),
+                c.get("authoritative_value", ""),
+                c.get("authoritative_source", ""),
+                c.get("repair_instruction", ""),
+                c.get("reason", ""),
+                c.get("status", "pending"),
+                created_at,
+            ),
+        )
 
 
 async def _insert_expert_review(db, sid, *, result, created_at):
@@ -119,8 +147,19 @@ async def _insert_expert_review(db, sid, *, result, created_at):
         "INSERT INTO compliance_check (id, scheme_id, project_id, check_type,"
         " rule_id, item, severity, result, batch_id, created_at)"
         " VALUES (?,?,?,?,?,?,?,?,?,?)",
-        (uuid.uuid4().hex, sid, "", "expert_review", "", "", "",
-         json.dumps(result, ensure_ascii=False), "", created_at))
+        (
+            uuid.uuid4().hex,
+            sid,
+            "",
+            "expert_review",
+            "",
+            "",
+            "",
+            json.dumps(result, ensure_ascii=False),
+            "",
+            created_at,
+        ),
+    )
 
 
 # ===========================================================================
@@ -135,41 +174,69 @@ async def test_all_six_sources_present_when_all_inputs_populated(ov_db):
 
     # compliance（AI 批次）
     await _insert_ai_batch(
-        db, sid, batch_id="B1", created_at=_now(),
-        results=[{"rule_id": "STD-02", "item": "引用非现行推荐标准",
-                  "severity": "medium", "hit": True}])
+        db,
+        sid,
+        batch_id="B1",
+        created_at=_now(),
+        results=[{"rule_id": "STD-02", "item": "引用非现行推荐标准", "severity": "medium", "hit": True}],
+    )
 
     # consistency_audit
     await _insert_consistency_audit(
-        db, sid, score=70,
-        issues=[{"severity": "high", "dimension": "工期",
-                 "content_quote": "120 日历天", "fact": "总工期",
-                 "section_title": "工程概况", "suggestion": "统一工期"}],
-        created_at=_now())
+        db,
+        sid,
+        score=70,
+        issues=[
+            {
+                "severity": "high",
+                "dimension": "工期",
+                "content_quote": "120 日历天",
+                "fact": "总工期",
+                "section_title": "工程概况",
+                "suggestion": "统一工期",
+            }
+        ],
+        created_at=_now(),
+    )
 
     # consistency_conflicts（未解决）
     await _insert_consistency_conflicts(
-        db, sid, scan_id="SC1",
-        rows=[{"conflict_type": "numeric", "severity": "high",
-               "topic": "总工期", "value": "120 日历天",
-               "occurrences": [{"section_id": "S1", "text": "120 日历天"}],
-               "repair_instruction": "改为 180 日历天", "status": "pending"}],
-        created_at=_now())
+        db,
+        sid,
+        scan_id="SC1",
+        rows=[
+            {
+                "conflict_type": "numeric",
+                "severity": "high",
+                "topic": "总工期",
+                "value": "120 日历天",
+                "occurrences": [{"section_id": "S1", "text": "120 日历天"}],
+                "repair_instruction": "改为 180 日历天",
+                "status": "pending",
+            }
+        ],
+        created_at=_now(),
+    )
 
     # expert_review
     await _insert_expert_review(
-        db, sid,
-        result={"results": [{"item": "方案深度不足", "rule_id": "TRC-01",
-                            "severity": "medium", "hit": True}]},
-        created_at=_now())
+        db,
+        sid,
+        result={"results": [{"item": "方案深度不足", "rule_id": "TRC-01", "severity": "medium", "hit": True}]},
+        created_at=_now(),
+    )
 
     await db.commit()
     payload = await readiness_overview(sid, db, force=True)
     assert payload["cached"] is False
     sources = set(payload["sources"])
-    assert {"program", "compliance", "consistency", "consistency_scan",
-            "expert_review"} <= sources, (
-        f"六源中至少五源必须出现，实际 {sources}")
+    assert {
+        "program",
+        "compliance",
+        "consistency",
+        "consistency_scan",
+        "expert_review",
+    } <= sources, f"六源中至少五源必须出现，实际 {sources}"
     # export_check 依赖章节内容触发导出问题，允许为空（降级）
     assert payload["total"] is not None
     assert payload["grade"] in ("A", "B", "C", "D")
@@ -179,24 +246,46 @@ async def test_consistency_audit_issues_expand_to_unique_rule_ids(ov_db):
     """多条一致性审计 issue → 每条独立 rule_id（CON-04-{idx}），不塌缩。"""
     db, sid = ov_db
     await _insert_consistency_audit(
-        db, sid, score=60,
+        db,
+        sid,
+        score=60,
         issues=[
-            {"severity": "high", "dimension": "工期", "content_quote": "120",
-             "fact": "总工期 120", "section_title": "概况", "suggestion": "统一"},
-            {"severity": "medium", "dimension": "材料", "content_quote": "C30",
-             "fact": "混凝土标号 C30", "section_title": "材料",
-             "suggestion": "统一"},
-            {"severity": "low", "dimension": "人员", "content_quote": "8 人",
-             "fact": "施工人员 8 人", "section_title": "人力", "suggestion": "统一"},
+            {
+                "severity": "high",
+                "dimension": "工期",
+                "content_quote": "120",
+                "fact": "总工期 120",
+                "section_title": "概况",
+                "suggestion": "统一",
+            },
+            {
+                "severity": "medium",
+                "dimension": "材料",
+                "content_quote": "C30",
+                "fact": "混凝土标号 C30",
+                "section_title": "材料",
+                "suggestion": "统一",
+            },
+            {
+                "severity": "low",
+                "dimension": "人员",
+                "content_quote": "8 人",
+                "fact": "施工人员 8 人",
+                "section_title": "人力",
+                "suggestion": "统一",
+            },
         ],
-        created_at=_now())
+        created_at=_now(),
+    )
     await db.commit()
 
     payload = await _readiness_overview_compute(db, sid, persist=False)
-    con04_ids = sorted(f["rule_id"] for f in payload["findings"]
-                       if f["rule_id"].startswith("CON-04-"))
-    assert con04_ids == ["CON-04-1", "CON-04-2", "CON-04-3"], (
-        f"三条一致性审计 issue 必须各自独立成 finding，实际 {con04_ids}")
+    con04_ids = sorted(f["rule_id"] for f in payload["findings"] if f["rule_id"].startswith("CON-04-"))
+    assert con04_ids == [
+        "CON-04-1",
+        "CON-04-2",
+        "CON-04-3",
+    ], f"三条一致性审计 issue 必须各自独立成 finding，实际 {con04_ids}"
 
 
 async def test_consistency_scan_only_counts_pending_failed(ov_db):
@@ -204,36 +293,56 @@ async def test_consistency_scan_only_counts_pending_failed(ov_db):
     db, sid = ov_db
     scan_id = "SC-pending-filter"
     await _insert_consistency_conflicts(
-        db, sid, scan_id=scan_id,
+        db,
+        sid,
+        scan_id=scan_id,
         rows=[
-            {"id": f"{scan_id}-1", "conflict_type": "numeric",
-             "severity": "high", "topic": "工期", "status": "pending",
-             "occurrences": []},
-            {"id": f"{scan_id}-2", "conflict_type": "numeric",
-             "severity": "high", "topic": "材料", "status": "failed",
-             "occurrences": []},
-            {"id": f"{scan_id}-3", "conflict_type": "numeric",
-             "severity": "high", "topic": "金额", "status": "repaired",
-             "occurrences": []},
-            {"id": f"{scan_id}-4", "conflict_type": "numeric",
-             "severity": "high", "topic": "人员", "status": "skipped",
-             "occurrences": []},
+            {
+                "id": f"{scan_id}-1",
+                "conflict_type": "numeric",
+                "severity": "high",
+                "topic": "工期",
+                "status": "pending",
+                "occurrences": [],
+            },
+            {
+                "id": f"{scan_id}-2",
+                "conflict_type": "numeric",
+                "severity": "high",
+                "topic": "材料",
+                "status": "failed",
+                "occurrences": [],
+            },
+            {
+                "id": f"{scan_id}-3",
+                "conflict_type": "numeric",
+                "severity": "high",
+                "topic": "金额",
+                "status": "repaired",
+                "occurrences": [],
+            },
+            {
+                "id": f"{scan_id}-4",
+                "conflict_type": "numeric",
+                "severity": "high",
+                "topic": "人员",
+                "status": "skipped",
+                "occurrences": [],
+            },
         ],
-        created_at=_now())
+        created_at=_now(),
+    )
     await db.commit()
 
     payload = await _readiness_overview_compute(db, sid, persist=False)
-    scan_ids = sorted(f["rule_id"] for f in payload["findings"]
-                      if f["rule_id"].startswith("CON-SCAN-"))
-    assert scan_ids == ["CON-SCAN-1", "CON-SCAN-2"], (
-        f"仅 pending+failed 参与评分，实际 {scan_ids}")
+    scan_ids = sorted(f["rule_id"] for f in payload["findings"] if f["rule_id"].startswith("CON-SCAN-"))
+    assert scan_ids == ["CON-SCAN-1", "CON-SCAN-2"], f"仅 pending+failed 参与评分，实际 {scan_ids}"
 
 
 # ===========================================================================
 # 二、降级顺序：任一源异常时总检仍返回
 # ===========================================================================
-async def test_single_source_failure_does_not_break_overview(
-        ov_db, monkeypatch):
+async def test_single_source_failure_does_not_break_overview(ov_db, monkeypatch):
     """一致性审计 JSON 损坏 → 跳过解析，findings 中不产生 CON-04-* 条目，
     但总检仍返回 200（不因脏数据 500）。"""
     db, sid = ov_db
@@ -241,15 +350,18 @@ async def test_single_source_failure_does_not_break_overview(
 
     # 写入一行为合法 batch（保证至少有一条合规 finding，避免"零源"歧义）
     await _insert_ai_batch(
-        db, sid, batch_id="B-OK", created_at=_now(),
-        results=[{"rule_id": "STD-01", "item": "废止标准", "severity": "high",
-                  "hit": False}])
+        db,
+        sid,
+        batch_id="B-OK",
+        created_at=_now(),
+        results=[{"rule_id": "STD-01", "item": "废止标准", "severity": "high", "hit": False}],
+    )
 
     # 写入一行为**损坏** JSON 的一致性审计，模拟历史脏数据
     await db.execute(
-        "INSERT INTO consistency_audit (id, scheme_id, project_id, score,"
-        " issues, created_at) VALUES (?,?,?,?,?,?)",
-        (uuid.uuid4().hex, sid, "", 55, "{not valid json", _now()))
+        "INSERT INTO consistency_audit (id, scheme_id, project_id, score," " issues, created_at) VALUES (?,?,?,?,?,?)",
+        (uuid.uuid4().hex, sid, "", 55, "{not valid json", _now()),
+    )
     await db.commit()
 
     payload = await _readiness_overview_compute(db, sid, persist=False)
@@ -257,14 +369,11 @@ async def test_single_source_failure_does_not_break_overview(
     assert isinstance(payload["total"], (int, float))
     assert payload["grade"] in ("A", "B", "C", "D")
     # 脏 JSON 走 except JSONDecodeError → issues=[] → 不产出 CON-04-* finding
-    con04_ids = [f for f in payload["findings"]
-                 if f.get("rule_id", "").startswith("CON-04-")]
-    assert not con04_ids, (
-        f"损坏 JSON 不得产生 CON-04-* finding，实际 {con04_ids}")
+    con04_ids = [f for f in payload["findings"] if f.get("rule_id", "").startswith("CON-04-")]
+    assert not con04_ids, f"损坏 JSON 不得产生 CON-04-* finding，实际 {con04_ids}"
 
 
-async def test_export_source_swallowed_when_routers_export_missing(
-        ov_db, monkeypatch):
+async def test_export_source_swallowed_when_routers_export_missing(ov_db, monkeypatch):
     """导出预检子模块抛异常 → sources 不含 export_check，但总检仍返回。"""
     db, sid = ov_db
     await _add_section(db, sid, title="工程概况", content="概况" * 200)
@@ -277,10 +386,13 @@ async def test_export_source_swallowed_when_routers_export_missing(
     # 但 readiness_overview 每次调用都走 from app.routers.export import ...
     # 内部语句 —— 此处通过 patch app.routers.export.collect_export_issues 生效
     import app.routers.export as _exp
+
     orig = _exp.collect_export_issues
     try:
+
         async def _broken(*a, **k):
             raise RuntimeError("导出预检不可用")
+
         monkeypatch.setattr(_exp, "collect_export_issues", _broken)
         payload = await _readiness_overview_compute(db, sid, persist=False)
     finally:
@@ -301,6 +413,7 @@ async def test_concurrent_overview_shares_one_lock_and_cache(ov_db):
     await db.commit()
 
     import asyncio
+
     results = await asyncio.gather(
         readiness_overview(sid, db, force=False),
         readiness_overview(sid, db, force=False),
@@ -365,24 +478,24 @@ async def test_stale_flag_flips_when_content_changes(ov_db):
     sec = await cur.fetchone()
     await db.execute(
         "UPDATE sections SET content=?, word_count=? WHERE id=?",
-        ("彻底改过的内容" * 200, len("彻底改过的内容" * 200), sec["id"]))
+        ("彻底改过的内容" * 200, len("彻底改过的内容" * 200), sec["id"]),
+    )
     await db.commit()
 
     # 缓存 TTL 内直接请求会命中缓存（cached=True 且 stale=False 是**缓存语义**）
     # 这里走 force=True 强制重算以观察指纹变化
     second = await readiness_overview(sid, db, force=True)
-    assert second["content_fingerprint"] != fp1, (
-        "正文变更后指纹必须改变，否则 G3 时效判定失效")
+    assert second["content_fingerprint"] != fp1, "正文变更后指纹必须改变，否则 G3 时效判定失效"
 
     # 走 /runs 观察 stale
     from app.routers.compliance import list_preflight_runs
+
     runs = await list_preflight_runs(sid, 10, db)
     assert runs["items"], "/runs 必须能读到刚才两次总检的历史"
     # 最新一条 stale=False（就是刚重算的那条），旧的一条 stale=True
     assert runs["items"][0]["stale"] is False
     if len(runs["items"]) >= 2:
-        assert runs["items"][1]["stale"] is True, (
-            "正文变更后，旧历史条目的 stale 必须翻为 True")
+        assert runs["items"][1]["stale"] is True, "正文变更后，旧历史条目的 stale 必须翻为 True"
 
 
 # ===========================================================================
@@ -403,20 +516,38 @@ async def test_severity_penalty_matches_score_findings(ov_db):
     """
     db, sid = ov_db
     await _insert_consistency_audit(
-        db, sid, score=60,
+        db,
+        sid,
+        score=60,
         issues=[
-            {"severity": "high", "dimension": "红线",
-             "content_quote": "q", "fact": "f", "section_title": "t",
-             "suggestion": "s"},
-            {"severity": "medium", "dimension": "x",
-             "content_quote": "q", "fact": "f", "section_title": "t",
-             "suggestion": "s"},
+            {
+                "severity": "high",
+                "dimension": "红线",
+                "content_quote": "q",
+                "fact": "f",
+                "section_title": "t",
+                "suggestion": "s",
+            },
+            {
+                "severity": "medium",
+                "dimension": "x",
+                "content_quote": "q",
+                "fact": "f",
+                "section_title": "t",
+                "suggestion": "s",
+            },
             # block 应被降级为 medium（守护 severity 命名空间口径）
-            {"severity": "block", "dimension": "越权",
-             "content_quote": "q", "fact": "f", "section_title": "t",
-             "suggestion": "s"},
+            {
+                "severity": "block",
+                "dimension": "越权",
+                "content_quote": "q",
+                "fact": "f",
+                "section_title": "t",
+                "suggestion": "s",
+            },
         ],
-        created_at=_now())
+        created_at=_now(),
+    )
     await db.commit()
 
     payload = await _readiness_overview_compute(db, sid, persist=False)
@@ -426,24 +557,25 @@ async def test_severity_penalty_matches_score_findings(ov_db):
     assert counts["medium"] >= 2, f"注入 block 应降级为 medium，实际 {counts}"
     # CON-04-* 全部来自 consistency 源；block 只能出现在 program 源（DLV-01 等）
     con04_blocks = [
-        f for f in payload["findings"]
-        if f.get("rule_id", "").startswith("CON-04-")
-        and f.get("severity") == "block"
+        f for f in payload["findings"] if f.get("rule_id", "").startswith("CON-04-") and f.get("severity") == "block"
     ]
     assert not con04_blocks, (
         "consistency 源（CON-04-*）不得产生 block 级 finding，"
-        f"实际 {[(f['rule_id'], f['severity']) for f in con04_blocks]}")
+        f"实际 {[(f['rule_id'], f['severity']) for f in con04_blocks]}"
+    )
     # 注入的 CON-04-1/2/3 severity 传递与降级必须精确
     con04_1 = [f for f in payload["findings"] if f.get("rule_id") == "CON-04-1"]
     con04_2 = [f for f in payload["findings"] if f.get("rule_id") == "CON-04-2"]
     con04_3 = [f for f in payload["findings"] if f.get("rule_id") == "CON-04-3"]
-    assert con04_1 and con04_1[0]["severity"] == "high", (
-        f"CON-04-1 应为 high，实际 {con04_1[0]['severity'] if con04_1 else None}")
-    assert con04_2 and con04_2[0]["severity"] == "medium", (
-        f"CON-04-2 应为 medium，实际 {con04_2[0]['severity'] if con04_2 else None}")
+    assert (
+        con04_1 and con04_1[0]["severity"] == "high"
+    ), f"CON-04-1 应为 high，实际 {con04_1[0]['severity'] if con04_1 else None}"
+    assert (
+        con04_2 and con04_2[0]["severity"] == "medium"
+    ), f"CON-04-2 应为 medium，实际 {con04_2[0]['severity'] if con04_2 else None}"
     assert con04_3 and con04_3[0]["severity"] == "medium", (
-        f"注入 block 应降级为 medium（CON-04-3），"
-        f"实际 {con04_3[0]['severity'] if con04_3 else None}")
+        f"注入 block 应降级为 medium（CON-04-3），" f"实际 {con04_3[0]['severity'] if con04_3 else None}"
+    )
 
 
 # ===========================================================================
@@ -455,17 +587,14 @@ async def test_persist_false_does_not_write_history(ov_db):
     await _add_section(db, sid, title="工程概况", content="概况" * 200)
     await db.commit()
 
-    cur = await db.execute(
-        "SELECT COUNT(*) AS n FROM preflight_runs WHERE scheme_id=?", (sid,))
+    cur = await db.execute("SELECT COUNT(*) AS n FROM preflight_runs WHERE scheme_id=?", (sid,))
     before = (await cur.fetchone())["n"]
 
     await _readiness_overview_compute(db, sid, persist=False)
 
-    cur = await db.execute(
-        "SELECT COUNT(*) AS n FROM preflight_runs WHERE scheme_id=?", (sid,))
+    cur = await db.execute("SELECT COUNT(*) AS n FROM preflight_runs WHERE scheme_id=?", (sid,))
     after = (await cur.fetchone())["n"]
-    assert before == after, (
-        f"persist=False 不得写 preflight_runs，实际 {before}→{after}")
+    assert before == after, f"persist=False 不得写 preflight_runs，实际 {before}→{after}"
 
 
 # ===========================================================================
@@ -482,36 +611,41 @@ async def test_consistency_scan_exposes_reason_and_authoritative_value(ov_db):
     db, sid = ov_db
     scan_id = "SC-detail-surfacing"
     await _insert_consistency_conflicts(
-        db, sid, scan_id=scan_id,
+        db,
+        sid,
+        scan_id=scan_id,
         rows=[
-            {"id": f"{scan_id}-1", "conflict_type": "numeric",
-             "severity": "high", "topic": "基坑开挖深度", "status": "pending",
-             "occurrences": ["5.6m（工程概况）", "5.8m（施工工艺）"],
-             "authoritative_value": "5.6m", "authoritative_source": "全局事实",
-             "reason": "全局事实已确认 5.6m，施工工艺章节 5.8m 与之矛盾",
-             "repair_instruction": "将施工工艺章节的开挖深度统一为 5.6m"},
+            {
+                "id": f"{scan_id}-1",
+                "conflict_type": "numeric",
+                "severity": "high",
+                "topic": "基坑开挖深度",
+                "status": "pending",
+                "occurrences": ["5.6m（工程概况）", "5.8m（施工工艺）"],
+                "authoritative_value": "5.6m",
+                "authoritative_source": "全局事实",
+                "reason": "全局事实已确认 5.6m，施工工艺章节 5.8m 与之矛盾",
+                "repair_instruction": "将施工工艺章节的开挖深度统一为 5.6m",
+            },
         ],
-        created_at=_now())
+        created_at=_now(),
+    )
     await db.commit()
 
     payload = await _readiness_overview_compute(db, sid, persist=False)
-    scan_findings = [f for f in payload["findings"]
-                     if f.get("rule_id", "").startswith("CON-SCAN-")]
+    scan_findings = [f for f in payload["findings"] if f.get("rule_id", "").startswith("CON-SCAN-")]
     assert len(scan_findings) == 1
     f = scan_findings[0]
-    assert f["authoritative_value"] == "5.6m", (
-        f"权威值必须进入 finding，实际 {f.get('authoritative_value')!r}")
+    assert f["authoritative_value"] == "5.6m", f"权威值必须进入 finding，实际 {f.get('authoritative_value')!r}"
     assert f["authoritative_source"] == "全局事实"
     assert "5.6m" in f["detail"], (
-        f"detail 必须包含权威值（整改报告只印 title/detail/suggestion），"
-        f"实际 {f['detail']!r}")
-    assert "矛盾" in f["detail"], (
-        f"detail 必须包含仲裁理由，不再与 section_title 逐字重复，"
-        f"实际 {f['detail']!r}")
-    assert f["detail"] != f["section_title"], (
-        "detail 不得再与 section_title 逐字重复")
-    assert f["suggestion"] == "将施工工艺章节的开挖深度统一为 5.6m", (
-        f"repair_instruction 必须透传为整改建议，实际 {f.get('suggestion')!r}")
+        f"detail 必须包含权威值（整改报告只印 title/detail/suggestion），" f"实际 {f['detail']!r}"
+    )
+    assert "矛盾" in f["detail"], f"detail 必须包含仲裁理由，不再与 section_title 逐字重复，" f"实际 {f['detail']!r}"
+    assert f["detail"] != f["section_title"], "detail 不得再与 section_title 逐字重复"
+    assert (
+        f["suggestion"] == "将施工工艺章节的开挖深度统一为 5.6m"
+    ), f"repair_instruction 必须透传为整改建议，实际 {f.get('suggestion')!r}"
 
 
 async def test_consistency_scan_detail_falls_back_to_topic_when_no_reason(ov_db):
@@ -519,19 +653,28 @@ async def test_consistency_scan_detail_falls_back_to_topic_when_no_reason(ov_db)
     db, sid = ov_db
     scan_id = "SC-no-reason"
     await _insert_consistency_conflicts(
-        db, sid, scan_id=scan_id,
+        db,
+        sid,
+        scan_id=scan_id,
         rows=[
-            {"id": f"{scan_id}-1", "conflict_type": "numeric",
-             "severity": "medium", "topic": "材料厚度", "status": "pending",
-             "occurrences": [], "authoritative_value": "", "reason": "",
-             "repair_instruction": ""},
+            {
+                "id": f"{scan_id}-1",
+                "conflict_type": "numeric",
+                "severity": "medium",
+                "topic": "材料厚度",
+                "status": "pending",
+                "occurrences": [],
+                "authoritative_value": "",
+                "reason": "",
+                "repair_instruction": "",
+            },
         ],
-        created_at=_now())
+        created_at=_now(),
+    )
     await db.commit()
 
     payload = await _readiness_overview_compute(db, sid, persist=False)
-    f = [x for x in payload["findings"]
-         if x.get("rule_id", "").startswith("CON-SCAN-")][0]
+    f = [x for x in payload["findings"] if x.get("rule_id", "").startswith("CON-SCAN-")][0]
     assert f["detail"] == "材料厚度"
     assert f["authoritative_value"] == ""
     assert "权威值" not in f["detail"], "无权威值时不造「权威值：」残句"

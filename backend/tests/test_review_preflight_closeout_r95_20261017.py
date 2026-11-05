@@ -17,6 +17,7 @@ D. **validate_rule_registry 生产消费接线**（R90 遗留①）：/rules 端
 E. **静态锁**：三处 UPDATE 的 CAS 接线不被悄悄拆回；前端批量反馈
    链路透传 conflicts。
 """
+
 from __future__ import annotations
 
 import inspect
@@ -49,8 +50,7 @@ class _Cur:
 class _StubConn:
     """按 SQL 特征路由的桩。`update_rowcount` 模拟 CAS 生效(1)/被并发(0)。"""
 
-    def __init__(self, *, section_status="pending", scheme_status="pending",
-                 update_rowcount=1, pf_row="default"):
+    def __init__(self, *, section_status="pending", scheme_status="pending", update_rowcount=1, pf_row="default"):
         self.section_status = section_status
         self.scheme_status = scheme_status
         self.update_rowcount = update_rowcount
@@ -63,19 +63,23 @@ class _StubConn:
             if "project_id" in s:
                 return _Cur({"project_id": "p-1"})
             if "FROM sections WHERE id=? AND scheme_id=?" in s:
-                return _Cur({"id": "sec-1", "title": "T",
-                             "review_status": self.section_status})
+                return _Cur({"id": "sec-1", "title": "T", "review_status": self.section_status})
             if "review_status FROM schemes" in s:
-                return _Cur({"id": "s-1", "name": "S", "status": "草稿",
-                             "review_status": self.scheme_status})
+                return _Cur({"id": "s-1", "name": "S", "status": "草稿", "review_status": self.scheme_status})
             if "FROM schemes WHERE id=?" in s:
                 return _Cur({"id": "s-1"})
             if "FROM preflight_runs" in s:
                 if self.pf_row == "none":
                     return _Cur(None)
-                return _Cur({"blocked": 0, "released": 1,
-                             "content_fingerprint": "", "total": 88,
-                             "created_at": "2026-10-17 00:00:00"})
+                return _Cur(
+                    {
+                        "blocked": 0,
+                        "released": 1,
+                        "content_fingerprint": "",
+                        "total": 88,
+                        "created_at": "2026-10-17 00:00:00",
+                    }
+                )
             if "FROM sections WHERE scheme_id=?" in s or "MAX(updated_at)" in s:
                 return _Cur(None)
             return _Cur(None)
@@ -107,8 +111,8 @@ class TestBatchCASFallback:
     async def test_happy_path_still_changes_and_records(self):
         conn = _StubConn(section_status="pending", update_rowcount=1)
         out = await rv.batch_review_sections(
-            "s-1", {"section_ids": ["sec-1"], "to_status": "approved",
-                    "reviewer": "张三", "comment": ""}, conn)
+            "s-1", {"section_ids": ["sec-1"], "to_status": "approved", "reviewer": "张三", "comment": ""}, conn
+        )
         assert out["changed"] == 1 and out["conflicts"] == []
         upd = _update_writes(conn)[0]
         # CAS：WHERE 带期望状态，参数含读到的 from_status
@@ -120,8 +124,8 @@ class TestBatchCASFallback:
         """并发方在 SELECT→UPDATE 窗口改写状态（0 行）→ conflicts，绝不落痕。"""
         conn = _StubConn(section_status="pending", update_rowcount=0)
         out = await rv.batch_review_sections(
-            "s-1", {"section_ids": ["sec-1"], "to_status": "approved",
-                    "reviewer": "张三", "comment": ""}, conn)
+            "s-1", {"section_ids": ["sec-1"], "to_status": "approved", "reviewer": "张三", "comment": ""}, conn
+        )
         assert out["changed"] == 0
         assert out["conflicts"] == ["sec-1"]
         assert out["changed_ids"] == []
@@ -131,16 +135,16 @@ class TestBatchCASFallback:
         """契约锁定：conflicts 恒存在（前端按其长度决定是否警示）。"""
         conn = _StubConn(update_rowcount=1)
         out = await rv.batch_review_sections(
-            "s-1", {"section_ids": ["sec-1"], "to_status": "approved",
-                    "reviewer": "张三", "comment": ""}, conn)
+            "s-1", {"section_ids": ["sec-1"], "to_status": "approved", "reviewer": "张三", "comment": ""}, conn
+        )
         assert "conflicts" in out
 
     async def test_self_transition_never_reaches_update(self):
         """已是目标态 → nochange（幂等），CAS 语句根本不发。"""
         conn = _StubConn(section_status="approved")
         out = await rv.batch_review_sections(
-            "s-1", {"section_ids": ["sec-1"], "to_status": "approved",
-                    "reviewer": "张三", "comment": ""}, conn)
+            "s-1", {"section_ids": ["sec-1"], "to_status": "approved", "reviewer": "张三", "comment": ""}, conn
+        )
         assert out["nochange"] == ["sec-1"]
         assert _update_writes(conn) == []
 
@@ -152,17 +156,13 @@ class TestSectionAndSubmitCasing:
     async def test_section_race_returns_409(self):
         conn = _StubConn(section_status="pending", update_rowcount=0)
         with pytest.raises(HTTPException) as exc:
-            await rv.review_section(
-                "s-1", "sec-1",
-                SectionReviewIn(to_status="approved", reviewer="张三"), conn)
+            await rv.review_section("s-1", "sec-1", SectionReviewIn(to_status="approved", reviewer="张三"), conn)
         assert exc.value.status_code == 409
         assert _record_inserts(conn) == []
 
     async def test_section_happy_path_returns_changed(self):
         conn = _StubConn(section_status="reviewing", update_rowcount=1)
-        out = await rv.review_section(
-            "s-1", "sec-1",
-            SectionReviewIn(to_status="approved", reviewer="张三"), conn)
+        out = await rv.review_section("s-1", "sec-1", SectionReviewIn(to_status="approved", reviewer="张三"), conn)
         assert out["changed"] is True
         upd = _update_writes(conn)[0]
         assert "COALESCE(review_status,'')=?" in upd[0]
@@ -171,16 +171,14 @@ class TestSectionAndSubmitCasing:
     async def test_submit_race_returns_409_not_fake_ok(self):
         conn = _StubConn(scheme_status="pending", update_rowcount=0)
         with pytest.raises(HTTPException) as exc:
-            await rv.submit_scheme_review(
-                "s-1", SchemeReviewIn(to_status="approved", reviewer="张三"), conn)
+            await rv.submit_scheme_review("s-1", SchemeReviewIn(to_status="approved", reviewer="张三"), conn)
         assert exc.value.status_code == 409
 
     async def test_submit_illegal_legacy_status_keeps_escape_hatch(self):
         """库内残留非法 review_status：from_status 归一为空串，
         CAS 谓词 `? = ''` 放行覆盖推进（2026-09-17 既有语义不回退）。"""
         conn = _StubConn(scheme_status="已发布", update_rowcount=1)
-        out = await rv.submit_scheme_review(
-            "s-1", SchemeReviewIn(to_status="approved", reviewer="张三"), conn)
+        out = await rv.submit_scheme_review("s-1", SchemeReviewIn(to_status="approved", reviewer="张三"), conn)
         assert out["ok"] is True
         upd = _update_writes(conn)[0]
         assert "? = ''" in upd[0]
@@ -206,36 +204,36 @@ class TestCasSqlSemantics:
     def test_expectation_mismatch_matches_zero_rows(self):
         conn = _fresh_db("pending")
         cur = conn.execute(
-            "UPDATE sections SET review_status=? WHERE id=?"
-            " AND COALESCE(review_status,'')=?",
-            ("approved", "sec-1", "reviewing"))
+            "UPDATE sections SET review_status=? WHERE id=?" " AND COALESCE(review_status,'')=?",
+            ("approved", "sec-1", "reviewing"),
+        )
         assert cur.rowcount == 0, "期望状态不符必须 0 行（CAS 的判据本身）"
 
     def test_expectation_match_and_null_coalesce(self):
         conn = _fresh_db("pending")
         cur = conn.execute(
-            "UPDATE sections SET review_status=? WHERE id=?"
-            " AND COALESCE(review_status,'')=?",
-            ("approved", "sec-1", "pending"))
+            "UPDATE sections SET review_status=? WHERE id=?" " AND COALESCE(review_status,'')=?",
+            ("approved", "sec-1", "pending"),
+        )
         assert cur.rowcount == 1
         conn2 = _fresh_db(None)  # NULL 行
         cur2 = conn2.execute(
-            "UPDATE sections SET review_status=? WHERE id=?"
-            " AND COALESCE(review_status,'')=?",
-            ("approved", "sec-1", ""))
+            "UPDATE sections SET review_status=? WHERE id=?" " AND COALESCE(review_status,'')=?",
+            ("approved", "sec-1", ""),
+        )
         assert cur2.rowcount == 1, "NULL 必须被 COALESCE 归一为空串期望所命中"
 
     def test_escape_hatch_semantics(self):
         conn = _fresh_db("已发布")  # 非法残留状态
         cur = conn.execute(
-            "UPDATE sections SET review_status=? WHERE id=?"
-            " AND (? = '' OR COALESCE(review_status,'') = ?)",
-            ("approved", "sec-1", "", ""))
+            "UPDATE sections SET review_status=? WHERE id=?" " AND (? = '' OR COALESCE(review_status,'') = ?)",
+            ("approved", "sec-1", "", ""),
+        )
         assert cur.rowcount == 1, "期望为空串时必须无条件放行（逃生门）"
         cur2 = conn.execute(
-            "UPDATE sections SET review_status=? WHERE id=?"
-            " AND (? = '' OR COALESCE(review_status,'') = ?)",
-            ("approved", "sec-1", "pending", "pending"))
+            "UPDATE sections SET review_status=? WHERE id=?" " AND (? = '' OR COALESCE(review_status,'') = ?)",
+            ("approved", "sec-1", "pending", "pending"),
+        )
         assert cur2.rowcount == 0, "非空期望对非法残留行必须失配"
 
 
@@ -247,21 +245,19 @@ class TestRulesEndpointSelfCheck:
         out = await compliance.list_rules()
         assert out["registry_problems"] == [], "当前注册表健康，契约键必须存在且为空"
         # 原有契约零变化
-        for k in ("rule_version", "items", "dimensions",
-                  "standard_db_version", "standard_db_checked_at"):
+        for k in ("rule_version", "items", "dimensions", "standard_db_version", "standard_db_checked_at"):
             assert k in out
 
     async def test_drift_is_surfaced_and_logged(self, monkeypatch, caplog):
         from app.services import audit_rules as ar
+
         saved = ar.RULE_MAP
-        monkeypatch.setattr(ar, "RULE_MAP",
-                            {k: v for k, v in saved.items() if k != "DLV-13"})
+        monkeypatch.setattr(ar, "RULE_MAP", {k: v for k, v in saved.items() if k != "DLV-13"})
         with caplog.at_level("ERROR", logger="compliance"):
             out = await compliance.list_rules()
         assert out["registry_problems"], "摘除 DLV-13 注册必须被自检发现"
         assert any("DLV-13" in p for p in out["registry_problems"])
-        assert any("漂移" in r.message for r in caplog.records), \
-            "生产分叉必须落 ERROR 日志（可观测性）"
+        assert any("漂移" in r.message for r in caplog.records), "生产分叉必须落 ERROR 日志（可观测性）"
 
     def test_list_rules_actually_calls_validator(self):
         """静态锁：接线不许被悄悄拆回（此前生产零消费，仅 CI 触发）。"""
@@ -275,8 +271,7 @@ class TestRulesEndpointSelfCheck:
 # ===========================================================================
 class TestStaticWiringLocks:
     def test_three_update_sites_are_cas(self):
-        for fn in (rv.batch_review_sections, rv.review_section,
-                   rv.submit_scheme_review):
+        for fn in (rv.batch_review_sections, rv.review_section, rv.submit_scheme_review):
             src = inspect.getsource(fn)
             assert "COALESCE(review_status,'')" in src, fn.__name__
             assert "require_rows=False" in src, fn.__name__
@@ -288,9 +283,14 @@ class TestStaticWiringLocks:
             assert not naked.search(inspect.getsource(fn))
 
     def test_frontend_surfaces_conflicts(self):
-        p = (Path(__file__).resolve().parents[2]
-             / "frontend" / "src" / "components" / "review"
-             / "ReviewWorkflowPanel.tsx")
+        p = (
+            Path(__file__).resolve().parents[2]
+            / "frontend"
+            / "src"
+            / "components"
+            / "review"
+            / "ReviewWorkflowPanel.tsx"
+        )
         src = p.read_text(encoding="utf-8")
         assert "data.conflicts" in src, "批量反馈链路必须透传 conflicts"
         assert "并发操作修改" in src
@@ -299,6 +299,6 @@ class TestStaticWiringLocks:
         """基线 2 失败用例的锚点订正不复归：T7 断言必须锚渲染段。"""
         tp = Path(__file__).resolve().parent / "test_audit_fixes_20260927.py"
         src = tp.read_text(encoding="utf-8")
-        seg = src[src.index("class TestAIRenderCountNotDiscardedT7"):]
+        seg = src[src.index("class TestAIRenderCountNotDiscardedT7") :]
         assert "inspect.getsource(_prepare_export_render)" in seg
         assert "inspect.getsource(_prepare_export)" in seg  # 取数段声明仍锚原函数

@@ -12,6 +12,7 @@
 服务端用 ``compliance._readiness_overview_compute`` 的同一套口径重新算出
 findings 再取那一条，保证「用户点的那条」与「系统判的那条」逐字一致。
 """
+
 from __future__ import annotations
 
 # ruff: noqa: I001 —— R13 契约：review_db 必须单独一行，护栏 test_review_db_is_imported 锁
@@ -33,26 +34,29 @@ from app.services import review_db  # noqa: I001
 from app.services.audit_rules import active_rules
 
 logger = logging.getLogger("review_autofix")
-router = APIRouter(
-    prefix="/api/v1/schemes/{scheme_id}/review/autofix",
-    tags=["review"])
+router = APIRouter(prefix="/api/v1/schemes/{scheme_id}/review/autofix", tags=["review"])
+
 
 async def _load_scheme(db, scheme_id: str) -> dict:
     row = await review_db.fetch_one(
-        db, "SELECT id, project_id, name, type FROM schemes WHERE id=?", (scheme_id,),
-        what="自动修复：读取方案")
+        db, "SELECT id, project_id, name, type FROM schemes WHERE id=?", (scheme_id,), what="自动修复：读取方案"
+    )
     if not row:
         raise HTTPException(404, "方案不存在")
     return row
 
+
 async def _load_sections(db, scheme_id: str) -> list[dict]:
     """载入章节（id/title/content），按目录树前序 DFS 排序（与预检同口径）。"""
     from app.services.content_utils import order_sections_dfs
+
     rows = await review_db.fetch_all(
         db,
         "SELECT id, parent_id, title, content, word_count, level, status, sort_order"
-        " FROM sections WHERE scheme_id=? ORDER BY sort_order", (scheme_id,),
-        what="自动修复：读取章节")
+        " FROM sections WHERE scheme_id=? ORDER BY sort_order",
+        (scheme_id,),
+        what="自动修复：读取章节",
+    )
     return order_sections_dfs(rows)
 
 
@@ -64,11 +68,11 @@ def _guard_not_generating(scheme_id: str, action: str) -> None:
     局部导入 invalidate_consistency_scan_cache 同一手法）。
     """
     from app.routers.sections import ensure_no_generation_write
+
     ensure_no_generation_write(scheme_id, action)
 
 
-async def _resolve_finding(db, scheme_id: str, rule_id: str,
-                           section_id: str = "") -> dict:
+async def _resolve_finding(db, scheme_id: str, rule_id: str, section_id: str = "") -> dict:
     """按 rule_id 从**当前总检口径**重新派生那一条 finding。
     复用 ``compliance._readiness_overview_compute``（与总检页完全同一套聚合
     逻辑），不另写一份解析 —— 否则两处分叉就会出现「界面显示可修、后端说
@@ -76,19 +80,22 @@ async def _resolve_finding(db, scheme_id: str, rule_id: str,
     悄悄改到别的章比直接报错危险得多。
     """
     from app.routers.compliance import _readiness_overview_compute
+
     # persist=False（2026-10-03 数据链收口）：修复链路重算只取 findings，
     # 不得落 preflight_runs —— 否则每点一次定位/修复都污染分数趋势。
     payload = await _readiness_overview_compute(db, scheme_id, persist=False)
-    hits = [f for f in (payload.get("findings") or [])
-            if (f.get("rule_id") or "") == (rule_id or "")]
+    hits = [f for f in (payload.get("findings") or []) if (f.get("rule_id") or "") == (rule_id or "")]
     if section_id:
         hits = [f for f in hits if (f.get("section_id") or "") == section_id]
     if not hits:
         raise HTTPException(
-            404, f"当前检查结果中不存在问题 {rule_id}"
-                 + (f"（章节 {section_id}）" if section_id else "")
-                 + "，请先重新执行「一键总检」")
+            404,
+            f"当前检查结果中不存在问题 {rule_id}"
+            + (f"（章节 {section_id}）" if section_id else "")
+            + "，请先重新执行「一键总检」",
+        )
     return hits[0]
+
 
 # @deprecated 孤儿 API（2026-10-06 核实）：前端**零消费** —— 可修复性是随
 # /overview 的 findings[].autofix 逐条下发的（同一 capability_of 单一来源，
@@ -96,10 +103,10 @@ async def _resolve_finding(db, scheme_id: str, rule_id: str,
 # 端点保留供脚本/CI 直接读全量能力表（48 条规则 × mode/reason），
 # 数据被 /overview 覆盖，故按仓库惯例挂 deprecated（同 compliance /preflight）。
 @router.get("/capabilities", deprecated=True)
-async def capabilities(scheme_id: str = "", db=Depends(get_db),
-                       response: Response = None):
+async def capabilities(scheme_id: str = "", db=Depends(get_db), response: Response = None):
     """全部规则的自动修复能力表（脚本/诊断用；UI 判据走 findings[].autofix）。"""
     from app.routers.compliance import _apply_deprecation_headers
+
     _apply_deprecation_headers(
         response,
         replacement="/api/v1/compliance/overview/{scheme_id}（findings[].autofix）",
@@ -107,15 +114,19 @@ async def capabilities(scheme_id: str = "", db=Depends(get_db),
     items = []
     for rule in active_rules():
         cap = review_autofix.capability_of(rule.rule_id)
-        items.append({
-            "rule_id": rule.rule_id, "title": rule.title,
-            "dimension": rule.dimension, "severity": rule.severity,
-            "mode": cap.mode,
-            "fixable": cap.mode in (review_autofix.FIX_MODE_AUTO,
-                                    review_autofix.FIX_MODE_AI),
-            "reason": cap.reason,
-        })
+        items.append(
+            {
+                "rule_id": rule.rule_id,
+                "title": rule.title,
+                "dimension": rule.dimension,
+                "severity": rule.severity,
+                "mode": cap.mode,
+                "fixable": cap.mode in (review_autofix.FIX_MODE_AUTO, review_autofix.FIX_MODE_AI),
+                "reason": cap.reason,
+            }
+        )
     return {"items": items, "total": len(items)}
+
 
 @router.post("/plan")
 async def plan(scheme_id: str, body: dict | None = None, db=Depends(get_db)):
@@ -128,25 +139,43 @@ async def plan(scheme_id: str, body: dict | None = None, db=Depends(get_db)):
     if not rule_id:
         raise HTTPException(422, "缺少 rule_id")
     await _load_scheme(db, scheme_id)
-    finding = await _resolve_finding(db, scheme_id, rule_id,
-                                     str(body.get("section_id") or ""))
+    finding = await _resolve_finding(db, scheme_id, rule_id, str(body.get("section_id") or ""))
     cap = review_autofix.capability_of(rule_id)
     if cap.mode == review_autofix.FIX_MODE_MANUAL:
-        return {"ok": False, "fixable": False, "mode": cap.mode,
-                "reason": cap.reason, "finding": finding, "targets": []}
+        return {
+            "ok": False,
+            "fixable": False,
+            "mode": cap.mode,
+            "reason": cap.reason,
+            "finding": finding,
+            "targets": [],
+        }
     sections = await _load_sections(db, scheme_id)
     targets = review_autofix.locate_targets(finding, sections)
+    if targets:
+        reason = ""
+    elif not (finding.get("section_id") or finding.get("section_title")):
+        # ✅ B-05（R175）：不能只给 ok=false。明确区分「没定位到章节」与
+        #    「规则本身不可自动修」，并给出可执行的下一步。
+        reason = (
+            f"「{rule_id}」未产生章节定位（既无 section_id / section_title，"
+            f"也未在目录中匹配到该规则对应的目标章节）。请先到「目录生成」"
+            f"确认对应章节是否存在，或按整改建议人工补齐。"
+        )
+    else:
+        reason = "已定位到目标章节，但未能在正文中定位到具体改写位置。为避免无依据" "改写正文，请按整改建议人工处理。"
     return {
-        "ok": bool(targets), "fixable": bool(targets), "mode": cap.mode,
-        "reason": "" if targets else
-                  "未能在正文中定位到该问题的具体位置，为避免无依据改写正文，"
-                  "请按整改建议人工处理。",
-        "finding": finding, "targets": targets,
+        "ok": bool(targets),
+        "fixable": bool(targets),
+        "mode": cap.mode,
+        "reason": reason,
+        "finding": finding,
+        "targets": targets,
         "max_sections": review_autofix.AUTOFIX_MAX_SECTIONS,
     }
 
-async def _persist_fixed(db, *, scheme_id: str, rule_id: str,
-                        pending: list, repair_id: str = "") -> str:
+
+async def _persist_fixed(db, *, scheme_id: str, rule_id: str, pending: list, repair_id: str = "") -> str:
     """把校验通过的修复结果落库，返回快照 id（回滚凭据）。
     口径与人工编辑 / 一致性修复完全一致（复用同一批唯一实现）：
     ``word_count`` / ``word_status`` 用 ``content_utils`` 唯一口径重算；
@@ -158,17 +187,22 @@ async def _persist_fixed(db, *, scheme_id: str, rule_id: str,
     from app.routers._chart_pipeline import resync_inline_charts
     from app.routers.sections import invalidate_consistency_scan_cache
     from app.services import repair_record
-    from app.services.content_utils import (
-        DEFAULT_WORD_BUDGET, text_word_count, word_status_for)
+    from app.services.content_utils import DEFAULT_WORD_BUDGET, text_word_count, word_status_for
+
     # 修复前快照：回滚的唯一凭据（回滚本身也会再存一份撤销快照）
     snapshot_id = await repair_record.create_snapshot(
-        db, scheme_id,
+        db,
+        scheme_id,
         [{"section_id": sid, "content_before": before} for sid, before, _ in pending],
-        snapshot_type="review_autofix")
+        snapshot_type="review_autofix",
+    )
     for sid, _before, after in pending:
         row = await review_db.fetch_one(
-            db, "SELECT word_budget FROM sections WHERE id=?", (sid,),
-            what=f"自动修复落库：读取章节字数预算（section={sid[:8]}）")
+            db,
+            "SELECT word_budget FROM sections WHERE id=?",
+            (sid,),
+            what=f"自动修复落库：读取章节字数预算（section={sid[:8]}）",
+        )
         budget = (row["word_budget"] if row else None) or DEFAULT_WORD_BUDGET
         # ✅ R92（2026-10-17 · 正文写点同步补链）：审核预检自动修复整章改写了正文，
         #    须在同事务内（commit 在函数末尾）按修复后正文全量重登记本章内联图表，
@@ -178,13 +212,11 @@ async def _persist_fixed(db, *, scheme_id: str, rule_id: str,
         #    正文，绝不阻断修复落库。enforce_limits=False：同手动保存 B31 口径。
         _persist_content = after
         try:
-            _n, _fixed = await resync_inline_charts(
-                db, scheme_id, sid, after, enforce_limits=False)
+            _n, _fixed = await resync_inline_charts(db, scheme_id, sid, after, enforce_limits=False)
             if _fixed:
                 _persist_content = _fixed
         except Exception as _re:  # noqa: BLE001 - 登记失败不阻断正文落库
-            logger.warning("自动修复落库：章节 %s 图表重登记失败（保留原正文）: %s",
-                           sid[:8], _re)
+            logger.warning("自动修复落库：章节 %s 图表重登记失败（保留原正文）: %s", sid[:8], _re)
         wc = text_word_count(_persist_content)
         # ✅ R13（2026-10-06）：旧实现丢弃返回值 —— 正文 UPDATE 返回 None 时
         #    循环照常走完、commit 成功、函数返回快照 id，端点据此返回 ok=True。
@@ -192,14 +224,17 @@ async def _persist_fixed(db, *, scheme_id: str, rule_id: str,
         #    且审核状态被真的退回了（半生效比不生效更糟：结论与正文彻底脱节）。
         await review_db.exec_write(
             db,
-            "UPDATE sections SET content=?, word_count=?, word_status=?,"
-            " updated_at=? WHERE id=?",
-            (_persist_content, wc, word_status_for(wc, budget),
-             datetime.now().isoformat(), sid),
-            what=f"自动修复落库：写入正文（section={sid[:8]}）")
+            "UPDATE sections SET content=?, word_count=?, word_status=?," " updated_at=? WHERE id=?",
+            (_persist_content, wc, word_status_for(wc, budget), datetime.now().isoformat(), sid),
+            what=f"自动修复落库：写入正文（section={sid[:8]}）",
+        )
         await reset_review_on_content_change(
-            db, scheme_id, sid, actor="审核预检自动修复",
-            comment=f"按问题 {rule_id} 自动修复正文，原审核结论失效，请重新送审")
+            db,
+            scheme_id,
+            sid,
+            actor="审核预检自动修复",
+            comment=f"按问题 {rule_id} 自动修复正文，原审核结论失效，请重新送审",
+        )
     # 正文已变 → 一致性扫描缓存的 content_hash 自动失效；标题亦可能随补充
     # 内容变化，按结构变更口径再清一次更保险（按 scheme 隔离，不误清其它方案）
     await invalidate_consistency_scan_cache(db, scheme_id)
@@ -213,12 +248,14 @@ async def _persist_fixed(db, *, scheme_id: str, rule_id: str,
         await review_db.exec_write(
             db,
             "UPDATE consistency_repairs SET snapshot_id=? WHERE id=?",
-            (snapshot_id, repair_id), what="自动修复：回填快照 id 到留痕行",
-            require_rows=False)
+            (snapshot_id, repair_id),
+            what="自动修复：回填快照 id 到留痕行",
+            require_rows=False,
+        )
     await db.commit()
-    logger.info("审核预检自动修复 rule=%s：已落库 %d 章（快照 %s）",
-                rule_id, len(pending), snapshot_id)
+    logger.info("审核预检自动修复 rule=%s：已落库 %d 章（快照 %s）", rule_id, len(pending), snapshot_id)
     return snapshot_id
+
 
 @router.post("/apply")
 async def apply(scheme_id: str, body: dict | None = None, db=Depends(get_db)):
@@ -229,33 +266,40 @@ async def apply(scheme_id: str, body: dict | None = None, db=Depends(get_db)):
         raise HTTPException(422, "缺少 rule_id")
     scheme = await _load_scheme(db, scheme_id)
     _guard_not_generating(scheme_id, "自动修复落库")
-    finding = await _resolve_finding(db, scheme_id, rule_id,
-                                     str(body.get("section_id") or ""))
+    finding = await _resolve_finding(db, scheme_id, rule_id, str(body.get("section_id") or ""))
     sections = await _load_sections(db, scheme_id)
     # AI 改写的依据：全局事实（数值权威值）+ 现行标准清单（编号权威值）
     facts = ""
     standards_text = ""
     try:
         from app.services.consistency_scanner import build_global_facts_text, build_standards_text
+
         facts = await build_global_facts_text(db, scheme_id, limit=3000)
-        standards_text = build_standards_text(scheme.get("name") or "",
-                                              scheme.get("type") or "")
+        standards_text = build_standards_text(scheme.get("name") or "", scheme.get("type") or "")
     except Exception as e:  # 依据缺失只降级，不阻断修复
         logger.warning("自动修复：构建事实 / 标准依据失败（降级为空）: %s", e)
     res = await review_autofix.apply_fix(
-        db, scheme_id=scheme_id, finding=finding, sections=sections,
-        scheme=scheme, facts=facts, standards_text=standards_text)
+        db,
+        scheme_id=scheme_id,
+        finding=finding,
+        sections=sections,
+        scheme=scheme,
+        facts=facts,
+        standards_text=standards_text,
+    )
     pending = res.pop("pending", []) or []
     if pending:
         res["snapshot_id"] = await _persist_fixed(
-            db, scheme_id=scheme_id, rule_id=rule_id, pending=pending,
-            repair_id=res.get("repair_id", ""))
+            db, scheme_id=scheme_id, rule_id=rule_id, pending=pending, repair_id=res.get("repair_id", "")
+        )
     return res
+
 
 @router.post("/rollback")
 async def rollback(scheme_id: str, body: dict | None = None, db=Depends(get_db)):
     """按快照一键回滚自动修复（只影响该快照涉及的章节）。"""
     from app.services import repair_record
+
     body = body or {}
     snapshot_id = str(body.get("snapshot_id") or "")
     if not snapshot_id:
@@ -273,29 +317,35 @@ async def rollback(scheme_id: str, body: dict | None = None, db=Depends(get_db))
     from app.routers._chart_pipeline import resync_inline_charts
 
     async def _resync(_db, _sid, _content):
-        await resync_inline_charts(_db, scheme_id, _sid, _content,
-                                   enforce_limits=False)
+        await resync_inline_charts(_db, scheme_id, _sid, _content, enforce_limits=False)
 
     try:
         result = await repair_record.rollback_snapshot(
-            db, snapshot_id, undo_type="review_autofix_rollback",
-            resync_fn=_resync)
+            db, snapshot_id, undo_type="review_autofix_rollback", resync_fn=_resync
+        )
     except KeyError:
         raise HTTPException(404, "快照不存在")
     # 回滚同样改写正文 → 审核结论再次失效，退回待审核并留痕
     for sec in snap.get("sections") or []:
         await reset_review_on_content_change(
-            db, scheme_id, sec.get("section_id") or "",
+            db,
+            scheme_id,
+            sec.get("section_id") or "",
             actor="审核预检自动修复·回滚",
-            comment="已回滚自动修复内容，恢复修复前正文，请重新送审")
+            comment="已回滚自动修复内容，恢复修复前正文，请重新送审",
+        )
     await db.commit()
     # 修复批次状态同步（与一致性修复的 rollback 同口径）
     rows = await review_db.fetch_all(
-        db, "SELECT id FROM consistency_repairs WHERE snapshot_id=? AND scheme_id=?",
-        (snapshot_id, scheme_id), what="自动修复回滚：定位待标记的修复批次")
+        db,
+        "SELECT id FROM consistency_repairs WHERE snapshot_id=? AND scheme_id=?",
+        (snapshot_id, scheme_id),
+        what="自动修复回滚：定位待标记的修复批次",
+    )
     for r in rows:
         await repair_record.mark_repair_status(db, r["id"], "rolled_back")
     return {"status": "rolled_back", **result}
+
 
 @router.get("/repairs")
 async def list_repairs(scheme_id: str, limit: int = 20, db=Depends(get_db)):
@@ -307,14 +357,18 @@ async def list_repairs(scheme_id: str, limit: int = 20, db=Depends(get_db)):
     未来的「修复历史」面板直接使用。
     """
     from app.services import repair_record
+
     await _load_scheme(db, scheme_id)
     items = await repair_record.list_repairs(db, scheme_id, limit)
     return {"items": [i for i in items if i.get("mode") in ("review_autofix", "review_autofix_batch")]}
+
+
 # ---------------------------------------------------------------------------
 # 批量：发现收集（只读）→ 暂存（定位/改写/校验，不落库）→ 确认（落库/回滚）
 # ---------------------------------------------------------------------------
 def _severity_rank(sev: str) -> int:
     return {"block": 0, "high": 1, "medium": 2, "low": 3}.get(sev or "", 9)
+
 
 def _merged_after_if_prefix(items: list[dict], accepted_ids: set) -> str | None:
     """同章多条问题时，若接受集合恰为链式前缀，取**最后一条被接受项**的 after。
@@ -335,11 +389,12 @@ def _merged_after_if_prefix(items: list[dict], accepted_ids: set) -> str | None:
     for it in ordered:
         if it.get("rule_id") in accepted_ids:
             if seen_rejected:
-                return None      # 非前缀 → 交由调用方重新链式改写
+                return None  # 非前缀 → 交由调用方重新链式改写
             last_accepted_after = it.get("after")
         else:
             seen_rejected = True
     return last_accepted_after
+
 
 async def _build_facts(db, scheme: dict) -> tuple[str, str]:
     """构建自动修复的 AI 依据：全局事实（数值权威值）+ 现行标准清单。"""
@@ -347,12 +402,13 @@ async def _build_facts(db, scheme: dict) -> tuple[str, str]:
     standards_text = ""
     try:
         from app.services.consistency_scanner import build_global_facts_text, build_standards_text
+
         facts = await build_global_facts_text(db, scheme.get("id") or "", limit=3000)
-        standards_text = build_standards_text(
-            scheme.get("name") or "", scheme.get("type") or "")
+        standards_text = build_standards_text(scheme.get("name") or "", scheme.get("type") or "")
     except Exception as e:  # 依据缺失只降级，不阻断修复
         logger.warning("自动修复：构建事实 / 标准依据失败（降级为空）: %s", e)
     return facts, standards_text
+
 
 @router.post("/collect")
 async def collect(scheme_id: str, body: dict | None = None, db=Depends(get_db)):
@@ -365,6 +421,7 @@ async def collect(scheme_id: str, body: dict | None = None, db=Depends(get_db)):
     """
     from app.routers.compliance import _readiness_overview_compute
     from app.services import review_autofix
+
     body = body or {}
     scope = str(body.get("scope") or "all_blocking").strip()
     await _load_scheme(db, scheme_id)
@@ -374,9 +431,7 @@ async def collect(scheme_id: str, body: dict | None = None, db=Depends(get_db)):
     findings = payload.get("findings") or []
     review_autofix.capability_summary(findings)
     if scope == "all_blocking":
-        sel = [f for f in findings
-               if (f.get("severity") == "block")
-               and (f.get("autofix") or {}).get("fixable")]
+        sel = [f for f in findings if (f.get("severity") == "block") and (f.get("autofix") or {}).get("fixable")]
     elif scope == "auto_fixable":
         sel = [f for f in findings if (f.get("autofix") or {}).get("fixable")]
     else:
@@ -388,11 +443,14 @@ async def collect(scheme_id: str, body: dict | None = None, db=Depends(get_db)):
         else:
             f["targets"] = []
     return {
-        "scheme_id": scheme_id, "scope": scope, "total": len(sel),
+        "scheme_id": scheme_id,
+        "scope": scope,
+        "total": len(sel),
         "items": sel,
         "content_fingerprint": payload.get("content_fingerprint"),
         "stale": payload.get("stale", False),
     }
+
 
 @router.post("/stage")
 async def stage(scheme_id: str, body: dict | None = None, db=Depends(get_db)):
@@ -403,6 +461,7 @@ async def stage(scheme_id: str, body: dict | None = None, db=Depends(get_db)):
     """
     from app.routers.compliance import _readiness_overview_compute
     from app.services import review_autofix
+
     body = body or {}
     rule_ids = body.get("rule_ids") or []
     scope = str(body.get("scope") or "all_blocking").strip()
@@ -417,28 +476,45 @@ async def stage(scheme_id: str, body: dict | None = None, db=Depends(get_db)):
     elif scope == "all_blocking":
         findings = [f for f in findings if f.get("severity") == "block"]
     elif scope == "auto_fixable":
-        findings = [f for f in findings
-                    if review_autofix.capability_of(f.get("rule_id") or "").mode
-                    in (review_autofix.FIX_MODE_AUTO, review_autofix.FIX_MODE_AI)]
+        findings = [
+            f
+            for f in findings
+            if review_autofix.capability_of(f.get("rule_id") or "").mode
+            in (review_autofix.FIX_MODE_AUTO, review_autofix.FIX_MODE_AI)
+        ]
     else:
         findings = list(findings)
     # 仅 auto/ai 可暂存
-    findings = [f for f in findings
-                if review_autofix.capability_of(f.get("rule_id") or "").mode
-                in (review_autofix.FIX_MODE_AUTO, review_autofix.FIX_MODE_AI)]
+    findings = [
+        f
+        for f in findings
+        if review_autofix.capability_of(f.get("rule_id") or "").mode
+        in (review_autofix.FIX_MODE_AUTO, review_autofix.FIX_MODE_AI)
+    ]
     if not findings:
-        return {"batch_id": "", "items": [],
-                "stats": {"repaired": 0, "failed": 0, "skipped": 0},
-                "status": "empty", "reason": "当前范围内没有可自动修复的问题",
-                # 与 stage_fixes 正常返回的契约字段对齐（加法式，旧前端零影响）
-                "max_sections": review_autofix.AUTOFIX_MAX_SECTIONS,
-                "skipped_sections": []}
+        return {
+            "batch_id": "",
+            "items": [],
+            "stats": {"repaired": 0, "failed": 0, "skipped": 0},
+            "status": "empty",
+            "reason": "当前范围内没有可自动修复的问题",
+            # 与 stage_fixes 正常返回的契约字段对齐（加法式，旧前端零影响）
+            "max_sections": review_autofix.AUTOFIX_MAX_SECTIONS,
+            "skipped_sections": [],
+        }
     sections = await _load_sections(db, scheme_id)
     facts, standards_text = await _build_facts(db, scheme)
     res = await review_autofix.stage_fixes(
-        db, scheme_id=scheme_id, findings=findings, sections=sections,
-        scheme=scheme, facts=facts, standards_text=standards_text)
+        db,
+        scheme_id=scheme_id,
+        findings=findings,
+        sections=sections,
+        scheme=scheme,
+        facts=facts,
+        standards_text=standards_text,
+    )
     return res
+
 
 @router.post("/confirm")
 async def confirm(scheme_id: str, body: dict | None = None, db=Depends(get_db)):
@@ -455,13 +531,13 @@ async def confirm(scheme_id: str, body: dict | None = None, db=Depends(get_db)):
     （``rule_id``/``section_id``/``status``/``detail``，供前端提示「哪几条没修」）。
     """
     from app.services import repair_record, review_autofix
+
     body = body or {}
     batch_id = str(body.get("batch_id") or "").strip()
     if not batch_id:
         raise HTTPException(422, "缺少 batch_id")
     batch = await repair_record.get_repair(db, batch_id)
-    if not batch or batch.get("scheme_id") != scheme_id \
-            or batch.get("mode") != "review_autofix_batch":
+    if not batch or batch.get("scheme_id") != scheme_id or batch.get("mode") != "review_autofix_batch":
         raise HTTPException(404, "暂存批次不存在")
     # ✅ R98（R90 遗留⑦收口）：确认落库整章改写 content（链式重算还会再调 AI）
     #    —— 生成任务在跑时暂存批次的 before/after 已基于过期正文，必须拒绝。
@@ -486,17 +562,13 @@ async def confirm(scheme_id: str, body: dict | None = None, db=Depends(get_db)):
         accepted_items = list(repaired)
     elif accept is not None:
         want = {str(x) for x in (accept or [])}
-        accepted_items = [it for it in repaired
-                          if it.get("rule_id") in want or _item_key(it) in want]
+        accepted_items = [it for it in repaired if it.get("rule_id") in want or _item_key(it) in want]
     else:  # 仅给了 reject
         drop = {str(x) for x in (reject or [])}
-        accepted_items = [it for it in repaired
-                          if it.get("rule_id") not in drop
-                          and _item_key(it) not in drop]
+        accepted_items = [it for it in repaired if it.get("rule_id") not in drop and _item_key(it) not in drop]
     if not accepted_items:
         await repair_record.mark_repair_status(db, batch_id, "rejected")
-        return {"status": "rejected", "accepted": 0, "repaired_sections": 0,
-                "snapshot_id": "", "batch_id": batch_id}
+        return {"status": "rejected", "accepted": 0, "repaired_sections": 0, "snapshot_id": "", "batch_id": batch_id}
     accepted_keys = {_item_key(it) for it in accepted_items}
     #: ✅ F2b（R55 · 2026-10-08）：前缀判定必须喂该章**完整链**（含未被接受的
     #:   已修复项）。旧实现先把 by_section 过滤成「只剩被接受项」再交给
@@ -535,8 +607,7 @@ async def confirm(scheme_id: str, body: dict | None = None, db=Depends(get_db)):
         sec_accepted = [it for it in its if _item_key(it) in accepted_keys]
         if not sec_accepted:
             continue
-        merged = _merged_after_if_prefix(
-            its, {it.get("rule_id") for it in sec_accepted})
+        merged = _merged_after_if_prefix(its, {it.get("rule_id") for it in sec_accepted})
         if merged is not None:
             # ✅ R168（stage→confirm 竞态守卫）：前缀合并直接取**暂存时**的 after。
             #    暂存后本章正文被改（手动编辑 / 其它修复批次落库）则 after 基于
@@ -545,23 +616,21 @@ async def confirm(scheme_id: str, body: dict | None = None, db=Depends(get_db)):
             #    本章并记入 skipped（与 F2c 失效 finding 同一可观测出口）。
             #    非前缀路径（下方链式重算）按**当前正文**重算，无此风险。
             _staged_sha = next(
-                (str(it.get("content_sha_before") or "") for it in its
-                 if it.get("content_sha_before")), "")
+                (str(it.get("content_sha_before") or "") for it in its if it.get("content_sha_before")), ""
+            )
             if _staged_sha:
-                _cur_sha = hashlib.sha256(
-                    (section.get("content") or "").encode("utf-8")).hexdigest()[:16]
+                _cur_sha = hashlib.sha256((section.get("content") or "").encode("utf-8")).hexdigest()[:16]
                 if _cur_sha != _staged_sha:
-                    skipped.append({
-                        "rule_id": ",".join(sorted({
-                            str(it.get("rule_id") or "") for it in sec_accepted})),
-                        "section_id": sid,
-                        "status": "content_changed",
-                        "detail": "暂存后本章正文已被修改（手动编辑或其它修复），"
-                                  "暂存结果基于过期正文，已跳过以防覆盖",
-                    })
-                    logger.warning(
-                        "confirm 内容漂移守卫跳过章节 section=%s（暂存后正文已变）",
-                        str(sid)[:8])
+                    skipped.append(
+                        {
+                            "rule_id": ",".join(sorted({str(it.get("rule_id") or "") for it in sec_accepted})),
+                            "section_id": sid,
+                            "status": "content_changed",
+                            "detail": "暂存后本章正文已被修改（手动编辑或其它修复），"
+                            "暂存结果基于过期正文，已跳过以防覆盖",
+                        }
+                    )
+                    logger.warning("confirm 内容漂移守卫跳过章节 section=%s（暂存后正文已变）", str(sid)[:8])
                     continue
             pending.append((sid, section.get("content") or "", merged))
             continue
@@ -583,35 +652,49 @@ async def confirm(scheme_id: str, body: dict | None = None, db=Depends(get_db)):
                     fb_sid = str(fb.get("section_id") or "")
                     if fb_sid and fb_sid != sid:
                         raise HTTPException(
-                            404, f"{rid} 在当前检查结果中不属于本章（实际属于章节"
-                                 f" {fb_sid}），已跳过本章以防跨章改写")
+                            404,
+                            f"{rid} 在当前检查结果中不属于本章（实际属于章节" f" {fb_sid}），已跳过本章以防跨章改写",
+                        )
                     resolved.append(fb)
             except HTTPException as e:
                 # 失效 finding 静默跳过会丢失可观测性：用户以为修了、实际没修
                 # 记 WARNING 含 rule_id 与错误码，供运维审计与前端提示
                 logger.warning(
                     "confirm 链式重算跳过失效 finding（rule_id=%s, status=%s, detail=%s）",
-                    rid, e.status_code, str(e.detail)[:200])
-                skipped.append({"rule_id": rid, "section_id": sid,
-                                "status": e.status_code,
-                                "detail": str(e.detail)[:200]})
+                    rid,
+                    e.status_code,
+                    str(e.detail)[:200],
+                )
+                skipped.append(
+                    {"rule_id": rid, "section_id": sid, "status": e.status_code, "detail": str(e.detail)[:200]}
+                )
         if not resolved:
             continue
         resolved = sorted(resolved, key=lambda x: _severity_rank(x.get("severity")))
         scheme = await _load_scheme(db, scheme_id)
         facts, standards_text = await _build_facts(db, scheme)
-        _content, _items = await review_autofix._chain_section_fixes(
-            section, resolved, scheme, facts, standards_text)
+        _content, _items = await review_autofix._chain_section_fixes(section, resolved, scheme, facts, standards_text)
         pending.append((sid, section.get("content") or "", _content))
     snapshot_id = ""
     if pending:
         snapshot_id = await _persist_fixed(
-            db, scheme_id=scheme_id, rule_id="batch", pending=pending,
-            repair_id=batch_id)
-    await repair_record.mark_repair_status(db, batch_id, "confirmed")
+            db, scheme_id=scheme_id, rule_id="batch", pending=pending, repair_id=batch_id
+        )
+        # ✅ B-10（R175，闭环）：只有**真的写入了正文**才标记 confirmed。
+        await repair_record.mark_repair_status(db, batch_id, "confirmed")
+        status = "confirmed"
+    else:
+        # ✅ B-10（R175）：被接受项全部因内容漂移/失效被跳过（pending 为空），
+        #    旧实现仍 mark "confirmed" 并返回成功 —— 用户以为修完了，正文没动。
+        await repair_record.mark_repair_status(db, batch_id, "failed")
+        status = "no_change"
+        logger.warning("review_autofix confirm: 批次 %s 无任何章节实际改写（跳过 %d 条）", batch_id[:8], len(skipped))
     return {
-        "status": "confirmed", "accepted": len(accepted_items),
-        "repaired_sections": len(pending), "snapshot_id": snapshot_id,
+        "status": status,
+        "accepted": len(accepted_items),
+        "repaired_sections": len(pending),
+        "snapshot_id": snapshot_id,
         "batch_id": batch_id,
         "skipped": skipped,
+        "message": "" if pending else "本次接受的问题均未产生实际正文改动（内容未变或已跳过），未标记为已确认",
     }

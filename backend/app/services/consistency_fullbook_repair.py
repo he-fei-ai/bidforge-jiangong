@@ -23,6 +23,7 @@
 默认关闭（`config.consistency_fullbook_repair_enabled=False`）：关闭时本模块
 **从不被调用**，``repair_agent.run_repair`` 逐字节保持既有链路。
 """
+
 from __future__ import annotations
 
 import logging
@@ -55,8 +56,7 @@ def _section_marker(sid: str) -> str:
     return f"<!-- §:{sid} -->"
 
 
-def build_fullbook_workspace(*, facts: str, conflicts_digest: str,
-                             sections: list[dict]) -> str:
+def build_fullbook_workspace(*, facts: str, conflicts_digest: str, sections: list[dict]) -> str:
     """装配整卷工作区文本（纯函数，便于单测）。
 
     sections 需含 id/title/content。每章以独占一行的 ``<!-- §:id -->`` 标记起始，
@@ -81,8 +81,7 @@ def build_fullbook_workspace(*, facts: str, conflicts_digest: str,
     return "\n".join(parts)
 
 
-def parse_fullbook_workspace(text: str,
-                             known_sids: list[str]) -> tuple[dict[str, str], list[str]]:
+def parse_fullbook_workspace(text: str, known_sids: list[str]) -> tuple[dict[str, str], list[str]]:
     """按小节标记把 AI 回包切回各章正文（纯函数）。
 
     Returns:
@@ -129,14 +128,18 @@ def _digest_conflicts(conflicts: list[dict]) -> str:
         ctype = c.get("conflict_type") or ""
         instr = c.get("repair_instruction") or ""
         occs = c.get("occurrences") or []
-        wrong = sorted({
-            str(o.get("value") or "").strip()
-            for o in occs if str(o.get("value") or "").strip() and
-            str(o.get("value") or "").strip() != auth})
+        wrong = sorted(
+            {
+                str(o.get("value") or "").strip()
+                for o in occs
+                if str(o.get("value") or "").strip() and str(o.get("value") or "").strip() != auth
+            }
+        )
         lines.append(
             f"- [{c.get('id', '')}] {ctype} 「{topic}」：权威值 = {auth}"
             + (f"；错误取值 = {'、'.join(wrong)}" if wrong else "")
-            + (f"；修复指令：{instr}" if instr else ""))
+            + (f"；修复指令：{instr}" if instr else "")
+        )
     return "\n".join(lines)
 
 
@@ -148,7 +151,7 @@ def _section_conflict_values(conflicts: list[dict], sid: str) -> tuple[list[str]
         auth = (c.get("authoritative_value") or "").strip()
         if not auth:
             continue
-        for occ in (c.get("occurrences") or []):
+        for occ in c.get("occurrences") or []:
             if str(occ.get("section_id") or "") != sid:
                 continue
             v = str(occ.get("value") or "").strip()
@@ -159,11 +162,18 @@ def _section_conflict_values(conflicts: list[dict], sid: str) -> tuple[list[str]
     return sorted(set(wrong)), auth_single
 
 
-async def run_fullbook_repair(db, *, scheme_id: str, scan_id: str,
-                              conflicts: list[dict], facts: str,
-                              severity_threshold: str = "high",
-                              conflict_ids: list[str] | None = None,
-                              resync_fn=None, progress_cb=None) -> dict:
+async def run_fullbook_repair(
+    db,
+    *,
+    scheme_id: str,
+    scan_id: str,
+    conflicts: list[dict],
+    facts: str,
+    severity_threshold: str = "high",
+    conflict_ids: list[str] | None = None,
+    resync_fn=None,
+    progress_cb=None,
+) -> dict:
     """整卷合并修复一次批次。返回 save_repair 结果（含 repair_id / snapshot_id / items）。
 
     仅修复**有权威值**且落在阈值 / 白名单内的冲突（复用 filter_conflicts 口径）。
@@ -178,21 +188,27 @@ async def run_fullbook_repair(db, *, scheme_id: str, scan_id: str,
     # 延迟 import 避免模块级成环（repair_agent 亦在函数内消费 routers 注入回调）
     from app.services.repair_agent import filter_conflicts
 
-    targets = filter_conflicts(
-        conflicts, severity_threshold=severity_threshold, conflict_ids=conflict_ids)
+    targets = filter_conflicts(conflicts, severity_threshold=severity_threshold, conflict_ids=conflict_ids)
     if not targets:
         snap_id = await repair_record.create_snapshot(db, scheme_id, [])
         return await repair_record.save_repair(
-            db, scheme_id=scheme_id, scan_id=scan_id, mode="fullbook",
-            items=[], snapshot_id=snap_id, total_conflicts=0,
-            stats={"repaired": 0, "failed": 0, "skipped": 0})
+            db,
+            scheme_id=scheme_id,
+            scan_id=scan_id,
+            mode="fullbook",
+            items=[],
+            snapshot_id=snap_id,
+            total_conflicts=0,
+            stats={"repaired": 0, "failed": 0, "skipped": 0},
+        )
 
     # 只取涉及冲突的末级章节作为整卷范围（保持目录 DFS 序）
     from app.services.consistency_scanner import load_leaf_sections
+
     all_leaves = await load_leaf_sections(db, scheme_id)
     involved: set[str] = set()
     for c in targets:
-        for occ in (c.get("occurrences") or []):
+        for occ in c.get("occurrences") or []:
             sid = str(occ.get("section_id") or "")
             if sid:
                 involved.add(sid)
@@ -200,23 +216,27 @@ async def run_fullbook_repair(db, *, scheme_id: str, scan_id: str,
     section_by_id = {str(s.get("id") or ""): s for s in sections}
     known_sids = list(section_by_id.keys())
 
-    workspace = build_fullbook_workspace(
-        facts=facts, conflicts_digest=_digest_conflicts(targets), sections=sections)
+    workspace = build_fullbook_workspace(facts=facts, conflicts_digest=_digest_conflicts(targets), sections=sections)
     if len(workspace) > FULLBOOK_MAX_CHARS:
-        logger.warning("[整卷修复] 工作区 %d 字超过上限 %d，放弃整卷模式（交回逐章修）",
-                       len(workspace), FULLBOOK_MAX_CHARS)
+        logger.warning(
+            "[整卷修复] 工作区 %d 字超过上限 %d，放弃整卷模式（交回逐章修）", len(workspace), FULLBOOK_MAX_CHARS
+        )
         snap_id = await repair_record.create_snapshot(db, scheme_id, [])
         return await repair_record.save_repair(
-            db, scheme_id=scheme_id, scan_id=scan_id, mode="fullbook",
-            items=[], snapshot_id=snap_id,
+            db,
+            scheme_id=scheme_id,
+            scan_id=scan_id,
+            mode="fullbook",
+            items=[],
+            snapshot_id=snap_id,
             total_conflicts=len({c["id"] for c in targets}),
-            stats={"repaired": 0, "failed": 0,
-                   "skipped": len({c["id"] for c in targets})})
+            stats={"repaired": 0, "failed": 0, "skipped": len({c["id"] for c in targets})},
+        )
 
     # 快照（仅涉及章节的当前正文）
-    snapshot_sections = [{"section_id": sid,
-                          "content_before": section_by_id[sid].get("content") or ""}
-                         for sid in known_sids]
+    snapshot_sections = [
+        {"section_id": sid, "content_before": section_by_id[sid].get("content") or ""} for sid in known_sids
+    ]
     snapshot_id = await repair_record.create_snapshot(db, scheme_id, snapshot_sections)
 
     system = render("consistency_fullbook_system")
@@ -225,19 +245,15 @@ async def run_fullbook_repair(db, *, scheme_id: str, scan_id: str,
         section_count=str(len(sections)),
         workspace=workspace,
     )
-    messages = [{"role": "system", "content": system},
-                {"role": "user", "content": user}]
+    messages = [{"role": "system", "content": system}, {"role": "user", "content": user}]
 
     parsed: dict[str, str] = {}
     gate_reject_reason = ""
     for attempt in range(1, FULLBOOK_MAX_RETRIES + 2):  # 1 生成 + 2 重问
         if progress_cb:
-            await progress_cb(min(attempt, 1), 1,
-                              f"整卷合并修复：第 {attempt} 轮往返")
+            await progress_cb(min(attempt, 1), 1, f"整卷合并修复：第 {attempt} 轮往返")
         try:
-            raw = await chat_with_fallback(
-                messages, temperature=0.1, timeout=180,
-                scene="consistency_fullbook")
+            raw = await chat_with_fallback(messages, temperature=0.1, timeout=180, scene="consistency_fullbook")
         except Exception as e:  # noqa: BLE001 - 调用失败重问一次，最终仍失败则整批放弃
             logger.warning("[整卷修复] 第 %d 轮调用异常：%s", attempt, e)
             gate_reject_reason = f"AI 调用异常：{str(e)[:120]}"
@@ -267,54 +283,65 @@ async def run_fullbook_repair(db, *, scheme_id: str, scan_id: str,
         # 整包被拒：本批全部涉及冲突计 failed（不写库，原文经快照保留）
         for c in targets:
             failed_conflicts.add(c["id"])
-            items.append({
-                "conflict_id": c["id"], "section_id": "",
-                "topic": c.get("topic", ""),
-                "authoritative_value": c.get("authoritative_value", ""),
-                "status": "failed",
-                "problems": [f"整卷回包未通过闸门：{gate_reject_reason or '解析失败'}"],
-            })
+            items.append(
+                {
+                    "conflict_id": c["id"],
+                    "section_id": "",
+                    "topic": c.get("topic", ""),
+                    "authoritative_value": c.get("authoritative_value", ""),
+                    "status": "failed",
+                    "problems": [f"整卷回包未通过闸门：{gate_reject_reason or '解析失败'}"],
+                }
+            )
     else:
         for sid in known_sids:
             orig = section_by_id[sid].get("content") or ""
             new = parsed.get(sid, "")
-            confs = [c for c in targets
-                     if any(str(o.get("section_id") or "") == sid
-                            for o in (c.get("occurrences") or []))]
+            confs = [
+                c for c in targets if any(str(o.get("section_id") or "") == sid for o in (c.get("occurrences") or []))
+            ]
             cids = [c["id"] for c in confs]
             if new.strip() == orig.strip():
                 # 未变化：不算修复也不算失败（该章冲突可能本就在别处或无需动）
                 for cid in cids:
                     failed_conflicts.add(cid)
-                items.extend({
-                    "conflict_id": cid, "section_id": sid,
-                    "section_title": section_by_id[sid].get("title", ""),
-                    "authoritative_value": next(
-                        (c.get("authoritative_value", "") for c in confs
-                         if c["id"] == cid), ""),
-                    "before": orig[:4000], "after": orig[:4000],
-                    "status": "failed",
-                    "problems": ["整卷回包该章无变化，冲突未落改"],
-                } for cid in cids)
+                items.extend(
+                    {
+                        "conflict_id": cid,
+                        "section_id": sid,
+                        "section_title": section_by_id[sid].get("title", ""),
+                        "authoritative_value": next(
+                            (c.get("authoritative_value", "") for c in confs if c["id"] == cid), ""
+                        ),
+                        "before": orig[:4000],
+                        "after": orig[:4000],
+                        "status": "failed",
+                        "problems": ["整卷回包该章无变化，冲突未落改"],
+                    }
+                    for cid in cids
+                )
                 continue
             wrong, auth_single = _section_conflict_values(targets, sid)
-            ok, problems = validate_repair(
-                before=orig, after=new, wrong_values=wrong,
-                authoritative_value=auth_single)
+            ok, problems = validate_repair(before=orig, after=new, wrong_values=wrong, authoritative_value=auth_single)
             if not ok:
                 # 闸门 C/D 拒该章：不回写
                 for cid in cids:
                     failed_conflicts.add(cid)
-                items.extend({
-                    "conflict_id": cid, "section_id": sid,
-                    "section_title": section_by_id[sid].get("title", ""),
-                    "authoritative_value": next(
-                        (c.get("authoritative_value", "") for c in confs
-                         if c["id"] == cid), ""),
-                    "before": orig[:4000], "after": new[:4000],
-                    "status": "failed",
-                    "problems": problems,
-                } for cid in cids)
+                items.extend(
+                    {
+                        "conflict_id": cid,
+                        "section_id": sid,
+                        "section_title": section_by_id[sid].get("title", ""),
+                        "authoritative_value": next(
+                            (c.get("authoritative_value", "") for c in confs if c["id"] == cid), ""
+                        ),
+                        "before": orig[:4000],
+                        "after": new[:4000],
+                        "status": "failed",
+                        "problems": problems,
+                    }
+                    for cid in cids
+                )
                 continue
             # 通过闸门：回写该章
             _wc = text_word_count(new)
@@ -327,35 +354,36 @@ async def run_fullbook_repair(db, *, scheme_id: str, scan_id: str,
                         persist_content = _resynced
                         _wc = text_word_count(persist_content)
                 except Exception as _re:  # noqa: BLE001 - 登记失败保留原回包正文
-                    logger.warning("[整卷修复] 第 %s 章图表重登记失败（保留回包正文）: %s",
-                                   sid, _re)
+                    logger.warning("[整卷修复] 第 %s 章图表重登记失败（保留回包正文）: %s", sid, _re)
             # ✅ R168 原子性：只缓冲不 commit，与冲突状态回写、save_repair 留痕
             #    同事务一次性提交（中途异常 → 调用方 get_db 归还前回滚，零半生效）。
             await db.execute(
-                "UPDATE sections SET content=?, word_count=?, word_status=?, "
-                "updated_at=? WHERE id=?",
-                (persist_content, _wc, word_status_for(_wc, _wb),
-                 datetime.now().isoformat(), sid))
+                "UPDATE sections SET content=?, word_count=?, word_status=?, " "updated_at=? WHERE id=?",
+                (persist_content, _wc, word_status_for(_wc, _wb), datetime.now().isoformat(), sid),
+            )
             for cid in cids:
                 repaired_conflicts.add(cid)
-            items.extend({
-                "conflict_id": cid, "section_id": sid,
-                "section_title": section_by_id[sid].get("title", ""),
-                "authoritative_value": next(
-                    (c.get("authoritative_value", "") for c in confs
-                     if c["id"] == cid), ""),
-                "before": orig[:4000], "after": persist_content[:4000],
-                "status": "repaired",
-                "problems": [],
-            } for cid in cids)
+            items.extend(
+                {
+                    "conflict_id": cid,
+                    "section_id": sid,
+                    "section_title": section_by_id[sid].get("title", ""),
+                    "authoritative_value": next(
+                        (c.get("authoritative_value", "") for c in confs if c["id"] == cid), ""
+                    ),
+                    "before": orig[:4000],
+                    "after": persist_content[:4000],
+                    "status": "repaired",
+                    "problems": [],
+                }
+                for cid in cids
+            )
 
     # 冲突状态回写（✅ R168：同上缓冲，save_repair 内部 commit 一并落库）
     for cid in repaired_conflicts:
-        await db.execute(
-            "UPDATE consistency_conflicts SET status='repaired' WHERE id=?", (cid,))
+        await db.execute("UPDATE consistency_conflicts SET status='repaired' WHERE id=?", (cid,))
     for cid in failed_conflicts:
-        await db.execute(
-            "UPDATE consistency_conflicts SET status='failed' WHERE id=?", (cid,))
+        await db.execute("UPDATE consistency_conflicts SET status='failed' WHERE id=?", (cid,))
 
     all_ids = {c["id"] for c in conflicts}
     target_ids = {c["id"] for c in targets}
@@ -366,12 +394,24 @@ async def run_fullbook_repair(db, *, scheme_id: str, scan_id: str,
     # 阈值 / 白名单外的可修项 + 无权威值项 → 计入 skipped（本轮不处理）
     stats["skipped"] = max(len(all_ids) - stats["repaired"] - stats["failed"], 0)
     result = await repair_record.save_repair(
-        db, scheme_id=scheme_id, scan_id=scan_id, mode="fullbook",
-        items=items, snapshot_id=snapshot_id, total_conflicts=len(all_ids),
-        stats=stats)
-    logger.info("整卷修复批次 %s 完成：成功 %d 失败 %d 跳过 %d（冲突总数 %d，可修 %d）",
-                result["repair_id"], result["repaired"], result["failed"],
-                result["skipped"], result["total_conflicts"], len(target_ids))
+        db,
+        scheme_id=scheme_id,
+        scan_id=scan_id,
+        mode="fullbook",
+        items=items,
+        snapshot_id=snapshot_id,
+        total_conflicts=len(all_ids),
+        stats=stats,
+    )
+    logger.info(
+        "整卷修复批次 %s 完成：成功 %d 失败 %d 跳过 %d（冲突总数 %d，可修 %d）",
+        result["repair_id"],
+        result["repaired"],
+        result["failed"],
+        result["skipped"],
+        result["total_conflicts"],
+        len(target_ids),
+    )
     return result
 
 
@@ -381,5 +421,6 @@ def _append_repair_nudge(messages: list, reason: str) -> list:
         "上一次返回不符合结构要求，程序已拒绝：" + reason + "。"
         "请严格保持整卷中每一个 <!-- §:章节ID --> 标记独占一行、顺序与数量与原文完全一致，"
         "不得新增、删除、改名或重复任何小节标记；只在标记之下就地修订冲突取值，"
-        "其余内容逐字保留。重新输出完整整卷。")
+        "其余内容逐字保留。重新输出完整整卷。"
+    )
     return [*messages, {"role": "user", "content": nudge}]

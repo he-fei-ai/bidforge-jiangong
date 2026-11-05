@@ -9,6 +9,7 @@
 优先使用全局事实做程序化命中（最高优先级、确定性最强），
 其余冲突交 AI 一次性批量仲裁，结果回写 consistency_conflicts。
 """
+
 from __future__ import annotations
 
 import json
@@ -72,19 +73,27 @@ def majority_value(conflict: dict) -> tuple[str, int]:
     return value, cnt
 
 
-async def _arbitrate_batch(batch: list[dict], *, facts: str, design_docs: str,
-                           standards: str, project_requirements: str) -> dict[str, dict]:
+async def _arbitrate_batch(
+    batch: list[dict], *, facts: str, design_docs: str, standards: str, project_requirements: str
+) -> dict[str, dict]:
     """单批 AI 仲裁，返回 conflict_id -> 仲裁结果。失败时返回空（调用方降级）。"""
-    compact = [{
-        "conflict_id": c["id"],
-        "type": c.get("conflict_type"),
-        "topic": c.get("topic"),
-        "occurrences": [
-            {"section_id": o.get("section_id"), "section_title": o.get("section_title"),
-             "value": o.get("value"), "text": _clip(o.get("text", ""), 80)}
-            for o in c.get("occurrences", [])
-        ],
-    } for c in batch]
+    compact = [
+        {
+            "conflict_id": c["id"],
+            "type": c.get("conflict_type"),
+            "topic": c.get("topic"),
+            "occurrences": [
+                {
+                    "section_id": o.get("section_id"),
+                    "section_title": o.get("section_title"),
+                    "value": o.get("value"),
+                    "text": _clip(o.get("text", ""), 80),
+                }
+                for o in c.get("occurrences", [])
+            ],
+        }
+        for c in batch
+    ]
 
     user = render(
         "consistency_arbitrate_user",
@@ -95,17 +104,21 @@ async def _arbitrate_batch(batch: list[dict], *, facts: str, design_docs: str,
         conflicts=json.dumps(compact, ensure_ascii=False),
     )
     obj, _ = await collect_json_response(
-        [{"role": "system", "content": render("consistency_arbitrate_system")},
-         {"role": "user", "content": user}],
+        [{"role": "system", "content": render("consistency_arbitrate_system")}, {"role": "user", "content": user}],
         lambda o: [] if isinstance(o.get("arbitrations"), list) else ["缺少 arbitrations"],
-        max_retries=1, temperature=0.1, json_mode=True, timeout=240,
-        scene="consistency_arbitrate")
+        max_retries=1,
+        temperature=0.1,
+        json_mode=True,
+        timeout=240,
+        scene="consistency_arbitrate",
+    )
     rows = obj.get("arbitrations") or []
     return {str(r.get("conflict_id")): r for r in rows if isinstance(r, dict)}
 
 
-async def ai_arbitrate(conflicts: list[dict], *, facts: str, design_docs: str,
-                       standards: str, project_requirements: str) -> dict[str, dict]:
+async def ai_arbitrate(
+    conflicts: list[dict], *, facts: str, design_docs: str, standards: str, project_requirements: str
+) -> dict[str, dict]:
     """AI 分批仲裁，返回 conflict_id -> 仲裁结果。
 
     按 ARBITRATE_BATCH_SIZE 分批（避免上百条冲突导致 prompt 超长/超时/JSON 截断），
@@ -115,21 +128,28 @@ async def ai_arbitrate(conflicts: list[dict], *, facts: str, design_docs: str,
         return {}
     results: dict[str, dict] = {}
     for i in range(0, len(conflicts), ARBITRATE_BATCH_SIZE):
-        batch = conflicts[i:i + ARBITRATE_BATCH_SIZE]
+        batch = conflicts[i : i + ARBITRATE_BATCH_SIZE]
         try:
-            results.update(await _arbitrate_batch(
-                batch, facts=facts, design_docs=design_docs,
-                standards=standards, project_requirements=project_requirements))
+            results.update(
+                await _arbitrate_batch(
+                    batch,
+                    facts=facts,
+                    design_docs=design_docs,
+                    standards=standards,
+                    project_requirements=project_requirements,
+                )
+            )
         except Exception as e:
             logger.warning(
-                "AI 仲裁第 %d 批（%d 条）失败，该批降级为规则仲裁: %s",
-                i // ARBITRATE_BATCH_SIZE + 1, len(batch), e)
+                "AI 仲裁第 %d 批（%d 条）失败，该批降级为规则仲裁: %s", i // ARBITRATE_BATCH_SIZE + 1, len(batch), e
+            )
     return results
 
 
 def build_repair_instruction(conflict: dict, auth_value: str) -> str:
-    wrong = sorted({o.get("value", "") for o in conflict.get("occurrences", [])
-                    if o.get("value") and o.get("value") != auth_value})
+    wrong = sorted(
+        {o.get("value", "") for o in conflict.get("occurrences", []) if o.get("value") and o.get("value") != auth_value}
+    )
     if not wrong:
         return f"将「{conflict.get('topic')}」统一为 {auth_value}"
     if len(wrong) <= 3:
@@ -137,13 +157,13 @@ def build_repair_instruction(conflict: dict, auth_value: str) -> str:
     return f"将与权威值不一致的「{conflict.get('topic')}」取值统一改为 {auth_value}"
 
 
-async def arbitrate_conflicts(db, conflicts: list[dict], *, facts: str,
-                              design_docs: str = "", standards: str = "",
-                              project_requirements: str = "") -> list[dict]:
+async def arbitrate_conflicts(
+    db, conflicts: list[dict], *, facts: str, design_docs: str = "", standards: str = "", project_requirements: str = ""
+) -> list[dict]:
     """对整批冲突执行仲裁，回写权威值/修复指令/等级，返回更新后的冲突清单。"""
     ai_results = await ai_arbitrate(
-        conflicts, facts=facts, design_docs=design_docs,
-        standards=standards, project_requirements=project_requirements)
+        conflicts, facts=facts, design_docs=design_docs, standards=standards, project_requirements=project_requirements
+    )
 
     out: list[dict] = []
     update_rows: list[tuple] = []
@@ -155,8 +175,7 @@ async def arbitrate_conflicts(db, conflicts: list[dict], *, facts: str,
         fact_hit = match_global_facts(c, facts)
 
         auth_value = (fact_hit or {}).get("value") or ai.get("authoritative_value") or ""
-        auth_source = ((fact_hit or {}).get("source")
-                       or ai.get("authoritative_source") or "")
+        auth_source = (fact_hit or {}).get("source") or ai.get("authoritative_source") or ""
         reason = ai.get("reason", "")
         severity = ai.get("severity") or c.get("severity") or "medium"
         if severity not in SEVERITY_ORDER:
@@ -180,29 +199,29 @@ async def arbitrate_conflicts(db, conflicts: list[dict], *, facts: str,
                 auth_source = ""
                 reason = reason or "无法确定权威值，建议人工确认"
 
-        instruction = "" if skipped else (
-            ai.get("repair_instruction")
-            or build_repair_instruction(c, auth_value))
+        instruction = "" if skipped else (ai.get("repair_instruction") or build_repair_instruction(c, auth_value))
 
         status = "skipped" if skipped else "pending"
-        c.update({
-            "severity": severity,
-            "authoritative_value": auth_value,
-            "authoritative_source": auth_source,
-            "repair_instruction": instruction,
-            "reason": reason,
-            "status": status,
-        })
+        c.update(
+            {
+                "severity": severity,
+                "authoritative_value": auth_value,
+                "authoritative_source": auth_source,
+                "repair_instruction": instruction,
+                "reason": reason,
+                "status": status,
+            }
+        )
         out.append(c)
-        update_rows.append(
-            (severity, auth_value, auth_source, instruction, reason, status, cid))
+        update_rows.append((severity, auth_value, auth_source, instruction, reason, status, cid))
 
     # 单事务批量回写（旧实现逐行 execute 后统一 commit，行数多时 round-trip 放大）
     try:
         await db.executemany(
             "UPDATE consistency_conflicts SET severity=?, authoritative_value=?,"
             " authoritative_source=?, repair_instruction=?, reason=?, status=? WHERE id=?",
-            update_rows)
+            update_rows,
+        )
         await db.commit()
     except Exception:
         await db.rollback()

@@ -73,13 +73,13 @@ DB_UNAVAILABLE_DETAIL = "数据服务暂时不可用，请稍后重试"
 
 
 def _unavailable(what: str, scheme_hint: str = "") -> HTTPException:
-    logger.warning("db.execute 返回 None（R13），%s 本次不可用%s",
-                   what, f"（scheme={scheme_hint[:8]}）" if scheme_hint else "")
+    logger.warning(
+        "db.execute 返回 None（R13），%s 本次不可用%s", what, f"（scheme={scheme_hint[:8]}）" if scheme_hint else ""
+    )
     return HTTPException(503, DB_UNAVAILABLE_DETAIL)
 
 
-async def fetch_all(db, sql: str, params: Sequence[Any] = (), *,
-                    what: str = "查询") -> list[dict]:
+async def fetch_all(db, sql: str, params: Sequence[Any] = (), *, what: str = "查询") -> list[dict]:
     """读路径：取多行，统一返回 ``list[dict]``（空结果 = ``[]``）。
 
     ``what`` 只用于告警文案（说明是哪类查询失败），便于日志定位。
@@ -90,8 +90,7 @@ async def fetch_all(db, sql: str, params: Sequence[Any] = (), *,
     return [dict(r) for r in await cur.fetchall()]
 
 
-async def fetch_one(db, sql: str, params: Sequence[Any] = (), *,
-                    what: str = "查询") -> dict | None:
+async def fetch_one(db, sql: str, params: Sequence[Any] = (), *, what: str = "查询") -> dict | None:
     """读路径：取单行，无匹配时返回 ``None``（**不是**「查询失败」）。"""
     cur = await db.execute(sql, params)
     if cur is None:
@@ -100,8 +99,7 @@ async def fetch_one(db, sql: str, params: Sequence[Any] = (), *,
     return dict(row) if row is not None else None
 
 
-async def fetch_scalar(db, sql: str, params: Sequence[Any] = (),
-                       default: Any = None, *, what: str = "查询") -> Any:
+async def fetch_scalar(db, sql: str, params: Sequence[Any] = (), default: Any = None, *, what: str = "查询") -> Any:
     """读路径：取首行首列（计数 / 标量聚合）。无结果返回 ``default``。"""
     row = await fetch_one(db, sql, params, what=what)
     if not row:
@@ -109,9 +107,9 @@ async def fetch_scalar(db, sql: str, params: Sequence[Any] = (),
     return next(iter(row.values()), default)
 
 
-async def exec_write(db, sql: str, params: Sequence[Any] = (), *,
-                     what: str = "写操作",
-                     require_rows: bool = True) -> int:
+async def exec_write(
+    db, sql: str, params: Sequence[Any] = (), *, what: str = "写操作", require_rows: bool = True
+) -> int:
     """写路径：执行 INSERT / UPDATE / DELETE，返回受影响行数。
 
     Args:

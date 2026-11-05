@@ -10,6 +10,7 @@
 
 护栏原则：反例必须**真的能跑通修复前的旧路径**，否则测试只是自证。
 """
+
 import asyncio
 import inspect
 
@@ -38,6 +39,7 @@ class _AsyncNullCur:
 # T4 正文注入门控：模拟值 / 过期值不得进正文
 # ============================================================
 
+
 class TestFactsInjectGate:
     """T4：正文生成的事实门控必须与 facts_extractor 单一事实源完全一致。
 
@@ -48,11 +50,13 @@ class TestFactsInjectGate:
 
     def test_single_source_of_truth_contains_gate(self):
         from app.services.facts_extractor import _FACTS_INJECT_WHERE
+
         assert "is_simulated=0" in _FACTS_INJECT_WHERE
         assert "is_stale=0" in _FACTS_INJECT_WHERE
 
     def _capture_sql(self, with_project: bool) -> str:
         from app.routers.sse_handlers import _load_facts_rows
+
         seen: list[str] = []
 
         class _Db:
@@ -60,9 +64,11 @@ class TestFactsInjectGate:
                 s = str(sql)
                 seen.append(s)
                 if "FROM schemes" in s:
+
                     class _R:
                         async def fetchone(self_inner):
                             return ("p1",) if with_project else None
+
                     return _R()
                 return _NullCur()
 
@@ -82,6 +88,7 @@ class TestFactsInjectGate:
     def test_reuses_single_source_constant(self):
         """不得另写一份字面量（避免再次分叉）。"""
         from app.routers.sse_handlers import _load_facts_rows
+
         assert "_FACTS_INJECT_WHERE" in inspect.getsource(_load_facts_rows)
 
     def test_missing_table_degrades_gracefully(self):
@@ -94,9 +101,11 @@ class TestFactsInjectGate:
 
         assert _run(_load_facts_rows(_Db(), "s1")) == []
 
+
 # ============================================================
 # T5 事实预算：按比例分配，不得头部优先整段丢弃
 # ============================================================
+
 
 class TestFactsBudgetProportional:
     """T5：尾部事实整段消失 → AI 判定「事实缺失」→ 大量假性【待补充】。
@@ -112,76 +121,86 @@ class TestFactsBudgetProportional:
 
     def test_all_facts_survive_over_budget(self):
         from app.routers.sse_handlers import _render_facts_text
+
         out = _render_facts_text(self._rows(40, 300), max_total=2000, per_fact=300)
         assert out.count("甲") >= 40, "尾部事实被整段丢弃"
 
     def test_under_budget_is_byte_identical_to_legacy(self):
         """未超预算时必须与旧实现逐字一致（零回归）。"""
         from app.routers.sse_handlers import _render_facts_text
-        rows = [("工程概况", "t0", "第一条内容", 0.9),
-                ("工程概况", "t1", "第二条内容", 0.9),
-                ("验收要求", "t2", "第三条内容", 0.9)]
+
+        rows = [
+            ("工程概况", "t0", "第一条内容", 0.9),
+            ("工程概况", "t1", "第二条内容", 0.9),
+            ("验收要求", "t2", "第三条内容", 0.9),
+        ]
         out = _render_facts_text(rows, max_total=6000, per_fact=300)
-        assert out == ("### 工程概况\n第一条内容\n第二条内容\n"
-                       "### 验收要求\n第三条内容\n")
+        assert out == ("### 工程概况\n第一条内容\n第二条内容\n" "### 验收要求\n第三条内容\n")
 
     def test_group_header_never_truncated(self):
         """反例：不得产出「### 基坑支」这种半截组标题。"""
         from app.routers.sse_handlers import _render_facts_text
-        out = _render_facts_text([("工程概况", "t", "甲" * 500)],
-                                 max_total=6000, per_fact=300)
+
+        out = _render_facts_text([("工程概况", "t", "甲" * 500)], max_total=6000, per_fact=300)
         assert "### 工程概况\n" in out
 
     def test_low_confidence_annotation_preserved(self):
         from app.routers.sse_handlers import LOW_CONFIDENCE_THRESHOLD, _render_facts_text
-        rows = [("工程概况", "t", "基坑深度 12.5m",
-                 LOW_CONFIDENCE_THRESHOLD - 0.1)]
+
+        rows = [("工程概况", "t", "基坑深度 12.5m", LOW_CONFIDENCE_THRESHOLD - 0.1)]
         assert "低置信度" in _render_facts_text(rows, max_total=6000, per_fact=300)
 
     def test_legacy_3tuple_rows_still_supported(self):
         """反例：历史 3 元组行（无 confidence）不得崩。"""
         from app.routers.sse_handlers import _render_facts_text
-        assert _render_facts_text([("工程概况", "t", "内容")], max_total=6000, per_fact=300) == \
-            "### 工程概况\n内容\n"
+
+        assert _render_facts_text([("工程概况", "t", "内容")], max_total=6000, per_fact=300) == "### 工程概况\n内容\n"
 
     def test_empty_rows(self):
         from app.routers.sse_handlers import _render_facts_text
+
         assert _render_facts_text([], max_total=100, per_fact=10) == ""
 
     def test_chapter_preorder_keeps_all_facts(self):
         """chapter 前置是「重排」不是「筛选」——契约：绝不丢事实。"""
         from app.routers.sse_handlers import _render_facts_text
-        rows = [("G1", "t0", "甲组内容", 0.9, "technique"),
-                ("G2", "t1", "乙组内容", 0.9, "safety"),
-                ("G3", "t2", "丙组内容", 0.9, "technique")]
-        out = _render_facts_text(rows, max_total=6000, per_fact=300,
-                                 chapter="technique")
+
+        rows = [
+            ("G1", "t0", "甲组内容", 0.9, "technique"),
+            ("G2", "t1", "乙组内容", 0.9, "safety"),
+            ("G3", "t2", "丙组内容", 0.9, "technique"),
+        ]
+        out = _render_facts_text(rows, max_total=6000, per_fact=300, chapter="technique")
         assert "甲组内容" in out and "乙组内容" in out and "丙组内容" in out
         assert out.index("甲组内容") < out.index("乙组内容")
 
-
-
     def test_total_stays_within_budget(self):
         from app.routers.sse_handlers import _render_facts_text
+
         out = _render_facts_text(self._rows(30, 400), max_total=1500, per_fact=300)
         assert len(out) <= 1500
 
     def test_unknown_chapter_is_noop(self):
         """反例：chapter 匹配不到时必须与不传完全一致（零回归）。"""
         from app.routers.sse_handlers import _render_facts_text
+
         rows = [("G1", "t0", "甲组内容", 0.9, "technique")]
-        assert (_render_facts_text(rows, max_total=6000, per_fact=300, chapter="zzz")
-                == _render_facts_text(rows, max_total=6000, per_fact=300))
+        assert _render_facts_text(rows, max_total=6000, per_fact=300, chapter="zzz") == _render_facts_text(
+            rows, max_total=6000, per_fact=300
+        )
+
 
 # ============================================================
 # T6 危大判定：不得使用模拟值 / 过期值
 # ============================================================
+
 
 class TestDangerCheckFiltering:
     """T6：「超过一定规模」是给监管看的确定性结论，不能用不确定数据算。"""
 
     def _sqls(self):
         import app.routers.global_facts as gf
+
         seen: list[str] = []
 
         class _Db:
@@ -213,6 +232,7 @@ class TestDangerCheckFiltering:
     def test_danger_check_endpoint_uses_filtered_query(self):
         """反例：danger-check 必须传 injectable_only=True。"""
         import app.routers.global_facts as gf
+
         assert "injectable_only=True" in inspect.getsource(gf)
 
 
@@ -220,18 +240,20 @@ class TestDangerCheckFiltering:
 # T8 内存 LRU 缓存键必须含渲染器版本
 # ============================================================
 
+
 class TestRenderCacheVersion:
     """T8：升级渲染器后内存 LRU 会命中旧 PNG，磁盘版本机制被完全绕过，
     旧图还会被「转正」写入新版本槽位，直到进程重启才恢复。"""
 
     def test_cache_key_contains_version(self):
         from app.services.ai import mermaid_renderer as mr
-        key = mr._render_cache_key("graph TD\n A-->B", "flowchart",
-                                   90, "天", 5, False, True)
+
+        key = mr._render_cache_key("graph TD\n A-->B", "flowchart", 90, "天", 5, False, True)
         assert key[0] == f"v{mr._RENDERER_VERSION}"
 
     def test_version_change_invalidates_key(self, monkeypatch):
         from app.services.ai import mermaid_renderer as mr
+
         args = ("graph TD\n A-->B", "flowchart", 90, "天", 5, False, True)
         k1 = mr._render_cache_key(*args)
         monkeypatch.setattr(mr, "_RENDERER_VERSION", mr._RENDERER_VERSION + 1)
@@ -240,6 +262,7 @@ class TestRenderCacheVersion:
     def test_single_version_definition(self):
         """版本号只能定义一次（两处定义会隐式分叉）。"""
         from app.services.ai import mermaid_renderer as mr
+
         assert inspect.getsource(mr).count("_RENDERER_VERSION = ") == 1
 
     def test_lru_roundtrip_still_works(self):
@@ -247,9 +270,9 @@ class TestRenderCacheVersion:
 
         from app.services.ai import mermaid_renderer as mr
         from PIL import Image
+
         mr.clear_render_cache()
-        key = mr._render_cache_key("graph TD\n A-->B", "flowchart",
-                                   90, "天", 5, False, True)
+        key = mr._render_cache_key("graph TD\n A-->B", "flowchart", 90, "天", 5, False, True)
         assert mr._render_cache_get(key) is None
         buf = BytesIO()
         Image.new("RGB", (400, 400), "white").save(buf, format="PNG")
@@ -262,6 +285,7 @@ class TestRenderCacheVersion:
 # ============================================================
 # T9 / T10 正文生成「四项依据」完整性
 # ============================================================
+
 
 class TestContentFourBasis:
     """T9：正文生成必须注入「专项方案名称包含的主要施工内容」。
@@ -278,23 +302,25 @@ class TestContentFourBasis:
     def test_scope_helper_is_shared_with_outline(self):
         """单一实现：正文与目录生成必须复用同一解析器（services/scheme_scope）。"""
         from app.routers.sse_handlers import _outline_construction_scope
-        assert "app.services.scheme_scope" in inspect.getsource(
-            _outline_construction_scope)
+
+        assert "app.services.scheme_scope" in inspect.getsource(_outline_construction_scope)
 
     def test_scope_helper_returns_text_for_real_scheme_name(self):
         """反例：确认它对真实方案名确实能拆出条目（否则注入是空转）。"""
         from app.routers.sse_handlers import _outline_construction_scope
-        out = _outline_construction_scope(
-            {"name": "深基坑开挖及支护专项施工方案", "type": "危大工程"})
+
+        out = _outline_construction_scope({"name": "深基坑开挖及支护专项施工方案", "type": "危大工程"})
         assert out, "真实方案名应能拆出主要施工内容"
 
     def test_scope_helper_empty_when_unparseable(self):
         from app.routers.sse_handlers import _outline_construction_scope
+
         assert _outline_construction_scope({"name": "", "type": ""}) == ""
 
     def test_chapter_key_lookup_is_total(self):
         """反例：未命中必须返回空串（不得抛异常阻断逐章生成）。"""
         from app.routers.sse_handlers import chapter_key_of_title
+
         assert chapter_key_of_title("") == ""
         assert chapter_key_of_title("毫不相干的标题") == ""
         assert chapter_key_of_title("施工安全保证措施") == "safety"
@@ -302,5 +328,5 @@ class TestContentFourBasis:
     def test_content_generation_passes_chapter(self):
         """T10：正文调用点必须传 chapter（九大章节分类接进正文的唯一通道）。"""
         from app.routers.sse_handlers import generate_content
-        assert "chapter=chapter_key_of_title" in inspect.getsource(
-            generate_content)
+
+        assert "chapter=chapter_key_of_title" in inspect.getsource(generate_content)

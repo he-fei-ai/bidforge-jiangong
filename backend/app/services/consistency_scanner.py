@@ -9,6 +9,7 @@
 
 扫描只读，不修改正文。
 """
+
 from __future__ import annotations
 
 import asyncio
@@ -27,6 +28,16 @@ from app.services.ai.json_response import collect_json_response
 from app.services.ai.prompts._registry import render
 from app.services.ai.provider_factory import effective_batch_size
 from app.services.content_utils import order_sections_dfs
+
+# ✅ B-16（R175，判定源统一）：数值主题表由 services/numeric_topics.py 单一维护。
+# ✅ B-19（R176，长文本口径统一）：章节截断阈值与 /check、/consistency-audit
+#    共用同一常量，不再各持一套（护栏断言两者数值必须相等）。
+from app.services.numeric_topics import (
+    LONG_TEXT_SECTION_CAP,
+    pattern_num_topics,
+    topic_object_group,
+)
+from app.services.placeholder_sections import PLACEHOLDER_STATUS
 from app.services.standards_registry import get_standards_text
 
 logger = logging.getLogger("consistency_scanner")
@@ -39,7 +50,7 @@ logger = logging.getLogger("consistency_scanner")
 # （R47 债-1 护栏 test_consumers_rebind_original_names），故按 sse_handlers
 # 同款写法以 noqa:F401 显式再导出。
 from app.services.ai.prompts._limits import (  # noqa: E402
-    PER_SECTION_LIMIT,
+    PER_SECTION_LIMIT,  # noqa: F401 —— 仅保留同名绑定供 R47 债-1 护栏读取
     SECTION_CHUNK_LIMIT,  # noqa: F401
 )
 
@@ -49,48 +60,30 @@ from app.services.ai.prompts._limits import (  # noqa: E402
 #   ① 批处理：一次调用扫 k 章（调用数 N → ⌈N/k⌉），批结果不合法则按章回退；
 #   ② 并发：批之间并发（旧实现纯串行 for），只降墙钟不降调用数；
 #   ③ 增量：按「章节正文指纹 + 上下文指纹」缓存，改一章只重扫一章。
-CONSISTENCY_SCAN_BATCH_SIZE = max(
-    1, int(getattr(settings, "consistency_scan_batch_size", 1) or 1))
-CONSISTENCY_SCAN_CONCURRENCY = max(
-    1, int(getattr(settings, "consistency_scan_concurrency", 1) or 1))
+CONSISTENCY_SCAN_BATCH_SIZE = max(1, int(getattr(settings, "consistency_scan_batch_size", 1) or 1))
+CONSISTENCY_SCAN_CONCURRENCY = max(1, int(getattr(settings, "consistency_scan_concurrency", 1) or 1))
 # 单批正文字符上限（章数之外第二道闸门）：防止 prompt 过长导致超时 / JSON 截断
 CONSISTENCY_SCAN_BATCH_CHARS = 18000
 
-# ---------- 程序预扫描规则 ----------
-_NUM_TOPICS = [
-    ("工期", r"(?:总工期|工期|建设工期|施工工期)[^0-9]{0,12}(\d+(?:\.\d+)?)\s*(日历天|天|个月|月)"),
-    ("基坑深度", r"(?:开挖|基坑)[^。\n]{0,8}深度[^0-9]{0,8}(\d+(?:\.\d+)?)\s*(?:m|米|M)"),
-    ("搭设高度", r"(?:支撑|脚手架|支架|模板)[^。\n]{0,8}高度[^0-9]{0,8}(\d+(?:\.\d+)?)\s*(?:m|米|M)"),
-    ("混凝土强度", r"((?:柱|梁|板|墙|基础|承台|桩|楼板|底板|顶板)[^0-9，。；、\n]{0,6}?)?\s*(?:混凝土强度等级|混凝土为|砼)\s*[:：]?\s*C(\d{2,3})"),
-    ("质保期", r"(?:质保期|保修期|质量保修期)[^0-9]{0,10}(\d+)\s*(年|个月|月)"),
-    ("响应时间", r"(?:响应(?:时间|时效)|到场(?:时间|时效))[^0-9]{0,8}(\d+(?:\.\d+)?)\s*(小时|h|H)"),
-    ("设备数量", r"(塔吊|塔式起重机|施工电梯|升降机|挖掘机|起重机)[^0-9]{0,10}(\d+)\s*(台|套)"),
-    # ✅ 2026-10-17（文档质量报告 六·2 数据矛盾）：补入报告**实证**互相矛盾的
-    #    高价值主题 —— 旧表只覆盖工期/基坑深度/搭设高度/混凝土强度，这些字段
-    #    正文与附录多处口径不一（用工年龄 55/60、缺陷责任期 24/60、板厚 12/15mm、
-    #    壁厚 3.0/3.6/3.24mm、悬臂拆模 55%/100%）却全程漏检、用户端零提示。
-    #    取值按**对象**分组（见 _NUM_TOPIC_OBJECT_GROUP）：「一般 55 周岁 /
-    #    危大工程 60 周岁」属不同对象的差异化取值，不得误判为矛盾。
-    ("用工年龄", r"(一般|危大工程)[^0-9。\n]{0,16}?(\d{2})\s*周岁"),
-    ("缺陷责任期",
-     r"(整体工程|防水工程|防水|缺陷责任期)[^0-9。\n]{0,12}?(\d+)\s*个月"),
-    ("模板面板厚度",
-     r"(\d+(?:\.\d+)?)\s*(?:mm|毫米)\s*厚|厚度[^0-9。\n]{0,4}?(\d+(?:\.\d+)?)\s*(?:mm|毫米)"),
-    ("钢管壁厚",
-     r"(?:[φΦ]\s*48(?:\.3)?\s*[×xX*]\s*(\d+(?:\.\d+)?)"
-     r"|壁厚(?!偏差)[^0-9。\n]{0,8}?(\d+(?:\.\d+)?)\s*(?:mm|毫米))"),
-    ("拆模强度", r"(悬臂构件|悬臂|楼板|板|梁|拱)[^0-9。\n]{0,6}?(?:强度)?\s*[≥>=]{1,2}\s*(\d+)\s*%"),
-]
+# ✅ B-02（R175，可信度）：增量缓存格式版本。v1 时代「AI 失败 → 写空行」与
+#    「扫描成功且无冲突」在缓存里完全同形（都是 rows_json='[]'），无法区分。
+#    v2 起失败章节**不写缓存**；版本后缀让全部 v1 旧键一次性失效（安全，只是
+#    多一次全量扫描），彻底清掉历史上被写坏的假「0 冲突」。
+# ✅ D-16（R175，污染固化）：v2 的批扫路径仍会把「模型漏答的章节」当成 0 冲突
+#    写入（与 B-02 是**同一张缓存表、同一个键**）；v2 行可能已被污染，且本次
+#    修复后覆盖校验才生效，故沿用同一常量升到 v3 一次性失效 —— **不新增第二个
+#    版本常量**，也不引入第二张缓存。
+SCAN_CACHE_FORMAT_VERSION = "v3"
 
-#: 需要「按对象分组后再比较」的主题 → 对象标识所在捕获组下标（1 = 第一个捕获组，
-#  与 m.group(i) 一致；m.group(0) 是整体匹配，不是捕获组）。
-#  ✅ BUG 修复（2026-09-18）：设备数量/混凝土强度这类主题的取值必须**按对象**比较，
-#  否则「塔吊 2 台 + 施工电梯 2 台」「柱 C40 + 梁 C30」会被当作跨章节数值矛盾，
-#  对正常方案产生必然的误报（与 preflight_engine 的 CON-01 同一口径）。
-_NUM_TOPIC_OBJECT_GROUP = {"设备数量": 1, "混凝土强度": 1,
-                           # ✅ 2026-10-17：差异化取值必须按对象分组后才比较
-                           #    （「一般 55 周岁 / 危大工程 60 周岁」不是矛盾）
-                           "用工年龄": 1, "缺陷责任期": 1, "拆模强度": 1}
+#: ✅ D-16：批扫覆盖率闸门。模型声明扫描过的章节必须与本批请求集合**逐个相等**；
+#:    缺失占比 ≥ 该比例（或覆盖 0 章）→ 整批回退逐章重扫，否则只补扫缺失章。
+COVERAGE_WHOLE_BATCH_FALLBACK_RATIO = 0.5
+
+# ---------- 程序预扫描规则 ----------
+# ✅ B-16（R175，判定源统一）：数值主题表收敛到 services/numeric_topics.py 唯一事实源。
+_NUM_TOPICS = pattern_num_topics()
+#: 需要按对象分组后再比较的主题 → 对象标识所在捕获组下标（1-based）。
+_NUM_TOPIC_OBJECT_GROUP = topic_object_group()
 #: 岗位简称与全称等价（避免同一岗位被拆成两桶而产生假冲突）
 _ROLE_ALIASES = {"技术负责人": "项目技术负责人"}
 #: 岗位后常见的「动词 / 连接词」开头片段 —— 这些不是人名，是谓语。
@@ -106,19 +99,98 @@ _ROLE_ALIASES = {"技术负责人": "项目技术负责人"}
 #: 「组织各专 / 审核后归 / 批准后 / 签发 / 重排对应 / 接到报告 / 或专职安」。
 #: 现按「谓语前缀」拦截；真正的中文人名不会以这些字开头。
 _PERSON_NAME_STOP_PREFIX = (
-    "组织", "审核", "审", "批准", "审批", "签发", "签字", "签署", "确认", "核实",
-    "重排", "调整", "安排", "部署", "负责", "担任", "会同", "参加",
-    "接到", "接报", "巡查", "检查", "监督", "验收", "复核", "报", "上报", "提交",
-    "编制", "起草", "拟", "制定", "责令", "要求", "督促", "协调",
-    "或", "和", "与", "及", "等", "该", "各", "本", "其", "并", "同时", "立即",
-    "应当", "应", "必须", "须", "要", "将", "把", "对", "向", "由", "从",
+    "组织",
+    "审核",
+    "审",
+    "批准",
+    "审批",
+    "签发",
+    "签字",
+    "签署",
+    "确认",
+    "核实",
+    "重排",
+    "调整",
+    "安排",
+    "部署",
+    "负责",
+    "担任",
+    "会同",
+    "参加",
+    "接到",
+    "接报",
+    "巡查",
+    "检查",
+    "监督",
+    "验收",
+    "复核",
+    "报",
+    "上报",
+    "提交",
+    "编制",
+    "起草",
+    "拟",
+    "制定",
+    "责令",
+    "要求",
+    "督促",
+    "协调",
+    "或",
+    "和",
+    "与",
+    "及",
+    "等",
+    "该",
+    "各",
+    "本",
+    "其",
+    "并",
+    "同时",
+    "立即",
+    "应当",
+    "应",
+    "必须",
+    "须",
+    "要",
+    "将",
+    "把",
+    "对",
+    "向",
+    "由",
+    "从",
 )
 #: 谓语的「兜底」判定：捕获值若整体落在常见公文动词集合内，同样不是人名。
-_PERSON_NAME_STOP_EXACT = frozenset({
-    "负责", "担任", "组织", "审核", "批准", "审批", "签发", "确认", "检查",
-    "监督", "验收", "复核", "上报", "提交", "编制", "起草", "制定", "协调",
-    "安排", "部署", "巡查", "参加", "会同", "接报", "接到", "责令", "要求",
-})
+_PERSON_NAME_STOP_EXACT = frozenset(
+    {
+        "负责",
+        "担任",
+        "组织",
+        "审核",
+        "批准",
+        "审批",
+        "签发",
+        "确认",
+        "检查",
+        "监督",
+        "验收",
+        "复核",
+        "上报",
+        "提交",
+        "编制",
+        "起草",
+        "制定",
+        "协调",
+        "安排",
+        "部署",
+        "巡查",
+        "参加",
+        "会同",
+        "接报",
+        "接到",
+        "责令",
+        "要求",
+    }
+)
 
 
 def _looks_like_person_name(name: str) -> bool:
@@ -132,15 +204,22 @@ def _looks_like_person_name(name: str) -> bool:
 
 _PERSON_RE = re.compile(
     r"(项目经理|项目技术负责人|技术负责人|现场负责人|安全负责人|总监理工程师)"
-    r"\s*[:：为是]?\s*([\u4e00-\u9fa5]{2,4})(?![a-zA-Z0-9])")
-_MODEL_RE = re.compile(
-    r"\b(?:QTZ?\d{2,4}[A-Za-z]?|SC\d{3}|C\d{2}(?:/P\d)?|Q\d{3}[A-Z]?|HPB\d{3}|HRB\d{3})\b")
+    r"\s*[:：为是]?\s*([\u4e00-\u9fa5]{2,4})(?![a-zA-Z0-9])"
+)
+_MODEL_RE = re.compile(r"\b(?:QTZ?\d{2,4}[A-Za-z]?|SC\d{3}|C\d{2}(?:/P\d)?|Q\d{3}[A-Z]?|HPB\d{3}|HRB\d{3})\b")
 _STANDARD_RE = re.compile(r"(GB(?:/T)?|JGJ(?:/T)?|DBJ\d?|JTG(?:/T)?)\s*[0-9]{2,5}(?:\.\d+)?(?:[—\-－]\d{4})?")
 
 _SEVERITY_BY_TYPE = {
-    "numeric": "medium", "param": "medium", "person": "medium",
-    "model": "medium", "timeline": "medium", "commitment": "medium",
-    "duplication": "low", "facts": "high", "design": "high", "standard": "high",
+    "numeric": "medium",
+    "param": "medium",
+    "person": "medium",
+    "model": "medium",
+    "timeline": "medium",
+    "commitment": "medium",
+    "duplication": "low",
+    "facts": "high",
+    "design": "high",
+    "standard": "high",
 }
 
 
@@ -153,22 +232,34 @@ def _clip(text: str, limit: int) -> str:
     return text if len(text) <= limit else text[:limit]
 
 
+def _clip_section_content(text: str, limit: int = LONG_TEXT_SECTION_CAP) -> str:
+    """✅ B-19（R176）：章节正文超限截断时**显式标记**，禁止静默丢字。
+
+    与 /check、/consistency-audit 使用同一阈值（``LONG_TEXT_SECTION_CAP``）和
+    同一标记文案「[……本章正文已截断，原文 N 字]」，让模型知道「后面还有内容」，
+    避免在残缺上下文中判定「未提及」。
+    """
+    text = text or ""
+    if len(text) <= limit:
+        return text
+    return text[:limit] + f"\n\n[……本章正文已截断，原文 {len(text)} 字]"
+
+
 async def build_global_facts_text(db, scheme_id: str, limit: int = 5000) -> str:
     """全局事实文本（复用 facts_builder 的过滤口径：剔除矛盾值/未确认模拟值）。"""
     try:
         from app.services.facts_builder import build_facts_text
+
         return await build_facts_text(db, scheme_id, max_total=limit)
     except Exception as e:
         logger.warning("构建全局事实文本失败（降级为空）: %s", e)
         return ""
 
 
-async def build_project_docs_text(db, project_id: str, *, doc_type: str = "",
-                                  limit: int = 4000) -> str:
+async def build_project_docs_text(db, project_id: str, *, doc_type: str = "", limit: int = 4000) -> str:
     """项目资料 / 设计文件摘要（project_documents.parsed_markdown 聚合截断）。"""
     try:
-        sql = ("SELECT file_name, doc_type, parsed_markdown FROM project_documents "
-               "WHERE project_id=?")
+        sql = "SELECT file_name, doc_type, parsed_markdown FROM project_documents " "WHERE project_id=?"
         params: list = [project_id]
         if doc_type:
             sql += " AND doc_type=?"
@@ -204,14 +295,18 @@ async def load_leaf_sections(db, scheme_id: str) -> list[dict]:
     """
     cur = await db.execute(
         "SELECT id, parent_id, title, content, level, sort_order FROM sections "
-        "WHERE scheme_id=? AND IFNULL(content,'')!='' ORDER BY sort_order",
-        (scheme_id,))
+        "WHERE scheme_id=? AND IFNULL(content,'')!='' AND COALESCE(status,'')!=? "
+        "ORDER BY sort_order",
+        (scheme_id, PLACEHOLDER_STATUS),
+    )
     # ✅ 遗留修复（2026-09-22）：sort_order 是同级序号非文档序，扁平排会造成
     #    扫描/AI 上下文章节次序错乱；重排为目录树前序 DFS（与正文生成同口径）。
     all_rows = [dict(r) for r in order_sections_dfs([dict(r) for r in await cur.fetchall()])]
     cur2 = await db.execute(
-        "SELECT DISTINCT parent_id FROM sections WHERE scheme_id=? AND IFNULL(content,'')!=''",
-        (scheme_id,))
+        "SELECT DISTINCT parent_id FROM sections "
+        "WHERE scheme_id=? AND IFNULL(content,'')!='' AND COALESCE(status,'')!=?",
+        (scheme_id, PLACEHOLDER_STATUS),
+    )
     parent_ids = {r[0] for r in await cur2.fetchall() if r[0]}
     # 叶子 = 自身 id 不在「有正文节点的父集合」中的章节；
     # 退化情况（无层级信息）则退化为全部有正文章节。
@@ -237,9 +332,7 @@ def program_prescan(sections: list[dict]) -> list[dict]:
                 else:
                     # ✅ 按对象分组：不同设备/构件各有各的取值，不构成数值矛盾。
                     #    取值 = 除对象标识组（1-based）外的全部捕获组。
-                    value = "".join(
-                        (m.group(i) or "") for i in range(1, m.re.groups + 1)
-                        if i != obj_group)
+                    value = "".join((m.group(i) or "") for i in range(1, m.re.groups + 1) if i != obj_group)
                     obj = (m.group(obj_group) or "").strip()
                     bucket_key = f"{topic}｜{obj}" if obj else topic
                 if not value:
@@ -265,15 +358,17 @@ def program_prescan(sections: list[dict]) -> list[dict]:
         occurrences = []
         for value, occs in values.items():
             occurrences.extend([{**o, "value": value} for o in occs])
-        candidates.append({
-            "conflict_type": "numeric",
-            "topic": topic,
-            "value": " / ".join(values.keys()),
-            "text": "；".join(o["text"] for o in occurrences[:6]),
-            "position": 0,
-            "section_occurrences": occurrences,
-            "source": "program_prescan",
-        })
+        candidates.append(
+            {
+                "conflict_type": "numeric",
+                "topic": topic,
+                "value": " / ".join(values.keys()),
+                "text": "；".join(o["text"] for o in occurrences[:6]),
+                "position": 0,
+                "section_occurrences": occurrences,
+                "source": "program_prescan",
+            }
+        )
     candidates.extend(_intra_section_candidates(buckets))
     return candidates
 
@@ -294,8 +389,7 @@ def _intra_section_candidates(buckets: dict[str, dict[str, list[dict]]]) -> list
     """
     try:
         on = bool(getattr(settings, "consistency_detect_intra_section", True))
-        allow = tuple(getattr(settings, "consistency_intra_section_topics",
-                              ("工期", "质保期", "响应时间")) or ())
+        allow = tuple(getattr(settings, "consistency_intra_section_topics", ("工期", "质保期", "响应时间")) or ())
     except Exception:
         return []
     if not on or not allow:
@@ -320,15 +414,17 @@ def _intra_section_candidates(buckets: dict[str, dict[str, list[dict]]]) -> list
                 continue
             distinct = list(value_map.keys())
             occurrences = [{**value_map[v], "value": v} for v in distinct]
-            out.append({
-                "conflict_type": "numeric",
-                "topic": f"{bucket_key}（同章节内数值不一致）",
-                "value": " / ".join(distinct),
-                "text": "；".join(o["text"] for o in occurrences[:6]),
-                "position": 0,
-                "section_occurrences": occurrences,
-                "source": "program_prescan_intra",
-            })
+            out.append(
+                {
+                    "conflict_type": "numeric",
+                    "topic": f"{bucket_key}（同章节内数值不一致）",
+                    "value": " / ".join(distinct),
+                    "text": "；".join(o["text"] for o in occurrences[:6]),
+                    "position": 0,
+                    "section_occurrences": occurrences,
+                    "source": "program_prescan_intra",
+                }
+            )
     return out
 
 
@@ -336,16 +432,22 @@ def _add_bucket(buckets: dict, topic: str, value: str, sid: str, title: str, tex
     value = (value or "").strip()
     if not value:
         return
-    occ = {"section_id": sid, "section_title": title,
-           "text": text[:120], "position": 0}
+    occ = {"section_id": sid, "section_title": title, "text": text[:120], "position": 0}
     buckets.setdefault(topic, {}).setdefault(value, [])
     if not any(o["section_id"] == sid for o in buckets[topic][value]):
         buckets[topic][value].append(occ)
 
 
-async def ai_scan_section(*, section: dict, facts: str, project_docs: str,
-                          design_docs: str, standards: str) -> list[dict]:
-    """AI 分片提取单章冲突候选（低温 JSON）。失败返回空列表，绝不阻断扫描。"""
+async def ai_scan_section(
+    *, section: dict, facts: str, project_docs: str, design_docs: str, standards: str, raise_on_failure: bool = False
+) -> list[dict]:
+    """AI 分片提取单章冲突候选（低温 JSON）。
+
+    ``raise_on_failure=False``（默认，向后兼容）：失败返回空列表，绝不阻断扫描。
+    ✅ B-02（R175，可信度）：``run_scan`` 传 ``True`` —— 失败必须**抛出**，
+    否则调用方无法区分「检查成功且无冲突」与「检查失败」，会把失败章节的
+    空结果写成增量缓存，之后永久命中假「0 冲突」。
+    """
     user = render(
         "consistency_scan_user",
         global_facts=facts or "（无）",
@@ -354,19 +456,24 @@ async def ai_scan_section(*, section: dict, facts: str, project_docs: str,
         standards_summary=standards or "（无）",
         section_id=section["id"],
         section_title=section["title"],
-        section_content=_clip(section["content"], PER_SECTION_LIMIT),
+        section_content=_clip_section_content(section["content"]),
     )
     system = render("consistency_scan_system")
     try:
         obj, _ = await collect_json_response(
-            [{"role": "system", "content": system},
-             {"role": "user", "content": user}],
+            [{"role": "system", "content": system}, {"role": "user", "content": user}],
             lambda o: [] if isinstance(o.get("conflicts"), list) else ["缺少 conflicts"],
-            max_retries=1, temperature=0.1, json_mode=True, timeout=180,
-            scene="consistency_scan")
+            max_retries=1,
+            temperature=0.1,
+            json_mode=True,
+            timeout=180,
+            scene="consistency_scan",
+        )
         rows = obj.get("conflicts") or []
     except Exception as e:
         logger.warning("章节 %s AI 扫描失败（跳过）: %s", section["title"], e)
+        if raise_on_failure:
+            raise
         return []
     return normalize_scan_rows(rows, section)
 
@@ -380,21 +487,25 @@ def normalize_scan_rows(rows: list[dict], section: dict) -> list[dict]:
     for r in rows:
         if not isinstance(r, dict) or not r.get("topic"):
             continue
-        out.append({
-            "conflict_type": r.get("conflict_type") or r.get("type") or "numeric",
-            "topic": str(r.get("topic"))[:60],
-            "value": str(r.get("value") or "")[:120],
-            "text": str(r.get("text") or "")[:300],
-            "position": int(r.get("position") or 0),
-            "section_occurrences": [{
-                "section_id": section["id"],
-                "section_title": section["title"],
+        out.append(
+            {
+                "conflict_type": r.get("conflict_type") or r.get("type") or "numeric",
+                "topic": str(r.get("topic"))[:60],
+                "value": str(r.get("value") or "")[:120],
                 "text": str(r.get("text") or "")[:300],
                 "position": int(r.get("position") or 0),
-                "value": str(r.get("value") or "")[:120],
-            }],
-            "source": "ai_scan",
-        })
+                "section_occurrences": [
+                    {
+                        "section_id": section["id"],
+                        "section_title": section["title"],
+                        "text": str(r.get("text") or "")[:300],
+                        "position": int(r.get("position") or 0),
+                        "value": str(r.get("value") or "")[:120],
+                    }
+                ],
+                "source": "ai_scan",
+            }
+        )
     return out
 
 
@@ -418,42 +529,65 @@ def _group_batch_rows(rows: list, sections: list[dict]) -> dict[str, list[dict]]
     return out
 
 
-async def ai_scan_batch(*, sections: list[dict], facts: str, project_docs: str,
-                        design_docs: str, standards: str) -> dict[str, list[dict]] | None:
+async def ai_scan_batch(
+    *, sections: list[dict], facts: str, project_docs: str, design_docs: str, standards: str
+) -> dict[str, list[dict]] | None:
     """一次 AI 调用扫描多个章节，返回 {section_id: 原始冲突行}。
 
     返回 None 表示「本批不可用」（AI 调用失败或结构不合法），调用方按章回退。
     """
     block = "\n".join(
         f"章节ID：{sec['id']}\n章节标题：{sec['title']}\n章节内容：\n"
-        f"{_clip(sec.get('content') or '', PER_SECTION_LIMIT)}\n-----"
-        for sec in sections)
-    user = render("consistency_scan_batch_user",
-                  global_facts=facts or "（无）",
-                  project_docs_summary=project_docs or "（无）",
-                  design_docs_summary=design_docs or "（无）",
-                  standards_summary=standards or "（无）",
-                  section_count=len(sections), sections_block=block)
+        f"{_clip_section_content(sec.get('content') or '')}\n-----"
+        for sec in sections
+    )
+    user = render(
+        "consistency_scan_batch_user",
+        global_facts=facts or "（无）",
+        project_docs_summary=project_docs or "（无）",
+        design_docs_summary=design_docs or "（无）",
+        standards_summary=standards or "（无）",
+        section_count=len(sections),
+        sections_block=block,
+    )
     system = render("consistency_scan_batch_system")
     try:
         obj, _ = await collect_json_response(
-            [{"role": "system", "content": system},
-             {"role": "user", "content": user}],
-            lambda o: [] if isinstance(o.get("conflicts"), list) else ["缺少 conflicts"],
-            max_retries=1, temperature=0.1, json_mode=True, timeout=240,
-            scene="consistency_scan")
+            [{"role": "system", "content": system}, {"role": "user", "content": user}],
+            lambda o: []
+            if (isinstance(o.get("conflicts"), list) and isinstance(o.get("scanned_sections"), list))
+            else ["缺少 conflicts / scanned_sections"],
+            max_retries=1,
+            temperature=0.1,
+            json_mode=True,
+            timeout=240,
+            scene="consistency_scan",
+        )
     except Exception as e:
         logger.warning("多章合并扫描失败（%d 章，按章回退）: %s", len(sections), e)
         return None
-    grouped = _group_batch_rows(obj.get("conflicts") or [], sections)
+    conflicts = obj.get("conflicts") or []
+    batch_ids = {s["id"] for s in sections}
+    claimed = obj.get("scanned_sections")
+    covered = {str(x).strip() for x in (claimed or []) if isinstance(x, str)} & batch_ids
+    grouped = _group_batch_rows(conflicts, sections)
     if grouped is None:
         logger.warning("多章合并扫描结果无法按章节归属（%d 章），按章回退", len(sections))
-    return grouped
+        return None
+    # ✅ D-16：模型给出的冲突若指向它自己没声明覆盖的章节 → 结果自相矛盾，
+    #    整批不可信（宁可回退重扫，也不把「半批结论」当完整结论写缓存）。
+    conflict_ids = {str(r.get("section_id") or "").strip() for r in conflicts if isinstance(r, dict)}
+    if conflict_ids - covered:
+        logger.warning("批扫描自相矛盾：冲突指向未声明覆盖的章节 %s，按章回退", sorted(conflict_ids - covered))
+        return None
+    # ✅ D-16：只返回模型**声明已检查**的章节（未声明的章节由调用方补扫/整批回退），
+    #    不再把「模型没答」预填成空列表 —— 否则与「真的无冲突」在缓存里同形。
+    return {sid: rows for sid, rows in grouped.items() if sid in covered}
 
 
-def chunk_sections_for_scan(sections: list[dict], *,
-                            batch_size: int | None = None,
-                            max_chars: int | None = None) -> list[list[dict]]:
+def chunk_sections_for_scan(
+    sections: list[dict], *, batch_size: int | None = None, max_chars: int | None = None
+) -> list[list[dict]]:
     """按「章数 + 字符数」双上限切批（纯函数，可单测）。
 
     batch_size=1 时退化为「每章一批」，与旧行为逐字一致。
@@ -464,7 +598,7 @@ def chunk_sections_for_scan(sections: list[dict], *,
     cur: list[dict] = []
     cur_chars = 0
     for sec in sections:
-        n = min(len(sec.get("content") or ""), PER_SECTION_LIMIT)
+        n = min(len(sec.get("content") or ""), LONG_TEXT_SECTION_CAP)
         if cur and (len(cur) >= k or cur_chars + n > limit):
             out.append(cur)
             cur, cur_chars = [], 0
@@ -480,15 +614,13 @@ def content_fingerprint(text: str) -> str:
     return hashlib.sha1((text or "").encode("utf-8", "ignore")).hexdigest()[:16]
 
 
-def context_fingerprint(facts: str, project_docs: str,
-                        design_docs: str, standards: str) -> str:
+def context_fingerprint(facts: str, project_docs: str, design_docs: str, standards: str) -> str:
     """上下文指纹：事实/资料/设计文件/规范任一变化 → 缓存整体失效重新扫描。"""
     blob = "\n".join([facts or "", project_docs or "", design_docs or "", standards or ""])
     return hashlib.sha1(blob.encode("utf-8", "ignore")).hexdigest()[:16]
 
 
-async def _load_cached_rows(db, sections: list[dict],
-                            ctx_hash: str) -> tuple[dict[str, list], list[dict]]:
+async def _load_cached_rows(db, sections: list[dict], ctx_hash: str) -> tuple[dict[str, list], list[dict]]:
     """返回 (命中表 section_id -> rows, 未命中章节列表)。
 
     缓存不可用（表缺失 / 查询报错 / JSON 损坏）时全部视为未命中 —— 增量只是优化，
@@ -501,7 +633,8 @@ async def _load_cached_rows(db, sections: list[dict],
         cur = await db.execute(
             "SELECT section_id, content_hash, rows_json FROM consistency_scan_cache"
             f" WHERE section_id IN ({marks}) AND context_hash=?",
-            (*[s["id"] for s in sections], ctx_hash))
+            (*[s["id"] for s in sections], ctx_hash),
+        )
         raw = {dict(r)["section_id"]: dict(r) for r in await cur.fetchall()}
     except Exception as e:
         logger.warning("一致性扫描缓存读取失败（本次全量重扫）: %s", e)
@@ -525,8 +658,9 @@ async def _load_cached_rows(db, sections: list[dict],
     return hit, pending
 
 
-async def _save_cached_rows(db, scheme_id: str, rows_by_sid: dict[str, list],
-                            ctx_hash: str, sections_by_id: dict[str, dict]) -> None:
+async def _save_cached_rows(
+    db, scheme_id: str, rows_by_sid: dict[str, list], ctx_hash: str, sections_by_id: dict[str, dict]
+) -> None:
     """把本次扫描结果写入增量缓存（失败只告警，不影响本次结果）。"""
     payload = []
     for sid, rows in (rows_by_sid or {}).items():
@@ -534,9 +668,15 @@ async def _save_cached_rows(db, scheme_id: str, rows_by_sid: dict[str, list],
         if not sec:
             continue
         try:
-            payload.append((sid, scheme_id,
-                            content_fingerprint(sec.get("content") or ""),
-                            ctx_hash, json.dumps(rows or [], ensure_ascii=False)))
+            payload.append(
+                (
+                    sid,
+                    scheme_id,
+                    content_fingerprint(sec.get("content") or ""),
+                    ctx_hash,
+                    json.dumps(rows or [], ensure_ascii=False),
+                )
+            )
         except Exception:
             continue
     if not payload:
@@ -549,7 +689,9 @@ async def _save_cached_rows(db, scheme_id: str, rows_by_sid: dict[str, list],
             " ON CONFLICT(section_id) DO UPDATE SET"
             " scheme_id=excluded.scheme_id, content_hash=excluded.content_hash,"
             " context_hash=excluded.context_hash, rows_json=excluded.rows_json,"
-            " created_at=datetime('now','localtime')", payload)
+            " created_at=datetime('now','localtime')",
+            payload,
+        )
         await db.commit()
     except Exception as e:
         logger.warning("一致性扫描缓存写入失败（不影响本次结果）: %s", e)
@@ -561,8 +703,20 @@ def _norm_topic(t: str) -> str:
 
 # 涉及结构/安全的参数主题关键词：不一致至少按 high 处理（与 §5.2 优先级一致）
 _SAFETY_TOPIC_HINTS = (
-    "强度", "型号", "基坑", "深度", "高度", "脚手架", "支撑",
-    "配筋", "截面", "桩", "轴线", "标高", "荷载", "坡度",
+    "强度",
+    "型号",
+    "基坑",
+    "深度",
+    "高度",
+    "脚手架",
+    "支撑",
+    "配筋",
+    "截面",
+    "桩",
+    "轴线",
+    "标高",
+    "荷载",
+    "坡度",
 )
 
 
@@ -601,8 +755,7 @@ def _conflict_id_prefix(scheme_id: str) -> str:
     return f"{hashlib.md5(str(scheme_id).encode('utf-8')).hexdigest()[:6]}-"
 
 
-def merge_conflicts(ai_rows: list[dict], prescan_rows: list[dict],
-                    scheme_id: str = "") -> list[dict]:
+def merge_conflicts(ai_rows: list[dict], prescan_rows: list[dict], scheme_id: str = "") -> list[dict]:
     """合并去重：
 
     1. 同规范化主题归并，occurrences 按「章节 + 取值」去重合并；
@@ -682,21 +835,37 @@ def merge_conflicts(ai_rows: list[dict], prescan_rows: list[dict],
         severity = _SEVERITY_BY_TYPE.get(item["conflict_type"], "medium")
         if any(h in (item["topic"] or "") for h in _SAFETY_TOPIC_HINTS) and severity != "high":
             severity = "high"
-        conflicts.append({
-            "id": cid,
-            "conflict_type": item["conflict_type"],
-            "severity": severity,
-            "topic": item["topic"],
-            "occurrences": occs,
-            "current_values": values,
-            "status": "pending",
-        })
+        conflicts.append(
+            {
+                "id": cid,
+                "conflict_type": item["conflict_type"],
+                "severity": severity,
+                "topic": item["topic"],
+                "occurrences": occs,
+                "current_values": values,
+                "status": "pending",
+            }
+        )
     return conflicts
 
 
-async def persist_conflicts(db, scheme_id: str, scan_id: str,
-                            conflicts: list[dict], *,
-                            content_fingerprint: str = "") -> None:
+def _conflict_identity(conflict_type, topic, occurrences) -> tuple:
+    """冲突身份签名：类型 + 主题 + 章节/取值集合（忽略出现位置与顺序）。
+
+    ✅ R179（B-03 残项）：跨轮扫描时冲突 id 仍是按顺序重编的 C001/C002…，
+    若只用 id 做 upsert 键，上一轮「已确认」的 C001 会被本轮**另一处**
+    冲突继承 —— 用户看到的新问题直接挂着旧的 accepted 状态，自动仲裁
+    也会跳过它。以身份签名判断是否同一问题，身份变化则重置为 pending。
+    """
+    occ = sorted(
+        (str(o.get("section_id") or ""), str(o.get("value") or "")) for o in (occurrences or []) if isinstance(o, dict)
+    )
+    return (str(conflict_type or ""), str(topic or "").strip(), tuple(occ))
+
+
+async def persist_conflicts(
+    db, scheme_id: str, scan_id: str, conflicts: list[dict], *, content_fingerprint: str = ""
+) -> None:
     now = datetime.now().isoformat()
     # ✅ BUG 修复（2026-09-22）：冲突 id 每次扫描都从 C001 重新编号，同一方案
     #    第二次扫描（重新生成正文 → 收尾一致性扫描必再跑一次）插入 C001 时
@@ -708,30 +877,71 @@ async def persist_conflicts(db, scheme_id: str, scan_id: str,
     #     这是**兜底层** —— 即便上游因故仍生成了全局流水号（历史数据 / 自定义
     #     调用方不传 scheme_id），命中他人行时也把它收回本方案，而不是把本方案的
     #     scan_id 与冲突原文写进别人的行（跨方案数据泄漏的放大环节）。
+    #     ✅ R179（B-03 残项）：仅当身份签名（类型/主题/章节取值集合）未变时保留
+    #     原 status；身份变化或原行属于其它方案 → 重置 pending，避免旧结论被
+    #     另一处新冲突继承。topic/conflict_type 也一并刷新，杜绝「旧主题配新问题」。
+    prev_map: dict[str, dict] = {}
+    if conflicts:
+        ids = [c["id"] for c in conflicts]
+        marks = ",".join("?" for _ in ids)
+        cur = await db.execute(
+            "SELECT id, scheme_id, conflict_type, topic, occurrences, status"
+            f" FROM consistency_conflicts WHERE id IN ({marks})",
+            ids,
+        )
+        prev_map = {r["id"]: dict(r) for r in await cur.fetchall()}
     for c in conflicts:
+        prev = prev_map.get(c["id"])
+        keep_status = "pending"
+        if prev and prev.get("scheme_id") == scheme_id:
+            try:
+                prev_occs = json.loads(prev.get("occurrences") or "[]")
+            except (TypeError, ValueError):
+                prev_occs = []
+            if _conflict_identity(prev.get("conflict_type"), prev.get("topic"), prev_occs) == _conflict_identity(
+                c["conflict_type"], c["topic"], c["occurrences"]
+            ):
+                keep_status = prev.get("status") or "pending"
         await db.execute(
             "INSERT INTO consistency_conflicts "
             "(id, scheme_id, scan_id, conflict_type, severity, topic, occurrences,"
             " status, content_fingerprint, created_at) VALUES (?,?,?,?,?,?,?,?,?,?)"
             " ON CONFLICT(id) DO UPDATE SET"
             " scheme_id=excluded.scheme_id, scan_id=excluded.scan_id,"
+            " conflict_type=excluded.conflict_type, topic=excluded.topic,"
             " severity=excluded.severity,"
-            " occurrences=excluded.occurrences,"
+            " occurrences=excluded.occurrences, status=excluded.status,"
             " content_fingerprint=excluded.content_fingerprint,"
             " created_at=excluded.created_at",
-            (c["id"], scheme_id, scan_id, c["conflict_type"], c["severity"],
-             c["topic"], json.dumps(c["occurrences"], ensure_ascii=False),
-             "pending", content_fingerprint, now))
+            (
+                c["id"],
+                scheme_id,
+                scan_id,
+                c["conflict_type"],
+                c["severity"],
+                c["topic"],
+                json.dumps(c["occurrences"], ensure_ascii=False),
+                keep_status,
+                content_fingerprint,
+                now,
+            ),
+        )
     await db.commit()
 
 
-async def run_scan(db, *, scheme_id: str, project_id: str, scheme_name: str,
-                   scheme_type: str,
-                   include_global_facts: bool = True,
-                   include_project_docs: bool = True,
-                   include_design_docs: bool = True,
-                   use_cache: bool = True,
-                   progress_cb=None) -> dict:
+async def run_scan(
+    db,
+    *,
+    scheme_id: str,
+    project_id: str,
+    scheme_name: str,
+    scheme_type: str,
+    include_global_facts: bool = True,
+    include_project_docs: bool = True,
+    include_design_docs: bool = True,
+    use_cache: bool = True,
+    progress_cb=None,
+) -> dict:
     """执行一次完整扫描，返回 {scan_id, total, conflicts, contexts, cached}。
 
     progress_cb(done, total, message)：可选的进度回调（SSE/任务注册用）。
@@ -743,14 +953,22 @@ async def run_scan(db, *, scheme_id: str, project_id: str, scheme_name: str,
     """
     sections = await load_leaf_sections(db, scheme_id)
     if not sections:
-        return {"scan_id": "", "total": 0, "conflicts": [], "sections": 0, "cached": 0}
+        return {
+            "scan_id": "",
+            "total": 0,
+            "conflicts": [],
+            "sections": 0,
+            "cached": 0,
+            "failed_sections": [],
+            "unscanned_sections": [],
+            "partial": False,
+        }
 
     facts = await build_global_facts_text(db, scheme_id) if include_global_facts else ""
-    project_docs = (await build_project_docs_text(db, project_id, limit=3000)
-                    if include_project_docs else "")
-    design_docs = (await build_project_docs_text(
-        db, project_id, doc_type="设计文件", limit=3000)
-        if include_design_docs else "")
+    project_docs = await build_project_docs_text(db, project_id, limit=3000) if include_project_docs else ""
+    design_docs = (
+        await build_project_docs_text(db, project_id, doc_type="设计文件", limit=3000) if include_design_docs else ""
+    )
     standards = build_standards_text(scheme_name, scheme_type)
 
     # 程序预扫描（零成本强信号）
@@ -761,6 +979,8 @@ async def run_scan(db, *, scheme_id: str, project_id: str, scheme_name: str,
     total = len(sections)
     by_id = {s["id"]: s for s in sections}
     ctx_hash = context_fingerprint(facts, project_docs, design_docs, standards)
+    # ✅ B-02：版本后缀使 v1 假缓存一次性失效（见 SCAN_CACHE_FORMAT_VERSION）。
+    ctx_hash = f"{ctx_hash}|{SCAN_CACHE_FORMAT_VERSION}"
     if use_cache:
         cached_rows, pending = await _load_cached_rows(db, sections, ctx_hash)
     else:
@@ -771,58 +991,100 @@ async def run_scan(db, *, scheme_id: str, project_id: str, scheme_name: str,
     # ✅ 2026-09-22（调用次数优化 O6）：批大小按 provider 实时成功率分级
     #    （ai_batch_by_success_rate=False 时与配置值完全一致，零行为变化）。
     _scan_batch_size = await effective_batch_size(CONSISTENCY_SCAN_BATCH_SIZE)
-    logger.info("一致性扫描：%d 章（缓存命中 %d，本次需扫 %d，批次 %d）",
-                total, len(cached_rows), len(pending),
-                len(chunk_sections_for_scan(pending, batch_size=_scan_batch_size)))
+    logger.info(
+        "一致性扫描：%d 章（缓存命中 %d，本次需扫 %d，批次 %d）",
+        total,
+        len(cached_rows),
+        len(pending),
+        len(chunk_sections_for_scan(pending, batch_size=_scan_batch_size)),
+    )
 
     scanned_rows: dict[str, list] = {}
+    failed_ids: set[str] = set()  # ✅ B-02：AI 扫描失败、未产生结论的章节
     batches = chunk_sections_for_scan(pending, batch_size=_scan_batch_size)
     if batches:
         sem = asyncio.Semaphore(CONSISTENCY_SCAN_CONCURRENCY)
         done = 0
 
-        async def _scan_batch(batch: list[dict]) -> dict[str, list]:
+        async def _scan_batch(batch: list[dict]) -> tuple[dict[str, list], set[str]]:
             nonlocal done
             async with sem:
                 out: dict[str, list] = {}
+                failed: set[str] = set()
                 grouped = None
                 if len(batch) > 1:
                     try:
                         grouped = await ai_scan_batch(
-                            sections=batch, facts=facts, project_docs=project_docs,
-                            design_docs=design_docs, standards=standards)
+                            sections=batch,
+                            facts=facts,
+                            project_docs=project_docs,
+                            design_docs=design_docs,
+                            standards=standards,
+                        )
                     except Exception as e:
                         # ai_scan_batch 内部已兜底，这里是双保险：批路径任何异常
                         # 都必须降级为逐章扫描，不能让整批章节的扫描结果丢失。
                         logger.warning("多章批扫描异常（按章回退）: %s", e)
                         grouped = None
+
+                async def _scan_one(sec: dict) -> None:
+                    try:
+                        # ✅ B-02：失败必须抛出，否则会把「检查失败」当成
+                        #    「检查成功且无冲突」写进增量缓存（假 0 冲突常驻）。
+                        out[sec["id"]] = await ai_scan_section(
+                            section=sec,
+                            facts=facts,
+                            project_docs=project_docs,
+                            design_docs=design_docs,
+                            standards=standards,
+                            raise_on_failure=True,
+                        )
+                    except Exception as e:  # 失败章节不产出结论、不写缓存
+                        logger.warning("章节 %s 扫描失败（不写缓存，计入失败清单）: %s", sec.get("title"), e)
+                        failed.add(sec["id"])
+                        out.pop(sec["id"], None)
+
                 if grouped is not None:
+                    # ✅ D-16：覆盖校验以**章节 ID 集合**逐个比对（不比数量）；
+                    #    ai_scan_batch 只回传模型声明检查过的章节，缺谁一目了然。
+                    requested = {sec["id"] for sec in batch}
+                    covered = requested & set(grouped)
+                    missing = [sec for sec in batch if sec["id"] not in covered]
                     for sec in batch:
-                        out[sec["id"]] = normalize_scan_rows(
-                            grouped.get(sec["id"], []), sec)
+                        if sec["id"] in covered:
+                            out[sec["id"]] = normalize_scan_rows(grouped[sec["id"]], sec)
+                    if missing:
+                        whole = (not covered) or (len(missing) / len(batch) >= COVERAGE_WHOLE_BATCH_FALLBACK_RATIO)
+                        if whole:
+                            # 整批缺失 / 大面积缺失：丢弃半批结论，逐章重扫全部，
+                            # 不把残缺结果拼进最终结论。
+                            out.clear()
+                            logger.warning("批扫描覆盖不足（%d/%d 章），整批回退逐章重扫", len(covered), len(batch))
+                        else:
+                            logger.warning(
+                                "批扫描缺 %d 章（%d/%d 已覆盖），只补扫缺失章", len(missing), len(covered), len(batch)
+                            )
+                        for sec in batch if whole else missing:
+                            await _scan_one(sec)
                 else:
                     # 单章（批大小=1）或批不可用 → 逐章调用（旧路径，质量兜底）
                     for sec in batch:
-                        try:
-                            out[sec["id"]] = await ai_scan_section(
-                                section=sec, facts=facts, project_docs=project_docs,
-                                design_docs=design_docs, standards=standards)
-                        except Exception as e:  # ai_scan_section 自身已兜底，双保险
-                            logger.warning("章节 %s 扫描失败（跳过）: %s",
-                                           sec.get("title"), e)
-                            out[sec["id"]] = []
+                        await _scan_one(sec)
                 done += len(batch)
                 if progress_cb:
                     await progress_cb(
-                        len(cached_rows) + done, total,
-                        f"正在扫描章节 {len(cached_rows) + done}/{total}："
-                        f"{batch[-1].get('title', '')}")
-                return out
+                        len(cached_rows) + done,
+                        total,
+                        f"正在扫描章节 {len(cached_rows) + done}/{total}：" f"{batch[-1].get('title', '')}",
+                    )
+                return out, failed
 
-        for res in await asyncio.gather(*[_scan_batch(b) for b in batches]):
+        for res, res_failed in await asyncio.gather(*[_scan_batch(b) for b in batches]):
             scanned_rows.update(res)
+            failed_ids.update(res_failed)
         for sid, rows in scanned_rows.items():
             ai_rows.extend(rows or [])
+        # ✅ B-02：只写成功章节的缓存（失败章节根本没进 scanned_rows）。
         await _save_cached_rows(db, scheme_id, scanned_rows, ctx_hash, by_id)
     elif progress_cb:
         await progress_cb(total, total, f"全部 {total} 章命中缓存，无需重复扫描")
@@ -834,16 +1096,25 @@ async def run_scan(db, *, scheme_id: str, project_id: str, scheme_name: str,
     # ✅ 2026-10-07（陈旧结论排除）：本批扫描落当前正文指纹（与总检聚合
     #    同一算法）。正文在扫描后被修改 → 本批冲突不再计入就绪度评分。
     _scan_fp = await scheme_fingerprint.content_fingerprint(db, scheme_id)
-    await persist_conflicts(db, scheme_id, scan_id, conflicts,
-                            content_fingerprint=_scan_fp)
-    logger.info("一致性扫描完成：%d 章（缓存 %d）→ %d 个冲突",
-                total, len(cached_rows), len(conflicts))
+    await persist_conflicts(db, scheme_id, scan_id, conflicts, content_fingerprint=_scan_fp)
+    logger.info("一致性扫描完成：%d 章（缓存 %d）→ %d 个冲突", total, len(cached_rows), len(conflicts))
+    # ✅ B-02（R175）：失败章节必须显式回传，消费方据此把本次扫描标记为
+    #    partial，而不是当成「完整扫描且 0 冲突」。旧消费者忽略新字段即可。
+    failed_sections = [
+        {"section_id": sid, "section_title": (by_id.get(sid) or {}).get("title", "")} for sid in sorted(failed_ids)
+    ]
     return {
         "scan_id": scan_id,
         "total": len(conflicts),
         "conflicts": conflicts,
         "sections": total,
         "cached": len(cached_rows),
+        # ✅ B-02（加法式）：未产生结论的章节 + 本次扫描是否完整。
+        "failed_sections": failed_sections,
+        # ✅ D-16（加法式）：与 failed_sections 同源，显式命名「未被扫描/未产出结论」
+        #    的章节，消费方无需再猜 failed 的语义；缓存里绝不会出现它们的 0 冲突。
+        "unscanned_sections": failed_sections,
+        "partial": bool(failed_sections),
         "contexts": {
             "global_facts": facts,
             "project_docs": project_docs,

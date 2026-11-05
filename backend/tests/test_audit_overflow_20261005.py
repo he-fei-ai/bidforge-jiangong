@@ -10,6 +10,7 @@ F2. 溢出队列容量护栏：超过上限时最旧批次被驱逐且计数累�
 F3. 滞留时长护栏：超过 AUDIT_OVERFLOW_MAX_AGE 的批次被清理
 F4. 公开 flush 入口也会触发溢出队列清理（回归护栏）
 """
+
 from __future__ import annotations
 
 import logging
@@ -31,8 +32,20 @@ def _reset_audit_state() -> None:
 def _make_row(i: int) -> tuple:
     """构造一条 13 字段的审计行（与 _audit_buffer.append 保持一致）。"""
     return (
-        f"audit-{i}", "deepseek", "deepseek-chat", "chat",
-        100, 50, 0, 0.5, 1, "", "test_scene", "cfg-1", "https://example.com")
+        f"audit-{i}",
+        "deepseek",
+        "deepseek-chat",
+        "chat",
+        100,
+        50,
+        0,
+        0.5,
+        1,
+        "",
+        "test_scene",
+        "cfg-1",
+        "https://example.com",
+    )
 
 
 @pytest.fixture(autouse=True)
@@ -46,7 +59,10 @@ class TestAuditOverflowRecovery:
     """F1：审计批量落库重试耗尽后，行进入溢出队列，下一轮 flush 能落库。"""
 
     async def test_overflow_rows_later_flush_into_db(
-        self, db_conn, caplog, monkeypatch,
+        self,
+        db_conn,
+        caplog,
+        monkeypatch,
     ) -> None:
         """DB 锁期间行进溢出队列保留；DB 恢复后下一次 flush 从溢出队列落库。
 
@@ -63,8 +79,7 @@ class TestAuditOverflowRecovery:
                 raise sqlite3.OperationalError("database is locked")
             await original_flush(rows)
 
-        monkeypatch.setattr(pf, "retry_db_op",
-                            lambda coro_factory, **_kw: coro_factory())
+        monkeypatch.setattr(pf, "retry_db_op", lambda coro_factory, **_kw: coro_factory())
         monkeypatch.setattr(pf, "_flush_audit_rows_once", flaky)
 
         for i in range(3):
@@ -89,23 +104,24 @@ class TestAuditOverflowRecovery:
             await pf._flush_audit_buffer()
 
         assert len(pf._audit_overflow) == 0, "溢出队列应已清空"
-        cur = await db_conn.execute(
-            "SELECT id FROM ai_audit_logs WHERE id LIKE 'audit-%' ORDER BY id")
+        cur = await db_conn.execute("SELECT id FROM ai_audit_logs WHERE id LIKE 'audit-%' ORDER BY id")
         stored_ids = [row[0] for row in await cur.fetchall()]
-        assert stored_ids == ["audit-0", "audit-1", "audit-2"], (
-            f"溢出队列恢复后审计行应全部落库，实际: {stored_ids}")
+        assert stored_ids == ["audit-0", "audit-1", "audit-2"], f"溢出队列恢复后审计行应全部落库，实际: {stored_ids}"
 
     async def test_no_silent_loss_when_db_locks(
-        self, db_conn, caplog, monkeypatch,
+        self,
+        db_conn,
+        caplog,
+        monkeypatch,
     ) -> None:
         """核心不变式：无论 DB 锁多少轮，主缓冲不静默丢失 ——
         要么进 DB，要么在溢出队列里等待，且每次失败都留下告警。
         """
+
         async def always_fail(rows):
             raise sqlite3.OperationalError("database is locked")
 
-        monkeypatch.setattr(pf, "retry_db_op",
-                            lambda coro_factory, **_kw: coro_factory())
+        monkeypatch.setattr(pf, "retry_db_op", lambda coro_factory, **_kw: coro_factory())
         monkeypatch.setattr(pf, "_flush_audit_rows_once", always_fail)
 
         for i in range(2):
@@ -116,17 +132,14 @@ class TestAuditOverflowRecovery:
 
         # 2 条审计行：无论 flush 结果如何，主缓冲 + 溢出队列的条数总和
         # 应等于 2，绝不允许 < 2（那意味着静默丢失）
-        total_in_system = len(pf._audit_buffer) + sum(
-            len(r) for _ts, r in pf._audit_overflow)
-        assert total_in_system == 2, (
-            f"审计行必须始终存在于系统内（主缓冲或溢出队列），实际 {total_in_system}")
+        total_in_system = len(pf._audit_buffer) + sum(len(r) for _ts, r in pf._audit_overflow)
+        assert total_in_system == 2, f"审计行必须始终存在于系统内（主缓冲或溢出队列），实际 {total_in_system}"
 
         # 必须有告警记录（对齐 AGENTS.md「静默丢失零容忍」）
         warn_lines = [
-            rec.getMessage() for rec in caplog.records
-            if rec.name == "provider_factory"
-            and rec.levelno == logging.WARNING
-            and "溢出队列" in rec.getMessage()
+            rec.getMessage()
+            for rec in caplog.records
+            if rec.name == "provider_factory" and rec.levelno == logging.WARNING and "溢出队列" in rec.getMessage()
         ]
         assert warn_lines, "溢出路径必须留下可检索的告警"
 
@@ -146,10 +159,9 @@ class TestAuditOverflowGuards:
         pf._enqueue_audit_overflow([_make_row(999)], "test-eject")
 
         assert len(pf._audit_overflow) == pf.AUDIT_OVERFLOW_MAX_BATCHES, (
-            f"溢出队列长度应保持 {pf.AUDIT_OVERFLOW_MAX_BATCHES}，"
-            f"实际 {len(pf._audit_overflow)}")
-        assert pf._audit_overflow_evicted == evicted_before + 1, (
-            "容量驱逐应累计计数")
+            f"溢出队列长度应保持 {pf.AUDIT_OVERFLOW_MAX_BATCHES}，" f"实际 {len(pf._audit_overflow)}"
+        )
+        assert pf._audit_overflow_evicted == evicted_before + 1, "容量驱逐应累计计数"
 
     async def test_age_guard_evicts_stale_batch(self, db_conn) -> None:
         """滞留时长护栏：超过 AUDIT_OVERFLOW_MAX_AGE 的批次被清理。"""
@@ -172,14 +184,16 @@ class TestPublicFlushEntryPoint:
     """F4：溢出队列清理不应被公开 flush 入口阻断（回归护栏）。"""
 
     async def test_flush_audit_buffer_public_exposes_overflow_drain(
-        self, db_conn, monkeypatch,
+        self,
+        db_conn,
+        monkeypatch,
     ) -> None:
         """`flush_audit_buffer` 公开入口也触发溢出消费。"""
+
         async def fake_flush_once(rows):
             return None
 
-        monkeypatch.setattr(pf, "retry_db_op",
-                            lambda coro_factory, **_kw: coro_factory())
+        monkeypatch.setattr(pf, "retry_db_op", lambda coro_factory, **_kw: coro_factory())
         monkeypatch.setattr(pf, "_flush_audit_rows_once", fake_flush_once)
 
         # 手工塞一条溢出条目

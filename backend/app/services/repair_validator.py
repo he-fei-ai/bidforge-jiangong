@@ -9,6 +9,7 @@
 
 校验失败的修复项标记 failed，调用方不应写库，保证"修复失败不破坏原文"。
 """
+
 from __future__ import annotations
 
 import re
@@ -68,8 +69,9 @@ def structure_signature(text: str) -> dict:
     }
 
 
-def validate_repair(*, before: str, after: str, wrong_values: list[str],
-                    authoritative_value: str) -> tuple[bool, list[str]]:
+def validate_repair(
+    *, before: str, after: str, wrong_values: list[str], authoritative_value: str
+) -> tuple[bool, list[str]]:
     """校验单次修复，返回 (通过, 问题列表)。"""
     problems: list[str] = []
     before = before or ""

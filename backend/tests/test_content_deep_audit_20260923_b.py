@@ -10,7 +10,7 @@ F3. _save_task_checkpoint 接入重试
     证据：20:48:27「保存目录生成 checkpoint 失败」与终态失败同一事件
 F4. 审计批量落库接入重试
     证据：20:47:20「AI 审计日志批量落库失败（丢失 1 条）: database is locked」
-F5. 思考吞噬严格「翻倍一次」
+F5. 思考吞噬严格「只重试一次」（R180：第二次直接提升到推理上限，不再是 2×）
     证据：20:54~20:55 单正文任务 6 条「翻倍至 3072 重试一次」全部失败
 F6. render_prompt 未解析占位符检测对齐 _is_false_positive（AGENTS.md §5.3）
     证据：20:54~20:55 单任务 6 条 "unresolved placeholders: ['max']"
@@ -19,6 +19,7 @@ F7. 提取成果超预算按 `## ` 小节配额截断（不再头部优先整段
 
 所有反例均为「旧行为可复现的错误路径」，断言修复后不再出现。
 """
+
 import logging
 import sqlite3
 
@@ -59,6 +60,7 @@ class TestRetryDbOp:
     async def test_retries_on_database_locked_then_succeeds(self):
         """database is locked 瞬时错误应被重试，最终成功不抛异常。"""
         import app.db as dbmod
+
         calls = {"n": 0}
 
         async def flaky():
@@ -73,6 +75,7 @@ class TestRetryDbOp:
     async def test_retries_on_disk_io_error(self):
         """disk I/O error（USB 外置盘抖动）同属可重试瞬态错误。"""
         import app.db as dbmod
+
         calls = {"n": 0}
 
         async def flaky():
@@ -87,6 +90,7 @@ class TestRetryDbOp:
     async def test_non_retryable_error_raises_immediately(self):
         """业务错误（如缺列）不得重试，原样抛出。"""
         import app.db as dbmod
+
         calls = {"n": 0}
 
         async def always_fail():
@@ -100,6 +104,7 @@ class TestRetryDbOp:
     async def test_retry_exhausted_reraises_last_error(self):
         """重试耗尽后必须把最后的异常抛给调用方（不得静默吞掉）。"""
         import app.db as dbmod
+
         calls = {"n": 0}
 
         async def always_fail():
@@ -113,6 +118,7 @@ class TestRetryDbOp:
     async def test_zero_retries_is_single_attempt(self):
         """max_retries=0 即单次尝试（供不需要重试的调用方显式关闭）。"""
         import app.db as dbmod
+
         calls = {"n": 0}
 
         async def always_fail():
@@ -126,10 +132,10 @@ class TestRetryDbOp:
     def test_is_retryable_db_error_classification(self):
         """分类函数：只认两种瞬态 SQLite 锁/IO 错误。"""
         from app.db import is_retryable_db_error
+
         assert is_retryable_db_error(sqlite3.OperationalError("database is locked"))
         assert is_retryable_db_error(sqlite3.OperationalError("disk I/O error"))
-        assert not is_retryable_db_error(
-            sqlite3.OperationalError("no such table: x"))
+        assert not is_retryable_db_error(sqlite3.OperationalError("no such table: x"))
 
 
 # ===========================================================================
@@ -156,12 +162,10 @@ class TestTaskRegistryDbRetry:
         await tr.finish_task(tid, "completed", "done")
 
         assert calls["n"] >= 2, "终态写库必须重试"
-        cur = await db_conn.execute(
-            "SELECT status FROM task_registry WHERE id=?", (tid,))
+        cur = await db_conn.execute("SELECT status FROM task_registry WHERE id=?", (tid,))
         assert (await cur.fetchone())["status"] == "completed"
 
-    async def test_finish_task_non_retryable_still_cleans_memory(
-            self, db_conn, monkeypatch):
+    async def test_finish_task_non_retryable_still_cleans_memory(self, db_conn, monkeypatch):
         """业务错误不得重试，但内存态清理（G12-5 不变量）必须执行。"""
         import app.services.ai.task_registry as tr
 
@@ -178,8 +182,7 @@ class TestTaskRegistryDbRetry:
         await tr.finish_task(tid, "failed", "x")
         assert tid not in tr._tasks, "内存态必须清理，否则 409 竞态守卫永久生效"
 
-    async def test_update_progress_retries_and_terminal_persists(
-            self, db_conn, monkeypatch):
+    async def test_update_progress_retries_and_terminal_persists(self, db_conn, monkeypatch):
         """进度落库（含终态 force 路径）遇锁必须重试并真正写入。"""
         import app.services.ai.task_registry as tr
 
@@ -198,21 +201,19 @@ class TestTaskRegistryDbRetry:
         await tr.update_progress(tid, 1.0, "完成", event="completed")
 
         assert calls["n"] >= 2
-        cur = await db_conn.execute(
-            "SELECT progress FROM task_registry WHERE id=?", (tid,))
+        cur = await db_conn.execute("SELECT progress FROM task_registry WHERE id=?", (tid,))
         assert (await cur.fetchone())["progress"] == 1.0
 
     async def test_set_task_status_rowcount_semantics(self, db_conn):
         """控制指令落库返回受影响行数：命中 1，已是终态 0（竞态守卫生效）。"""
         import app.services.ai.task_registry as tr
+
         await tr.register_task("content_generation", scheme_id="sc4")
         tid = list(tr._tasks)[0]
         assert await tr._set_task_status_db(tid, "paused") == 1, "running→paused 应迁移"
         # 已是终态时 WHERE status IN ('running','paused') 不命中 → 0
-        await db_conn.execute("UPDATE task_registry SET status='completed' WHERE id=?",
-                              (tid,))
-        assert await tr._set_task_status_db(tid, "paused") == 0, \
-            "已是终态不得被覆盖（竞态守卫）"
+        await db_conn.execute("UPDATE task_registry SET status='completed' WHERE id=?", (tid,))
+        assert await tr._set_task_status_db(tid, "paused") == 0, "已是终态不得被覆盖（竞态守卫）"
 
 
 # ===========================================================================
@@ -234,31 +235,31 @@ class TestCheckpointDbRetry:
 
         monkeypatch.setattr(sh, "_write_task_checkpoint_db", flaky)
         await self._ensure_task(db_conn, "t-1")
-        await sh._save_task_checkpoint("t-1", "content_result",
-                                       {"event": "stopped"})
+        await sh._save_task_checkpoint("t-1", "content_result", {"event": "stopped"})
 
         assert calls["n"] >= 2
-        cur = await db_conn.execute(
-            "SELECT checkpoint_json FROM task_registry WHERE id='t-1'")
+        cur = await db_conn.execute("SELECT checkpoint_json FROM task_registry WHERE id='t-1'")
         row = await cur.fetchone()
         assert row and row["checkpoint_json"], "checkpoint 必须真正落库"
 
     async def test_content_checkpoint_roundtrip(self, db_conn):
         """正文成果清单写入后可被读回（断线重挂链路），kind 不匹配返回 None。"""
         import app.routers.sse_handlers as sh
+
         await self._ensure_task(db_conn, "t-2")
         payload = {"event": "stopped", "sections_total": 3, "sections_ok": 2}
         await sh._save_content_checkpoint("t-2", payload)
         got = await sh._load_task_checkpoint("t-2", "content_result")
         assert got is not None and got["sections_ok"] == 2
-        assert await sh._load_task_checkpoint("t-2", "outline_result") is None, \
-            "kind 不匹配必须返回 None（防串台）"
+        assert await sh._load_task_checkpoint("t-2", "outline_result") is None, "kind 不匹配必须返回 None（防串台）"
 
     async def _ensure_task(self, conn, task_id: str) -> None:
         """checkpoint 走 UPDATE，任务行必须已存在（正常链路由 register_task 建）。"""
         await conn.execute(
             "INSERT OR IGNORE INTO task_registry (id, task_type, status) "
-            "VALUES (?, 'content_generation', 'running')", (task_id,))
+            "VALUES (?, 'content_generation', 'running')",
+            (task_id,),
+        )
         await conn.commit()
 
 
@@ -270,8 +271,7 @@ class TestAuditFlushDbRetry:
         """审计批量落库遇 database is locked 必须重试——旧实现整批永久丢失。"""
         import app.services.ai.provider_factory as pf
 
-        pf._audit_buffer.append(
-            ("a1", "deepseek", "m", "chat", 10, 20, 0, 1.0, 1, "", "content_draft"))
+        pf._audit_buffer.append(("a1", "deepseek", "m", "chat", 10, 20, 0, 1.0, 1, "", "content_draft"))
         calls = {"n": 0}
         orig = pf._flush_audit_rows_once
 
@@ -288,20 +288,17 @@ class TestAuditFlushDbRetry:
         cur = await db_conn.execute("SELECT COUNT(*) AS c FROM ai_audit_logs")
         assert (await cur.fetchone())["c"] == 1, "审计记录不得因重试丢失"
 
-    async def test_flush_legacy_fallback_not_retried_as_transient(self, db_conn,
-                                                                 monkeypatch):
+    async def test_flush_legacy_fallback_not_retried_as_transient(self, db_conn, monkeypatch):
         """业务错误（缺 scene 列）走 legacy 降级写入，不被误当瞬态锁错误重试整批。"""
         import app.services.ai.provider_factory as pf
 
-        pf._audit_buffer.append(
-            ("a2", "deepseek", "m", "chat", 10, 20, 0, 1.0, 1, "", "outline_draft"))
+        pf._audit_buffer.append(("a2", "deepseek", "m", "chat", 10, 20, 0, 1.0, 1, "", "outline_draft"))
         calls = {"n": 0}
 
         async def legacy_only(rows):
             calls["n"] += 1
             async with pf.write_tx_conn() as conn:
-                await conn.executemany(pf._AUDIT_INSERT_LEGACY,
-                                        [r[:10] for r in rows])
+                await conn.executemany(pf._AUDIT_INSERT_LEGACY, [r[:10] for r in rows])
                 await conn.commit()
 
         monkeypatch.setattr(pf, "_flush_audit_rows_once", legacy_only)
@@ -327,14 +324,20 @@ class _FakeProvider:
 
 def _thinking_err(mt: int = 1536) -> RuntimeError:
     return RuntimeError(
-        f"推理模型把 max_tokens({mt}) 全部消耗在思考过程"
-        "（finish_reason=length），正文为空：请调大 max_tokens")
+        f"推理模型把 max_tokens({mt}) 全部消耗在思考过程" "（finish_reason=length），正文为空：请调大 max_tokens"
+    )
 
 
 class TestThinkingExhaustedOnce:
     async def test_no_double_doubling_below_half_cap(self, monkeypatch):
         """反例：base_mt=1536、cap=4096 时旧实现会连续翻倍两次
-        （1536→3072→4096），每候选多烧一次完整网络往返。修复后严格一次。"""
+        （1536→3072→4096），每候选多烧一次完整网络往返。修复后严格一次。
+
+        ✅ R180（2026-11-05 · 断言同步，非放宽）：AI 配置线依据 R110 生产实测
+        （14 次 3072 仍被思考过程吞噬）把「一次翻倍」改为「一次直接提升到
+        ``ai_reasoning_max_tokens``（默认 4096）」。护栏不变：**只重试一次**、
+        第二次即到上限；仅期望值由 3072 更新为 4096。
+        """
         import app.services.ai.provider_factory as pf
         from app.config import settings
 
@@ -351,12 +354,23 @@ class TestThinkingExhaustedOnce:
         monkeypatch.setattr(pf, "extract_usage", lambda *a, **k: {})
 
         await pf._attempt_candidate(
-            {"provider_name": "fake", "api_key": "k", "base_url": "", "model": "m",
-             "max_tokens": 1536, "temperature": 0.7},
-            [], temperature=0.7, json_mode=False, max_tokens=1536,
-            req_timeout=10, scene="content_draft")
+            {
+                "provider_name": "fake",
+                "api_key": "k",
+                "base_url": "",
+                "model": "m",
+                "max_tokens": 1536,
+                "temperature": 0.7,
+            },
+            [],
+            temperature=0.7,
+            json_mode=False,
+            max_tokens=1536,
+            req_timeout=10,
+            scene="content_draft",
+        )
 
-        assert built == [1536, 3072], f"应严格翻倍一次，实际调用链={built}"
+        assert built == [1536, 4096], f"应只重试一次且直接到推理上限，实际调用链={built}"
 
     async def test_retry_disabled_is_legacy(self, monkeypatch):
         """ai_retry_on_thinking_exhausted=False → 不重试（旧行为）。"""
@@ -373,15 +387,30 @@ class TestThinkingExhaustedOnce:
         monkeypatch.setattr(pf, "_build_provider", _build)
 
         await pf._attempt_candidate(
-            {"provider_name": "fake", "api_key": "k", "base_url": "", "model": "m",
-             "max_tokens": 1536, "temperature": 0.7},
-            [], temperature=0.7, json_mode=False, max_tokens=1536,
-            req_timeout=10, scene="content_draft")
+            {
+                "provider_name": "fake",
+                "api_key": "k",
+                "base_url": "",
+                "model": "m",
+                "max_tokens": 1536,
+                "temperature": 0.7,
+            },
+            [],
+            temperature=0.7,
+            json_mode=False,
+            max_tokens=1536,
+            req_timeout=10,
+            scene="content_draft",
+        )
 
         assert built == [1536], "关闭重试时只应调用一次"
 
     async def test_recovers_after_single_doubling(self, monkeypatch):
-        """翻倍一次后成功 → 正常返回正文（原 O3 收益不丢）。"""
+        """重试一次后成功 → 正常返回正文（原 O3 收益不丢）。
+
+        ✅ R180：第二次 max_tokens = ``ai_reasoning_max_tokens``（4096），
+        仍只重试一次（不因提高上限而放大调用次数）。
+        """
         import app.services.ai.provider_factory as pf
         from app.config import settings
 
@@ -406,19 +435,29 @@ class TestThinkingExhaustedOnce:
             return _Recover()
 
         monkeypatch.setattr(pf, "_build_provider", _build)
-        monkeypatch.setattr(pf, "extract_usage",
-                            lambda *a, **k: {"prompt_tokens": 1,
-                                            "completion_tokens": 2,
-                                            "cached_tokens": 0})
+        monkeypatch.setattr(
+            pf, "extract_usage", lambda *a, **k: {"prompt_tokens": 1, "completion_tokens": 2, "cached_tokens": 0}
+        )
 
         result, err = await pf._attempt_candidate(
-            {"provider_name": "fake", "api_key": "k", "base_url": "", "model": "m",
-             "max_tokens": 1536, "temperature": 0.7},
-            [], temperature=0.7, json_mode=False, max_tokens=1536,
-            req_timeout=10, scene="content_draft")
+            {
+                "provider_name": "fake",
+                "api_key": "k",
+                "base_url": "",
+                "model": "m",
+                "max_tokens": 1536,
+                "temperature": 0.7,
+            },
+            [],
+            temperature=0.7,
+            json_mode=False,
+            max_tokens=1536,
+            req_timeout=10,
+            scene="content_draft",
+        )
 
         assert err is None and result == "正常正文"
-        assert built == [1536, 3072], "应翻倍一次后成功"
+        assert built == [1536, 4096], "应重试一次（直接到推理上限）后成功"
 
 
 # ===========================================================================
@@ -455,6 +494,7 @@ class TestCacheMissingVariablesNoFalsePositive:
     def test_get_prompt_without_kwargs_logs_nothing(self):
         """无 kwargs 取原始模板是合法用法，不得报"缺变量"。"""
         import app.services.ai.prompts._cache as c
+
         cap = _WarnCapture()
         c.logger.addHandler(cap)
         try:
@@ -472,16 +512,12 @@ class TestCacheMissingVariablesNoFalsePositive:
             PROMPT_VARIABLE_CONTRACTS,
             extract_user_variables,
         )
+
         cap = _WarnCapture()
         c.logger.addHandler(cap)
-        kwargs = {
-            name: f"测试-{name}"
-            for name in PROMPT_VARIABLE_CONTRACTS["content_generation_system"]
-        }
+        kwargs = {name: f"测试-{name}" for name in PROMPT_VARIABLE_CONTRACTS["content_generation_system"]}
         # 防漂移：契约变量必须覆盖模板真实业务变量；JSON 示例误报变量不在契约内。
-        assert set(kwargs).issubset(set(extract_user_variables(
-            c.get_prompt("content_generation_system")
-        )))
+        assert set(kwargs).issubset(set(extract_user_variables(c.get_prompt("content_generation_system"))))
         try:
             r = c.get_prompt("content_generation_system", **kwargs)
             assert r
@@ -493,6 +529,7 @@ class TestCacheMissingVariablesNoFalsePositive:
     def test_get_prompt_empty_kwargs_suppresses_warning_only(self):
         """校验结果仍如实返回缺失（契约不变），只是不再刷日志告警。"""
         import app.services.ai.prompts._cache as c
+
         cap = _WarnCapture()
         c.logger.addHandler(cap)
         try:
@@ -500,8 +537,9 @@ class TestCacheMissingVariablesNoFalsePositive:
         finally:
             c.logger.removeHandler(cap)
         assert missing, "校验 API 空 kwargs 仍应如实报出全部缺失变量"
-        assert not [l for l in cap.lines if "missing variables" in l], \
-            f"但不得刷日志告警（噪音修复点），实际: {cap.lines}"
+        assert not [
+            l for l in cap.lines if "missing variables" in l
+        ], f"但不得刷日志告警（噪音修复点），实际: {cap.lines}"
 
     def test_get_prompt_with_validation_still_reports_real_gap(self):
         """只要有传参，真实缺口仍要报出来（修 bug 不得吞掉真信号）。
@@ -511,24 +549,22 @@ class TestCacheMissingVariablesNoFalsePositive:
         其余未传的模板变量必须全部报缺。
         """
         import app.services.ai.prompts._cache as c
-        _, missing = c.get_prompt_with_validation(
-            "outline_review_system", scheme_name="深基坑支护")
-        assert "scheme_name" not in missing, \
-            f"已传入的变量不应报缺，实际: {missing}"
-        assert "outline_json" in missing, \
-            f"传了部分参数时剩余真实缺口仍应报缺失，实际: {missing}"
+
+        _, missing = c.get_prompt_with_validation("outline_review_system", scheme_name="深基坑支护")
+        assert "scheme_name" not in missing, f"已传入的变量不应报缺，实际: {missing}"
+        assert "outline_json" in missing, f"传了部分参数时剩余真实缺口仍应报缺失，实际: {missing}"
 
     def test_get_prompt_with_validation_partial_passes_partial_missing(self):
         """传了一个不相关变量时，真实缺口仍要报出来。"""
         import app.services.ai.prompts._cache as c
-        _, missing = c.get_prompt_with_validation(
-            "outline_review_system", unrelated="无关参数")
-        assert "outline_json" in missing, \
-            f"传了无关参数但没传 outline_json 时应报缺失，实际: {missing}"
+
+        _, missing = c.get_prompt_with_validation("outline_review_system", unrelated="无关参数")
+        assert "outline_json" in missing, f"传了无关参数但没传 outline_json 时应报缺失，实际: {missing}"
 
     def test_residual_placeholder_warning_still_fires(self):
         """残留占位符告警路径不受本次改动影响。"""
         import app.services.ai.prompts._cache as c
+
         cap = _WarnCapture()
         c.logger.addHandler(cap)
         try:
@@ -561,8 +597,7 @@ class TestRenderPromptFalsePositive:
         tmpl = '输出示例：{"max": 200} 任务清单。' + "正文内容" * 60
         with _CapLog("app.services.ai.prompts._registry") as cm:
             out = reg.render_prompt(tmpl)
-        assert not any("placeholders" in r and "max" in r for r in cm.records), \
-            f"JSON 示例误报未过滤：{cm.records}"
+        assert not any("placeholders" in r and "max" in r for r in cm.records), f"JSON 示例误报未过滤：{cm.records}"
         assert out == tmpl, "无变量可替换时模板应原样返回"
 
     def test_real_missing_variable_still_reported(self):
@@ -572,8 +607,7 @@ class TestRenderPromptFalsePositive:
         tmpl = "方案名称：{scheme_name}。" + "正文内容" * 60
         with _CapLog("app.services.ai.prompts._registry") as cm:
             reg.render_prompt(tmpl)
-        assert any("scheme_name" in r for r in cm.records), \
-            f"真实缺失变量被误报过滤吞掉：{cm.records}"
+        assert any("scheme_name" in r for r in cm.records), f"真实缺失变量被误报过滤吞掉：{cm.records}"
 
     def test_shared_prefix_exempt_unchanged(self):
         """SHARED_ 前缀变量的既有豁免行为不受本次改动影响。"""
@@ -582,8 +616,7 @@ class TestRenderPromptFalsePositive:
         tmpl = "共享上下文：{SHARED_CTX}。" + "正文内容" * 60
         with _CapLog("app.services.ai.prompts._registry") as cm:
             reg.render_prompt(tmpl)
-        assert not any("SHARED_CTX" in r for r in cm.records), \
-            f"SHARED_ 前缀变量应被豁免：{cm.records}"
+        assert not any("SHARED_CTX" in r for r in cm.records), f"SHARED_ 前缀变量应被豁免：{cm.records}"
 
 
 # ===========================================================================
@@ -601,6 +634,7 @@ class TestBudgetedTruncation:
 
     def test_split_md_sections(self):
         import app.routers.sse_handlers as sh
+
         secs = sh._split_md_sections("# 大标题\n\n## A\n正文A\n\n## B\n正文B")
         assert len(secs) == 3
         assert secs[0][0] == "" and secs[0][1].strip() == "# 大标题"
@@ -610,15 +644,18 @@ class TestBudgetedTruncation:
     def test_split_ignores_deeper_headings(self):
         """`### ` 及以下层级不得被误切为独立小节。"""
         import app.routers.sse_handlers as sh
+
         assert len(sh._split_md_sections("## 一级\n### 二级\n正文")) == 2
 
     def test_no_section_is_single_block(self):
         """无 `## ` 节时返回单块（调用方按整体处理）。"""
         import app.routers.sse_handlers as sh
+
         assert sh._split_md_sections("只有前言") == [("", "只有前言")]
 
     def test_allocates_proportional_with_floor_and_cap(self):
         import app.routers.sse_handlers as sh
+
         allocs = sh._allocate_char_budgets([10000, 1000, 1000, 1000, 1000], 4000)
         assert len(allocs) == 5
         assert sum(allocs) <= 4000, f"总预算不得超出：{sum(allocs)}"
@@ -628,17 +665,19 @@ class TestBudgetedTruncation:
     def test_fits_budget_is_exact(self):
         """未超预算时逐项返回原长度（等比即恒等）。"""
         import app.routers.sse_handlers as sh
-        assert sh._allocate_char_budgets([1000, 1000, 1000], 3000) == \
-            [1000, 1000, 1000]
+
+        assert sh._allocate_char_budgets([1000, 1000, 1000], 3000) == [1000, 1000, 1000]
 
     def test_empty_and_zero_budget(self):
         import app.routers.sse_handlers as sh
+
         assert sh._allocate_char_budgets([], 4000) == []
         assert sh._allocate_char_budgets([100], 0) == [0]
 
     def test_all_sections_survive_budget_cut(self):
         """核心反例：旧实现头部优先切片会让尾部 15 项整段消失。"""
         import app.routers.sse_handlers as sh
+
         out, rep = sh._budgeted_truncate_sections(self._mk_sections(18, 6000), 4000)
         for i in range(1, 19):
             assert f"## 第{i}项" in out, f"第{i}项标题丢失"
@@ -649,6 +688,7 @@ class TestBudgetedTruncation:
     def test_under_budget_untouched(self):
         """未超预算时不改动内容（向后兼容）。"""
         import app.routers.sse_handlers as sh
+
         out, rep = sh._budgeted_truncate_sections("## A\n短内容", 1000)
         assert rep["truncated_sections"] == 0
         assert "短内容" in out

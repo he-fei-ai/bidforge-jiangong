@@ -21,6 +21,7 @@ AI 返回修复后的**完整正文**，``UPDATE sections SET content=?`` 整列
 本模块提供定点编辑的**纯逻辑**（唯一命中才替换）+ 一次 AI 调用封装，
 由 ``repair_agent`` 在「定点编辑失败」时回落到既有的整章重写。
 """
+
 from __future__ import annotations
 
 import json
@@ -58,8 +59,7 @@ class EditResult:
         return self.applied > 0
 
     def to_dict(self) -> dict:
-        return {"applied": self.applied, "rejected": [
-            {"old_text": o[:60], "reason": r} for o, r in self.rejected]}
+        return {"applied": self.applied, "rejected": [{"old_text": o[:60], "reason": r} for o, r in self.rejected]}
 
 
 def _normalize_ws(text: str) -> str:
@@ -145,8 +145,7 @@ def apply_unique_edits(content: str, edits: Sequence) -> EditResult:
             continue
         span = find_unique_span(result.content, old_text)
         if span is None:
-            reason = ("ambiguous" if result.content.count(old_text) > 1
-                      else "not_found")
+            reason = "ambiguous" if result.content.count(old_text) > 1 else "not_found"
             result.rejected.append((summary, reason))
             continue
         s, e = span
@@ -165,7 +164,6 @@ def apply_unique_edits(content: str, edits: Sequence) -> EditResult:
 CONSISTENCY_EDITS_REPAIR_RETRIES = 1
 
 
-
 def _validate_edits(obj: Any) -> list:
     if not isinstance(obj, dict):
         return ["顶层必须是 JSON 对象"]
@@ -176,9 +174,9 @@ def _validate_edits(obj: Any) -> list:
     return []
 
 
-def build_edits_prompt(section_id: str, section_title: str,
-                      conflicts_in_section: list, facts: str,
-                      sources: str) -> str:
+def build_edits_prompt(
+    section_id: str, section_title: str, conflicts_in_section: list, facts: str, sources: str
+) -> str:
     """组装「只产出编辑」的 user 提示词（章节原文由调用方追加到最后）。"""
     return render(
         "consistency_repair_edits_user",
@@ -186,16 +184,20 @@ def build_edits_prompt(section_id: str, section_title: str,
         authoritative_sources=sources or "（见各冲突项权威值）",
         section_id=section_id,
         section_title=section_title,
-        conflicts_in_section=json.dumps(conflicts_in_section, ensure_ascii=False,
-                                       indent=2),
+        conflicts_in_section=json.dumps(conflicts_in_section, ensure_ascii=False, indent=2),
     )
 
 
-async def collect_repair_edits(*, section_id: str, section_title: str,
-                               section_content: str,
-                               conflicts_in_section: list,
-                               facts: str, sources: str,
-                               chat_fn=None) -> EditResult:
+async def collect_repair_edits(
+    *,
+    section_id: str,
+    section_title: str,
+    section_content: str,
+    conflicts_in_section: list,
+    facts: str,
+    sources: str,
+    chat_fn=None,
+) -> EditResult:
     """调用 LLM 产出定点编辑并就地应用（失败时返回 ``applied=0`` 的结果）。
 
     与整章重写并存：调用方在 ``applied == 0`` 时回落到
@@ -210,8 +212,7 @@ async def collect_repair_edits(*, section_id: str, section_title: str,
     if chat_fn is None:
         from app.services.ai.provider_factory import chat_with_fallback as chat_fn
 
-    user = build_edits_prompt(section_id, section_title, conflicts_in_section,
-                              facts, sources)
+    user = build_edits_prompt(section_id, section_title, conflicts_in_section, facts, sources)
     # 章节原文放在最后（与《标书智能体（四）》§四.4「任务差异后置」一致），
     # 模型据此逐字抄写 old_text。
     # ✅ R38 D2 纪律（勿改成截断）：此处**有意不截断**正文 —— 模型抄写的
@@ -232,30 +233,33 @@ async def collect_repair_edits(*, section_id: str, section_title: str,
         GENERIC_REPAIR_KEY,
         collect_json_response_with_chat,
     )
+
     try:
         obj, _raw = await collect_json_response_with_chat(
             chat_fn,
-            [{"role": "system", "content": system},
-             {"role": "user", "content": user}],
+            [{"role": "system", "content": system}, {"role": "user", "content": user}],
             validate_fn=_validate_edits,
             max_retries=CONSISTENCY_EDITS_REPAIR_RETRIES,
             # ✅ R57（2026-10-09）：定点编辑使用**独立** scene。
             #    此前它与「整章重写」共用 consistency_repair，导致
             #    ① /ai/stats 无法分别观测两条路径的成功率与成本；
             #    ② 回归护栏只能靠「调用次数」裸计数区分二者（脆弱）。
-            temperature=0.1, timeout=120, scene="consistency_repair_edits",
+            temperature=0.1,
+            timeout=120,
+            scene="consistency_repair_edits",
             repair_key=GENERIC_REPAIR_KEY,
         )
     except Exception as e:  # noqa: BLE001 - fail-soft：回落到整章重写
-        logger.warning("[定点编辑] 第 %s 章节 AI 产出不可用（含 %d 轮修复）: %s",
-                       section_id, CONSISTENCY_EDITS_REPAIR_RETRIES, e)
+        logger.warning(
+            "[定点编辑] 第 %s 章节 AI 产出不可用（含 %d 轮修复）: %s", section_id, CONSISTENCY_EDITS_REPAIR_RETRIES, e
+        )
         return EditResult(content=section_content or "")
 
     if not isinstance(obj, dict):
         return EditResult(content=section_content or "")
     res = apply_unique_edits(section_content or "", obj.get("edits") or [])
     if res.rejected:
-        logger.info("[定点编辑] 第 %s 章节应用 %d 条、拒绝 %d 条：%s",
-                    section_id, res.applied, len(res.rejected), res.to_dict())
+        logger.info(
+            "[定点编辑] 第 %s 章节应用 %d 条、拒绝 %d 条：%s", section_id, res.applied, len(res.rejected), res.to_dict()
+        )
     return res
-

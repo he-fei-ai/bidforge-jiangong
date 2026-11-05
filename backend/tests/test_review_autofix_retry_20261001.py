@@ -14,6 +14,7 @@ AI 正常返回但校验不合格即直接判 failed。本轮按 ``repair_agent`
    两次都失败 ⇒ 判 failed 且**保留原文**（绝不写半成品）。
 5. **不变量：最多 2 次调用** —— 无论开关怎么开都不许出现第 3 次。
 """
+
 import pytest
 from app.services import review_autofix
 from app.services.content_utils import text_word_count, word_status_for
@@ -31,15 +32,14 @@ _AFTER = _BEFORE.replace("120 日历天", "90 日历天")
 
 async def _seed(db, *, content: str = _BEFORE) -> None:
     await db.execute("INSERT INTO projects(id,name) VALUES(?,?)", (PROJ, "P"))
-    await db.execute("INSERT INTO schemes(id,project_id,name) VALUES(?,?,?)",
-                     (SCHEME, PROJ, "深基坑专项方案"))
+    await db.execute("INSERT INTO schemes(id,project_id,name) VALUES(?,?,?)", (SCHEME, PROJ, "深基坑专项方案"))
     wc = text_word_count(content)
     await db.execute(
         "INSERT INTO sections(id,scheme_id,project_id,title,content,word_count,"
         "word_status,word_budget,status,level,sort_order) "
         "VALUES(?,?,?,?,?,?,?,?,?,?,?)",
-        (SEC_A, SCHEME, PROJ, "工程概况", content, wc,
-         word_status_for(wc, 1500), 1500, "generated", 1, 0))
+        (SEC_A, SCHEME, PROJ, "工程概况", content, wc, word_status_for(wc, 1500), 1500, "generated", 1, 0),
+    )
     await db.commit()
 
 
@@ -49,25 +49,37 @@ def _sections(content: str = _BEFORE) -> list[dict]:
 
 def _con01_finding(severity: str = "high") -> dict:
     return {
-        "rule_id": "CON-01", "dimension": "consistency", "severity": severity,
-        "title": "全文一致性", "detail": "「工期」在正文中出现 2 种不同取值",
+        "rule_id": "CON-01",
+        "dimension": "consistency",
+        "severity": severity,
+        "title": "全文一致性",
+        "detail": "「工期」在正文中出现 2 种不同取值",
         "evidence": ["120日历天（工程概况）", "90日历天（施工进度计划）"],
-        "section_id": "", "section_title": "", "suggestion": "请统一工期口径",
-        "basis": "", "mode": "program",
+        "section_id": "",
+        "section_title": "",
+        "suggestion": "请统一工期口径",
+        "basis": "",
+        "mode": "program",
     }
 
 
 def _dlv05_finding(section_id: str = SEC_A) -> dict:
     return {
-        "rule_id": "DLV-05", "dimension": "deliverability", "severity": "block",
-        "title": "控制字符", "detail": "含控制字符", "evidence": [],
-        "section_id": section_id, "section_title": "工程概况",
-        "suggestion": "清除控制字符", "basis": "", "mode": "program",
+        "rule_id": "DLV-05",
+        "dimension": "deliverability",
+        "severity": "block",
+        "title": "控制字符",
+        "detail": "含控制字符",
+        "evidence": [],
+        "section_id": section_id,
+        "section_title": "工程概况",
+        "suggestion": "清除控制字符",
+        "basis": "",
+        "mode": "program",
     }
 
 
-async def _run(db, monkeypatch, finding, *, replies, exc_at=None,
-               sections=None):
+async def _run(db, monkeypatch, finding, *, replies, exc_at=None, sections=None):
     """跑一次 ``apply_fix``，返回 (结果, AI 实际被调用次数)。"""
     calls = {"n": 0}
 
@@ -80,9 +92,12 @@ async def _run(db, monkeypatch, finding, *, replies, exc_at=None,
 
     monkeypatch.setattr(review_autofix, "chat_with_fallback", fake_chat)
     res = await review_autofix.apply_fix(
-        db, scheme_id=SCHEME, finding=finding,
+        db,
+        scheme_id=SCHEME,
+        finding=finding,
         sections=sections if sections is not None else _sections(),
-        scheme={"name": "深基坑专项方案", "type": "深基坑"})
+        scheme={"name": "深基坑专项方案", "type": "深基坑"},
+    )
     return res, calls["n"]
 
 
@@ -90,8 +105,7 @@ async def _run(db, monkeypatch, finding, *, replies, exc_at=None,
 def _reset_retry_flags(monkeypatch):
     """每个用例从「默认关闭」出发，避免用例间串味。"""
     monkeypatch.setattr(review_autofix, "AUTOFIX_RETRY_ON_INVALID", False)
-    monkeypatch.setattr(
-        review_autofix, "AUTOFIX_RETRY_ON_INVALID_BY_SEVERITY", False)
+    monkeypatch.setattr(review_autofix, "AUTOFIX_RETRY_ON_INVALID_BY_SEVERITY", False)
 
 
 class TestShouldRetryOnInvalid:
@@ -99,39 +113,29 @@ class TestShouldRetryOnInvalid:
 
     def test_default_off_never_retries(self):
         for sev in ("block", "high", "medium", "low"):
-            assert review_autofix.should_retry_on_invalid(
-                _con01_finding(sev)) is False
+            assert review_autofix.should_retry_on_invalid(_con01_finding(sev)) is False
 
     def test_global_switch_retries_any_severity(self, monkeypatch):
         monkeypatch.setattr(review_autofix, "AUTOFIX_RETRY_ON_INVALID", True)
         for sev in ("block", "high", "medium", "low"):
-            assert review_autofix.should_retry_on_invalid(
-                _con01_finding(sev)) is True
+            assert review_autofix.should_retry_on_invalid(_con01_finding(sev)) is True
 
     def test_severity_switch_only_retries_block_and_high(self, monkeypatch):
-        monkeypatch.setattr(
-            review_autofix, "AUTOFIX_RETRY_ON_INVALID_BY_SEVERITY", True)
-        assert review_autofix.should_retry_on_invalid(
-            _con01_finding("block")) is True
-        assert review_autofix.should_retry_on_invalid(
-            _con01_finding("high")) is True
-        assert review_autofix.should_retry_on_invalid(
-            _con01_finding("medium")) is False
-        assert review_autofix.should_retry_on_invalid(
-            _con01_finding("low")) is False
+        monkeypatch.setattr(review_autofix, "AUTOFIX_RETRY_ON_INVALID_BY_SEVERITY", True)
+        assert review_autofix.should_retry_on_invalid(_con01_finding("block")) is True
+        assert review_autofix.should_retry_on_invalid(_con01_finding("high")) is True
+        assert review_autofix.should_retry_on_invalid(_con01_finding("medium")) is False
+        assert review_autofix.should_retry_on_invalid(_con01_finding("low")) is False
 
     def test_global_switch_wins_over_severity(self, monkeypatch):
         monkeypatch.setattr(review_autofix, "AUTOFIX_RETRY_ON_INVALID", True)
-        monkeypatch.setattr(
-            review_autofix, "AUTOFIX_RETRY_ON_INVALID_BY_SEVERITY", True)
-        assert review_autofix.should_retry_on_invalid(
-            _con01_finding("low")) is True
+        monkeypatch.setattr(review_autofix, "AUTOFIX_RETRY_ON_INVALID_BY_SEVERITY", True)
+        assert review_autofix.should_retry_on_invalid(_con01_finding("low")) is True
 
     def test_auto_mode_never_retries_even_when_switch_on(self, monkeypatch):
         """程序化修复不调 AI，重试只是把同一段确定性代码再跑一遍。"""
         monkeypatch.setattr(review_autofix, "AUTOFIX_RETRY_ON_INVALID", True)
-        assert review_autofix.should_retry_on_invalid(
-            _dlv05_finding()) is False
+        assert review_autofix.should_retry_on_invalid(_dlv05_finding()) is False
 
     def test_manual_mode_never_retries(self, monkeypatch):
         """manual 规则不会进入改写链路，判据同样必须 fail-closed。"""
@@ -139,19 +143,16 @@ class TestShouldRetryOnInvalid:
         finding = dict(_dlv05_finding(), rule_id="DLV-01")
         assert review_autofix.should_retry_on_invalid(finding) is False
 
-    def test_unknown_severity_does_not_retry_under_severity_switch(
-            self, monkeypatch):
+    def test_unknown_severity_does_not_retry_under_severity_switch(self, monkeypatch):
         """未知严重度必须 fail-closed 到「不重试」。"""
-        monkeypatch.setattr(
-            review_autofix, "AUTOFIX_RETRY_ON_INVALID_BY_SEVERITY", True)
-        assert review_autofix.should_retry_on_invalid(
-            _con01_finding("")) is False
-        assert review_autofix.should_retry_on_invalid(
-            _con01_finding("严重")) is False
+        monkeypatch.setattr(review_autofix, "AUTOFIX_RETRY_ON_INVALID_BY_SEVERITY", True)
+        assert review_autofix.should_retry_on_invalid(_con01_finding("")) is False
+        assert review_autofix.should_retry_on_invalid(_con01_finding("严重")) is False
 
     def test_retry_severities_are_valid_severity_values(self):
         """重试严重度白名单必须是 SEVERITY_ORDER 的真子集（防拼错永不命中）。"""
         from app.services.audit_rules import SEVERITY_ORDER
+
         assert review_autofix.AUTOFIX_RETRY_SEVERITIES
         assert set(review_autofix.AUTOFIX_RETRY_SEVERITIES) <= set(SEVERITY_ORDER)
 
@@ -162,38 +163,32 @@ class TestRetryBehaviour:
     async def test_default_is_single_call(self, db_conn, monkeypatch):
         """默认关闭 ⇒ 恒 1 次调用，判 failed（与引入前逐字一致）。"""
         await _seed(db_conn)
-        res, n = await _run(db_conn, monkeypatch, _con01_finding(),
-                            replies=[_SAME])
+        res, n = await _run(db_conn, monkeypatch, _con01_finding(), replies=[_SAME])
         assert n == 1
         assert res["status"] == "failed"
         assert res["pending"] == []
 
-    async def test_exception_always_retries_even_when_switches_off(
-            self, db_conn, monkeypatch):
+    async def test_exception_always_retries_even_when_switches_off(self, db_conn, monkeypatch):
         """AI 调用异常是偶发故障，不看开关也重试一次。"""
         await _seed(db_conn)
-        res, n = await _run(db_conn, monkeypatch, _con01_finding(),
-                            replies=[_AFTER], exc_at=0)
+        res, n = await _run(db_conn, monkeypatch, _con01_finding(), replies=[_AFTER], exc_at=0)
         assert n == 2
         assert res["status"] == "repaired", res["items"]
         assert res["stats"]["repaired"] == 1
 
     async def test_exception_then_invalid_still_failed(self, db_conn, monkeypatch):
         await _seed(db_conn)
-        res, n = await _run(db_conn, monkeypatch, _con01_finding(),
-                            replies=[_SAME], exc_at=0)
+        res, n = await _run(db_conn, monkeypatch, _con01_finding(), replies=[_SAME], exc_at=0)
         # 第 1 次异常 → 重试；第 2 次返回不合格 → 判 failed，共 2 次
         assert n == 2
         assert res["status"] == "failed"
         assert res["pending"] == []
 
-    async def test_retry_on_invalid_recovers_on_second_attempt(
-            self, db_conn, monkeypatch):
+    async def test_retry_on_invalid_recovers_on_second_attempt(self, db_conn, monkeypatch):
         """开启开关后：第 1 次不合格、第 2 次合格 ⇒ repaired。"""
         await _seed(db_conn)
         monkeypatch.setattr(review_autofix, "AUTOFIX_RETRY_ON_INVALID", True)
-        res, n = await _run(db_conn, monkeypatch, _con01_finding(),
-                            replies=[_SAME, _AFTER])
+        res, n = await _run(db_conn, monkeypatch, _con01_finding(), replies=[_SAME, _AFTER])
         assert n == 2
         assert res["status"] == "repaired", res["items"]
         assert len(res["pending"]) == 1
@@ -205,43 +200,33 @@ class TestRetryBehaviour:
         """两次都不合格 ⇒ failed，且 pending 为空（绝不写半成品）。"""
         await _seed(db_conn)
         monkeypatch.setattr(review_autofix, "AUTOFIX_RETRY_ON_INVALID", True)
-        res, n = await _run(db_conn, monkeypatch, _con01_finding(),
-                            replies=[_SAME])
+        res, n = await _run(db_conn, monkeypatch, _con01_finding(), replies=[_SAME])
         assert n == 2
         assert res["status"] == "failed"
         assert res["pending"] == []
-        cur = await db_conn.execute(
-            "SELECT content FROM sections WHERE id=?", (SEC_A,))
+        cur = await db_conn.execute("SELECT content FROM sections WHERE id=?", (SEC_A,))
         assert (await cur.fetchone())["content"] == _BEFORE
 
     async def test_never_exceeds_two_calls(self, db_conn, monkeypatch):
         """不变量：开关全开也不许出现第 3 次调用。"""
         await _seed(db_conn)
         monkeypatch.setattr(review_autofix, "AUTOFIX_RETRY_ON_INVALID", True)
-        monkeypatch.setattr(
-            review_autofix, "AUTOFIX_RETRY_ON_INVALID_BY_SEVERITY", True)
-        _res, n = await _run(db_conn, monkeypatch, _con01_finding("block"),
-                             replies=[_SAME])
+        monkeypatch.setattr(review_autofix, "AUTOFIX_RETRY_ON_INVALID_BY_SEVERITY", True)
+        _res, n = await _run(db_conn, monkeypatch, _con01_finding("block"), replies=[_SAME])
         assert n == 2
 
-    async def test_medium_severity_does_not_retry_under_severity_switch(
-            self, db_conn, monkeypatch):
+    async def test_medium_severity_does_not_retry_under_severity_switch(self, db_conn, monkeypatch):
         """分级重试只覆盖 block/high：medium 维持 1 次调用。"""
         await _seed(db_conn)
-        monkeypatch.setattr(
-            review_autofix, "AUTOFIX_RETRY_ON_INVALID_BY_SEVERITY", True)
-        res, n = await _run(db_conn, monkeypatch, _con01_finding("medium"),
-                            replies=[_SAME])
+        monkeypatch.setattr(review_autofix, "AUTOFIX_RETRY_ON_INVALID_BY_SEVERITY", True)
+        res, n = await _run(db_conn, monkeypatch, _con01_finding("medium"), replies=[_SAME])
         assert n == 1
         assert res["status"] == "failed"
 
-    async def test_block_severity_retries_under_severity_switch(
-            self, db_conn, monkeypatch):
+    async def test_block_severity_retries_under_severity_switch(self, db_conn, monkeypatch):
         await _seed(db_conn)
-        monkeypatch.setattr(
-            review_autofix, "AUTOFIX_RETRY_ON_INVALID_BY_SEVERITY", True)
-        res, n = await _run(db_conn, monkeypatch, _con01_finding("block"),
-                            replies=[_SAME, _AFTER])
+        monkeypatch.setattr(review_autofix, "AUTOFIX_RETRY_ON_INVALID_BY_SEVERITY", True)
+        res, n = await _run(db_conn, monkeypatch, _con01_finding("block"), replies=[_SAME, _AFTER])
         assert n == 2
         assert res["status"] == "repaired", res["items"]
 
@@ -250,8 +235,7 @@ class TestRetryBehaviour:
         content = "正常\x07内容"
         await _seed(db_conn, content=content)
         monkeypatch.setattr(review_autofix, "AUTOFIX_RETRY_ON_INVALID", True)
-        res, n = await _run(db_conn, monkeypatch, _dlv05_finding(),
-                            replies=[_SAME], sections=_sections(content))
+        res, n = await _run(db_conn, monkeypatch, _dlv05_finding(), replies=[_SAME], sections=_sections(content))
         assert n == 0
         assert res["status"] == "repaired"
         assert len(res["pending"]) == 1
@@ -260,20 +244,18 @@ class TestRetryBehaviour:
     async def test_retry_persists_via_router(self, db_conn, monkeypatch):
         """端到端走 routers 层：重试成功的正文必须真的落库 + 退回待审核。"""
         from app.routers import review_autofix as ra
+
         await _seed(db_conn)
-        await db_conn.execute(
-            "UPDATE sections SET review_status='approved' WHERE id=?", (SEC_A,))
+        await db_conn.execute("UPDATE sections SET review_status='approved' WHERE id=?", (SEC_A,))
         await db_conn.commit()
         monkeypatch.setattr(review_autofix, "AUTOFIX_RETRY_ON_INVALID", True)
-        res, n = await _run(db_conn, monkeypatch, _con01_finding(),
-                            replies=[_SAME, _AFTER])
+        res, n = await _run(db_conn, monkeypatch, _con01_finding(), replies=[_SAME, _AFTER])
         assert n == 2 and res["status"] == "repaired"
         snapshot_id = await ra._persist_fixed(
-            db_conn, scheme_id=SCHEME, rule_id="CON-01",
-            pending=res["pending"], repair_id=res.get("repair_id", ""))
+            db_conn, scheme_id=SCHEME, rule_id="CON-01", pending=res["pending"], repair_id=res.get("repair_id", "")
+        )
         assert snapshot_id
-        cur = await db_conn.execute(
-            "SELECT content, review_status FROM sections WHERE id=?", (SEC_A,))
+        cur = await db_conn.execute("SELECT content, review_status FROM sections WHERE id=?", (SEC_A,))
         row = await cur.fetchone()
         assert "90 日历天" in row["content"] and "120 日历天" not in row["content"]
         assert row["review_status"] == "pending"
@@ -284,6 +266,7 @@ class TestConfigContract:
 
     def test_defaults_are_false(self):
         from app.config import Settings
+
         s = Settings()
         assert s.review_autofix_retry_on_invalid is False
         assert s.review_autofix_retry_on_invalid_by_severity is False
@@ -291,9 +274,7 @@ class TestConfigContract:
     def test_module_constants_are_config_driven(self):
         """模块常量必须由配置驱动，不能写死 True。"""
         import inspect
+
         src = inspect.getsource(review_autofix)
         assert 'getattr(settings, "review_autofix_retry_on_invalid"' in src
-        assert ('getattr(settings, "review_autofix_retry_on_invalid_by_severity"'
-                in src)
-
-
+        assert 'getattr(settings, "review_autofix_retry_on_invalid_by_severity"' in src

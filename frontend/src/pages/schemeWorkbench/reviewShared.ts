@@ -1,5 +1,3 @@
-
-
 // ✅ any 清理（2026-11-02）：目录质量载荷契约（按本函数实际消费字段推导，
 //    与后端 outline_quality 结构对齐；未知字段一律 ? 修饰，不虚构）
 type OutlineQualityPayload = {
@@ -68,7 +66,7 @@ export function summarizeOutlineQuality(review: unknown): {
   if (redundant.length > 0) {
     const head = redundant
       .slice(0, 5)
-      .map((r) => ((r as { title?: string } | null)?.title) || "")
+      .map((r) => (r as { title?: string } | null)?.title || "")
       .filter(Boolean)
       .join("、");
     if (head) logs.push(`ℹ️ 疑似与方案名称无关的章节（未自动删除，请确认）：${head}`);
@@ -144,3 +142,41 @@ export const CR_REPAIR_STATUS: Record<string, string> = {
 };
 
 /** 全局事实分类选项（与后端 CATEGORY_TITLES 对齐，用于手工录入/编辑时归类） */
+
+/** 目录审核依据（review_mode / suggestions）→ 生成日志行（R74 G1 契约） */
+export function summarizeOutlineReviewBasis(review: unknown): {
+  level: "info" | "none";
+  message: string;
+  logs: string[];
+} {
+  const empty = { level: "none" as const, message: "", logs: [] as string[] };
+  if (!review || typeof review !== "object") return empty;
+  const r = review as { review_mode?: unknown; suggestions?: unknown };
+  const logs: string[] = [];
+  const mode = typeof r.review_mode === "string" ? r.review_mode : "";
+  if (mode.startsWith("programmatic")) {
+    const detailMap: Record<string, string> = {
+      surgical: "外科式补齐缺失章节",
+      titled: "占位标题外科式重写",
+    };
+    // 未登记的模式 token 照原文透出（后端新增细分时前端不得静默咽掉）
+    const tokens = mode
+      .split("+")
+      .slice(1)
+      .map((t) => detailMap[t] || t);
+    const detail = tokens.length ? `，含${tokens.join("、")}` : "，全部必备项已覆盖";
+    logs.push(`📗 审核依据：程序化预检${detail}（本次结论未经完整 AI 审核）`);
+  } else {
+    logs.push("📘 审核依据：AI 审核链路");
+  }
+  // ⚠️ 脏数据防御：与 summarizeOutlineQuality 同口径 —— suggestions 元素可能
+  //    是 null/非字符串（弱模型回传），逐个过滤，绝不在日志路径上抛。
+  const sugg = Array.isArray(r.suggestions)
+    ? r.suggestions.filter((s): s is string => typeof s === "string" && s.trim() !== "")
+    : [];
+  // ⚠️ 前缀全角空格走普通字符串拼接：模板字符串内的 U+3000 会被 eslint
+  //    no-irregular-whitespace 判红（该规则 skipTemplates 默认 false）。
+  sugg.slice(0, 8).forEach((s) => logs.push("　· " + s));
+  if (sugg.length > 8) logs.push("　· …共 " + sugg.length + " 条");
+  return { level: "info", message: logs.join("\n"), logs };
+}

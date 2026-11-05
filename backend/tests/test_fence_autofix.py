@@ -6,6 +6,7 @@
   · count_fences：与 find/auto_fix 口径一致性、行内不计数
   · 集成：修复后 DLV-07 判据清零；不干扰 text_word_count 与 word_status
 """
+
 from app.services.content_utils import (
     DEFAULT_WORD_BUDGET,
     auto_fix_unclosed_fences,
@@ -152,7 +153,7 @@ class TestAutoFixUnclosedFences:
         assert log == []
 
     def test_mixed_mermaid_and_chart_json(self):
-        src = "```\n前言\n```\n\n```chart-json\n{\"type\":\"pie\",\"data\":[1,2,3]"
+        src = '```\n前言\n```\n\n```chart-json\n{"type":"pie","data":[1,2,3]'
         fixed, log = auto_fix_unclosed_fences(src)
         assert len(log) == 1
         assert log[0]["lang"] == "chart-json"
@@ -348,10 +349,10 @@ class TestAutoFixLenientFences:
         import app.config as cfg
         import app.services.fence_common as fc
 
-        assert getattr(cfg.settings, "content_fence_normalize_close") is True, \
-            "配置默认必须为开（收口口径），且不得被静默改默认值"
+        assert (
+            getattr(cfg.settings, "content_fence_normalize_close") is True
+        ), "配置默认必须为开（收口口径），且不得被静默改默认值"
         monkeypatch.setattr(cfg.settings, "content_fence_normalize_close", False, raising=False)
         assert fc.normalize_close_enabled() is False
         monkeypatch.setattr(cfg.settings, "content_fence_normalize_close", True, raising=False)
         assert fc.normalize_close_enabled() is True
-

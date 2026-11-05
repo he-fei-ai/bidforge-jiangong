@@ -5,6 +5,7 @@
   ② --before 时间窗 —— 修复上线后的正常重复总检不得被抹掉；
   ③ CLI 安全轨 —— dry-run 不动数据 / apply 前自动备份 / 超硬上限拒绝执行。
 """
+
 import sqlite3
 import sys
 from pathlib import Path
@@ -44,16 +45,24 @@ def make_db(tmp_path: Path) -> Path:
     return db
 
 
-def insert(db: Path, *, row_id: str, scheme: str = "sc1", fp: str = "F1",
-           total: float = 82.0, findings: str = "[]",
-           created_at: str = "2026-10-01 10:00:00") -> None:
+def insert(
+    db: Path,
+    *,
+    row_id: str,
+    scheme: str = "sc1",
+    fp: str = "F1",
+    total: float = 82.0,
+    findings: str = "[]",
+    created_at: str = "2026-10-01 10:00:00",
+) -> None:
     conn = sqlite3.connect(str(db))
     conn.execute(
         "INSERT INTO preflight_runs (id, scheme_id, content_fingerprint,"
         " rule_version, total, grade, verdict, released, blocked, counts,"
         " dimensions, findings, stats, created_at)"
         " VALUES (?, ?, ?, '1.8.0', ?, 'B', 'ok', 0, 1, '{}', '[]', ?, '{}', ?)",
-        (row_id, scheme, fp, total, findings, created_at))
+        (row_id, scheme, fp, total, findings, created_at),
+    )
     conn.commit()
     conn.close()
 
@@ -61,8 +70,7 @@ def insert(db: Path, *, row_id: str, scheme: str = "sc1", fp: str = "F1",
 def rows(db: Path) -> list[tuple]:
     conn = sqlite3.connect(str(db))
     try:
-        return conn.execute(
-            "SELECT id FROM preflight_runs ORDER BY rowid").fetchall()
+        return conn.execute("SELECT id FROM preflight_runs ORDER BY rowid").fetchall()
     finally:
         conn.close()
 
@@ -78,8 +86,7 @@ class TestDedupCriterion:
     def test_exact_duplicates_keep_earliest(self, tmp_path):
         """3 条 11 列全等 → 一组，keep 最早，delete 其余 2 条。"""
         db = make_db(tmp_path)
-        for i, ts in enumerate(("2026-10-01 10:00:00", "2026-10-01 10:00:05",
-                                "2026-10-01 10:00:09")):
+        for i, ts in enumerate(("2026-10-01 10:00:00", "2026-10-01 10:00:05", "2026-10-01 10:00:09")):
             insert(db, row_id=f"r{i}", created_at=ts)
         conn = open_rw(db)
         try:
@@ -107,8 +114,7 @@ class TestDedupCriterion:
         """同指纹但结论不同（AI 非确定性）→ 两行都是真实历史，不得删。"""
         db = make_db(tmp_path)
         insert(db, row_id="a", findings="[]")
-        insert(db, row_id="b", findings='[{"rule_id":"STD-03"}]',
-               created_at="2026-10-01 10:00:05")
+        insert(db, row_id="b", findings='[{"rule_id":"STD-03"}]', created_at="2026-10-01 10:00:05")
         conn = open_rw(db)
         try:
             assert mod.find_duplicate_groups(conn) == []
@@ -139,7 +145,8 @@ class TestDedupCriterion:
                 " ('a','sc1','F1',82,'B','ok',0,1,'{}','[]','[]','{\"words\":100}',"
                 "  '2026-10-01 10:00:00'),"
                 " ('b','sc1','F1',82,'B','ok',0,1,'{}','[]','[]','{\"words\":200}',"
-                "  '2026-10-01 10:00:05')")
+                "  '2026-10-01 10:00:05')"
+            )
             conn.commit()
             assert mod.find_duplicate_groups(conn) == []
         finally:
@@ -158,8 +165,7 @@ class TestBeforeWindow:
         insert(db, row_id="legit", created_at="2026-10-04 09:00:00")
         conn = open_rw(db)
         try:
-            groups = mod.find_duplicate_groups(
-                conn, before="2026-10-02 00:00:00")
+            groups = mod.find_duplicate_groups(conn, before="2026-10-02 00:00:00")
             assert len(groups) == 1
             assert len(groups[0]["delete_rowids"]) == 1
             mod.delete_rows(conn, groups)
