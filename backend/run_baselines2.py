@@ -36,6 +36,7 @@ content_tests = [
     "tests/test_content_rewrite.py",
 ]
 
+
 def run_tests(tests, label):
     cmd = [sys.executable, "-m", "pytest"] + tests + ["-q", "-p", "no:cacheprovider", "--tb=line"]
     t0 = time.time()
@@ -53,6 +54,7 @@ def run_tests(tests, label):
         print("--- STDERR (last 10) ---")
         for line in err.strip().split("\n")[-10:]:
             print(line)
+
 
 run_tests(facts_tests, "FACTS MODULE BASELINE")
 run_tests(content_tests, "CONTENT MODULE BASELINE")

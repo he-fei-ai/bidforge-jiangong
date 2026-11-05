@@ -59,5 +59,6 @@ def run_tests(tests, label):
         for line in err_lines[-10:]:
             print(line)
 
+
 run_tests(facts_tests, "FACTS MODULE BASELINE")
 run_tests(content_tests, "CONTENT MODULE BASELINE")

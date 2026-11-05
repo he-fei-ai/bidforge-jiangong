@@ -319,9 +319,23 @@ REM 已存在但不完整，旧脚本会直接报「已就绪」，随后 npm run dev 才以难以
 REM 理解的 ENOENT 报错失败。这里检查 vite 的入口脚本是否真的存在。
 if not exist "node_modules\.bin\vite.cmd" (
     echo   node_modules 缺失或不完整，正在安装 ^(可能需要 1-3 分钟^)...
-    call npm install --registry=https://registry.npmmirror.com
+    REM 优先 npm ci：按 lock 精确复装，避免 install 悄悄升级依赖。
+    if not exist "package-lock.json" (
+        echo   [!] 未发现 package-lock.json，npm ci 不可用，回退 npm install
+        call npm install --registry=https://registry.npmmirror.com
+    ) else (
+        call npm ci --registry=https://registry.npmmirror.com
+    )
     if errorlevel 1 (
         echo   ^(镜像安装失败，尝试官方源...^)
+        if exist "package-lock.json" (
+            call npm ci
+        ) else (
+            call npm install
+        )
+    )
+    if errorlevel 1 (
+        echo   ^(npm ci 官方源仍失败，回退 npm install 做最后兜底...^)
         call npm install
     )
     if errorlevel 1 (
@@ -346,6 +360,28 @@ REM ========== 4. 启动后端 ==========
 echo.
 echo [4/5] 启动后端服务 (FastAPI :8000)...
 cd /d "%~dp0backend"
+
+REM ---- 4.0 security notice: non-loopback bind with empty API_AUTH_TOKEN ----
+REM (ASCII-only block - this file is GBK/CP936; keep it pure ASCII.)
+REM The uvicorn start line below binds 0.0.0.0 (all interfaces). When
+REM API_AUTH_TOKEN is empty (env var or backend\.env), every host on the
+REM LAN can call the full API. We only WARN here; the default bind
+REM behavior is intentionally kept unchanged.
+set "AUTH_TOKEN_SET="
+if defined API_AUTH_TOKEN if not "%API_AUTH_TOKEN%"=="" set "AUTH_TOKEN_SET=1"
+if not defined AUTH_TOKEN_SET (
+    for /f "usebackq tokens=1,* delims==" %%a in (`findstr /b /l /c:"API_AUTH_TOKEN=" "%~dp0backend\.env" 2^>nul`) do (
+        if not "%%b"=="" set "AUTH_TOKEN_SET=1"
+    )
+)
+if not defined AUTH_TOKEN_SET (
+    echo.
+    echo [!] SECURITY NOTICE: backend binds 0.0.0.0 (all network interfaces)
+    echo     and API_AUTH_TOKEN is empty - anyone on your LAN can call the API.
+    echo     Local-only use: change --host to 127.0.0.1 in the uvicorn start line below.
+    echo     LAN/server use: set API_AUTH_TOKEN in backend\.env before exposing.
+    echo.
+)
 REM 用 start /D 指定工作目录，配合 cmd /S /K 保证引号按字面量解析
 REM （不再写成 cmd /k "cd /d "path" && ..." 这种嵌套引号写法）
 REM NOTE: single-process mode (no --reload). The reloader parent owns the

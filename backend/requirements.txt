@@ -1,11 +1,19 @@
 # ================================================================
-# 专项方案工具箱 · 后端运行时依赖（Python 3.12）
+# 专项方案工具箱 · 后端运行时依赖
+# 版本声明：requires-python >=3.12（见 pyproject.toml / .python-version）
+#   - 下限 3.12：CI（.github/workflows/ci.yml）在 3.12 上安装并跑 pytest
+#   - 实测生产：3.14.4（2026-11-03 基线机器 C:\Program Files\Python314，依赖全量在装）
 # 基线：2026-11-03 本机全量测试通过的环境（见 docs/R169）
 # 约定：只列直接依赖并锁死版本；升级须单独提交并跑全量回归。
+# pin 来源：与验证过的运行环境对齐。2026-11-04 用运行中的解释器
+#   （C:\Program Files\Python314\python.exe，Python 3.14.4）通过
+#   importlib.metadata.version 逐包实测，pin 取该环境实测值。
+# 含义：部署端 `pip install -r requirements.txt` 装到的就是这一套版本；
+#   环境与 pin 一旦再漂移，以「重跑全量回归后的实测值」为准重新对齐。
 # ================================================================
 
 # Web 框架
-fastapi==0.138.0
+fastapi==0.139.0
 starlette==1.3.1
 uvicorn[standard]==0.49.0
 python-multipart==0.0.32
@@ -23,13 +31,16 @@ docx2python==3.6.2
 Pillow==12.2.0
 PyMuPDF==1.27.2.3
 pdfplumber==0.11.9
-pypdf==5.4.0
+pypdf==6.14.2
 openpyxl==3.1.5
 xlrd==1.2.0
 
 # 加密与网络
-cryptography==49.0.0
-httpx==0.27.1
+# cryptography：pin 由 49.0.0 下调为实测 48.0.1（本机全量回归覆盖的版本）。
+#   这是依赖方向上的「降低声明版本」，若需升级请先在验证环境升到 49.x 并回归
+#   Fernet 加解密链路，再单独提交提升 pin，不要只改声明。
+cryptography==48.0.1
+httpx==0.28.1
 aiohttp==3.14.1
 
 # 图表渲染数值计算

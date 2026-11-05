@@ -5,7 +5,18 @@
 
 -r requirements.txt
 
-# pytest 8.4.x 是 pytest-asyncio 1.4.0 的最低要求（本地旧 env 仍为 8.3.3）
-pytest==8.4.1
+# pytest：pin 与验证过的运行环境对齐（2026-11-04 实测 9.1.0）
+# 与 pytest-asyncio==1.4.0 的组合已在 Python 3.14.4 上跑过全量回归；
+# pytest-asyncio 1.4.0 只要求 pytest>=8.x，升到 9.x 不违反其下限约束。
+pytest==9.1.0
 pytest-asyncio==1.4.0
+# ruff：实测环境为 0.16.2，但 pin 仍保持 0.6.9，暂不升（2026-11-04 取证）：
+#   - 0.16.2 下 `ruff check` 在 5 个已跟踪产品文件上新增 I001 命中，
+#     而 CI 的 Ruff 步骤是阻断式，升 pin 会让流水线变红；
+#   - 0.16.2 的 `ruff format --check` 会因 Annotation range bug 直接 panic。
+# 前置条件：先单独修完上述 I001 并换成可用的 ruff 版本，再提交 pin 升级。
 ruff==0.6.9
+
+# 测试直接 import lxml（python-docx 的传递依赖，此前靠侥幸幸存）。
+# 版本取值依据：基线机器（Python 3.14.4）pip show lxml 实装 6.1.1，2026-11-03 实测。
+lxml==6.1.1

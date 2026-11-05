@@ -1,0 +1,18 @@
+# ================================================================
+# 专项方案工具箱 · 后端项目元数据（仅声明 Python 版本下限）
+# 取值依据（2026-11-03 取证）：
+#   - 下限 3.12：CI（.github/workflows/ci.yml backend job）在 3.12 上
+#     安装 requirements-dev.txt 并运行 pytest，为仓库当前最低验证线；
+#   - 上界不设限：基线机器生产解释器为 Python 3.14.4
+#     （C:\Program Files\Python314\python.exe，pip show 依赖全量在装，
+#     start_all.bat 以 `import app.main` 作为就绪判据）。
+# 注意：本文件刻意不含 [project.scripts] / [build-system] / [tool.*]，
+#       不改变 pip -r requirements.txt 的安装路径，也不影响
+#       pytest rootdir 与 ruff 配置发现（二者分别依赖 conftest 与
+#       独立配置文件）。若未来引入打包/发布，再补全元数据。
+# ================================================================
+[project]
+name = "scheme-assistant-backend"
+version = "5.3.0"
+description = "工程项目专项方案智能编制平台 - 后端"
+requires-python = ">=3.12"

@@ -32,3 +32,16 @@ fix(export): 表格侧叠行拆分与尾部空列裁剪
 - 配置：仓库根 `commitlint.config.js`（已就位，手动校验可用 `npx commitlint --edit`）
 - 依赖：`@commitlint/cli`、`@commitlint/config-conventional` 暂未安装
 - 钩子：未接入 husky。多会话并行开发期间，共享 `.git/hooks` 中的 pre-commit 钩子会拦截所有会话的提交，待并行窗口结束、需要自动化时再评估接入。
+
+## Python 解释器：pin 来源与 CI 的双腿策略
+
+2026-11-04 起的事实：
+
+- `backend/requirements*.txt` 的 pin 与 **Python 3.14.4 验证环境**对齐（逐包 `importlib.metadata.version` 实测），部署端 `pip install -r requirements.txt` 装到的就是这一套版本。
+- CI 的**阻断腿**（`backend` job）仍跑 **Python 3.12**；另有非阻断的**观察腿**（`backend-py314-observe`）跑 **Python 3.14**，只跑 12 个文件的冒烟子集（六条链路 import + 核心纯函数），不跑全量、不拦合并。
+- 观察腿转正标准（与 `smoke-windows` 相同）：连续 10 次 run 全绿，且期间未暴露 3.14 特有的依赖或行为问题 ⇒ 此时把阻断腿的 `python-version` 切到 3.14，并删除观察腿。
+- 切腿之前不要只改一边：只改 pin 或只改 CI 解释器，都会让「声明版本 / 实装版本 / CI 版本」再次分叉。
+
+## ruff 升级的前置条件
+
+当前 ruff pin 为 `0.6.9`。换成实测的 `0.16.2` 会新增 5 条 I001（`app/routers/global_facts.py`、`app/routers/sse_handlers.py`、`app/services/bid_section_extraction.py`、`app/services/consistency_scanner.py`、`app/services/preflight_engine.py`），且 0.16.2 的 `ruff format --check` 会因 Annotation range bug panic。升 ruff 的前置条件：先单独提交修完这 5 处 import 排序，并换到不 panic 的版本，再改 pin。

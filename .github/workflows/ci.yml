@@ -4,6 +4,7 @@ on:
   push:
     branches: [main, master]
   pull_request:
+  workflow_dispatch:
 
 jobs:
   backend:
@@ -31,8 +32,10 @@ jobs:
       - name: Ruff
         run: ruff check .
 
-      # 格式门禁：当前为非阻断（存量约数千处格式差异，一次性重排留作独立整改项）
-      # TODO: 待存量 ruff format 全量重排落地后，删除 continue-on-error 转为阻断
+      # 格式门禁：维持非阻断（2026-11-04 复核，未转正）。
+      # 理由：`ruff format --check` 在当前代码基线上仍报大量待重排文件；
+      # 本机实装的 ruff 0.16.2 还会在扫描时报 Annotation range panic（退出码 101），
+      # 工具本身不稳定。转正前提：存量格式重排单独落地 + 换到不 panic 的 ruff 版本。
       - name: Ruff format check (non-blocking)
         continue-on-error: true
         run: ruff format --check .
@@ -67,3 +70,195 @@ jobs:
 
       - name: Vitest
         run: npm test
+
+      # 真实构建冒烟：tsc 已在上方单独跑过，build 里重复的 tsc 由
+      # vite 构建自身的类型闸门兜底；产物缺失（如 public 资源断裂、
+      # import.meta.env 引用错误）只有真正 build 才暴露。
+      - name: Build
+        run: npm run build
+
+  # Windows 冒烟：验证「干净环境 + requirements.txt + Windows 路径」下
+  # uvicorn 能启动且 /api/v1/health 返回 200。本地开发全部在 Windows，
+  # 但此前 CI 只覆盖 ubuntu，Windows 特有失效（路径分隔符、事件循环
+  # 策略、可选依赖导入顺序）从未被流水线捕获。
+  #
+  # continue-on-error 转阻断条件（满足任一即可移除该行）：
+  #   1. 连续 10 次运行均通过（排除环境偶发因素）；
+  #   2. 首次暴露过至少一个 Windows 特有缺陷并被修复。
+  # 在此之前失败只在 CI 面板黄标，不拦截合并。
+  #
+  # 2026-11-04 复核：两个转阻断条件均未满足（本机无 gh CLI，无法核对历史 run
+  # 记录；也尚未捕获并修复过 Windows 特有缺陷），故维持非阻断。
+  smoke-windows:
+    name: Smoke (windows-latest, uvicorn + /health)
+    runs-on: windows-latest
+    continue-on-error: true
+    defaults:
+      run:
+        working-directory: backend
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+          cache: pip
+          cache-dependency-path: backend/requirements.txt
+
+      - name: Install dependencies
+        run: |
+          python -m pip install --upgrade pip
+          pip install -r requirements.txt
+
+      # 单进程启动（与 start_all.bat 的单 socket 持有约定一致），
+      # 用系统自带 curl.exe 探测 /api/v1/health，60 秒内断言 200，
+      # 结束后无论成败都终止 uvicorn 进程。
+      - name: Start uvicorn and probe /api/v1/health
+        shell: pwsh
+        run: |
+          $proc = Start-Process -FilePath python -ArgumentList "-m","uvicorn","app.main:app","--host","127.0.0.1","--port","8000" -PassThru -NoNewWindow -RedirectStandardOutput uvicorn-out.log -RedirectStandardError uvicorn-err.log
+          $code = ""
+          try {
+            foreach ($i in 1..60) {
+              Start-Sleep -Seconds 1
+              $code = & curl.exe -s -o NUL -w "%{http_code}" http://127.0.0.1:8000/api/v1/health
+              if ($code -eq "200") { break }
+            }
+            if ($code -ne "200") {
+              Write-Host "::error::health probe failed (last http_code=$code)"
+              Get-Content uvicorn-out.log -ErrorAction SilentlyContinue
+              Get-Content uvicorn-err.log -ErrorAction SilentlyContinue
+              exit 1
+            }
+            Write-Host "GET /api/v1/health -> 200 OK"
+          } finally {
+            Stop-Process -Id $proc.Id -Force -ErrorAction SilentlyContinue
+          }
+
+  # Python 3.14 观察腿（非阻断）：requirements*.txt 的 pin 取值来自 Python 3.14.4
+  # 验证环境，而阻断腿（backend job）跑 3.12，两者存在解释器差异。
+  # 本腿存在的目的就是把这种偏差暴露出来，而不是拦截合并，故 continue-on-error。
+  #
+  # 范围：只跑冒烟子集（12 个文件，覆盖 API 契约与全路由 import、上传解析、目录、
+  # 正文 SSE、事实、图表、审核、导出的核心纯函数），不跑全量，避免 CI 时间翻倍。
+  # 耗时基准：3.14.4 本机实测 161 passed / 11.7s（2026-11-04）。
+  #
+  # 转正标准（与 smoke-windows 一致）：连续 10 次 run 全绿，且期间未出现 3.14 特有的
+  # 依赖或行为问题 ⇒ 把阻断腿的 python-version 切到 3.14，并删除本观察腿。
+  backend-py314-observe:
+    name: Backend pytest (3.14, non-blocking)
+    runs-on: ubuntu-latest
+    continue-on-error: true
+    defaults:
+      run:
+        working-directory: backend
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Set up Python 3.14
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.14"
+          cache: pip
+          cache-dependency-path: |
+            backend/requirements.txt
+            backend/requirements-dev.txt
+
+      - name: Install dependencies
+        run: |
+          python -m pip install --upgrade pip
+          pip install -r requirements.txt -r requirements-dev.txt
+
+      - name: Smoke subset (six chains import + core pure functions)
+        run: |
+          python -m pytest -p no:cacheprovider -q \
+            tests/test_api_contract.py \
+            tests/test_import_module_boundaries_20261008.py \
+            tests/test_import_module_crosscut_20261008.py \
+            tests/test_import_parse_closeout_r72_20261012.py \
+            tests/test_cross_module_chain_20261004.py \
+            tests/test_content_sse_contract.py \
+            tests/test_global_facts_route_contract_20261011.py \
+            tests/test_facts_budget_contract_r177_20261104.py \
+            tests/test_upload_format_contract.py \
+            tests/test_chart_module_hardening.py \
+            tests/test_review_status_decouple.py \
+            tests/test_export_docx_smoke.py
+
+  # 性能回归门禁（第一版非阻断）：纯函数微基准，不触数据库、不联网、不起服务，
+  # 用 backend/tools/perf/bench_micro.py 产出 JSON 并固化到 artifact，
+  # 目的是积累跨 run 的 median 趋势数据，暂不拦截合并（CI runner 性能波动大）。
+  #
+  # 阈值口径（参照性能审计会话的验收口径）：单项 median 相对基线漂移 ±20%。
+  # 基线文件 backend/tools/perf/baseline_micro.json 由维护者在稳定机器上跑一次
+  # `--repeat 5 --budget 10 --json` 后提交；文件不存在时本 job 只产出趋势数据。
+  #
+  # 转阻断前提（任一满足后再删除 continue-on-error）：
+  #   1. 基线文件已提交且连续 10 次 run 的 median 漂移均在 ±20% 内；
+  #   2. runner 侧性能噪声已被量化（如同一 commit 重复 run 的 median 极差 < 10%）。
+  perf-micro:
+    name: Perf (micro benchmark, non-blocking)
+    runs-on: ubuntu-latest
+    continue-on-error: true
+    defaults:
+      run:
+        working-directory: backend
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+          cache: pip
+          cache-dependency-path: backend/requirements.txt
+
+      - name: Install dependencies
+        run: |
+          python -m pip install --upgrade pip
+          pip install -r requirements.txt
+
+      - name: Run micro benchmark
+        run: python tools/perf/bench_micro.py --repeat 5 --budget 10 --json > perf_micro.json
+
+      - name: Compare medians against baseline (±20%)
+        run: |
+          python - <<'PY'
+          import json
+          import pathlib
+
+          cur = json.loads(pathlib.Path("perf_micro.json").read_text(encoding="utf-8"))
+          base_path = pathlib.Path("tools/perf/baseline_micro.json")
+          if not base_path.exists():
+              print("no baseline_micro.json -> trend only (non-blocking)")
+              raise SystemExit(0)
+
+          base = {(r["bench"], r["scale"]): r["median_ms"]
+                  for r in json.loads(base_path.read_text(encoding="utf-8"))["rows"]
+                  if r.get("status") == "OK"}
+          drift = []
+          for row in cur["rows"]:
+              if row.get("status") != "OK":
+                  continue
+              ref = base.get((row["bench"], row["scale"]))
+              if not ref:
+                  continue
+              delta = (row["median_ms"] - ref) / ref
+              if abs(delta) > 0.20:
+                  drift.append(f"{row['bench']}/{row['scale']}: "
+                               f"{row['median_ms']:.3f}ms vs {ref:.3f}ms ({delta:+.1%})")
+          for line in drift:
+              print(f"::warning::median drift beyond ±20%: {line}")
+          print(f"checked {len(cur['rows'])} rows, {len(drift)} beyond ±20%")
+          PY
+
+      - name: Upload benchmark result
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: perf-micro-${{ github.run_id }}
+          path: backend/perf_micro.json
+          retention-days: 90
+          if-no-files-found: warn
+

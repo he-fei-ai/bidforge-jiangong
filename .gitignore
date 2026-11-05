@@ -185,3 +185,9 @@ _tmp_screenshot.png
 !docs/**/*.png
 !examples/**/*.png
 !backend/app/**/*.png
+
+# ---------------- 归档目录 ----------------
+# backend/legacy_scripts/ 存放一次性排查脚本（不参与构建/运行，仅本地留存）；
+# 归档脚本本身不纳入版本控制，仅 README 作为说明入口保留。
+backend/legacy_scripts/*
+!backend/legacy_scripts/README.md
