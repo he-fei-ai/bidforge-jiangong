@@ -1,4 +1,5 @@
 """配置管理（pydantic-settings）"""
+
 import os
 from pathlib import Path
 
@@ -36,10 +37,10 @@ class Settings(BaseSettings):
     #   rapidocr  : 纯 pip 安装、无需系统二进制，Windows 零配置推荐
     #   vision    : 复用 AI 配置中的视觉模型（无需任何本地依赖）
     ocr_engine: str = "auto"
-    ocr_lang: str = "chi_sim+eng"      # tesseract 语言包（需含 chi_sim）
-    ocr_pdf_max_pages: int = 20        # 扫描件 PDF 的 OCR 页数上限
-    ocr_pdf_dpi: int = 200             # PDF 渲染 DPI（越高越准、越慢）
-    ocr_min_chars_per_page: int = 30   # 平均每页字符数低于该值 → 判定为扫描件
+    ocr_lang: str = "chi_sim+eng"  # tesseract 语言包（需含 chi_sim）
+    ocr_pdf_max_pages: int = 20  # 扫描件 PDF 的 OCR 页数上限
+    ocr_pdf_dpi: int = 200  # PDF 渲染 DPI（越高越准、越慢）
+    ocr_min_chars_per_page: int = 30  # 平均每页字符数低于该值 → 判定为扫描件
 
     # ---------- 上传文件大小上限（解析提取模块 · 目录识别上传） ----------
     # 单文件最大字节数：超过即 413 拒绝，避免超大文件一次性读入内存（OOM）。
@@ -77,10 +78,10 @@ class Settings(BaseSettings):
     # 自动走云端解析；配置为空时保持纯本地行为（与旧版一致）。
     mineru_provider: str = ""
     mineru_token: str = ""
-    mineru_agent_timeout: int = 300      # Agent 轮询超时（秒）
-    mineru_accurate_timeout: int = 600   # 精准解析轮询超时（秒）
-    mineru_poll_interval: float = 3.0    # 轮询间隔（秒）
-    mineru_enabled: bool = True          # 总开关（provider 非空时才生效）
+    mineru_agent_timeout: int = 300  # Agent 轮询超时（秒）
+    mineru_accurate_timeout: int = 600  # 精准解析轮询超时（秒）
+    mineru_poll_interval: float = 3.0  # 轮询间隔（秒）
+    mineru_enabled: bool = True  # 总开关（provider 非空时才生效）
     # ✅ 增强（2026-09-23，审计报告 §4-4）：云端对单图大小常有限制（参考实现
     #    agent 模式约 100MB）。超过则直接跳过云端兜底、本地又无 OCR → 抛 ParseError
     #    让用户知道（而非把超大图塞给云端触发 413/超时）。默认 100MB，正常扫描件
@@ -96,9 +97,9 @@ class Settings(BaseSettings):
     # legacy_office_enabled=False 时行为与旧版本一致（.doc/.wps 解析报错，
     # 但上传仍被接受并给出可操作提示）。
     legacy_office_enabled: bool = True
-    legacy_office_path: str = ""         # 显式指定 soffice 可执行文件（留空自动探测）
-    legacy_office_timeout: int = 120     # 单后端转换超时（秒）
-    legacy_office_com_enabled: bool = True   # Windows 下是否尝试 Word/WPS COM 转换
+    legacy_office_path: str = ""  # 显式指定 soffice 可执行文件（留空自动探测）
+    legacy_office_timeout: int = 120  # 单后端转换超时（秒）
+    legacy_office_com_enabled: bool = True  # Windows 下是否尝试 Word/WPS COM 转换
     # ✅ G4（2026-10-12）：转换前先做廉价的 OLE 头结构校验，损坏/截断的 .doc
     #    毫秒级早退，不再白等「单后端转换超时」（默认 120s/后端、最多两后端）。
     #    预检只做「合法 CFB 文件的必要条件」判定（扇区算术 + 保留索引），
@@ -123,11 +124,11 @@ class Settings(BaseSettings):
     # ---------- 图片生成配置（自招投标方案平台移植） ----------
     # 支持：agnes / dashscope / volcengine / hunyuan / zhipu / stepfun / baidu
     image_provider: str = "agnes"
-    image_model: str = ""            # 留空用各厂商默认模型
-    image_base_url: str = ""         # 留空用各厂商默认端点
-    image_api_key: str = ""          # 留空时回退到文本模型 key（Agnes 可免 key）
+    image_model: str = ""  # 留空用各厂商默认模型
+    image_base_url: str = ""  # 留空用各厂商默认端点
+    image_api_key: str = ""  # 留空时回退到文本模型 key（Agnes 可免 key）
     image_enabled: bool = True
-    image_default_size: str = "2K"   # 1K/2K/3K/4K
+    image_default_size: str = "2K"  # 1K/2K/3K/4K
     image_quality: str = "standard"
     image_max_concurrency: int = 2
     # ---------- 导出远程图片下载安全配置 ----------
@@ -211,12 +212,40 @@ class Settings(BaseSettings):
     sse_total_timeout_default: int = 1800
     sse_total_timeout_hard_max: int = 14400
     ai_request_timeout: int = 900
+    # ✅ R175（2026-11-03 · SSRF 防护）：是否允许 AI Base URL 指向内网/回环/
+    #    链路本地地址。默认 False = 拒绝（含 127.0.0.0/8、::1、10/8、172.16/12、
+    #    192.168/16、169.254/16、0.0.0.0、localhost 及解析后落到这些网段的域名）。
+    #    本机自建模型服务（如 Ollama / vLLM / LM Studio）确需连接时显式设为 true。
+    #    ⚠️ 打开后任何持有配置写权限的人都能让后端向任意内网地址发起请求，
+    #    并把已保存的 API Key 发送到该地址 —— 仅限可信的单机/内网部署。
+    ai_allow_private_base_url: bool = False
 
     # ---------- AI 调用链性能参数（正文生成链路，2026-09-17） ----------
-    # 对冲请求：主候选超过 ai_hedge_delay_seconds 仍无响应时，并行启动下一候选，
+    # 对冲请求：主候选超过阈值仍无响应时，并行启动下一候选，
     # 先成功者胜并取消其余在途调用。用于消除"慢候选长尾"（实测 p90 181s）。
+    #
+    # ✅ 2026-11-05（对冲放大修复）：
+    #   旧实现固定 20s 阈值，而生产 agnes 成功调用 P50=25.83s —— 阈值低于中位数，
+    #   意味着**多数正常偏慢的调用都会被复制一份**（本时间窗 301 次对冲 / 284 次
+    #   真实 POST，直接打穿免费额度触发 429）。现改为按该候选最近成功调用的
+    #   P90 自适应（同时不低于 P50×1.5），并限制同一逻辑调用最多 1 个对冲副本。
+    #   ai_hedge_delay_seconds 保留为：自适应关闭时的固定阈值 / 样本不足时的
+    #   冷启动阈值。默认值 20 → 45 是**刻意的行为变更**（20 低于实测 P50，属缺陷）。
     ai_hedge_enabled: bool = True
-    ai_hedge_delay_seconds: float = 20.0
+    ai_hedge_delay_seconds: float = 45.0
+    ai_hedge_adaptive_enabled: bool = True
+    # 自适应阈值 = clamp(max(P90, P50 × p50_ratio), [min, max])
+    #   · 样本数 < ai_hedge_min_samples 时用 ai_hedge_delay_seconds（冷启动）；
+    #   · min 默认 30s：确保阈值明显高于实测 P50(25.83s)，正常调用不被复制；
+    #   · max 默认 90s：避免 P90 长尾（实测 181s）时对冲永不触发。
+    ai_hedge_percentile: float = 90.0
+    ai_hedge_p50_ratio: float = 1.5
+    ai_hedge_min_delay_seconds: float = 30.0
+    ai_hedge_max_delay_seconds: float = 90.0
+    ai_hedge_min_samples: int = 12
+    # 同一逻辑调用最多启动几个对冲副本（1 = 只允许一个额外在途请求）。
+    # 0 等价于关闭对冲（与 ai_hedge_enabled=False 同义）。
+    ai_hedge_max_copies: int = 1
     # 降级候选链长度上限（实测曾达 13 个，失败时被逐个串行尝试 → 超时放大）。
     ai_fallback_chain_max: int = 3
     # 降级候选（非主候选）单次尝试的超时上限：避免调用方的长超时（300s）
@@ -238,10 +267,22 @@ class Settings(BaseSettings):
     #    0 = 关闭冷却（旧行为：配额错误后照常尝试，仅受熔断器约束）。
     ai_fail_cooldown_seconds: int = 120
     ai_fail_probe_every_seconds: int = 10
+    # ✅ 2026-11-05（429 处理）：上游返回 ``Retry-After`` 时以它为准
+    #    （至少不低于 ai_fail_cooldown_seconds），并受此上限约束（防止恶意/异常值
+    #    把冷却拉到数小时）。429 不再参与熔断冷却的指数放大，改为尊重该值。
+    ai_fail_cooldown_max_seconds: float = 600.0
     # ✅ 2026-09-22（调用次数优化 O3）：推理模型把 max_tokens 全部耗在思考
-    #    过程（finish_reason=length、正文为空）时，自动翻倍 max_tokens 重试一次
+    #    过程（finish_reason=length、正文为空）时，自动放大 max_tokens 重试一次
     #    （上限 ai_reasoning_max_tokens）。仅「正文为空」触发，不影响正常响应。
-    ai_reasoning_max_tokens: int = 4096
+    # ✅ 2026-11-05（推理预算修复）：生产实测 custom 模型 14 次思考吞噬、
+    #    累计浪费 675.5s —— 旧上限 4096 在 1536→3072 翻倍后仍装不下思考过程。
+    #    现一次性放大到「至少 ai_reasoning_retry_floor_tokens」，上限默认 16384；
+    #    并对已识别为推理模型的候选预先给足输出预算（见 ai_reasoning_output_floor）。
+    ai_reasoning_max_tokens: int = 16384
+    ai_reasoning_retry_floor_tokens: int = 8192
+    # 识别为推理模型（名称命中 reasoner/r1/o1/o3/qwq/thinking，或本会话曾发生
+    # 思考吞噬）时，单次调用的 max_tokens 下限。0 = 关闭该预扩预算。
+    ai_reasoning_output_floor: int = 4096
     ai_retry_on_thinking_exhausted: bool = True
     # ✅ 2026-10-07（正文截断收口 · 生产库实证）：正文**非空**但
     #    finish_reason=length/max_tokens = 被 max_tokens 截断的半截正文。
@@ -339,6 +380,15 @@ class Settings(BaseSettings):
     # 否则一次性直出。调小 => 更多方案走分步（更稳但调用次数更多）；
     # 调大 => 更多方案一次性直出（更快但弱模型下更易截断）。
     outline_stepwise_min_words: int = 50000
+    # ✅ R175 BUG-1（2026-11-03）：目录生成模式开关（唯一判定点见
+    #    sse_handlers._use_stepwise_for_budget）。
+    #    auto（默认）= 与引入前**逐字一致**：word_budget > outline_stepwise_min_words
+    #                   走分步，边界取等不分步（旧实现即 `>`）；
+    #    oneshot     = 强制一次性直出（失败时仍按 outline_oneshot_fallback_stepwise
+    #                   降级分步，两者不冲突：兜底只在一次性失败后生效）；
+    #    stepwise    = 强制分步（跳过一次性直出）。
+    #    向后兼容：老 .env / 旧配置文件不写该项时为 auto，行为完全不变。
+    outline_scheme: str = "auto"
 
     # ✅ R58（2026-10-10）：短方案（word_budget ≤ 上阈值）走「一次性直出」时，
     #    若 AI 返回空目录 / 节点全非法 / 调用异常，是否**自动切换分步生成**。
@@ -408,6 +458,16 @@ class Settings(BaseSettings):
     # medium/low 维持不重试。
     review_autofix_retry_on_invalid_by_severity: bool = False
 
+    # ---------- 审核与预检 · 分批送审预算闸门（D-41 成本上限，2026-11-04 配置化） ----------
+    # /check 与 /consistency-audit 按「单批 6000 字」装箱，调用次数随目录长度线性
+    # 增长；这两项是单次审核的成本硬顶（超出即 partial=true + 未审章节清单）。
+    # 默认 40 批 / 240000 字：与 R176 引入时逐字相同（存量最大方案 23 批，零触发）。
+    # 注意：调大意味着单次审核更贵（每批 = 一次 AI 调用）。
+    # 取值 <=0 视为该维度无上限（沿用仓库「0 = 不限」惯例），并在读取时记 WARNING；
+    # 不采用「拒绝启动」：预算是成本约束而非正确性依赖，一条误配置不应让服务起不来。
+    compliance_max_batches: int = 40
+    compliance_max_chars: int = 240000
+
     # False（默认）= 完全向后兼容：批大小恒为配置值，行为与现状逐字一致。
     # True = 按 provider 实时成功率**防御性降批**：成功率低于
     #   ai_batch_min_success_rate 的 provider 强制逐章调用（批=1）。
@@ -474,6 +534,19 @@ class Settings(BaseSettings):
     #    完全向后兼容）；>0 时若单章 user 上下文超过该值，按自然边界（段落→句→逗号）截断，
     #    避免极端超长知识库/事实把提示词撑爆导致 400/超时。截断只在超长时触发，正常长度不受影响。
     context_length_limit: int = 0
+
+    # ---------- 目录占位章节（2026-11-05 · 不生成正文） ----------
+    # 凡目录标题命中交付物类表述（计算书 / 附图 / 附件 / 布置图 / 节点详图 /
+    # 系统图 等）的章节，不再调用 AI 生成正文，只登记固定文本「另行补充内容」。
+    # 默认开启；章节标题判定与关键词归一化在 services/placeholder_sections.py
+    # 唯一实现（处理全角/半角、空格、括号、书名号差异）。
+    placeholder_sections_enabled: bool = True
+    # 关键词清单（逗号分隔，兼容中文逗号/分号/顿号）。默认即需求所列条目；
+    # 配置为空时回落到内置默认清单；置 enabled=False 才是彻底关闭该能力。
+    # 存量方案不强制迁移：再次生成/续写命中章节时按新规则覆盖为占位文本。
+    placeholder_section_keywords: str = (
+        "计算书,计算书及相关图纸,附图,附件,布置图,施工平面布置图,平面布置图,节点详图,详图,系统图,图纸"
+    )
 
     # ---------- 审核检查点前置与生成后自检（2026-10-02 · 第二十三轮） ----------
     # 核心逻辑：把审核与预检（audit_rules / preflight_engine）中**可在生成侧预防**
@@ -827,8 +900,20 @@ class Settings(BaseSettings):
 
     # 提取项级并发 / 分段并发 / 单项重试次数 / 分段预算。调参不再需要改代码；
     # 调小可缓解 provider 配额打爆（AGENTS.md §4.1 降级历史）。
-    bid_analysis_item_concurrency: int = 2
-    bid_analysis_segment_concurrency: int = 3
+    # ✅ 2026-11-05（方案 A · 降低并发）：item 2→1，segment 3→2。
+    #    依据（上一轮生产证据）：agnes 免费额度窗口内触发 HTTP 429，随后配额
+    #    冷却 + 全熔断快速失败；上层已在对冲层修复「一次调用被放大成多份请求」，
+    #    项级/分段级并发是剩余的放大源。
+    #    峰值在飞 AI 请求 ≈ item_concurrency × segment_concurrency：
+    #      旧 2×3 = 6 → 新 1×2 = 2（重试是**串行**追加，不抬高峰值）。
+    #    影响：吞吐下降（18 项提取的总墙上时间拉长），但 429 概率显著下降、
+    #    免费额度更耐用；对历史调用是「更慢但更稳」。
+    #    死锁/饥饿核查：项级与分段级是两个独立 asyncio.Semaphore，获取顺序固定
+    #    「先项级、后分段级」，无反向获取 ⇒ 无循环等待；bid_analysis.py 统一
+    #    `max(1, int(...))` 兜底（0 容量才会死锁）；asyncio.Semaphore 按等待顺序
+    #    放行，降为 1 只是串行化，不会饿死某个分段。
+    bid_analysis_item_concurrency: int = 1
+    bid_analysis_segment_concurrency: int = 2
     bid_analysis_item_retries: int = 2
     # ✅ A-1（2026-10-01 第七模块专项 · P0）：**多文档合计**参与 18 项提取的
     #    字符预算（_MAX_DOC_CHARS 的唯一来源，见 bid_analysis.py）。
@@ -978,6 +1063,15 @@ class Settings(BaseSettings):
     #   默认 False = 完全向后兼容（不改变任何现有注入文本）。
     prompt_injection_defense: bool = False
 
+    # ✅ R175（2026-11-03 · 新增）：外部资料凭据脱敏开关。
+    #   开启后，所有**发往外部 AI** 的用户资料原文（上传文档正文 / 招标文件 /
+    #   事实提取素材 / 章节正文等）中的疑似密钥、token、URL 内嵌口令会被替换为
+    #   ``[已脱敏凭据]``；库内原文不受影响（只做出站脱敏）。
+    #   默认 False = 完全向后兼容（修复前没有任何链路做脱敏，保持逐字节一致）。
+    #   ⚠️ 生产环境建议开启：上传资料可能含投标系统账号、数据库口令等。
+    #   回退方式：置回 False 即可，无数据迁移、无库内变更。
+    prompt_redact_sensitive: bool = False
+
     # G5 上下文预算分配器：正文生成时若单章 user 上下文超过预算，按
     #   「全局事实 > 目录树 > 资料摘要 > 知识库」优先级保重要、削次要。
     #   0（默认）= 关闭，沿用既有「逐章精选 + 组件级截断」行为。
@@ -1025,6 +1119,60 @@ class Settings(BaseSettings):
     # 反效果 +30%~51%，见上注释；保留开关仅为兼容早期显式开启过该参数的环境）
     db_temp_store_memory: bool = False
 
+    # ---------- 事件循环延迟埋点（2026-11-05 · 第二轮日志驱动分析 P0-1） ----------
+    # 背景：`/sections` 实测 8.6~10.2s、`/sse/tasks` 同期卡 8.6s，但访问日志只有
+    # 「请求总耗时」，无法区分「请求自己慢」与「事件循环被同步 CPU 任务阻塞」。
+    # 这里用后台心跳任务测「应醒时刻 vs 实际唤醒时刻」的偏差，超阈值 WARNING。
+    # 默认 1000ms：正常异步服务抖动通常 <100ms，取 1s 避免噪声刷屏；
+    # 冷却 30s 保证一次长阻塞期间最多打一条（「默认不刷屏」）。
+    loop_lag_monitor: bool = True
+    loop_lag_threshold_ms: int = 1000
+    loop_lag_interval_ms: int = 500
+    loop_lag_log_cooldown_s: float = 30.0
+
+    # ---------- 《L3以下“少目录、多正文”编制标准》（2026-11-05） ----------
+    # 标准原文（用户上传）把“L3 以下”定义为：目录只到 L3，L4-L7 不设标题；
+    # 每个 L2 下 L3 宜 2-5 个，每章 L3 宜 ≤5，全文 L3 宜 ≤40；每个 L3 正文
+    # ≥1500 字（关键 L3 ≥2500 字）、3-5 个自然段。下列默认值即标准数值。
+    # 口径确认（2026-11-05 二次修正）：标准原文的「每节 2-5、每章≤5、全文≤40」
+    # 全部只是**建议性**提示，L3 数量不做硬性要求。因此默认不自动合并任何 L3：
+    # converge_tree 只做「L4+ 折叠」这一确定性结构归一（见下），规模类判据一律
+    # 交由 DLV-17 告警。若要恢复 L3 硬收敛，显式打开
+    # outline_l3_converge_enforced（默认 False）。
+    # 向后兼容：全部为新增项；关闭 l3_standard_enabled 即恢复 2026-11-05 前行为
+    # （提示词块、目录折叠/收敛、DLV-17/18、字数下限均不生效）。
+    l3_standard_enabled: bool = True
+    # 目录结构归一的**总开关**（默认开启，但只做无损折叠，不合并 L3）。
+    # 关闭后连 L4+ 折叠也不执行（仅供诊断/回滚）。
+    outline_l3_converge_enabled: bool = True
+    # 是否把 L3 规模（每节≤5/单章有效上限/全文≤40）升级为**强制合并**。
+    # 默认 False（遵循「L3 不做硬性要求」）；True 时 converge_tree 才真正合并 L3。
+    outline_l3_converge_enforced: bool = False
+    outline_l3_max_per_section: int = 5
+    outline_l3_max_per_chapter: int = 5
+    # 「每节 L3 宜 2-5」的下限：仅在显式开启强制收敛时用于计算单章有效上限
+    # （单章有效上限 = max(每章上限, 下限 × 该章二级目录数)）。
+    outline_l3_min_per_section: int = 2
+    # 全文 L3 建议值：默认只用于 DLV-17 提示，不触发合并；
+    # 仅在 outline_l3_converge_enforced=True 时作为强制收敛目标。
+    outline_l3_max_total: int = 40
+
+    # 正文预算下限：仅在“未显式选择字数档位 / 未传 override”的默认路径生效，
+    # 用户显式档位（简短/标准/详细/超长）与 override 优先，避免覆盖用户意图。
+    content_l3_word_floor_enabled: bool = True
+    content_l3_word_floor: int = 1500
+    content_l3_key_word_floor: int = 2500
+    # 关键 L3 标题关键词（逗号分隔；标题命中即按关键下限要求）。
+    # 2026-11-05 口径补充：加入“吊装/脚手架/深基坑”，覆盖“起重吊装”“落地脚手架”
+    # “深基坑支护”等变体（子串命中）。
+    content_l3_key_title_keywords: str = (
+        "加固,拆除,危大,危险性较大,消防,调试,质量,安全,监测,监控,吊装,脚手架,深基坑"
+    )
+    content_l3_min_paragraphs: int = 3
+    content_l3_max_paragraphs: int = 5
+    # 连续短段判定：连续 ≥2 段且每段 < 80 字视为“短段簇”（仅提示词约束，
+    # 校验侧以正文总字数 + 自然段数为主判据，避免短句/工序步骤被误报）。
+    content_l3_short_para_chars: int = 80
 
     @field_validator("content_temperature", mode="before")
     @classmethod

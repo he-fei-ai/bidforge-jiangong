@@ -16,6 +16,7 @@ server 运行期间在 backend/ 内跑 pytest —— 每个 pytest 进程 import
   3. 首次降级时向 stderr 写一条告警（只写一次，不刷屏）。
 轮转成功路径与标准库完全一致（零行为差异）。
 """
+
 import sys
 from logging.handlers import RotatingFileHandler
 
@@ -55,6 +56,7 @@ class SafeRotatingFileHandler(RotatingFileHandler):
                 try:
                     sys.stderr.write(
                         "logging: 轮转失败（日志文件句柄被其它进程占用？），"
-                        "已降级为追加写模式（不再轮转），日志不会丢失\n")
+                        "已降级为追加写模式（不再轮转），日志不会丢失\n"
+                    )
                 except Exception:  # noqa: BLE001 - 告警失败绝不影响日志主流程
                     pass

@@ -1,4 +1,5 @@
 """API Key 加密存储（Fernet / AES-256）"""
+
 import logging
 import os
 
@@ -41,6 +42,20 @@ def _load_or_create_persistent_key() -> str:
             key = _KEY_FILE.read_text(encoding="utf-8").strip()
             if key:
                 return key
+            # ✅ R175（2026-11-03 · BUG-06）：文件存在但为空时，旧实现会走
+            #    「生成新 Key → x 模式 FileExistsError → 重试 10×0.05s → raise
+            #    → 外层临时密钥」路径，且因临时密钥本身合法而**不产生任何告警**：
+            #    每次重启换一把钥，全部已存密文永久 key_broken，用户毫无感知。
+            #    这里显式告警并删除空文件后重建（排他创建保证多进程只有一方胜出）。
+            logger.warning(
+                "持久化主密钥文件 %s 存在但内容为空（0 字节），将重新生成并写盘。"
+                "此前用临时密钥保存的 API Key 无法自动恢复，请在界面重新填写",
+                _KEY_FILE,
+            )
+            try:
+                _KEY_FILE.unlink()
+            except FileNotFoundError:
+                pass
         key = Fernet.generate_key().decode()
         _KEY_FILE.parent.mkdir(parents=True, exist_ok=True)
         try:
@@ -53,6 +68,7 @@ def _load_or_create_persistent_key() -> str:
                 f.write(key)
         except FileExistsError:
             import time as _time
+
             for _ in range(10):
                 existing = ""
                 if _KEY_FILE.exists():
@@ -67,8 +83,14 @@ def _load_or_create_persistent_key() -> str:
         except Exception as e:
             logger.debug("密钥文件 chmod 600 失败（尽力而为，不影响密钥可用性）: %s", e)
         return key
-    except Exception:
-        # 落盘失败（只读盘等）退回进程级临时密钥，功能仍可用但重启失效
+    except Exception as e:
+        # 落盘失败（只读盘等）退回进程级临时密钥，功能仍可用但重启失效。
+        # ✅ R175（BUG-06）：不再静默 —— 临时密钥意味着重启后历史密文全部失效。
+        logger.warning(
+            "无法持久化主密钥（数据目录不可写？），本次启动使用进程级临时密钥；"
+            "重启后已保存的 API Key 将无法解密，请检查 data 目录权限: %s",
+            e,
+        )
         return Fernet.generate_key().decode()
 
 
@@ -92,15 +114,13 @@ def _get_fernet() -> Fernet:
                 return _fernet
             except Exception:
                 logger.warning(
-                    "FERNET_KEY 非法，改用 data/secret_key.key 的持久化密钥"
-                    "（避免已保存的 API Key 全部解不开）")
+                    "FERNET_KEY 非法，改用 data/secret_key.key 的持久化密钥" "（避免已保存的 API Key 全部解不开）"
+                )
         persisted = _load_or_create_persistent_key()
         try:
             _fernet = Fernet(persisted.encode())
         except Exception:
-            logger.warning(
-                "持久化密钥文件内容非法，本次使用临时密钥"
-                "（重启后已保存的 API Key 需重新填写）")
+            logger.warning("持久化密钥文件内容非法，本次使用临时密钥" "（重启后已保存的 API Key 需重新填写）")
             _fernet = Fernet(Fernet.generate_key())
     return _fernet
 
@@ -214,12 +234,35 @@ def master_key_source() -> dict:
         try:
             content = _KEY_FILE.read_text(encoding="utf-8").strip()
             if content and is_valid_master_key(content):
-                return {"source": "persisted_file", "key_file_exists": True,
-                        "effective_key": content}
+                return {"source": "persisted_file", "key_file_exists": True, "effective_key": content}
         except Exception as e:
             # 读文件失败等同「无可用文件密钥」，交给下方 temporary 兜底
             logger.debug("读取主密钥文件失败（%s，按无文件密钥处理）: %s", _KEY_FILE, e)
     return {"source": "temporary", "key_file_exists": file_exists, "effective_key": ""}
+
+
+def ensure_master_key_ready() -> dict:
+    """✅ R175（BUG-06）：启动期主密钥自检。
+
+    首次 ``_get_fernet()`` 会按「FERNET_KEY 环境变量 → data/secret_key.key →
+    进程级临时密钥」初始化；空文件/损坏文件在 ``_load_or_create_persistent_key``
+    内已被修复（重建）或显式告警。本函数把最终来源在**启动期**落一条日志 ——
+    避免「临时密钥」只在首次保存/读取密钥时才被发现，而那时历史密文可能已经
+    不可解。返回值与 :func:`master_key_source` 一致（不含明文密钥的业务响应）。
+    """
+    _get_fernet()
+    src = master_key_source()
+    if src["source"] == "temporary":
+        logger.warning(
+            "主密钥当前为进程级临时密钥（不可持久化）：服务重启后已保存的 API Key "
+            "将全部无法解密。请检查 FERNET_KEY 环境变量与 data 目录写权限；"
+            "修复后可在「文本模型配置 → 主密钥轮转」重新加密存量密文。"
+        )
+    elif src["source"] == "persisted_file":
+        logger.info("主密钥来自持久化文件 data/secret_key.key（可跨重启）")
+    else:
+        logger.info("主密钥来自 FERNET_KEY 环境变量（多实例共享）")
+    return src
 
 
 def backup_master_key() -> "str":
@@ -267,8 +310,12 @@ def rotate_master_key(new_key: "str | None" = None) -> "dict":
     key = (new_key or "").strip()
     if key:
         if not is_valid_master_key(key):
-            return {"ok": False, "new_key_from": "", "backup_path": "",
-                    "error": "new_key 不是合法的 Fernet 密钥（应为 44 字符 urlsafe base64）"}
+            return {
+                "ok": False,
+                "new_key_from": "",
+                "backup_path": "",
+                "error": "new_key 不是合法的 Fernet 密钥（应为 44 字符 urlsafe base64）",
+            }
     else:
         key = Fernet.generate_key().decode()
 
@@ -284,20 +331,20 @@ def rotate_master_key(new_key: "str | None" = None) -> "dict":
         except Exception as e:
             logger.debug("轮转后密钥文件 chmod 600 失败（尽力而为）: %s", e)
     except Exception:
-        logger.warning("主密钥落盘失败，已放弃本次轮转（旧密钥不受影响）",
-                       exc_info=True)
-        return {"ok": False, "new_key_from": "provided" if new_key else "generated",
-                "backup_path": backup,
-                "error": "密钥文件写入失败（只读盘等）"}
+        logger.warning("主密钥落盘失败，已放弃本次轮转（旧密钥不受影响）", exc_info=True)
+        return {
+            "ok": False,
+            "new_key_from": "provided" if new_key else "generated",
+            "backup_path": backup,
+            "error": "密钥文件写入失败（只读盘等）",
+        }
 
     # ④ 清缓存：不清会让本进程继续持有旧 Fernet 实例，表现为「已轮换但
     #    解密仍用旧密钥」的静默失配。
     _fernet = None
 
-    logger.info("主密钥已轮换（来源=%s，备份=%s）",
-                "provided" if new_key else "generated", backup or "无")
-    return {"ok": True, "new_key_from": "provided" if new_key else "generated",
-            "backup_path": backup, "error": ""}
+    logger.info("主密钥已轮换（来源=%s，备份=%s）", "provided" if new_key else "generated", backup or "无")
+    return {"ok": True, "new_key_from": "provided" if new_key else "generated", "backup_path": backup, "error": ""}
 
 
 def decrypt_with_legacy_key(enc: "str", legacy_key: "str") -> "str":

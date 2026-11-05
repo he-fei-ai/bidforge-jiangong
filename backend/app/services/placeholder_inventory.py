@@ -21,6 +21,7 @@
   规范字段占位 / 裸占位标记 / 模糊占位），但正则在此独立定义 —— services 层
   不得反向 import routers 层（避免循环依赖）。
 """
+
 from __future__ import annotations
 
 import logging
@@ -76,33 +77,33 @@ def scan_occurrences(content: str, include_bracket: bool | None = None) -> list[
     if include_bracket is None:
         try:
             from app.config import settings
+
             include_bracket = bool(settings.placeholder_scan_bracket)
         except Exception:  # 配置不可用时按开启处理（补齐漏检，不静默放过）
             include_bracket = True
     hits: list[dict] = []
     for m in RE_FORMATTED.finditer(content):
-        hits.append({
-            "kind": "formatted",
-            "field": (m.group(1) or "").strip(),
-            "snippet": _make_snippet(content, m.start(), m.end()),
-        })
+        hits.append(
+            {
+                "kind": "formatted",
+                "field": (m.group(1) or "").strip(),
+                "snippet": _make_snippet(content, m.start(), m.end()),
+            }
+        )
     for m in RE_BARE.finditer(content):
-        hits.append({"kind": "bare", "field": "",
-                     "snippet": _make_snippet(content, m.start(), m.end())})
+        hits.append({"kind": "bare", "field": "", "snippet": _make_snippet(content, m.start(), m.end())})
     for m in RE_FUZZY.finditer(content):
-        hits.append({"kind": "fuzzy", "field": "",
-                     "snippet": _make_snippet(content, m.start(), m.end())})
+        hits.append({"kind": "fuzzy", "field": "", "snippet": _make_snippet(content, m.start(), m.end())})
     if include_bracket:
         for m in RE_BRACKET.finditer(content):
             inner = m.group(0)[1:-1].strip()
-            hits.append({"kind": "bracket", "field": inner,
-                         "snippet": _make_snippet(content, m.start(), m.end())})
+            hits.append({"kind": "bracket", "field": inner, "snippet": _make_snippet(content, m.start(), m.end())})
     return hits
 
 
-def build_placeholder_report(sections: list[dict],
-                             occurrence_cap: int = DEFAULT_OCCURRENCE_CAP,
-                             include_bracket: bool | None = None) -> dict:
+def build_placeholder_report(
+    sections: list[dict], occurrence_cap: int = DEFAULT_OCCURRENCE_CAP, include_bracket: bool | None = None
+) -> dict:
     """把多章扫描结果聚合成《待补充清单》（纯函数）。
 
     sections 每项至少含 id / title（可选 content / sort_order）。
@@ -117,18 +118,24 @@ def build_placeholder_report(sections: list[dict],
     ``include_bracket``：是否统计半角方括号中文占位（F3），None 时跟随配置。
     """
     report: dict = {
-        "total": 0, "formatted_total": 0, "bare_total": 0, "fuzzy_total": 0,
+        "total": 0,
+        "formatted_total": 0,
+        "bare_total": 0,
+        "fuzzy_total": 0,
         "bracket_total": 0,
-        "field_count": 0, "section_count": 0,
-        "by_field": [], "by_section": [], "occurrences": [],
+        "field_count": 0,
+        "section_count": 0,
+        "by_field": [],
+        "by_section": [],
+        "occurrences": [],
         "truncated": False,
     }
     if not isinstance(sections, list):
         return report
 
     # ---- 逐章扫描（聚合用 dict，输出前统一排序） ----
-    field_stat: dict[str, dict] = {}     # 字段名 → {count, section_ids, section_titles}
-    section_stat: list[dict] = []        # 章节聚合（保持扫描顺序，排序后输出）
+    field_stat: dict[str, dict] = {}  # 字段名 → {count, section_ids, section_titles}
+    section_stat: list[dict] = []  # 章节聚合（保持扫描顺序，排序后输出）
     occurrences: list[dict] = []
     cap = max(int(occurrence_cap), 0)
     for sec in sections:
@@ -152,17 +159,20 @@ def build_placeholder_report(sections: list[dict],
                 report["fuzzy_total"] += 1
             elif kind == "bracket":
                 report["bracket_total"] += 1
-            rec = {"section_id": sid, "section_title": title,
-                   "kind": kind, "field": h.get("field") or "",
-                   "snippet": h.get("snippet") or ""}
+            rec = {
+                "section_id": sid,
+                "section_title": title,
+                "kind": kind,
+                "field": h.get("field") or "",
+                "snippet": h.get("snippet") or "",
+            }
             if len(occurrences) < cap:
                 occurrences.append(rec)
             elif len(occurrences) == cap:
                 report["truncated"] = True
             # 规范占位才进字段聚合（裸/模糊占位没有字段名可聚合）
             if kind == "formatted" and rec["field"]:
-                st = field_stat.setdefault(rec["field"], {
-                    "count": 0, "section_ids": [], "section_titles": []})
+                st = field_stat.setdefault(rec["field"], {"count": 0, "section_ids": [], "section_titles": []})
                 st["count"] += 1
                 if sid not in st["section_ids"]:
                     st["section_ids"].append(sid)
@@ -170,24 +180,20 @@ def build_placeholder_report(sections: list[dict],
                 if rec["field"] not in seen_fields:
                     seen_fields.add(rec["field"])
                     sec_fields.append(rec["field"])
-        section_stat.append({
-            "section_id": sid, "title": title,
-            "count": len(hits), "fields": sec_fields})
+        section_stat.append({"section_id": sid, "title": title, "count": len(hits), "fields": sec_fields})
 
     report["occurrences"] = occurrences
     report["field_count"] = len(field_stat)
     report["section_count"] = len(section_stat)
     # 按出现次数降序、次键按名称升序（确定性输出，便于快照对比）
     report["by_field"] = sorted(
-        ({"field": k, **v} for k, v in field_stat.items()),
-        key=lambda e: (-e["count"], e["field"]))
-    report["by_section"] = sorted(
-        section_stat, key=lambda e: (-e["count"], e["title"]))
+        ({"field": k, **v} for k, v in field_stat.items()), key=lambda e: (-e["count"], e["field"])
+    )
+    report["by_section"] = sorted(section_stat, key=lambda e: (-e["count"], e["title"]))
     return report
 
 
-async def build_report_for_scheme(scheme_id: str, db,
-                                  occurrence_cap: int = DEFAULT_OCCURRENCE_CAP) -> dict:
+async def build_report_for_scheme(scheme_id: str, db, occurrence_cap: int = DEFAULT_OCCURRENCE_CAP) -> dict:
     """从库读取方案全部章节并产出《待补充清单》（供 REST 端点调用）。
 
     列清单与 export.py::collect_export_issues 同源（含 sort_order / content），
@@ -197,7 +203,9 @@ async def build_report_for_scheme(scheme_id: str, db,
         cur = await db.execute(
             "SELECT id, parent_id, level, sort_order, title, status, "
             "word_count, content FROM sections"
-            " WHERE scheme_id=? ORDER BY sort_order, level, id", (scheme_id,))
+            " WHERE scheme_id=? ORDER BY sort_order, level, id",
+            (scheme_id,),
+        )
         sections = [dict(r) for r in (await cur.fetchall() or [])]
         return build_placeholder_report(sections, occurrence_cap=occurrence_cap)
     except Exception as e:  # 审计类旁路：绝不阻断主流程
@@ -213,8 +221,7 @@ def _norm_field(text: str) -> str:
     return re.sub(r"\s+", "", str(text or "")).lower()
 
 
-def build_rerun_plan_from_report(report: dict, sections: list[dict],
-                                 injectable_corpus: list[str]) -> dict:
+def build_rerun_plan_from_report(report: dict, sections: list[dict], injectable_corpus: list[str]) -> dict:
     """由《待补充清单》+ 可注入语料 → 重跑计划（纯函数）。
 
     判定口径（宁漏报不误报）：
@@ -230,9 +237,12 @@ def build_rerun_plan_from_report(report: dict, sections: list[dict],
     保持本函数纯函数属性便于单测）。
     """
     plan: dict = {
-        "fields": [], "sections": [],
-        "rerunnable_sections": [], "rerunnable_count": 0,
-        "fillable_field_count": 0, "total_field_count": 0,
+        "fields": [],
+        "sections": [],
+        "rerunnable_sections": [],
+        "rerunnable_count": 0,
+        "fillable_field_count": 0,
+        "total_field_count": 0,
     }
     if not isinstance(report, dict) or not isinstance(sections, list):
         return plan
@@ -254,25 +264,27 @@ def build_rerun_plan_from_report(report: dict, sections: list[dict],
     # ---- 叶子判定（与 content_utils.select_target_leaves 的父 → 子映射同构）----
     children_map: dict[str, list[str]] = {}
     for s in sections:
-        children_map.setdefault(str(s.get("parent_id") or ""), []).append(
-            str(s.get("id") or ""))
+        children_map.setdefault(str(s.get("parent_id") or ""), []).append(str(s.get("id") or ""))
 
     for e in report.get("by_section") or []:
         sid = str(e.get("section_id") or "")
         if not sid:
             continue
         is_leaf = sid not in children_map
-        fields_detail = [{"field": f, "fillable": field_fill.get(f, False)}
-                         for f in e.get("fields") or []]
+        fields_detail = [{"field": f, "fillable": field_fill.get(f, False)} for f in e.get("fields") or []]
         fill_count = sum(1 for d in fields_detail if d["fillable"])
-        rerunnable = bool(is_leaf and e.get("count") and fields_detail
-                          and fill_count > 0)
-        plan["sections"].append({
-            "section_id": sid, "title": e.get("title") or "",
-            "count": e.get("count") or 0, "is_leaf": is_leaf,
-            "fields": fields_detail, "fill_count": fill_count,
-            "rerunnable": rerunnable,
-        })
+        rerunnable = bool(is_leaf and e.get("count") and fields_detail and fill_count > 0)
+        plan["sections"].append(
+            {
+                "section_id": sid,
+                "title": e.get("title") or "",
+                "count": e.get("count") or 0,
+                "is_leaf": is_leaf,
+                "fields": fields_detail,
+                "fill_count": fill_count,
+                "rerunnable": rerunnable,
+            }
+        )
         if rerunnable:
             plan["rerunnable_sections"].append(sid)
     plan["rerunnable_count"] = len(plan["rerunnable_sections"])
@@ -288,6 +300,7 @@ async def _resolve_project_id_for_scope(db, scheme_id: str) -> str:
     """
     try:
         from app.services.facts_extractor import resolve_scheme_project_id
+
         return await resolve_scheme_project_id(db, scheme_id)
     except Exception as e:  # pragma: no cover - 降级为仅方案级
         logger.warning("反查方案所属项目失败（全局事实仅按方案级读取）: %s", e)
@@ -323,7 +336,9 @@ async def build_rerun_plan(scheme_id: str, db) -> dict:
         cur = await db.execute(
             "SELECT id, parent_id, level, sort_order, title, status, "
             "word_count, content FROM sections"
-            " WHERE scheme_id=? ORDER BY sort_order, level, id", (scheme_id,))
+            " WHERE scheme_id=? ORDER BY sort_order, level, id",
+            (scheme_id,),
+        )
         sections = [dict(r) for r in (await cur.fetchall() or [])]
     except Exception as e:
         logger.warning("重跑计划读取章节失败（降级为空计划）: %s", e)
@@ -341,39 +356,43 @@ async def build_rerun_plan(scheme_id: str, db) -> dict:
     # 现改为复用同一出口（含门控 + 作用域），不再本地拼 WHERE。
     try:
         from app.services.facts_extractor import FACTS_GT_COLUMN, build_injectable_facts_query
+
         # ⚠️ columns **必须**含 FACTS_GT_COLUMN（带 AS gt）：该出口的 SQL 末尾
         #   固定 ``ORDER BY gt, title``，缺别名会报 "no such column: gt"，
         #   而异常被下面的 except 吞掉 → 语料整体为空 → 所有字段判不可补齐
         #   （「假不可重跑」，与本模块要修的「假可重跑」同族，只是方向相反）。
         sql, params = build_injectable_facts_query(
-            scheme_id, await _resolve_project_id_for_scope(db, scheme_id),
-            f"{FACTS_GT_COLUMN}, group_title, title, content")
+            scheme_id,
+            await _resolve_project_id_for_scope(db, scheme_id),
+            f"{FACTS_GT_COLUMN}, group_title, title, content",
+        )
     except Exception as e:  # pragma: no cover - 降级为方案级（fail-soft）
         logger.warning("构造全局事实查询失败（降级为仅方案级）: %s", e, exc_info=True)
         try:
             from app.services.facts_extractor import get_facts_inject_where
+
             inject_where = get_facts_inject_where()
         except Exception:  # pragma: no cover - 兜底仍 fail-closed，绝不 fail-open
             logger.warning("取全局事实注入门控失败（按保守口径过滤该源）")
-            inject_where = (
-                "has_conflict=0 AND is_resolved=1 AND is_simulated=0 AND is_stale=0")
-        sql = ("SELECT group_title, title, content FROM global_facts"
-               f" WHERE scheme_id=? AND {inject_where}")
+            inject_where = "has_conflict=0 AND is_resolved=1 AND is_simulated=0 AND is_stale=0"
+        sql = "SELECT group_title, title, content FROM global_facts" f" WHERE scheme_id=? AND {inject_where}"
         params = (scheme_id,)
     try:
         cur = await db.execute(sql, params)
-        for r in (await cur.fetchall() or []):
-            corpus.append(" ".join(str(r[k] or "") for k in
-                                   ("group_title", "title", "content")))
+        for r in await cur.fetchall() or []:
+            corpus.append(" ".join(str(r[k] or "") for k in ("group_title", "title", "content")))
     except Exception as e:
         logger.warning("重跑计划读取全局事实失败（该源降级跳过）: %s", e)
     try:
         from app.services.facts_extractor import SCHEME_PROJECT_ID_SQL
+
         cur = await db.execute(
             "SELECT content FROM bid_analysis_items"
             f" WHERE project_id=({SCHEME_PROJECT_ID_SQL})"
-            " AND status='success'", (scheme_id,))
-        for r in (await cur.fetchall() or []):
+            " AND status='success'",
+            (scheme_id,),
+        )
+        for r in await cur.fetchall() or []:
             corpus.append(str(r["content"] or ""))
     except Exception as e:
         logger.warning("重跑计划读取解析提取成果失败（该源降级跳过）: %s", e)

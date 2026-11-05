@@ -1,4 +1,5 @@
 """方案管理路由（项目下多方案）"""
+
 import json
 import logging
 import uuid
@@ -49,8 +50,7 @@ async def _refresh_word_count(db, scheme_id: str):
 
 @router.get("")
 async def list_schemes(project_id: str, db=Depends(read_db)):
-    cur = await db.execute(
-        "SELECT * FROM schemes WHERE project_id=? ORDER BY created_at DESC", (project_id,))
+    cur = await db.execute("SELECT * FROM schemes WHERE project_id=? ORDER BY created_at DESC", (project_id,))
     rows = [dict(r) for r in await cur.fetchall()]
     if not rows:
         return {"items": []}
@@ -58,7 +58,9 @@ async def list_schemes(project_id: str, db=Depends(read_db)):
     placeholders = ",".join("?" * len(ids))
     cur = await db.execute(
         f"SELECT scheme_id, COUNT(*) as cnt, COALESCE(SUM(word_count),0) as wc "
-        f"FROM sections WHERE scheme_id IN ({placeholders}) GROUP BY scheme_id", ids)
+        f"FROM sections WHERE scheme_id IN ({placeholders}) GROUP BY scheme_id",
+        ids,
+    )
     agg = {r[0]: {"section_count": r[1], "word_count": r[2]} for r in await cur.fetchall()}
     for r in rows:
         r.update(agg.get(r["id"], {"section_count": 0, "word_count": 0}))
@@ -81,8 +83,17 @@ async def create_scheme(project_id: str, data: SchemeCreate, db=Depends(get_db))
     await db.execute(
         "INSERT INTO schemes (id, project_id, name, type, profession, word_budget, outline_source, config_json)"
         " VALUES (?,?,?,?,?,?,?,?)",
-        (sid, project_id, data.name, data.type, data.profession,
-         data.word_budget, data.outline_source, json.dumps(config, ensure_ascii=False)))
+        (
+            sid,
+            project_id,
+            data.name,
+            data.type,
+            data.profession,
+            data.word_budget,
+            data.outline_source,
+            json.dumps(config, ensure_ascii=False),
+        ),
+    )
 
     # ✅ 断链修复：用户创建时选了目录库（outline_source='library'），旧实现只把
     #    library_ids 写进 config_json 却从不落 sections —— 方案创建后章节树为空，
@@ -115,8 +126,9 @@ async def _apply_library_on_create(db, scheme_id: str, library_ids: list[str]) -
         if not lid:
             continue
         cur = await db.execute(
-            "SELECT id, name, version, outline_json FROM outline_library"
-            " WHERE id=? AND review_status='已通过'", (lid,))
+            "SELECT id, name, version, outline_json FROM outline_library" " WHERE id=? AND review_status='已通过'",
+            (lid,),
+        )
         row = await cur.fetchone()
         if not row:
             continue
@@ -125,15 +137,13 @@ async def _apply_library_on_create(db, scheme_id: str, library_ids: list[str]) -
             continue
         try:
             from app.routers.sections import _save_outline_to_db
+
             result = await _save_outline_to_db(db, scheme_id, outline, source="目录库")
         except Exception as e:
             logger.warning("创建方案时套用目录库失败（降级为手动套用）: %s", e)
             return None
-        await db.execute(
-            "UPDATE outline_library SET ref_count=ref_count+1 WHERE id=?", (lid,))
-        await db.execute(
-            "UPDATE schemes SET outline_source='library', status='目录已确认' WHERE id=?",
-            (scheme_id,))
+        await db.execute("UPDATE outline_library SET ref_count=ref_count+1 WHERE id=?", (lid,))
+        await db.execute("UPDATE schemes SET outline_source='library', status='目录已确认' WHERE id=?", (scheme_id,))
         return {
             "library_id": row["id"],
             "name": row["name"],
@@ -187,34 +197,57 @@ async def delete_scheme(project_id: str, scheme_id: str, db=Depends(get_db)):
     - sections（章节正文，显式删除，CASCADE 双保险）
     - global_facts / chart_predictions / compliance_check / consistency_audit
     - export_cache + EXPORTS_DIR 磁盘导出文件
-    - task_registry（该方案的任务记录；运行中任务的后续写库会被各处 try/except 安全吞掉）
+    - task_registry（该方案的任务记录；删除行之前先取消内存中仍运行/暂停的
+      本方案任务，见下方 cancel_and_wait_tasks_for_schemes）
     - 不删除 project_documents（项目级资料，同项目其他方案共用）
     """
     from app.config import EXPORTS_DIR
 
-    cur = await db.execute(
-        "SELECT name FROM schemes WHERE id=? AND project_id=?",
-        (scheme_id, project_id))
+    cur = await db.execute("SELECT name FROM schemes WHERE id=? AND project_id=?", (scheme_id, project_id))
     row = await cur.fetchone()
     if not row:
         raise HTTPException(404, "方案不存在")
 
+    # ✅ BUG-B 修复（R173 · 2026-11-03）：删除行之前，先取消内存 `_tasks` 中
+    #    仍运行/暂停的本方案任务（协作式停止：生成循环在下一个
+    #    wait_resume / is_stopped 检查点退出，并 cancel 子任务），并给已到达
+    #    检查点的任务一个短暂收尾窗口，让 finish_task 终态写进**尚未删除**的
+    #    task_registry 行（避免终态回写 0 行、DB 无痕迹）。仍在飞 AI 调用的
+    #    任务超过宽限期即放行删除，其后续写库命中 0 行，属协作式取消的既有
+    #    语义。fail-soft：取消环节任何异常不得阻断删除本身。
+    cancelled_tasks: list[str] = []
+    try:
+        from app.services.ai.task_registry import cancel_and_wait_tasks_for_schemes
+
+        cancelled_tasks = await cancel_and_wait_tasks_for_schemes([scheme_id])
+    except Exception as e:
+        logging.getLogger("schemes").warning("删除前取消运行任务失败（继续删除）: %s", e)
+
     await db.execute("DELETE FROM sections WHERE scheme_id=?", (scheme_id,))
     # ✅ 级联补全：consistency_conflicts / consistency_repairs / scheme_snapshots
     # 均以 scheme_id 关联且无外键约束，旧清单遗漏会残留孤儿行。
-    for table in ("global_facts", "chart_predictions", "compliance_check",
-                  "consistency_audit", "consistency_conflicts", "consistency_repairs",
-                  "scheme_snapshots", "export_cache", "task_registry",
-                  "preflight_runs", "review_records"):
+    for table in (
+        "global_facts",
+        "chart_predictions",
+        "compliance_check",
+        "consistency_audit",
+        "consistency_conflicts",
+        "consistency_repairs",
+        "scheme_snapshots",
+        "export_cache",
+        "task_registry",
+        "preflight_runs",
+        "review_records",
+        # ✅ R175（2026-11-03）：事实模块新增两表（无外键，显式清理）
+        "facts_chunk_failures",
+        "facts_cross_conflicts",
+    ):
         await db.execute(f"DELETE FROM {table} WHERE scheme_id=?", (scheme_id,))
-    await db.execute(
-        "DELETE FROM facts_extracted_chunks WHERE project_id=? AND scheme_id=?",
-        (project_id, scheme_id))
+    await db.execute("DELETE FROM facts_extracted_chunks WHERE project_id=? AND scheme_id=?", (project_id, scheme_id))
     # ✅ 级联补全（2026-09-20）：uploaded_outlines 以 scheme_id 关联但无外键 ——
     #    方案删除后「已保存」记录仍指向不存在的方案（孤儿引用）。上传记录本身
     #    是项目级素材（可重复用于另存目录），不随方案删除，只断开悬挂引用。
-    await db.execute(
-        "UPDATE uploaded_outlines SET scheme_id='' WHERE scheme_id=?", (scheme_id,))
+    await db.execute("UPDATE uploaded_outlines SET scheme_id='' WHERE scheme_id=?", (scheme_id,))
     await db.execute("DELETE FROM schemes WHERE id=?", (scheme_id,))
     await db.commit()
 
@@ -223,23 +256,35 @@ async def delete_scheme(project_id: str, scheme_id: str, db=Depends(get_db)):
     #    （条目指向已不存在的方案，留着只会占用内存且永不命中）。
     try:
         from app.routers.compliance import invalidate_overview_cache
+
         invalidate_overview_cache(scheme_id)
     except Exception as e:  # fail-soft：缓存清理失败不影响删除结果
-        import logging
         logging.getLogger("schemes").warning("清理总检缓存失败: %s", e)
 
     # 清理磁盘导出文件（命名含 scheme_id 前缀）
+    # ✅ BUG-A 修复（R173 · 2026-11-03）：旧实现只清 `.docx`，漏清 `.pdf`
+    #    导出缓存（项目级 projects.py 2026-10-03 已修，方案级漏改）。
+    #    PDF 产物落在 EXPORTS_DIR，命名 `{scheme_id}_*_{hash[:8]}.pdf`
+    #    （export.py _tmp_pdf 行同款）；原子替换的临时文件
+    #    `.{uuid}.tmp.docx` / `.{uuid}.tmp.pdf` 由 glob 的 `*` 一并覆盖
+    #    （`*` 匹配含点号的任意字符）。EXPORTS_DIR 全部产物即
+    #    docx/pdf 两族（含 tmp 变体），无其他扩展名残留。
     removed_files = 0
     try:
-        for f in EXPORTS_DIR.glob(f"{scheme_id}_*.docx"):
-            f.unlink(missing_ok=True)
-            removed_files += 1
+        for ext in ("docx", "pdf"):
+            for f in EXPORTS_DIR.glob(f"{scheme_id}_*.{ext}"):
+                f.unlink(missing_ok=True)
+                removed_files += 1
     except OSError as e:
         # 删除失败不阻塞（文件残留无害，下次导出同内容会覆写）
-        import logging
         logging.getLogger("schemes").warning("清理导出文件失败: %s", e)
 
-    return {"ok": True, "name": row["name"], "export_files_removed": removed_files}
+    # 加法式返回：ok / name / export_files_removed 保持旧契约不变，
+    # 新增 tasks_cancelled 供调用方核对「删除前取消的运行任务数」。
+    result: dict = {"ok": True, "name": row["name"], "export_files_removed": removed_files}
+    if cancelled_tasks:
+        result["tasks_cancelled"] = len(cancelled_tasks)
+    return result
 
 
 @router.post("/{scheme_id}/duplicate")
@@ -247,8 +292,7 @@ async def duplicate_scheme(project_id: str, scheme_id: str, db=Depends(get_db)):
     # ⚠️ G3 根因加固（R45）：空 project_id 不得落库（唯一入口，见函数 docstring）
     project_id = require_project_id(project_id)
     # ✅ BUG 修复：source 校验时同时限定 project_id，避免跨项目误复制
-    cur = await db.execute(
-        "SELECT * FROM schemes WHERE id=? AND project_id=?", (scheme_id, project_id))
+    cur = await db.execute("SELECT * FROM schemes WHERE id=? AND project_id=?", (scheme_id, project_id))
     src = await cur.fetchone()
     if not src:
         raise HTTPException(404, "方案不存在")
@@ -257,8 +301,18 @@ async def duplicate_scheme(project_id: str, scheme_id: str, db=Depends(get_db)):
     await db.execute(
         "INSERT INTO schemes (id, project_id, name, type, profession, status, word_budget, outline_source, config_json)"
         " VALUES (?,?,?,?,?,?,?,?,?)",
-        (new_id, project_id, f"{src['name']}（副本）", src["type"], src["profession"],
-         "草稿", src["word_budget"], src["outline_source"], src["config_json"]))
+        (
+            new_id,
+            project_id,
+            f"{src['name']}（副本）",
+            src["type"],
+            src["profession"],
+            "草稿",
+            src["word_budget"],
+            src["outline_source"],
+            src["config_json"],
+        ),
+    )
 
     # ✅ BUG 修复：章节 parent_id 重映射。
     # 旧实现直接复制 s["parent_id"]，副本内子章节的 parent_id 仍指向原方案的父章节 id，
@@ -268,7 +322,9 @@ async def duplicate_scheme(project_id: str, scheme_id: str, db=Depends(get_db)):
     cur = await db.execute(
         "SELECT id, parent_id, title, description, level, word_budget, "
         "outline_json, sort_order, locked FROM sections "
-        "WHERE scheme_id=? ORDER BY sort_order, created_at", (scheme_id,))
+        "WHERE scheme_id=? ORDER BY sort_order, created_at",
+        (scheme_id,),
+    )
     src_sections = [dict(r) for r in await cur.fetchall()]
     id_map: dict[str, str] = {}
     inserts: list[tuple] = []
@@ -277,19 +333,30 @@ async def duplicate_scheme(project_id: str, scheme_id: str, db=Depends(get_db)):
         id_map[s["id"]] = nid
         # parent_id 若映射表里不存在（原方案的父节点在别处/悬空），回退为 ""
         new_parent = id_map.get(s.get("parent_id") or "", "") or ""
-        inserts.append((
-            nid, new_id, project_id, new_parent,
-            s["title"], s.get("description", ""), s.get("level", 1),
-            "empty", s.get("word_budget", DEFAULT_WORD_BUDGET), s.get("sort_order", 0),
-            s.get("outline_json", ""), s.get("locked", 0),
-        ))
+        inserts.append(
+            (
+                nid,
+                new_id,
+                project_id,
+                new_parent,
+                s["title"],
+                s.get("description", ""),
+                s.get("level", 1),
+                "empty",
+                s.get("word_budget", DEFAULT_WORD_BUDGET),
+                s.get("sort_order", 0),
+                s.get("outline_json", ""),
+                s.get("locked", 0),
+            )
+        )
     if inserts:
         await db.executemany(
             "INSERT INTO sections "
             "(id, scheme_id, project_id, parent_id, title, description, level, "
             "status, word_budget, sort_order, outline_json, locked) "
             "VALUES (?,?,?,?,?,?,?,?,?,?,?,?)",
-            inserts)
+            inserts,
+        )
 
     cur = await db.execute("SELECT * FROM global_facts WHERE scheme_id=?", (scheme_id,))
     fact_group_map: dict[str, str] = {}
@@ -312,20 +379,39 @@ async def duplicate_scheme(project_id: str, scheme_id: str, db=Depends(get_db)):
             "norm_group, value_kind, chapter, fact_attr, source_kind, "
             "is_shared, is_stale) "
             "VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)",
-            (str(uuid.uuid4()), project_id, new_id, new_group, s.get("group_title", ""),
-             s["title"], s["content"], s.get("category", ""), s.get("source_ref", ""),
-             s.get("is_simulated", 0), s.get("confidence", 1.0),
-             s.get("is_resolved", 1), s.get("has_conflict", 0),
-             s.get("conflict_keys", ""), s.get("fact_key", ""),
-             s.get("chunk_hash", ""), s.get("value_unit", ""),
-             s.get("fact_type", ""), s.get("evidence_kind", ""),
-             s.get("page_ref", ""), s.get("zone_type", ""),
-             s.get("is_safety_critical", 0), s.get("norm_group", ""),
-             # ✅ R80：value_kind 随方案复制保留口径（副本事实与原方案同语义）
-             s.get("value_kind", ""),
-             s.get("chapter", ""), s.get("fact_attr", ""),
-             s.get("source_kind", ""), s.get("is_shared", 0),
-             s.get("is_stale", 0)))
+            (
+                str(uuid.uuid4()),
+                project_id,
+                new_id,
+                new_group,
+                s.get("group_title", ""),
+                s["title"],
+                s["content"],
+                s.get("category", ""),
+                s.get("source_ref", ""),
+                s.get("is_simulated", 0),
+                s.get("confidence", 1.0),
+                s.get("is_resolved", 1),
+                s.get("has_conflict", 0),
+                s.get("conflict_keys", ""),
+                s.get("fact_key", ""),
+                s.get("chunk_hash", ""),
+                s.get("value_unit", ""),
+                s.get("fact_type", ""),
+                s.get("evidence_kind", ""),
+                s.get("page_ref", ""),
+                s.get("zone_type", ""),
+                s.get("is_safety_critical", 0),
+                s.get("norm_group", ""),
+                # ✅ R80：value_kind 随方案复制保留口径（副本事实与原方案同语义）
+                s.get("value_kind", ""),
+                s.get("chapter", ""),
+                s.get("fact_attr", ""),
+                s.get("source_kind", ""),
+                s.get("is_shared", 0),
+                s.get("is_stale", 0),
+            ),
+        )
 
     # ✅ R85 BUG-C：副本落库后**按副本自身的位置重排章节编号**。
     #
@@ -351,10 +437,10 @@ async def duplicate_scheme(project_id: str, scheme_id: str, db=Depends(get_db)):
     # 的仍是一个可用副本，只是编号可能未对齐）。
     try:
         from app.routers.sections import renumber_sections_after_reorder
+
         await renumber_sections_after_reorder(db, new_id)
     except Exception as e:  # noqa: BLE001
-        logger.warning("方案复制后章节编号重排失败（副本编号可能与源方案不一致，scheme=%s）: %s",
-                       new_id, e)
+        logger.warning("方案复制后章节编号重排失败（副本编号可能与源方案不一致，scheme=%s）: %s", new_id, e)
     await db.commit()
     return {"id": new_id}
 
@@ -366,7 +452,8 @@ async def archive_scheme(project_id: str, scheme_id: str, db=Depends(get_db)):
     if not row:
         raise HTTPException(404, "方案不存在")
     new_status = "草稿" if row[0] == "已归档" else "已归档"
-    await db.execute("UPDATE schemes SET status=?, updated_at=? WHERE id=?",
-                     (new_status, datetime.now().isoformat(), scheme_id))
+    await db.execute(
+        "UPDATE schemes SET status=?, updated_at=? WHERE id=?", (new_status, datetime.now().isoformat(), scheme_id)
+    )
     await db.commit()
     return {"status": new_status}

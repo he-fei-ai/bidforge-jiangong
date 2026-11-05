@@ -1,4 +1,5 @@
 """数据库连接（aiosqlite，含死线程检测与自动建表）"""
+
 import asyncio
 import datetime as _dt
 import logging
@@ -86,8 +87,7 @@ def safe_rowcount(cur, what: str = "") -> int:
         what: 只用于告警文案（说明是哪笔写操作未生效），便于日志定位。
     """
     if cur is None:
-        logger.warning("db.execute 返回 None（R13），%s 本次未生效",
-                       what or "写操作")
+        logger.warning("db.execute 返回 None（R13），%s 本次未生效", what or "写操作")
         return 0
     # rowcount 为负（非行级语句/未知）时按「本次未影响行」处理，
     # 避免调用方 `if affected > 0` 之类的守卫被 -1 意外触发。
@@ -95,9 +95,7 @@ def safe_rowcount(cur, what: str = "") -> int:
     return n if n > 0 else 0
 
 
-async def retry_db_op(coro_factory, *, max_retries: int = 3,
-                      base_delay: float = 0.05,
-                      jitter: float = 0.0) -> object:
+async def retry_db_op(coro_factory, *, max_retries: int = 3, base_delay: float = 0.05, jitter: float = 0.0) -> object:
     """对瞬态 SQLite 错误做有限重试的共享助手。
 
     coro_factory 是无参 async 函数（每次重试重新调用以创建新 coroutine），
@@ -121,12 +119,12 @@ async def retry_db_op(coro_factory, *, max_retries: int = 3,
             if attempt >= max_retries or not is_retryable_db_error(e):
                 raise
             last_exc = e
-            delay = base_delay * (2 ** attempt)
+            delay = base_delay * (2**attempt)
             if jitter > 0:
                 delay += random.uniform(0, jitter)
             logger.warning(
-                "DB 操作遇到可重试错误（第 %d/%d 次），%.2fs 后重试: %s",
-                attempt + 1, max_retries, delay, str(e)[:200])
+                "DB 操作遇到可重试错误（第 %d/%d 次），%.2fs 后重试: %s", attempt + 1, max_retries, delay, str(e)[:200]
+            )
             await asyncio.sleep(delay)
     raise last_exc  # pragma: no cover - 循环内必 return 或 raise
 
@@ -197,6 +195,7 @@ _PROBE_MAX_ATTEMPTS = 3
 # 标记，归还连接时直接剔除、不再复用，坏连接不污染下一个请求。
 # 非 disk I/O 类异常一律原样抛出，业务语义不变。
 
+
 def _mark_on_disk_io(exc: BaseException) -> bool:
     """是 disk I/O error 就标记（返回 True），否则 False。"""
     if isinstance(exc, sqlite3.OperationalError) and "disk I/O error" in str(exc):
@@ -248,6 +247,7 @@ def _patch_audiosqlite():
                 if _mark_on_disk_io(e):
                     _mark_poisoned(self)
                 raise
+
         return _wrapper
 
     for method_name in ("executemany", "executescript"):
@@ -265,6 +265,43 @@ _conn: aiosqlite.Connection | None = None
 _conn_path: Path | None = None  # 记录 _conn 打开时的 DB_PATH（路径切换后需重连）
 _last_health_check: float = 0.0
 _HEALTH_CHECK_TTL = 30.0  # 性能优化：全局连接健康检查 TTL，避免每次 get_conn 都 SELECT 1
+
+
+# ---------------------------------------------------------------------------
+# ✅ B1-4（R176 · 2026-11-04）：迁移降级状态（显式「降级模式」标志）
+# ---------------------------------------------------------------------------
+# 背景：`_migrate` 的每处失败此前只打 WARNING 后继续启动 —— 存量库缺列/缺表时
+# 进程"看起来正常"，相关功能却长期降级，且无法通过任何接口确认。
+# 按统一策略 R-D03/R-D07，这里把**非致命**迁移失败收敛为进程级降级标志，
+# 由 `/api/v1/health` 消费（`status=degraded` + 明细）；**不**把既有部署改成
+# 启动失败（向后兼容：旧库仍可启动，但降级状态可见、可排查）。
+_MIGRATION_DEGRADED: list[dict] = []
+
+
+def _record_migration_degraded(scope: str, error: BaseException) -> None:
+    """记录一条非致命迁移失败（供 :func:`migration_status` / 健康检查消费）。
+
+    「no such table」（新库/半初始化）与「duplicate column name」（列已被
+    并发/前次迁移补上）都是幂等跳过场景，不计入降级，避免把正常启动误标。
+    """
+    _msg = str(error).lower()
+    if "no such table" in _msg or "duplicate column name" in _msg:
+        logger.debug("迁移跳过 %s：%s（幂等可重入）", scope, error)
+        return
+    _MIGRATION_DEGRADED.append(
+        {
+            "scope": scope,
+            "error": f"{type(error).__name__}: {error}",
+            "at": time.strftime("%Y-%m-%dT%H:%M:%S"),
+        }
+    )
+    logger.warning("迁移降级：%s 失败 → 进程以「降级模式」运行（相关功能可能不完整）: %s", scope, error)
+
+
+def migration_status() -> dict:
+    """迁移降级状态（`/api/v1/health` 消费；无失败时 ``degraded=False``）。"""
+    items = list(_MIGRATION_DEGRADED)
+    return {"degraded": bool(items), "count": len(items), "items": items}
 
 
 def _thread_alive() -> bool:
@@ -506,8 +543,7 @@ def _quick_check_errors(db_path):
     try:
         probe = sqlite3.connect(str(db_path))
         try:
-            rows = probe.execute(
-                f"PRAGMA quick_check({_INTEGRITY_PROBE_LIMIT})").fetchall()
+            rows = probe.execute(f"PRAGMA quick_check({_INTEGRITY_PROBE_LIMIT})").fetchall()
         finally:
             probe.close()
     except sqlite3.DatabaseError as e:
@@ -544,8 +580,7 @@ def _corruption_scope_known(msgs: list, owner: dict) -> set:
         else:
             im = _INDEX_NAME_RE.search(msg)
             if im is not None:
-                hit = next((obj for obj in owner.values()
-                            if obj[0] == "index" and obj[1] == im.group(1)), None)
+                hit = next((obj for obj in owner.values() if obj[0] == "index" and obj[1] == im.group(1)), None)
                 tbl = _owner_table(hit)
                 if tbl is None or tbl not in _REGENERABLE_CACHE_TABLES:
                     return set()
@@ -578,12 +613,10 @@ def _root_page_owner(db_path) -> dict:
     try:
         probe = sqlite3.connect(str(db_path))
         try:
-            rows = probe.execute(
-                "SELECT type, name, tbl_name, rootpage FROM sqlite_master").fetchall()
+            rows = probe.execute("SELECT type, name, tbl_name, rootpage FROM sqlite_master").fetchall()
         finally:
             probe.close()
-        return {int(r[3]): (str(r[0]), str(r[1]), str(r[2])) for r in rows
-                if r[3] is not None}
+        return {int(r[3]): (str(r[0]), str(r[1]), str(r[2])) for r in rows if r[3] is not None}
     except sqlite3.DatabaseError:
         return {}
 
@@ -614,8 +647,8 @@ def _startup_db_integrity_gate() -> bool:
         return False
     preview = " | ".join(e[:120] for e in errors[:5])
     logger.warning(
-        "完整性闸门：主库 quick_check 异常（%d 条，探针上限 %d）：%s",
-        len(errors), _INTEGRITY_PROBE_LIMIT, preview)
+        "完整性闸门：主库 quick_check 异常（%d 条，探针上限 %d）：%s", len(errors), _INTEGRITY_PROBE_LIMIT, preview
+    )
     if len(errors) >= _INTEGRITY_PROBE_LIMIT:
         logger.warning("完整性闸门：错误数达到探针上限，范围无法确证，放弃自愈（保持原状）")
         return False
@@ -623,8 +656,9 @@ def _startup_db_integrity_gate() -> bool:
     tables = _corruption_scope_known(errors, _root_page_owner(db_path))
     if not tables:
         logger.warning(
-            "完整性闸门：损坏范围无法归属到可再生缓存表，放弃自愈（保持原状，"
-            "请人工备份后排查；首个错误: %s）", errors[0][:200])
+            "完整性闸门：损坏范围无法归属到可再生缓存表，放弃自愈（保持原状，" "请人工备份后排查；首个错误: %s）",
+            errors[0][:200],
+        )
         return False
 
     # 备份（主库+WAL+SHM 一并；主库绝不删除）
@@ -659,15 +693,15 @@ def _startup_db_integrity_gate() -> bool:
 
     after = _quick_check_errors(db_path)
     if after:
-        logger.warning(
-            "完整性闸门：重建后 quick_check 仍有 %d 条异常，还原备份（不雪上加霜）",
-            len(after))
+        logger.warning("完整性闸门：重建后 quick_check 仍有 %d 条异常，还原备份（不雪上加霜）", len(after))
         _restore_from(bak_dir, db_path, wal, shm)
         return False
 
     logger.warning(
-        "完整性闸门：已重建损坏的缓存表 %s（备份至 %s）；"
-        "业务数据未触碰，表内容按缓存语义清空", sorted(tables), bak_dir)
+        "完整性闸门：已重建损坏的缓存表 %s（备份至 %s）；" "业务数据未触碰，表内容按缓存语义清空",
+        sorted(tables),
+        bak_dir,
+    )
     return True
 
 
@@ -716,7 +750,10 @@ async def _integrity_probe_loop(interval: float) -> None:
                 logger.warning(
                     "运行期完整性巡检：主库 quick_check 异常（%d 条）：%s —— "
                     "请尽快停止写入并按 docs/后端连接超时取证与启动期主库完整性闸门"
-                    "_R165_20261103.md 处置", len(errors), preview)
+                    "_R165_20261103.md 处置",
+                    len(errors),
+                    preview,
+                )
     except asyncio.CancelledError:
         pass
 
@@ -732,17 +769,13 @@ def _start_integrity_probe_task() -> None:
         return
     raw = os.environ.get("DB_INTEGRITY_PROBE_SECONDS", "")
     try:
-        interval = float(raw) if raw.strip() else float(
-            _INTEGRITY_PROBE_DEFAULT_SECONDS)
+        interval = float(raw) if raw.strip() else float(_INTEGRITY_PROBE_DEFAULT_SECONDS)
     except ValueError:
         interval = float(_INTEGRITY_PROBE_DEFAULT_SECONDS)
     if interval <= 0:
         return
-    _probe_task = asyncio.create_task(
-        _integrity_probe_loop(interval), name="db-integrity-probe")
-    logger.info(
-        "运行期完整性巡检已启动（间隔 %ds；DB_INTEGRITY_PROBE_SECONDS 可调，0=关闭）",
-        int(interval))
+    _probe_task = asyncio.create_task(_integrity_probe_loop(interval), name="db-integrity-probe")
+    logger.info("运行期完整性巡检已启动（间隔 %ds；DB_INTEGRITY_PROBE_SECONDS 可调，0=关闭）", int(interval))
 
 
 async def init_db():
@@ -766,10 +799,16 @@ async def init_db():
 
 async def _migrate(conn: aiosqlite.Connection):
     """兼容性迁移：为已有表添加新列"""
+    # ✅ B1-4（R176）：每次迁移开始清空上次结论，`migration_status()` 始终反映
+    #    最近一次启动结果（重复调用不会累积历史）。
+    _MIGRATION_DEGRADED.clear()
     migrations = [
         ("ai_config", "plan", "TEXT DEFAULT 'pay_as_you_go'"),
         ("ai_config", "priority", "INTEGER DEFAULT 0"),
         ("ai_config", "remark", "TEXT DEFAULT ''"),
+        # ✅ R175（2026-11-03 · BUG-03）：是否参与真实调用（降级/视觉候选）。
+        #    1 = 参与（默认）；0 = 停用。与 is_active（当前主配置）语义分离。
+        ("ai_config", "enabled", "INTEGER DEFAULT 1"),
         # 请求方式（normal / stream）：仅影响后端与厂商之间的调用方式，
         # 应用侧仍等待完整结果后继续流程。
         ("ai_config", "request_mode", "TEXT DEFAULT 'normal'"),
@@ -848,6 +887,12 @@ async def _migrate(conn: aiosqlite.Connection):
         #     config_id / base_url，使同一 provider 的不同配置可独立统计。 ---
         ("ai_audit_logs", "config_id", "TEXT DEFAULT ''"),
         ("ai_audit_logs", "base_url", "TEXT DEFAULT ''"),
+        # --- ✅ 2026-11-05（审计合并 · 错误分类）：一次逻辑调用只落一条主记录，
+        #     逐次尝试压缩进 attempts_json；error_class 供统计按类别聚合。
+        #     历史行为 NULL/'' 或 attempt_count=1，读侧 COALESCE 兼容，零回填。 ---
+        ("ai_audit_logs", "error_class", "TEXT DEFAULT ''"),
+        ("ai_audit_logs", "attempt_count", "INTEGER DEFAULT 1"),
+        ("ai_audit_logs", "attempts_json", "TEXT DEFAULT ''"),
         # --- 2026-09-17：人工审核状态与编译状态解耦（review.py /submit 此前直接
         #     覆盖 schemes.status，评审通过后编译态被英文 approved/rejected 覆盖）---
         ("schemes", "review_status", "TEXT DEFAULT ''"),
@@ -937,6 +982,9 @@ async def _migrate(conn: aiosqlite.Connection):
         #   见 routers/compliance.py::_ai_row_is_stale）。历史行空串 = fail-open。
         ("compliance_check", "content_fingerprint", "TEXT DEFAULT ''"),
         ("consistency_audit", "content_fingerprint", "TEXT DEFAULT ''"),
+        # ✅ R180（2026-11-05）：每次审计的覆盖摘要（批次数/覆盖字数/总字数/问题数）。
+        #    历史行默认 '{}' = 旧记录无摘要，读侧解析为空对象（零迁移、不报错）。
+        ("consistency_audit", "counts_json", "TEXT DEFAULT '{}'"),
         ("consistency_conflicts", "content_fingerprint", "TEXT DEFAULT ''"),
     ]
     for table, column, definition in migrations:
@@ -955,7 +1003,8 @@ async def _migrate(conn: aiosqlite.Connection):
                 await conn.execute(f"ALTER TABLE {table} ADD COLUMN {column} {definition}")
                 logger.info("迁移：为 %s 添加列 %s", table, column)
         except Exception as e:
-            logger.warning("迁移 %s.%s 失败: %s", table, column, e)
+            # ✅ B1-4（R176）：缺列补不上 = schema 缺陷固化，必须进入显式降级状态。
+            _record_migration_degraded(f"{table}.{column}", e)
 
     # --- ✅ 2026-10-01 修复启动失败：域索引依赖 domain 列，必须等上方补列后再建。
     #     旧实现把该索引写在 SCHEMA_SQL 的 executescript 中、早于本迁移执行；
@@ -964,8 +1013,8 @@ async def _migrate(conn: aiosqlite.Connection):
     #     现改为补列之后创建：新库（domain 已随 CREATE TABLE 存在）与旧库均安全幂等。
     try:
         await conn.execute(
-            "CREATE INDEX IF NOT EXISTS idx_bid_analysis_project_domain "
-            "ON bid_analysis_items(project_id, domain)")
+            "CREATE INDEX IF NOT EXISTS idx_bid_analysis_project_domain " "ON bid_analysis_items(project_id, domain)"
+        )
     except Exception as e:
         logger.warning("bid_analysis_items 域索引创建失败（可忽略）: %s", e)
 
@@ -977,12 +1026,12 @@ async def _migrate(conn: aiosqlite.Connection):
             "section_id TEXT PRIMARY KEY, scheme_id TEXT NOT NULL, "
             "content_hash TEXT NOT NULL, context_hash TEXT NOT NULL, "
             "rows_json TEXT NOT NULL, "
-            "created_at TEXT DEFAULT (datetime('now','localtime')))")
-        await conn.execute(
-            "CREATE INDEX IF NOT EXISTS idx_cscan_scheme"
-            " ON consistency_scan_cache(scheme_id)")
+            "created_at TEXT DEFAULT (datetime('now','localtime')))"
+        )
+        await conn.execute("CREATE INDEX IF NOT EXISTS idx_cscan_scheme" " ON consistency_scan_cache(scheme_id)")
     except Exception as e:
-        logger.warning("consistency_scan_cache 建表失败: %s", e)
+        # ✅ B1-4（R176）：增量缓存表建不出来 → 一致性扫描退化为每章必调 AI（降级可见）
+        _record_migration_degraded("consistency_scan_cache 建表", e)
 
     # --- 提示词配置审计（旧库幂等建表；新库已由 SCHEMA_SQL 创建）。
     try:
@@ -992,12 +1041,14 @@ async def _migrate(conn: aiosqlite.Connection):
             " before_hash TEXT DEFAULT '', after_hash TEXT DEFAULT '',"
             " variables_before TEXT DEFAULT '[]', variables_after TEXT DEFAULT '[]',"
             " client_ip TEXT DEFAULT '',"
-            " created_at TEXT DEFAULT (datetime('now','localtime')))")
+            " created_at TEXT DEFAULT (datetime('now','localtime')))"
+        )
         await conn.execute(
-            "CREATE INDEX IF NOT EXISTS idx_prompt_audit_key_created"
-            " ON prompt_audit_logs(prompt_key, created_at)")
+            "CREATE INDEX IF NOT EXISTS idx_prompt_audit_key_created" " ON prompt_audit_logs(prompt_key, created_at)"
+        )
     except Exception as e:
-        logger.warning("prompt_audit_logs 建表失败: %s", e)
+        # ✅ B1-4（R176）：审计表缺失 → 提示词审计能力长期缺席（降级可见）
+        _record_migration_degraded("prompt_audit_logs 建表", e)
 
     # --- ✅ 性能优化（2026-09-24 · 基线优化 P0-2）：ai_audit_logs 覆盖索引 ---
     # 背景（基线实测，13334 行）：`GET /ai/config/audit-logs` 每次附带两条
@@ -1012,30 +1063,27 @@ async def _migrate(conn: aiosqlite.Connection):
     # 索引为纯新增、无 DDL 变更表结构，不影响任何既有查询与写入路径
     # （ai_audit_logs 是只追加的审计表，写入量 50 条攒批 flush，索引维护开销可忽略）。
     try:
-        await conn.execute(
-            "CREATE INDEX IF NOT EXISTS idx_ai_audit_provider_name"
-            " ON ai_audit_logs(provider_name)")
-        await conn.execute(
-            "CREATE INDEX IF NOT EXISTS idx_ai_audit_action"
-            " ON ai_audit_logs(action)")
+        await conn.execute("CREATE INDEX IF NOT EXISTS idx_ai_audit_provider_name" " ON ai_audit_logs(provider_name)")
+        await conn.execute("CREATE INDEX IF NOT EXISTS idx_ai_audit_action" " ON ai_audit_logs(action)")
         # action + success 组合：`audit-logs?success=0` 与「失败原因 TOP」
         # 聚合的公共前缀（WHERE action='chat' AND success=0 AND created_at >= ?）
         await conn.execute(
-            "CREATE INDEX IF NOT EXISTS idx_ai_audit_action_success"
-            " ON ai_audit_logs(action, success, created_at)")
+            "CREATE INDEX IF NOT EXISTS idx_ai_audit_action_success" " ON ai_audit_logs(action, success, created_at)"
+        )
         # 场景聚合：by_scene 统计（WHERE action='chat' AND scene!='' AND created_at>=?
         # GROUP BY scene）。带上 created_at 使索引可承担时间范围裁剪。
         await conn.execute(
             "CREATE INDEX IF NOT EXISTS idx_ai_audit_action_scene_created"
-            " ON ai_audit_logs(action, scene, created_at)")
+            " ON ai_audit_logs(action, scene, created_at)"
+        )
         # ✅ 2026-09-25（缺口补齐）：audit-logs 新增 scene 精确筛选后，
         #    上面那条 (action, scene, created_at) 索引**用不上**（前导列 action
         #    不在条件里）→ 按场景下钻会全表 SCAN。补一条以 scene 为前导列的
         #    覆盖索引：同时服务 `WHERE scene=? ORDER BY created_at` 与筛选
         #    下拉的 `SELECT DISTINCT scene`（覆盖索引免回表）。
         await conn.execute(
-            "CREATE INDEX IF NOT EXISTS idx_ai_audit_scene_created"
-            " ON ai_audit_logs(scene, created_at)")
+            "CREATE INDEX IF NOT EXISTS idx_ai_audit_scene_created" " ON ai_audit_logs(scene, created_at)"
+        )
         await conn.commit()
     except Exception as e:
         logger.warning("ai_audit_logs 覆盖索引创建失败: %s", e)
@@ -1049,12 +1097,11 @@ async def _migrate(conn: aiosqlite.Connection):
         cur = await conn.execute("PRAGMA table_info(prompt_audit_logs)")
         pal_cols = {r[1] for r in await cur.fetchall()}
         if "snapshot_json" not in pal_cols:
-            await conn.execute(
-                "ALTER TABLE prompt_audit_logs "
-                "ADD COLUMN snapshot_json TEXT DEFAULT ''")
+            await conn.execute("ALTER TABLE prompt_audit_logs " "ADD COLUMN snapshot_json TEXT DEFAULT ''")
             logger.info("迁移：prompt_audit_logs 增加 snapshot_json 列（支持版本回滚）")
     except Exception as e:
-        logger.warning("prompt_audit_logs snapshot_json 迁移失败: %s", e)
+        # ✅ B1-4（R176）：快照列补不上 → 历史提示词不可回滚（降级可见）
+        _record_migration_degraded("prompt_audit_logs.snapshot_json", e)
 
     # --- 增量提取进度作用域细化（修复 BUG-1：多方案共享项目时，非首方案「提取事实」
     #     命中其它方案的历史完成段指纹 → all_skipped 早退 → 本方案写入 0 条事实）---
@@ -1065,22 +1112,68 @@ async def _migrate(conn: aiosqlite.Connection):
         cur = await conn.execute("PRAGMA table_info(facts_extracted_chunks)")
         fec_cols = {r[1] for r in await cur.fetchall()}
         if "scheme_id" not in fec_cols:
-            await conn.execute(
-                "ALTER TABLE facts_extracted_chunks RENAME TO _fec_old")
+            await conn.execute("ALTER TABLE facts_extracted_chunks RENAME TO _fec_old")
             await conn.execute(
                 "CREATE TABLE facts_extracted_chunks ("
                 "project_id TEXT NOT NULL, scheme_id TEXT NOT NULL DEFAULT '', "
                 "chunk_hash TEXT NOT NULL, "
                 "extracted_at TEXT DEFAULT (datetime('now','localtime')), "
-                "PRIMARY KEY (project_id, scheme_id, chunk_hash))")
+                "PRIMARY KEY (project_id, scheme_id, chunk_hash))"
+            )
             await conn.execute(
                 "INSERT INTO facts_extracted_chunks "
                 "(project_id, scheme_id, chunk_hash, extracted_at) "
-                "SELECT project_id, '', chunk_hash, extracted_at FROM _fec_old")
+                "SELECT project_id, '', chunk_hash, extracted_at FROM _fec_old"
+            )
             await conn.execute("DROP TABLE _fec_old")
             logger.info("迁移：facts_extracted_chunks 增加 scheme_id 作用域")
     except Exception as e:
-        logger.warning("facts_extracted_chunks 迁移失败: %s", e)
+        # ✅ B1-4（R176）：增量提取完成表作用域升级失败 → 跨方案去重口径错误（降级可见）
+        _record_migration_degraded("facts_extracted_chunks 作用域迁移", e)
+
+    # --- R175（2026-11-03）事实模块两张新表（全部 CREATE ... IF NOT EXISTS，可重入）---
+    # 1) facts_chunk_failures：失败段跨轮次重试状态（BUG-02）。
+    #    · 失败段**不写入** facts_extracted_chunks（完成表），此表只做「连续失败
+    #      退避」：第 1 次失败 next_retry_at=now（下次立即可重试），此后指数退避；
+    #    · 无此表 / 写失败时退化为「每轮都重试」（不会永久跳过），功能不受阻。
+    # 2) facts_cross_conflicts：多来源冲突只读诊断记录（BUG-04）。
+    #    · 仅用于刷新/回溯展示，不参与 has_conflict / is_resolved 门控；
+    #    · 与 global_facts 同事务 upsert，按 (方案, 规则, 事实名, 冲突类型) 幂等。
+    # 对存量数据影响：两张均为**纯新增空表**，不改任何既有表结构与数据；
+    # 回滚方式：直接 DROP TABLE facts_chunk_failures / facts_cross_conflicts
+    # （旧代码不读这两张表，删除后行为与升级前完全一致）。
+    try:
+        await conn.execute(
+            "CREATE TABLE IF NOT EXISTS facts_chunk_failures ("
+            "project_id TEXT NOT NULL DEFAULT '', "
+            "scheme_id TEXT NOT NULL DEFAULT '', "
+            "chunk_hash TEXT NOT NULL, "
+            "fail_count INTEGER NOT NULL DEFAULT 0, "
+            "last_failed_at TEXT NOT NULL DEFAULT '', "
+            "next_retry_at TEXT NOT NULL DEFAULT '', "
+            "PRIMARY KEY (project_id, scheme_id, chunk_hash))"
+        )
+        await conn.execute(
+            "CREATE TABLE IF NOT EXISTS facts_cross_conflicts ("
+            "id INTEGER PRIMARY KEY AUTOINCREMENT, "
+            "project_id TEXT NOT NULL DEFAULT '', "
+            "scheme_id TEXT NOT NULL DEFAULT '', "
+            "rule_id TEXT NOT NULL DEFAULT '', "
+            "severity TEXT NOT NULL DEFAULT '', "
+            "conflict_type TEXT NOT NULL DEFAULT '', "
+            "fact_name TEXT NOT NULL DEFAULT '', "
+            "side_a_json TEXT NOT NULL DEFAULT '{}', "
+            "side_b_json TEXT NOT NULL DEFAULT '{}', "
+            "resolution_hint TEXT NOT NULL DEFAULT '', "
+            "auto_resolvable INTEGER NOT NULL DEFAULT 0, "
+            "created_at TEXT DEFAULT (datetime('now','localtime')), "
+            "updated_at TEXT DEFAULT (datetime('now','localtime')), "
+            "UNIQUE (project_id, scheme_id, rule_id, fact_name, conflict_type))"
+        )
+        logger.info("迁移：创建 facts_chunk_failures / facts_cross_conflicts（R175）")
+    except Exception as e:
+        # ✅ B1-4（R176）：事实模块新表缺失 → 失败段退避/跨来源冲突诊断降级（可见）
+        _record_migration_degraded("facts_chunk_failures / facts_cross_conflicts 建表", e)
 
     # --- 一次性数据迁移：修复被审核状态污染的 schemes.status（2026-09-17） ---
     # 旧版 review.py /submit 直接把英文审核状态写进 schemes.status，覆盖了编译状态。
@@ -1094,29 +1187,47 @@ async def _migrate(conn: aiosqlite.Connection):
             cur = await conn.execute(
                 "UPDATE schemes SET review_status=status"
                 " WHERE status IN ('pending','reviewing','approved','rejected')"
-                " AND COALESCE(review_status,'')=''")
+                " AND COALESCE(review_status,'')=''"
+            )
             moved = safe_rowcount(cur, what="schemes 审核状态迁移")
             if moved:
                 await conn.execute(
                     "UPDATE schemes SET status='目录已确认'"
-                    " WHERE status IN ('pending','reviewing','approved','rejected')")
+                    " WHERE status IN ('pending','reviewing','approved','rejected')"
+                )
                 logger.info("数据迁移：%d 个方案的审核状态从 status 搬运到 review_status", moved)
     except Exception as e:
-        logger.warning("schemes 审核状态数据迁移失败: %s", e)
+        # ✅ B1-4（R176）：审核状态污染修复失败 → 已污染数据继续固化（降级可见）
+        _record_migration_degraded("schemes 审核状态数据迁移", e)
 
     # --- 迁移索引（CREATE INDEX IF NOT EXISTS 自带幂等性，无需先探存） ---
     index_migrations = [
         ("idx_global_facts_group", "CREATE INDEX IF NOT EXISTS idx_global_facts_group ON global_facts(group_id)"),
-        ("idx_global_facts_simulated", "CREATE INDEX IF NOT EXISTS idx_global_facts_simulated ON global_facts(is_simulated)"),
+        (
+            "idx_global_facts_simulated",
+            "CREATE INDEX IF NOT EXISTS idx_global_facts_simulated ON global_facts(is_simulated)",
+        ),
         # 深度审计新增：高频复合查询索引
-        ("idx_chart_pred_scheme_status", "CREATE INDEX IF NOT EXISTS idx_chart_pred_scheme_status ON chart_predictions(scheme_id, status)"),
-        ("idx_global_facts_scheme_conflict", "CREATE INDEX IF NOT EXISTS idx_global_facts_scheme_conflict ON global_facts(scheme_id, has_conflict)"),
+        (
+            "idx_chart_pred_scheme_status",
+            "CREATE INDEX IF NOT EXISTS idx_chart_pred_scheme_status ON chart_predictions(scheme_id, status)",
+        ),
+        (
+            "idx_global_facts_scheme_conflict",
+            "CREATE INDEX IF NOT EXISTS idx_global_facts_scheme_conflict ON global_facts(scheme_id, has_conflict)",
+        ),
         # 九大章节维度检索（正文生成按章节精选事实、章节视图聚合统计）
         ("idx_global_facts_chapter", "CREATE INDEX IF NOT EXISTS idx_global_facts_chapter ON global_facts(chapter)"),
-        ("idx_task_registry_scheme_status", "CREATE INDEX IF NOT EXISTS idx_task_registry_scheme_status ON task_registry(scheme_id, status)"),
+        (
+            "idx_task_registry_scheme_status",
+            "CREATE INDEX IF NOT EXISTS idx_task_registry_scheme_status ON task_registry(scheme_id, status)",
+        ),
         # AI 配置：主配置选取 + 降级链排序热点查询
         ("idx_ai_config_active", "CREATE INDEX IF NOT EXISTS idx_ai_config_active ON ai_config(is_active, updated_at)"),
-        ("idx_ai_config_priority", "CREATE INDEX IF NOT EXISTS idx_ai_config_priority ON ai_config(priority, updated_at)"),
+        (
+            "idx_ai_config_priority",
+            "CREATE INDEX IF NOT EXISTS idx_ai_config_priority ON ai_config(priority, updated_at)",
+        ),
         # ✅ 性能优化（2026-09-24 · 遗留项 #3）：零索引但存在真实查询点的表
         #   - outline_library_versions：版本列表/回滚按 library_id（归档可累积多版）
         #   - knowledge_base：知识条目按 project_id(+scheme_id)（正文生成逐章注入）
@@ -1124,8 +1235,14 @@ async def _migrate(conn: aiosqlite.Connection):
         #     /consistency-audit 运行都落一行，重跑多代后历史行累积）
         #   全部 CREATE INDEX IF NOT EXISTS 幂等，纯新增、不改表结构、不影响写入路径。
         ("idx_olv_library", "CREATE INDEX IF NOT EXISTS idx_olv_library ON outline_library_versions(library_id)"),
-        ("idx_kb_project_scheme", "CREATE INDEX IF NOT EXISTS idx_kb_project_scheme ON knowledge_base(project_id, scheme_id)"),
-        ("idx_consistency_audit_scheme", "CREATE INDEX IF NOT EXISTS idx_consistency_audit_scheme ON consistency_audit(scheme_id, created_at)"),
+        (
+            "idx_kb_project_scheme",
+            "CREATE INDEX IF NOT EXISTS idx_kb_project_scheme ON knowledge_base(project_id, scheme_id)",
+        ),
+        (
+            "idx_consistency_audit_scheme",
+            "CREATE INDEX IF NOT EXISTS idx_consistency_audit_scheme ON consistency_audit(scheme_id, created_at)",
+        ),
     ]
     for idx_name, create_sql in index_migrations:
         try:
@@ -1142,12 +1259,49 @@ async def _migrate(conn: aiosqlite.Connection):
         await conn.execute("DROP INDEX IF EXISTS uq_export_cache_scheme_fp")
         await conn.execute(
             "DELETE FROM export_cache WHERE rowid NOT IN ("
-            "SELECT MAX(rowid) FROM export_cache GROUP BY scheme_id, config_hash, content_fingerprint)")
+            "SELECT MAX(rowid) FROM export_cache GROUP BY scheme_id, config_hash, content_fingerprint)"
+        )
         await conn.execute(
             "CREATE UNIQUE INDEX IF NOT EXISTS uq_export_cache_scheme_cfg_fp "
-            "ON export_cache(scheme_id, config_hash, content_fingerprint)")
+            "ON export_cache(scheme_id, config_hash, content_fingerprint)"
+        )
     except Exception as e:
         logger.warning("export_cache 三元组唯一索引迁移失败（可忽略）: %s", e)
+
+    # --- project_documents 同名唯一索引迁移（R175 · BUG-1） ---
+    # 并发同名上传在「SELECT→DELETE→INSERT」窗口内仍可产生两行同名档案：
+    # 两条连接各自的 SELECT 都早于对方 commit，只有数据库层唯一约束能兜住。
+    # 做法（可重入，每次启动执行均安全）：
+    #   ① 先按 (project_id, file_name) 去重，保留 rowid 最大的一行（= 最后一次上传）；
+    #   ② 再建唯一索引；上报路径改为 ON CONFLICT DO UPDATE，单语句完成替换。
+    # 注意：去重只删档案行，磁盘上的旧原件与 doc_chunks 不在本迁移清理范围内
+    #      （历史重复行的旧文件可能残留，属一次性历史数据，后续由同名再上传覆盖）。
+    try:
+        cur = await conn.execute(
+            "SELECT COUNT(*) FROM ("
+            "SELECT 1 FROM project_documents GROUP BY project_id, file_name "
+            "HAVING COUNT(*) > 1)"
+        )
+        dup_groups = 0
+        if cur is not None:
+            row = await cur.fetchone()
+            dup_groups = int(row[0]) if row else 0
+        if dup_groups:
+            del_cur = await conn.execute(
+                "DELETE FROM project_documents WHERE rowid NOT IN ("
+                "SELECT MAX(rowid) FROM project_documents "
+                "GROUP BY project_id, file_name)"
+            )
+            removed = safe_rowcount(del_cur, what="project_documents 同名去重迁移")
+            logger.info("数据迁移：%d 组同名文档档案重复，删除 %d 行（保留最新一行）", dup_groups, removed)
+        await conn.execute(
+            "CREATE UNIQUE INDEX IF NOT EXISTS uq_project_documents_pid_fname "
+            "ON project_documents(project_id, file_name)"
+        )
+    except Exception as e:
+        # fail-soft 不让启动失败；但索引缺失会让上传 upsert 报错（响亮失败），
+        # 不会退回静默产生重复行。
+        logger.error("project_documents 同名唯一索引迁移失败（上传同名替换将不可用）: %s", e)
 
     # --- 数据迁移：修复旧版图表预测僵尸行（status='generated' 但代码为空） ---
     # 旧版手动预测端点落库时 status 误写为 "generated" 且 mermaid_code 为空：
@@ -1166,7 +1320,8 @@ async def _migrate(conn: aiosqlite.Connection):
             " WHERE status='generated'"
             " AND chart_type NOT IN ('layout','timeline')"
             " AND COALESCE(json_extract(data_json, '$.mermaid_code'), '') = ''"
-            " AND json_extract(data_json, '$.data') IS NULL")
+            " AND json_extract(data_json, '$.data') IS NULL"
+        )
         _reset = safe_rowcount(cur, what="空代码图表预测重置迁移")
         if _reset:
             logger.info("迁移：重置 %d 条空代码图表预测为 pending（等待重新生成）", _reset)
@@ -1183,18 +1338,17 @@ async def _migrate(conn: aiosqlite.Connection):
     # 只处理「文本含代码围栏」的行（口径差异只可能出现在这些行），幂等可重复执行。
     try:
         from app.services.content_utils import DEFAULT_WORD_BUDGET, text_word_count, word_status_for
+
         cur = await conn.execute(
-            "SELECT id, content, word_count, word_status, word_budget FROM sections"
-            " WHERE content LIKE '%```%'")
+            "SELECT id, content, word_count, word_status, word_budget FROM sections" " WHERE content LIKE '%```%'"
+        )
         _fixed = 0
         for row in await cur.fetchall():
             content = row[1] or ""
             wc = text_word_count(content)
             ws = word_status_for(wc, row[4] or DEFAULT_WORD_BUDGET)
             if int(row[2] or 0) != wc or (row[3] or "") != ws:
-                await conn.execute(
-                    "UPDATE sections SET word_count=?, word_status=? WHERE id=?",
-                    (wc, ws, row[0]))
+                await conn.execute("UPDATE sections SET word_count=?, word_status=? WHERE id=?", (wc, ws, row[0]))
                 _fixed += 1
         if _fixed:
             await conn.commit()
@@ -1273,21 +1427,38 @@ _POOL_MAX_SIZE = 8
 
 
 async def _acquire_pool_conn() -> aiosqlite.Connection:
-    """从连接池取连接；池空且未达上限则新建，否则等待归还"""
+    """从连接池取连接；池空且未达上限则新建，否则等待归还。
+
+    ✅ R176（2026-11-04）：池内连接的 ``wal_checkpoint`` 探活移出 ``_db_pool_cv``。
+    锁只负责「出池 / 预留计数 / 等待」，真实 IO 一律在锁外 —— 此前探活持锁执行，
+    并发获取被单条件变量串行化（J: 外置盘抖动时每次探活几十 ms，尾延迟叠加）。
+
+    安全性前提（未满足就不要把探活移出锁）：
+      · 连接 ``pop`` 后即从 ``_db_pool`` 移除，全仓没有第二条把池连接交给其它协程
+        的路径 → 探活期间连接由本协程独占，不可能被抢走；
+      · 探活失败必须**回锁** ``total -= 1`` 并 ``notify()``，否则容量永远少计、
+        等待者永久睡死。
+    """
     global _db_pool_total, _db_pool_path
+    # BUG 修复（2026-09-13）：DB_PATH 切换后旧路径的池连接全部失效，
+    # 直接排空，避免复用指向旧库的连接。关闭是 IO，放到锁外。
+    stale: list[aiosqlite.Connection] = []
     async with _db_pool_cv:
-        # BUG 修复（2026-09-13）：DB_PATH 切换后旧路径的池连接全部失效，
-        # 直接排空，避免复用指向旧库的连接。
         if _db_pool_path is not None and _db_pool_path != DB_PATH:
             while _db_pool:
-                _c = _db_pool.pop()
+                stale.append(_db_pool.pop())
                 _db_pool_total -= 1
-                try:
-                    await _c.close()
-                except Exception as e:
-                    logger.debug("DB_PATH 切换关闭旧写池连接失败（清理路径，忽略）: %s", e)
             _db_pool_path = None
-        while True:
+    for _c in stale:
+        try:
+            await _c.close()
+        except Exception as e:
+            logger.debug("DB_PATH 切换关闭旧写池连接失败（清理路径，忽略）: %s", e)
+
+    while True:
+        conn = None
+        dead = None
+        async with _db_pool_cv:
             if _db_pool:
                 conn = _db_pool.pop()
                 # poisoned 标记：写路径里曾抛过 disk I/O error，直接剔除
@@ -1295,50 +1466,79 @@ async def _acquire_pool_conn() -> aiosqlite.Connection:
                 #    死连接探针会被"非 IO 异常"分支误判为可用而放行）
                 if _is_poisoned(conn) or _is_dead_conn(conn):
                     _db_pool_total -= 1
-                    try:
-                        await conn.close()
-                    except Exception as e:
-                        logger.debug("剔除失效写池连接时关闭失败（清理路径，忽略）: %s", e)
+                    dead, conn = conn, None
                     logger.warning("剔除失效写池连接（poisoned 或已关闭）")
-                    continue
-                # PRAGMA wal_checkpoint 探针：真实 IO 往返，覆盖"写入才抖"场景
-                if not await _probe_conn(conn):
-                    _db_pool_total -= 1
-                    try:
-                        await conn.close()
-                    except Exception as e:
-                        logger.debug("剔除写池连接时关闭失败（探活失败，忽略）: %s", e)
-                    logger.warning("剔除写池连接：探活 disk I/O 失败")
-                    continue
-                return conn
-            if _db_pool_total < _POOL_MAX_SIZE:
+            elif _db_pool_total < _POOL_MAX_SIZE:
                 _db_pool_total += 1
-                break
-            await _db_pool_cv.wait()
-        DB_PATH.parent.mkdir(parents=True, exist_ok=True)
-        # 新建连接也做有限次重试，避免 J 盘刚好离线时一次失败就抛错
-        last_err = None
-        for attempt in range(_PROBE_MAX_ATTEMPTS):
+                break  # 容量已预留 → 锁外新建
+            else:
+                await _db_pool_cv.wait()
+                continue  # 醒来必须重新竞争，不能沿用上一次的分支
+        # ---------------- 以下全部在锁外 ----------------
+        if dead is not None:
             try:
-                conn = await aiosqlite.connect(DB_PATH)
-                _db_pool_path = DB_PATH
-                await _setup_connection(conn)
-                if not await _probe_conn(conn):
-                    _db_pool_total -= 1
-                    try:
-                        await conn.close()
-                    except Exception as e:
-                        logger.debug("关闭新建写池连接失败（探活失败，忽略）: %s", e)
-                    last_err = Exception("新建写池连接探活失败")
-                    continue
-                return conn
+                await dead.close()
             except Exception as e:
-                _db_pool_total -= 1
-                last_err = e
-                if not _is_disk_io_error(e):
-                    raise
-                logger.warning("新建写池连接 disk I/O 失败（第 %d 次），重试", attempt + 1)
-        raise RuntimeError(f"数据库写池连接建立失败（连续 {_PROBE_MAX_ATTEMPTS} 次 disk I/O error）") from last_err
+                logger.debug("剔除失效写池连接时关闭失败（清理路径，忽略）: %s", e)
+            continue
+        if conn is None:  # 防御性：理论到不了
+            continue
+        # PRAGMA wal_checkpoint 探针：真实 IO 往返，覆盖"写入才抖"场景
+        if await _probe_conn(conn):
+            return conn
+        # 探活失败：回锁归还计数并唤醒等待者（缺 notify 会让等待者永久睡死）
+        async with _db_pool_cv:
+            _db_pool_total -= 1
+            _db_pool_cv.notify()
+        try:
+            await conn.close()
+        except Exception as e:
+            logger.debug("剔除写池连接时关闭失败（探活失败，忽略）: %s", e)
+        logger.warning("剔除写池连接：探活 disk I/O 失败")
+
+    DB_PATH.parent.mkdir(parents=True, exist_ok=True)
+    # 新建连接也做有限次重试，避免 J 盘刚好离线时一次失败就抛错。
+    # ✅ R176：预留计数在**整个重试期间保持**，只在最终放弃/非瞬态错误时归还一次 ——
+    #    逐次归还而不重新预留会让 total 永久少计（实测 12 并发 × 3 次重试后可到 -24），
+    #    进而突破 _POOL_MAX_SIZE 或让等待者永久睡死。
+    last_err = None
+    for attempt in range(_PROBE_MAX_ATTEMPTS):
+        conn = None
+        try:
+            conn = await aiosqlite.connect(DB_PATH)
+            _db_pool_path = DB_PATH
+            await _setup_connection(conn)
+            if not await _probe_conn(conn):
+                try:
+                    await conn.close()
+                except Exception as e:
+                    logger.debug("关闭新建写池连接失败（探活失败，忽略）: %s", e)
+                conn = None
+                last_err = Exception("新建写池连接探活失败")
+                if attempt + 1 < _PROBE_MAX_ATTEMPTS:
+                    continue  # 保留预留，直接重试
+                break
+            return conn
+        except Exception as e:
+            if conn is not None:
+                try:
+                    await conn.close()
+                except Exception as close_err:
+                    logger.debug("关闭新建写池连接失败（异常路径，忽略）: %s", close_err)
+            last_err = e
+            if not _is_disk_io_error(e):
+                async with _db_pool_cv:
+                    _db_pool_total -= 1
+                    _db_pool_cv.notify()
+                raise
+            if attempt + 1 >= _PROBE_MAX_ATTEMPTS:
+                break
+            logger.warning("新建写池连接 disk I/O 失败（第 %d 次），重试", attempt + 1)
+    # 放弃新建：归还预留容量并唤醒等待者
+    async with _db_pool_cv:
+        _db_pool_total -= 1
+        _db_pool_cv.notify()
+    raise RuntimeError(f"数据库写池连接建立失败（连续 {_PROBE_MAX_ATTEMPTS} 次 disk I/O error）") from last_err
 
 
 async def _release_pool_conn(conn: aiosqlite.Connection) -> None:
@@ -1451,50 +1651,72 @@ async def _read_probe(conn: aiosqlite.Connection) -> bool:
 
 
 async def _acquire_read_conn() -> aiosqlite.Connection:
-    """从只读池取连接；池空且未达上限则新建（query_only=ON），否则等待归还"""
+    """从只读池取连接；池空且未达上限则新建（query_only=ON），否则等待归还。
+
+    ✅ R176（2026-11-04）：与写池同口径 —— 池内连接的 ``wal_checkpoint(NOOP)``
+    探活移出 ``_read_pool_cv``，锁内只做出池 / 预留 / 等待。连接出池后由本协程
+    独占（不存在第二条分发路径），探活失败回锁补偿计数并 ``notify()``。
+    """
     global _read_pool_total, _read_pool_path
+    # DB_PATH 切换后旧路径的池连接全部失效（与写池同一约定），关闭放锁外。
+    stale: list[aiosqlite.Connection] = []
     async with _read_pool_cv:
-        # DB_PATH 切换后旧路径的池连接全部失效（与写池同一约定）
         if _read_pool_path is not None and _read_pool_path != DB_PATH:
             while _read_pool:
-                _c = _read_pool.pop()
+                stale.append(_read_pool.pop())
                 _read_pool_total -= 1
-                try:
-                    await _c.close()
-                except Exception as e:
-                    logger.debug("DB_PATH 切换关闭旧读池连接失败（清理路径，忽略）: %s", e)
             _read_pool_path = None
-        while True:
+    for _c in stale:
+        try:
+            await _c.close()
+        except Exception as e:
+            logger.debug("DB_PATH 切换关闭旧读池连接失败（清理路径，忽略）: %s", e)
+
+    while True:
+        conn = None
+        dead = None
+        async with _read_pool_cv:
             if _read_pool:
                 conn = _read_pool.pop()
                 # poisoned 标记：读路径曾抛过 disk I/O error，直接剔除
                 # ✅ 2026-09-26：已关闭的连接同样剔除（与写池同口径）
                 if _is_poisoned(conn) or _is_dead_conn(conn):
                     _read_pool_total -= 1
-                    try:
-                        await conn.close()
-                    except Exception as e:
-                        logger.debug("剔除失效读池连接时关闭失败（清理路径，忽略）: %s", e)
+                    dead, conn = conn, None
                     logger.warning("剔除失效读池连接（poisoned 或已关闭）")
-                    continue
-                # 用 PRAGMA wal_checkpoint(NOOP) 走 IO 层，覆盖"读取时抖"场景
-                if not await _read_probe(conn):
-                    _read_pool_total -= 1
-                    try:
-                        await conn.close()
-                    except Exception as e:
-                        logger.debug("剔除读池连接时关闭失败（探活失败，忽略）: %s", e)
-                    logger.warning("剔除读池连接：探活 disk I/O 失败")
-                    continue
-                return conn
-            if _read_pool_total < _READ_POOL_MAX_SIZE:
+            elif _read_pool_total < _READ_POOL_MAX_SIZE:
                 _read_pool_total += 1
-                break
-            await _read_pool_cv.wait()
+                break  # 容量已预留 → 锁外新建
+            else:
+                await _read_pool_cv.wait()
+                continue  # 醒来必须重新竞争
+        # ---------------- 以下全部在锁外 ----------------
+        if dead is not None:
+            try:
+                await dead.close()
+            except Exception as e:
+                logger.debug("剔除失效读池连接时关闭失败（清理路径，忽略）: %s", e)
+            continue
+        if conn is None:
+            continue
+        # 用 PRAGMA wal_checkpoint(NOOP) 走 IO 层，覆盖"读取时抖"场景
+        if await _read_probe(conn):
+            return conn
+        async with _read_pool_cv:
+            _read_pool_total -= 1
+            _read_pool_cv.notify()
+        try:
+            await conn.close()
+        except Exception as e:
+            logger.debug("剔除读池连接时关闭失败（探活失败，忽略）: %s", e)
+        logger.warning("剔除读池连接：探活 disk I/O 失败")
+
     DB_PATH.parent.mkdir(parents=True, exist_ok=True)
-    # 新建连接也做有限次重试，避免 J 盘刚好离线时一次失败就抛错
+    # 新建连接也做有限次重试，避免 J 盘刚好离线时一次失败就抛错。
+    # ✅ R176：预留计数在整个重试期间保持，只在最终放弃/非瞬态错误时归还一次。
     last_err = None
     for attempt in range(_PROBE_MAX_ATTEMPTS):
+        conn = None
         try:
             conn = await aiosqlite.connect(DB_PATH)
             _read_pool_path = DB_PATH
@@ -1502,20 +1724,34 @@ async def _acquire_read_conn() -> aiosqlite.Connection:
             # 只读保护：query_only=ON 后连接拒绝任何写语句（fail-fast，暴露误用）
             await conn.execute("PRAGMA query_only=ON")
             if not await _read_probe(conn):
-                _read_pool_total -= 1
                 try:
                     await conn.close()
                 except Exception as e:
                     logger.debug("关闭新建读池连接失败（探活失败，忽略）: %s", e)
+                conn = None
                 last_err = Exception("新建读池连接探活失败")
-                continue
+                if attempt + 1 < _PROBE_MAX_ATTEMPTS:
+                    continue  # 保留预留，直接重试
+                break
             return conn
         except Exception as e:
-            _read_pool_total -= 1
+            if conn is not None:
+                try:
+                    await conn.close()
+                except Exception as close_err:
+                    logger.debug("关闭新建读池连接失败（异常路径，忽略）: %s", close_err)
             last_err = e
             if not _is_disk_io_error(e):
+                async with _read_pool_cv:
+                    _read_pool_total -= 1
+                    _read_pool_cv.notify()
                 raise
+            if attempt + 1 >= _PROBE_MAX_ATTEMPTS:
+                break
             logger.warning("新建读池连接 disk I/O 失败（第 %d 次），重试", attempt + 1)
+    async with _read_pool_cv:
+        _read_pool_total -= 1
+        _read_pool_cv.notify()
     raise RuntimeError(f"数据库读池连接建立失败（连续 {_PROBE_MAX_ATTEMPTS} 次 disk I/O error）") from last_err
 
 

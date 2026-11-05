@@ -19,6 +19,7 @@
 
 数据来源：住房和城乡建设部公告、全国标准信息公共服务平台（std.samr.gov.cn）。
 """
+
 from __future__ import annotations
 
 import re
@@ -278,8 +279,7 @@ ABOLISHED_STANDARDS: dict[str, str] = {
 }
 
 
-def match_categories(scheme_name: str = "", scheme_type: str = "",
-                     section_title: str = "") -> list[str]:
+def match_categories(scheme_name: str = "", scheme_type: str = "", section_title: str = "") -> list[str]:
     """按方案名称/类型/章节标题关键词命中专业类别。
 
     Args:
@@ -298,9 +298,13 @@ def match_categories(scheme_name: str = "", scheme_type: str = "",
     return hits
 
 
-def get_standards_text(scheme_name: str = "", scheme_type: str = "",
-                       section_title: str = "", max_categories: int = 2,
-                       include_regulations: bool = True) -> str:
+def get_standards_text(
+    scheme_name: str = "",
+    scheme_type: str = "",
+    section_title: str = "",
+    max_categories: int = 2,
+    include_regulations: bool = True,
+) -> str:
     """生成提示词用的"编制依据（现行有效标准）"文本块。
 
     仅列出与本节主题高度相关的标准，避免清单过长稀释注意力。
@@ -340,10 +344,7 @@ def get_standards_text(scheme_name: str = "", scheme_type: str = "",
         lines.append("· 法规依据：")
         lines.extend(f"  - {r}" for r in REGULATIONS)
 
-    lines.append(
-        "【禁止引用的已废止版本】"
-        + "；".join(f"{k}（{v}）" for k, v in ABOLISHED_STANDARDS.items())
-    )
+    lines.append("【禁止引用的已废止版本】" + "；".join(f"{k}（{v}）" for k, v in ABOLISHED_STANDARDS.items()))
     return "\n".join(lines)
 
 
@@ -379,8 +380,7 @@ def _code_regex(code: str) -> re.Pattern:
 
 
 #: 预编译的废止标准匹配器（模块级缓存，避免每次扫描重复编译）
-_ABOLISHED_PATTERNS: list[tuple[str, re.Pattern]] = [
-    (code, _code_regex(code)) for code in ABOLISHED_STANDARDS]
+_ABOLISHED_PATTERNS: list[tuple[str, re.Pattern]] = [(code, _code_regex(code)) for code in ABOLISHED_STANDARDS]
 
 
 def find_abolished_codes(text: str) -> list[str]:
@@ -424,8 +424,7 @@ def strip_standard_year(code: str) -> str:
 #: 库内全部现行标准的基号集合（模块级缓存）
 _KNOWN_BASE_POOL: frozenset[str] = frozenset(
     strip_standard_year(s.code)
-    for s in [*BASE_STANDARDS,
-              *(std for items in CATEGORY_STANDARDS.values() for std in items)]
+    for s in [*BASE_STANDARDS, *(std for items in CATEGORY_STANDARDS.values() for std in items)]
 )
 
 

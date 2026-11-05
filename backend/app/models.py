@@ -1,4 +1,5 @@
 """Pydantic 数据模型"""
+
 from typing import List, Optional, Union
 
 from pydantic import BaseModel, ConfigDict, Field, field_validator
@@ -129,15 +130,16 @@ class OutlineLibraryUpdate(BaseModel):
 # ---------- 全局事实 ----------
 class FactItem(BaseModel):
     """单条事实条目（增强版，支持溯源/模拟/置信度）"""
-    name: str                           # 事实名称/键（如 "项目经理", "基坑深度"）
-    value: str                          # 事实值（如 "张伟", "12.5m"）
-    category: str = "other"             # 类别: personnel/schedule/equipment/tech_param/scale/other
-    source: str = ""                    # 来源文件/文档名
-    source_ref: str = ""                # 详细溯源引用（原文摘录）
-    is_simulated: bool = False          # 是否AI模拟值
-    confidence: float = 1.0             # 置信度 0-1
-    is_resolved: bool = True            # 是否已人工确认
-    key: str = ""                       # 归一化键（用于去重/矛盾检测）
+
+    name: str  # 事实名称/键（如 "项目经理", "基坑深度"）
+    value: str  # 事实值（如 "张伟", "12.5m"）
+    category: str = "other"  # 类别: personnel/schedule/equipment/tech_param/scale/other
+    source: str = ""  # 来源文件/文档名
+    source_ref: str = ""  # 详细溯源引用（原文摘录）
+    is_simulated: bool = False  # 是否AI模拟值
+    confidence: float = 1.0  # 置信度 0-1
+    is_resolved: bool = True  # 是否已人工确认
+    key: str = ""  # 归一化键（用于去重/矛盾检测）
     # ✅ R80（2026-10-15）：要求 vs 事实口径（''=未区分；fact=本方案口径；
     # requirement=招标/规范要求原文口径）。非法值在路由层归一为 ''。
     value_kind: str = ""
@@ -169,6 +171,7 @@ class DangerCheckRequest(BaseModel):
 
     与既有 ``factsApi.dangerCheck({}, schemeId)`` 逐字兼容：body 可为空对象。
     """
+
     model_config = ConfigDict(extra="allow")
     scheme_name: str = ""
     extra_text: str = ""
@@ -176,12 +179,14 @@ class DangerCheckRequest(BaseModel):
 
 class ClearFactsRequest(BaseModel):
     """POST /api/v1/global-facts/clear 请求体（作用域级清空）。"""
+
     model_config = ConfigDict(extra="allow")
     scheme_id: str = ""
 
 
 class AckStaleRequest(BaseModel):
     """POST /api/v1/global-facts/ack-stale 请求体（批量解除过期标记）。"""
+
     model_config = ConfigDict(extra="allow")
     #: ✅ 用裸 list 而非 list[str]：历史调用会在 fact_ids 里塞 None / 空串，
     #:    由端点体内逐条 str(f).strip() 过滤，保持旧行为（含测试中的 [None] 用例）。
@@ -191,12 +196,14 @@ class AckStaleRequest(BaseModel):
 
 class ResolveConflictRequest(BaseModel):
     """PATCH /api/v1/global-facts/{fact_id}/resolve-conflict 请求体（裁决矛盾取值）。"""
+
     model_config = ConfigDict(extra="allow")
     value: str = ""
 
 
 class BatchResolveRequest(BaseModel):
     """POST /api/v1/global-facts/batch-resolve 请求体（批量确认事实）。"""
+
     model_config = ConfigDict(extra="allow")
     #: ✅ 同 AckStaleRequest：保留旧 lenient 行为（fact_ids 可含 None / 空串）。
     fact_ids: list = Field(default_factory=list)
@@ -205,6 +212,7 @@ class BatchResolveRequest(BaseModel):
 
 class AdjustRequest(BaseModel):
     """POST /api/v1/global-facts/adjust 请求体（AI 自然语言调整）。"""
+
     model_config = ConfigDict(extra="allow")
     instruction: str = ""
     scheme_id: str = ""
@@ -234,6 +242,9 @@ class AIConfigIn(BaseModel):
     #    应用侧（章节生成、事实提取等）仍等待完整结果后继续流程，对外行为不变。
     request_mode: str = Field("normal", max_length=16)
     is_active: bool = True
+    # ✅ R175（2026-11-03 · BUG-03）：是否参与真实调用（主配置之外的降级候选）。
+    # None = 本次保存不改动启用状态（避免「编辑配置」意外把已停用的行重新启用）。
+    enabled: Optional[bool] = None
     # None = 本次保存不改动降级顺序（降级链由 /fallback-chain 独立维护）；
     # 若给成默认 0，每次「保存配置」都会把用户拖好的 priority 顺序清零。
     priority: Optional[int] = None
@@ -243,7 +254,14 @@ class AIConfigIn(BaseModel):
     # ✅ 2026-09-23（多环境）：环境标签（dev / test / prod …），空串 = 通用。
     # 默认空串 → 未启用多环境时行为与引入前完全一致。
     # （normalize_env 运行时还会做 32 字符 + 字符集归一，这里是入库前的粗约束）
-    env: str = Field("", max_length=64)
+    # ✅ R175（BUG-08）：与运行时 normalize_env 的 32 字符上限对齐（此前 64）。
+    env: str = Field("", max_length=32)
+
+
+class ConfigEnabledIn(BaseModel):
+    """✅ R175（BUG-03）：单条配置的「是否参与真实调用」开关（不影响主配置选择）。"""
+
+    enabled: bool = True
 
 
 class AIConfigTest(BaseModel):
@@ -266,6 +284,7 @@ class AIConfigTest(BaseModel):
 
 class ProviderModelsIn(BaseModel):
     """拉取模型列表入参（原为裸 dict，无任何校验）。"""
+
     base_url: str = Field("", max_length=2048)
     api_key: str = Field("", max_length=4096)
     config_id: str = Field("", max_length=64)
@@ -283,12 +302,14 @@ class FallbackChainUpdate(BaseModel):
       - 字符串 id：`["id1", "id2"]`
       - 对象：`[{"id": "id1"}, ...]`（前端现有格式）
     """
+
     chain: List[Union[str, dict]] = Field(default_factory=list)
 
 
 class AuditLogCleanup(BaseModel):
     """审计日志清理入参。"""
-    keep_days: int = 30      # 保留最近 N 天
+
+    keep_days: int = 30  # 保留最近 N 天
     only_failed: bool = False  # 仅清理失败记录
 
 
@@ -303,8 +324,9 @@ class ConfigImportIn(BaseModel):
       两个字段默认 ``None`` = **不迁移**，旧版导出文件不含这两个键、旧调用方不传
       参数时行为与引入前逐字一致（向后兼容）。
     """
+
     items: List[dict] = Field(default_factory=list)
-    overwrite: bool = False   # 同名（同 provider + model + base_url）是否覆盖
+    overwrite: bool = False  # 同名（同 provider + model + base_url）是否覆盖
     set_first_active: bool = False  # 是否把第一条设为当前使用配置
     # [{scene, config_id}]：config_id 为**导出源机器**上的配置 id（本次导入会生成新 id，
     # 由导入侧按原始 id 映射到新 id）；映射不到的场景按跳过处理并如实回传原因。
@@ -319,6 +341,7 @@ class SceneRouteUpdate(BaseModel):
 
     ``config_id`` 为空串表示**清除**该场景的路由（恢复共用「当前使用」配置）。
     """
+
     scene: str = ""
     config_id: str = ""
 
@@ -331,6 +354,7 @@ class SceneRouteBatchIn(BaseModel):
     批量的判据与单条**完全同源**（共用 ``_apply_scene_route``），
     单条失败不中断整批，失败项如实回传原因。
     """
+
     items: List[SceneRouteUpdate] = Field(default_factory=list)
 
 
@@ -339,6 +363,7 @@ class ActiveEnvIn(BaseModel):
 
     空串是合法取值，语义为「通用环境」= 不做任何环境过滤（旧行为）。
     """
+
     env: str = ""
 
 
@@ -348,6 +373,7 @@ class ConfigRollbackIn(BaseModel):
     ``audit_id`` = 要回滚到「该变更记录之前」的状态。
     ``include_active`` = 是否连「当前使用」标记一起还原（默认 False，见 rollback 端点说明）。
     """
+
     audit_id: str = ""
     include_active: bool = False
 
@@ -357,6 +383,7 @@ class DisabledProvidersIn(BaseModel):
 
     整体覆盖语义：传空数组 = 恢复全部厂商。
     """
+
     providers: List[str] = Field(default_factory=list)
 
 
@@ -370,6 +397,7 @@ class KeyRotationIn(BaseModel):
 
     全部字段加法式、默认值保证「只调 inspect」时无任何副作用（向后兼容）。
     """
+
     mode: str = Field("inspect", max_length=16)
     # 迁移窗口内可用的「历史密钥」：主密钥轮换后旧密文需用它解出明文再重加密。
     # 传空 = 仅用当前生效密钥（inspect/reencrypt 无副作用）。
@@ -419,7 +447,7 @@ class ExpertReviewIn(BaseModel):
 class SectionReviewIn(BaseModel):
     """章节审核（状态流转 + 评审意见）。"""
 
-    to_status: str                      # pending / reviewing / approved / rejected
+    to_status: str  # pending / reviewing / approved / rejected
     reviewer: str = ""
     comment: str = ""
 

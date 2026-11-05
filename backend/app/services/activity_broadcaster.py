@@ -10,6 +10,7 @@ SSE 端点收到信号后重新聚合任务 / AI / 服务态并推送给浏览�
 - notify() 可在同步 / 异步上下文中调用，不会阻塞事件循环；
 - 不聚合具体业务数据，仅作为“请刷新”信号，降低事件体积。
 """
+
 import asyncio
 import logging
 import threading

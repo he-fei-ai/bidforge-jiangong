@@ -15,6 +15,7 @@ task_id / request_id 命中数均为 0）。本模块即补齐这一埋点缺口
     set_context(project_id=pid, doc_id=did)   # 进入子阶段时补充
     # 在日志初始化处把 TraceContextFilter 挂到 handler 上即可。
 """
+
 from __future__ import annotations
 
 import contextvars

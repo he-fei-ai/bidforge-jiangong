@@ -8,6 +8,7 @@
 只读接口，异常时返回空态而不是 500（状态栏是常驻 UI，不应反复报错弹窗）。
 SSE 流在任务/AI 状态变化时由 activity_broadcaster 触发刷新，并叠加 10s 心跳保活。
 """
+
 import asyncio
 import json
 import logging
@@ -72,6 +73,10 @@ async def _build_activity_snapshot(limit: int = 8) -> dict:
     limit = max(1, min(int(limit or 8), 30))
 
     # ---- 1. 任务列表（DB 历史 + 内存实时态合并）----
+    # ✅ R176 B2-4（2026-11-04）：部分来源读取失败时，快照仍是 200 合法空态，
+    #    但必须**显式登记**哪些来源降级了（否则前端只能看到全 0，误判为"系统空闲"）。
+    #    键始终存在；全部成功时为空列表。
+    partial_sources: list[str] = []
     tasks: list[dict] = []
     rows: list[dict] = []
     running_rows: list[dict] = []
@@ -83,7 +88,8 @@ async def _build_activity_snapshot(limit: int = 8) -> dict:
             " t.scheme_id, t.created_at, t.updated_at, s.name AS scheme_name"
             " FROM task_registry t LEFT JOIN schemes s ON s.id = t.scheme_id"
             " ORDER BY t.created_at DESC LIMIT ?",
-            (limit,))
+            (limit,),
+        )
         rows = [dict(r) for r in await cur.fetchall()]
 
         # ✅ P0 BUG 修复（2026-09-30 · 「先截断后过滤」→ AI 在跑却显示"后台空闲"）：
@@ -106,15 +112,16 @@ async def _build_activity_snapshot(limit: int = 8) -> dict:
             " FROM task_registry t LEFT JOIN schemes s ON s.id = t.scheme_id"
             " WHERE t.status IN ('running','paused')"
             " ORDER BY t.created_at DESC LIMIT ?",
-            (_RUNNING_MAX,))
+            (_RUNNING_MAX,),
+        )
         running_rows = [dict(r) for r in await cur.fetchall()]
     except Exception as e:
         # fail-soft：任一查询失败都不阻断状态栏（只读常驻 UI，不应弹错）
         logger.warning("activity: 读取任务列表失败: %s", e)
+        partial_sources.append("tasks")
         # 退回旧行为：从已取到的 recent 里挑运行中任务
         if not running_rows:
-            running_rows = [r for r in rows
-                            if r.get("status") in ("running", "paused")]
+            running_rows = [r for r in rows if r.get("status") in ("running", "paused")]
     finally:
         if conn is not None:
             await release_read_conn(conn)
@@ -160,6 +167,7 @@ async def _build_activity_snapshot(limit: int = 8) -> dict:
 
     # ---- 2. 今日 AI 调用汇总（审计日志攒批落库最长延迟 ~10s）----
     ai_today: dict = {}
+    ai_error_classes: dict = {}
     conn = None
     try:
         conn = await get_read_conn()
@@ -176,33 +184,94 @@ async def _build_activity_snapshot(limit: int = 8) -> dict:
         #   3) 参数化避免每次拼接 SQL 文本。
         # 基线实测：2.885ms → 0.114ms（↓96%），p95 3.203ms → 0.131ms。
         cur = await conn.execute(
-            "SELECT COUNT(*) AS calls_today,"
+            # ✅ 2026-11-05（统计口径修复）：calls_today 旧口径是 COUNT(*)，把
+            #    circuit_skipped / provider_disabled 等「未真实发请求」的行也算进
+            #    「今日调用」；与 summary 的 action='chat' 口径不一致，面板与
+            #    ai_audit_logs 对不上。现统一为 action='chat' 的**逻辑调用**行
+            #    （方案 B 合并后，每次业务调用恰好一行；尝试次数见 attempts_today）
+            "SELECT COALESCE(SUM(CASE WHEN action='chat' THEN 1 ELSE 0 END), 0)"
+            " AS calls_today,"
             " COALESCE(SUM(prompt_tokens + completion_tokens), 0) AS tokens_today,"
-            " COALESCE(AVG(duration), 0) AS avg_duration,"
-            " COALESCE(SUM(CASE WHEN success=1 THEN 1 ELSE 0 END), 0) AS ok_calls,"
+            # ✅ 2026-11-05（口径修复）：平均耗时只取**成功真实调用**，
+            #    与 AIConfigPage 统计口径一致；失败尝试（大量 0.18s 快速失败）
+            #    不再拉低均值。全量均值另给 avg_duration_all 便于排查。
+            " COALESCE(AVG(CASE WHEN action='chat' AND success=1 THEN duration END), 0)"
+            " AS avg_duration,"
+            " COALESCE(AVG(CASE WHEN action='chat' THEN duration END), 0)"
+            " AS avg_duration_all,"
+            " COALESCE(SUM(CASE WHEN action='chat' AND success=1 THEN 1 ELSE 0 END), 0)"
+            " AS ok_calls,"
+            # ✅ 2026-11-04（口径修复）：成功率分母只算真实调用，跳过行单列。
+            " COALESCE(SUM(CASE WHEN action='chat' THEN 1 ELSE 0 END), 0) AS real_calls_today,"
+            " COALESCE(SUM(CASE WHEN action='chat' AND success=0 THEN 1 ELSE 0 END), 0)"
+            " AS failed_today,"
+            " COALESCE(SUM(CASE WHEN action='circuit_skipped' THEN 1 ELSE 0 END), 0)"
+            " AS skipped_today,"
+            # ✅ 2026-11-05（方案 B · 审计合并）：一次逻辑调用只落一条主记录，
+            #    attempt_count 记录其真实尝试次数（含重试/降级/对冲）。
+            #    旧行无该列时由迁移补 1，历史口径不变。
+            " COALESCE(SUM(CASE WHEN action='chat' THEN COALESCE(attempt_count, 1) ELSE 0 END), 0)"
+            " AS attempts_today,"
             " MAX(created_at) AS last_call_at"
             " FROM ai_audit_logs WHERE created_at >= ?",
-            (_today_local_prefix(),))
+            (_today_local_prefix(),),
+        )
         row = await cur.fetchone()
         if row:
             ai_today = dict(row)
+        # 今日失败按 error_class 聚合（历史 NULL/'' 归入 unknown，不报错）
+        cur2 = await conn.execute(
+            "SELECT COALESCE(NULLIF(error_class, ''), 'unknown') AS cls,"
+            " COUNT(*) AS n FROM ai_audit_logs"
+            " WHERE created_at >= ? AND action='chat' AND success=0"
+            " GROUP BY cls ORDER BY n DESC",
+            (_today_local_prefix(),),
+        )
+        ai_error_classes = {str(r["cls"]): int(r["n"] or 0) for r in await cur2.fetchall()}
     except Exception as e:
         logger.warning("activity: 读取 AI 审计汇总失败: %s", e)
+        partial_sources.append("ai_today")
     finally:
         if conn is not None:
             await release_read_conn(conn)
 
     # 实时态（进行中调用数 / 会话累计成败 / 最近一次调用）优先级更高
     ai = {
+        # ✅ 2026-11-05（方案 B）：calls_today / real_calls_today 是**逻辑调用**
+        #    行数（一次业务调用含重试/降级/对冲只落一行）；attempts_today 是
+        #    其真实尝试次数之和（SUM(attempt_count)），二者与 ai_audit_logs
+        #    完全可对账。
         "calls_today": int(ai_today.get("calls_today") or 0),
+        "real_calls_today": int(ai_today.get("real_calls_today") or 0),
+        "attempts_today": int(ai_today.get("attempts_today") or 0),
+        "failed_today": int(ai_today.get("failed_today") or 0),
+        # 尝试级失败 = 尝试数 - 成功次数（每次成功逻辑调用恰好 1 次成功尝试；
+        # 旧行 attempt_count=1 时退化为原「失败尝试数」口径）。
+        "attempt_failed_today": max(
+            0, int(ai_today.get("attempts_today") or 0) - int(ai_today.get("ok_calls") or 0)
+        ),
+        "skipped_today": int(ai_today.get("skipped_today") or 0),
         "tokens_today": int(ai_today.get("tokens_today") or 0),
         "avg_duration": round(float(ai_today.get("avg_duration") or 0), 2),
+        "avg_duration_all": round(float(ai_today.get("avg_duration_all") or 0), 2),
         "ok_calls": int(ai_today.get("ok_calls") or 0),
+        "error_classes_today": ai_error_classes,
         "last_call_at": ai_today.get("last_call_at") or "",
+        # 实时态里的 total/failed 是**尝试**口径，calls/call_failed 是**逻辑调用**口径
         **get_ai_live_stats(),
     }
     ok = ai.get("ok_calls") or 0
-    ai["success_rate"] = round(ok / ai["calls_today"] * 100, 1) if ai["calls_today"] else None
+    # ✅ 2026-11-04（口径修复）：分母改用 action='chat' 行数，跳过行不进分母。
+    # ✅ 2026-11-05（方案 B）：这些行已合并为逻辑调用 → 现在是**逻辑成功率**。
+    real_calls = ai.get("real_calls_today") or 0
+    ai["success_rate"] = round(ok / real_calls * 100, 1) if real_calls else None
+    attempts = ai.get("attempts_today") or 0
+    ai["attempt_success_rate"] = round(ok / attempts * 100, 1) if attempts else None
+    logical_calls = int(ai.get("calls") or 0)
+    logical_failed = int(ai.get("call_failed") or 0)
+    ai["logical_success_rate"] = (
+        round((logical_calls - logical_failed) / logical_calls * 100, 1) if logical_calls else None
+    )
 
     # ---- 3. 文档解析统计（监控缺口补齐 2026-10-06）：此前解析失败率/积压量
     #        在活动快照里完全不可见，用户批量上传后只能逐行翻文档列表。
@@ -217,12 +286,14 @@ async def _build_activity_snapshot(limit: int = 8) -> dict:
             " COALESCE(SUM(CASE WHEN parse_status='failed' THEN 1 ELSE 0 END), 0) AS failed,"
             " COALESCE(SUM(CASE WHEN parse_status='pending' THEN 1 ELSE 0 END), 0) AS pending,"
             " MAX(created_at) AS last_upload_at"
-            " FROM project_documents")
+            " FROM project_documents"
+        )
         row = await cur.fetchone()
         if row:
             docs_stats = dict(row)
     except Exception as e:
         logger.warning("activity: 读取文档解析统计失败: %s", e)
+        partial_sources.append("documents")
     finally:
         if conn is not None:
             await release_read_conn(conn)
@@ -247,6 +318,7 @@ async def _build_activity_snapshot(limit: int = 8) -> dict:
         "tasks": {"running": running, "recent": recent},
         "ai": ai,
         "documents": documents,
+        "partial_sources": partial_sources,
     }
 
 
@@ -359,42 +431,150 @@ from pydantic import BaseModel  # noqa: E402
 
 
 class GovernanceSettings(BaseModel):
-    """``PUT /system/governance`` 请求体；两个字段均为运行时旋钮。"""
-    prompt_context_budget: int = 0
-    prompt_injection_defense: bool = False
+    """``PUT /system/governance`` 请求体（PATCH 语义）。
+
+    ✅ 2026-11-05：字段默认值改为 ``None`` = 「不修改该项」—— 旧实现
+    全字段默认值（0 / False）导致「只提交部分字段时把其他开关静默重置」
+    （test_governance_partial_put_keeps_other_flags 报障）。
+    """
+
+    prompt_context_budget: int | None = None
+    prompt_injection_defense: bool | None = None
 
 
-@router.get("/governance")
+class RedactionSettings(BaseModel):
+    """``PUT /system/governance/redaction`` 请求体：敏感信息脱敏开关。"""
+
+    enabled: bool = False
+
+
+# ✅ 2026-11-05（R175 收口）：治理开关持久化 —— 旧实现只写进程内存态
+# （重启即回 .env 默认），用户在界面开的防护开关一重启就静默关闭，
+# 属于「以为已防护」的假安全感。现写入 SQLite kv 表，重启后读回；
+# 表在首次读写时幂等创建（不依赖 init_db 顺序）。
+_GOV_KV_TABLE_SQL = "CREATE TABLE IF NOT EXISTS governance_settings (" "key TEXT PRIMARY KEY, value TEXT NOT NULL)"
+
+
+async def _governance_kv_load() -> dict[str, str]:
+    """读取治理开关 kv（表不存在/库未初始化时返回空 dict，不抛错）。"""
+    import app.db as _appdb
+
+    conn = await _appdb.get_conn()
+    await conn.execute(_GOV_KV_TABLE_SQL)
+    await conn.commit()
+    # 注意：本项目对 aiosqlite 打过补丁（_patch_audiosqlite），conn.execute
+    # 返回 coroutine（await 后直接得到 cursor），不能用作 async context manager。
+    cur = await conn.execute("SELECT key, value FROM governance_settings")
+    rows = await cur.fetchall()
+    await cur.close()
+    return {str(k): str(v) for k, v in rows}
+
+
+async def _governance_kv_save(kv: dict[str, str]) -> None:
+    """写回治理开关 kv（upsert）。"""
+    import app.db as _appdb
+
+    conn = await _appdb.get_conn()
+    await conn.execute(_GOV_KV_TABLE_SQL)
+    await conn.executemany(
+        "INSERT INTO governance_settings (key, value) VALUES (?, ?) "
+        "ON CONFLICT(key) DO UPDATE SET value = excluded.value",
+        [(k, v) for k, v in kv.items()],
+    )
+    await conn.commit()
+
+
 async def governance_get():
-    """读取提示词治理开关的当前进程内现值。
+    """读取提示词治理开关当前生效值（持久化优先，重启不丢）。
 
     返回字段：
       - prompt_context_budget: int（≤0 = 关闭上下文预算削减；>0 = 最大字节数）
       - prompt_injection_defense: bool（False = 不对外部资料加围栏/脱敏）
     """
+    kv = await _governance_kv_load()
+    if "prompt_context_budget" in kv:
+        try:
+            budget = int(kv["prompt_context_budget"] or 0)
+        except ValueError:
+            budget = 0
+    else:
+        budget = int(getattr(settings, "prompt_context_budget", 0) or 0)
+    if "prompt_injection_defense" in kv:
+        defense = kv["prompt_injection_defense"] == "true"
+    else:
+        defense = bool(getattr(settings, "prompt_injection_defense", False))
     return {
-        "prompt_context_budget": int(
-            getattr(settings, "prompt_context_budget", 0) or 0),
-        "prompt_injection_defense": bool(
-            getattr(settings, "prompt_injection_defense", False)),
+        "prompt_context_budget": budget,
+        "prompt_injection_defense": defense,
     }
 
 
 @router.put("/governance")
 async def governance_put(body: GovernanceSettings):
-    """写回提示词治理开关到进程内 settings（内存态，重启回 .env 默认）。
+    """写回提示词治理开关（PATCH 语义 + SQLite 持久化）。
 
-    返回写回后的现值（与 GET 同构）。非法值由 Pydantic 校验拒绝（422）。
+    ``None`` 字段保留现值不重置；返回写回后的现值（与 GET 同构）。
+    非法值由 Pydantic 校验拒绝（422）。
     """
-    try:
-        settings.prompt_context_budget = int(body.prompt_context_budget)
-    except (TypeError, ValueError):
-        settings.prompt_context_budget = 0
-    settings.prompt_injection_defense = bool(body.prompt_injection_defense)
+    kv = await _governance_kv_load()
+    # 现值取序：持久化记录 > 进程内 settings
+    if "prompt_context_budget" in kv:
+        try:
+            cur_budget = int(kv["prompt_context_budget"] or 0)
+        except ValueError:
+            cur_budget = 0
+    else:
+        cur_budget = int(getattr(settings, "prompt_context_budget", 0) or 0)
+    cur_defense = (
+        (kv["prompt_injection_defense"] == "true")
+        if "prompt_injection_defense" in kv
+        else bool(getattr(settings, "prompt_injection_defense", False))
+    )
+
+    new_budget = cur_budget if body.prompt_context_budget is None else int(body.prompt_context_budget)
+    new_defense = cur_defense if body.prompt_injection_defense is None else bool(body.prompt_injection_defense)
+
+    settings.prompt_context_budget = new_budget
+    settings.prompt_injection_defense = new_defense
+    kv["prompt_context_budget"] = str(int(new_budget))
+    kv["prompt_injection_defense"] = "true" if new_defense else "false"
+    await _governance_kv_save(kv)
     logger.info(
-        "提示词治理开关已更新（内存态）: context_budget=%d, injection_defense=%s",
-        settings.prompt_context_budget, settings.prompt_injection_defense)
+        "提示词治理开关已更新并持久化: context_budget=%d, injection_defense=%s",
+        new_budget,
+        new_defense,
+    )
     return {
-        "prompt_context_budget": int(settings.prompt_context_budget or 0),
-        "prompt_injection_defense": bool(settings.prompt_injection_defense),
+        "prompt_context_budget": int(new_budget or 0),
+        "prompt_injection_defense": bool(new_defense),
+    }
+
+
+@router.put("/governance/redaction")
+async def governance_redaction_put(body: RedactionSettings):
+    """写回敏感信息脱敏开关（持久化，重启不丢）。"""
+    enabled = bool(body.enabled)
+    settings.prompt_redact_sensitive = enabled
+    kv = await _governance_kv_load()
+    kv["redaction_enabled"] = "true" if enabled else "false"
+    await _governance_kv_save(kv)
+    logger.info("敏感信息脱敏开关已更新并持久化: redaction_enabled=%s", enabled)
+    return {"redaction_enabled": enabled}
+
+
+@router.get("/governance/posture")
+async def governance_posture_get():
+    """治理姿态总览：脱敏开关生效值 + 是否已有持久化记录 + 风险提示。"""
+    from app.services import prompt_material_guard as _pmg
+
+    kv = await _governance_kv_load()
+    persisted = bool(kv)
+    if "redaction_enabled" in kv:
+        redaction_enabled = kv["redaction_enabled"] == "true"
+    else:
+        redaction_enabled = _pmg.redaction_enabled()
+    return {
+        "redaction_enabled": redaction_enabled,
+        "persisted": persisted,
+        "redaction_notice": ("" if redaction_enabled else _pmg.governance_posture()["redaction_notice"]),
     }

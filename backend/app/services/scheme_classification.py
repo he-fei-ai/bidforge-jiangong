@@ -18,6 +18,7 @@
 不改变既有 18 项提取的任何字段与默认值（向后兼容）。阈值取用本文件常量，
 后续若需按省市细则差异化，可经 config 注入覆盖（当前默认部文口径）。
 """
+
 from __future__ import annotations
 
 import re
@@ -38,18 +39,32 @@ from typing import Optional
 
 HAZARD_CATEGORIES: list[dict] = [
     {
-        "id": "foundation_pit", "name": "基坑工程",
+        "id": "foundation_pit",
+        "name": "基坑工程",
         "standards": ["基坑"],
         "subs": [
             {
-                "id": "fp_support_drain", "name": "基坑支护与降水工程",
-                "keywords": ("基坑支护", "支护", "降水", "地下连续墙", "SMW", "排桩",
-                             "地下水位", "坑底以上", "止水帷幕", "内支撑", "围护"),
+                "id": "fp_support_drain",
+                "name": "基坑支护与降水工程",
+                "keywords": (
+                    "基坑支护",
+                    "支护",
+                    "降水",
+                    "地下连续墙",
+                    "SMW",
+                    "排桩",
+                    "地下水位",
+                    "坑底以上",
+                    "止水帷幕",
+                    "内支撑",
+                    "围护",
+                ),
                 "standards": ["基坑"],
                 "threshold": "fp_support_drain",
             },
             {
-                "id": "fp_earthwork", "name": "土方开挖工程",
+                "id": "fp_earthwork",
+                "name": "土方开挖工程",
                 "keywords": ("土方开挖", "开挖", "挖土", "基坑开挖", "石方开挖", "管沟开挖"),
                 "standards": ["基坑"],
                 "threshold": "fp_earthwork",
@@ -63,29 +78,39 @@ HAZARD_CATEGORIES: list[dict] = [
             #    危大」处理；不要为本子类新建数值阈值（无部文依据，凭记忆编造
             #    阈值是本项目明确禁止的做法）。
             {
-                "id": "fp_monitoring", "name": "基坑监测工程",
-                "keywords": ("基坑监测", "变形监测", "自动化监测", "监测方案",
-                            "位移监测", "沉降监测", "测斜", "监测预警"),
+                "id": "fp_monitoring",
+                "name": "基坑监测工程",
+                "keywords": (
+                    "基坑监测",
+                    "变形监测",
+                    "自动化监测",
+                    "监测方案",
+                    "位移监测",
+                    "沉降监测",
+                    "测斜",
+                    "监测预警",
+                ),
                 "standards": ["基坑"],
                 "threshold": None,
             },
         ],
     },
     {
-        "id": "formwork", "name": "模板工程及支撑体系",
+        "id": "formwork",
+        "name": "模板工程及支撑体系",
         "standards": ["模板"],
         "subs": [
             {
-                "id": "fw_support", "name": "模板支撑体系工程",
-                "keywords": ("模板支撑", "支撑体系", "支模", "模板支架", "满堂支撑",
-                             "承重支撑", "钢管支撑"),
+                "id": "fw_support",
+                "name": "模板支撑体系工程",
+                "keywords": ("模板支撑", "支撑体系", "支模", "模板支架", "满堂支撑", "承重支撑", "钢管支撑"),
                 "standards": ["模板"],
                 "threshold": "fw_support",
             },
             {
-                "id": "fw_tall", "name": "高大模板工程",
-                "keywords": ("高大模板", "高支模", "超限梁", "大截面", "超限模板",
-                             "高支撑架", "大跨度模板"),
+                "id": "fw_tall",
+                "name": "高大模板工程",
+                "keywords": ("高大模板", "高支模", "超限梁", "大截面", "超限模板", "高支撑架", "大跨度模板"),
                 "standards": ["模板"],
                 "threshold": "fw_tall",
             },
@@ -96,29 +121,39 @@ HAZARD_CATEGORIES: list[dict] = [
             #    ⚠️ threshold 复用 "fw_support"：盘扣式属模板支撑体系的一种型式，
             #    危大/超规模的判定阈值与部文附件一/二口径一致，不新增阈值记录。
             {
-                "id": "fw_disc", "name": "盘扣式模板支撑体系工程",
-                "keywords": ("盘扣式模板支撑", "盘扣式支撑", "承插型盘扣式",
-                            "盘扣支架", "圆盘式模板支撑"),
+                "id": "fw_disc",
+                "name": "盘扣式模板支撑体系工程",
+                "keywords": ("盘扣式模板支撑", "盘扣式支撑", "承插型盘扣式", "盘扣支架", "圆盘式模板支撑"),
                 "standards": ["模板"],
                 "threshold": "fw_support",
             },
         ],
     },
     {
-        "id": "hoisting", "name": "起重吊装及起重机械安装拆卸工程",
+        "id": "hoisting",
+        "name": "起重吊装及起重机械安装拆卸工程",
         "standards": ["起重机械"],
         "subs": [
             {
-                "id": "ho_lift", "name": "起重吊装工程",
-                "keywords": ("起重吊装", "吊装", "构件吊装", "大型设备吊装", "钢结构吊装",
-                             "网架吊装", "非常规起重"),
+                "id": "ho_lift",
+                "name": "起重吊装工程",
+                "keywords": ("起重吊装", "吊装", "构件吊装", "大型设备吊装", "钢结构吊装", "网架吊装", "非常规起重"),
                 "standards": ["起重机械"],
                 "threshold": "ho_lift",
             },
             {
-                "id": "ho_crane", "name": "起重机械安装拆卸工程",
-                "keywords": ("塔吊安装", "起重机械安装", "拆卸", "塔式起重机", "施工升降机安装",
-                             "塔机拆除", "群塔", "起重机械基础"),
+                "id": "ho_crane",
+                "name": "起重机械安装拆卸工程",
+                "keywords": (
+                    "塔吊安装",
+                    "起重机械安装",
+                    "拆卸",
+                    "塔式起重机",
+                    "施工升降机安装",
+                    "塔机拆除",
+                    "群塔",
+                    "起重机械基础",
+                ),
                 "standards": ["起重机械"],
                 "threshold": "ho_crane",
             },
@@ -134,47 +169,60 @@ HAZARD_CATEGORIES: list[dict] = [
             #    视角的识别精度增强，多命中不影响判定结果（match_category_keywords
             #    返回命中列表，evaluate_hazard_level 取最严口径）。
             {
-                "id": "ho_tower_crane", "name": "塔式起重机（塔机）安装拆卸工程",
-                "keywords": ("塔机", "塔吊", "塔式起重机", "QT", "QTZ", "平衡臂",
-                            "起重臂", "顶升加节", "附墙加节"),
+                "id": "ho_tower_crane",
+                "name": "塔式起重机（塔机）安装拆卸工程",
+                "keywords": ("塔机", "塔吊", "塔式起重机", "QT", "QTZ", "平衡臂", "起重臂", "顶升加节", "附墙加节"),
                 "standards": ["起重机械"],
                 "threshold": "ho_crane",
             },
             {
-                "id": "ho_construction_hoist", "name": "施工升降机安装拆卸工程",
-                "keywords": ("施工升降机", "施工电梯", "齿轮齿条", "SC系列", "SC200",
-                            "标准节", "附墙支架"),
+                "id": "ho_construction_hoist",
+                "name": "施工升降机安装拆卸工程",
+                "keywords": ("施工升降机", "施工电梯", "齿轮齿条", "SC系列", "SC200", "标准节", "附墙支架"),
                 "standards": ["起重机械"],
                 "threshold": "ho_crane",
             },
         ],
     },
     {
-        "id": "scaffold", "name": "脚手架工程",
+        "id": "scaffold",
+        "name": "脚手架工程",
         "standards": ["脚手架"],
         "subs": [
             {
-                "id": "sc_ground", "name": "落地式钢管脚手架（高度>24m）",
+                "id": "sc_ground",
+                "name": "落地式钢管脚手架（高度>24m）",
                 "keywords": ("落地式脚手架", "扣件式钢管脚手架", "落地式", "钢管脚手架"),
                 "standards": ["脚手架"],
                 "threshold": "sc_ground",
             },
             {
-                "id": "sc_attached", "name": "附着式升降脚手架",
+                "id": "sc_attached",
+                "name": "附着式升降脚手架",
                 "keywords": ("附着式", "爬架", "升降脚手架", "附着升降"),
                 "standards": ["脚手架"],
                 "threshold": "sc_attached",
             },
             {
-                "id": "sc_cantilever", "name": "悬挑式脚手架",
+                "id": "sc_cantilever",
+                "name": "悬挑式脚手架",
                 "keywords": ("悬挑脚手架", "悬挑式", "型钢悬挑"),
                 "standards": ["脚手架"],
                 "threshold": "sc_cantilever",
             },
             {
-                "id": "sc_other", "name": "门型脚手架、挂脚手架、吊篮脚手架、卸料平台",
-                "keywords": ("门型脚手架", "门式脚手架", "挂脚手架", "吊篮", "吊篮脚手架",
-                             "卸料平台", "操作平台", "移动脚手架"),
+                "id": "sc_other",
+                "name": "门型脚手架、挂脚手架、吊篮脚手架、卸料平台",
+                "keywords": (
+                    "门型脚手架",
+                    "门式脚手架",
+                    "挂脚手架",
+                    "吊篮",
+                    "吊篮脚手架",
+                    "卸料平台",
+                    "操作平台",
+                    "移动脚手架",
+                ),
                 "standards": ["脚手架"],
                 "threshold": "sc_other",
             },
@@ -188,38 +236,43 @@ HAZARD_CATEGORIES: list[dict] = [
             #    脚手架管理，危大阈值（24m 及以上）与超规模阈值（50m 及以上）
             #    口径一致，不新增阈值记录。
             {
-                "id": "sc_cuplock", "name": "碗扣式钢管脚手架",
+                "id": "sc_cuplock",
+                "name": "碗扣式钢管脚手架",
                 "keywords": ("碗扣式", "碗扣脚手架", "碗扣式钢管", "BW"),
                 "standards": ["脚手架"],
                 "threshold": "sc_ground",
             },
             {
-                "id": "sc_disc", "name": "盘扣式钢管脚手架",
-                "keywords": ("盘扣式脚手架", "盘扣式钢管脚手架", "承插型盘扣式钢管",
-                            "盘扣脚手架", "圆盘式脚手架"),
+                "id": "sc_disc",
+                "name": "盘扣式钢管脚手架",
+                "keywords": ("盘扣式脚手架", "盘扣式钢管脚手架", "承插型盘扣式钢管", "盘扣脚手架", "圆盘式脚手架"),
                 "standards": ["脚手架"],
                 "threshold": "sc_ground",
             },
         ],
     },
     {
-        "id": "demolition", "name": "拆除、爆破工程",
+        "id": "demolition",
+        "name": "拆除、爆破工程",
         "standards": [],
         "subs": [
             {
-                "id": "dm_manual", "name": "人工拆除工程",
+                "id": "dm_manual",
+                "name": "人工拆除工程",
                 "keywords": ("人工拆除", "人工爆破", "手动拆除"),
                 "standards": [],
                 "threshold": None,
             },
             {
-                "id": "dm_machine", "name": "机械拆除工程",
+                "id": "dm_machine",
+                "name": "机械拆除工程",
                 "keywords": ("机械拆除", "机械破碎", "炮机拆除", "液压拆除"),
                 "standards": [],
                 "threshold": None,
             },
             {
-                "id": "dm_blast", "name": "爆破拆除工程",
+                "id": "dm_blast",
+                "name": "爆破拆除工程",
                 "keywords": ("爆破", "爆破拆除", "控制爆破", "炸药"),
                 "standards": [],
                 "threshold": None,
@@ -227,41 +280,48 @@ HAZARD_CATEGORIES: list[dict] = [
         ],
     },
     {
-        "id": "other", "name": "其他危大工程",
+        "id": "other",
+        "name": "其他危大工程",
         "standards": [],
         "subs": [
             {
-                "id": "ot_curtain", "name": "建筑幕墙安装",
+                "id": "ot_curtain",
+                "name": "建筑幕墙安装",
                 "keywords": ("幕墙", "玻璃幕墙", "石材幕墙", "铝板幕墙"),
                 "standards": ["装饰保温"],
                 "threshold": "ot_curtain",
             },
             {
-                "id": "ot_steel", "name": "钢结构（网架、索膜结构）安装",
+                "id": "ot_steel",
+                "name": "钢结构（网架、索膜结构）安装",
                 "keywords": ("钢结构", "网架", "索膜", "管桁架", "钢构安装"),
                 "standards": [],
                 "threshold": "ot_steel",
             },
             {
-                "id": "ot_prestress", "name": "预应力结构张拉",
+                "id": "ot_prestress",
+                "name": "预应力结构张拉",
                 "keywords": ("预应力", "张拉", "预应力张拉", "先张法", "后张法"),
                 "standards": ["混凝土"],
                 "threshold": "ot_prestress",
             },
             {
-                "id": "ot_underground", "name": "地下暗挖、顶管、水下作业",
+                "id": "ot_underground",
+                "name": "地下暗挖、顶管、水下作业",
                 "keywords": ("暗挖", "顶管", "水下作业", "盾构", "矿山法", "浅埋暗挖"),
                 "standards": [],
                 "threshold": None,
             },
             {
-                "id": "ot_slope", "name": "6m以上边坡施工",
+                "id": "ot_slope",
+                "name": "6m以上边坡施工",
                 "keywords": ("边坡", "高边坡", "边坡支护", "边坡开挖"),
                 "standards": ["基坑"],
                 "threshold": "ot_slope",
             },
             {
-                "id": "ot_confined", "name": "有限空间作业",
+                "id": "ot_confined",
+                "name": "有限空间作业",
                 # ✅ 2026-09-26 缺口修复（六大类危大工程及子类覆盖度审计）：
                 #    建办质〔2018〕31号 附件一「七、其他」明确含**有限空间作业**，
                 #    但本表 `other` 六个子类此前只覆盖幕墙/钢结构/预应力/暗挖/
@@ -274,7 +334,8 @@ HAZARD_CATEGORIES: list[dict] = [
                 "threshold": None,
             },
             {
-                "id": "ot_newtech", "name": "采用新技术、新工艺、新材料且无技术标准的工程",
+                "id": "ot_newtech",
+                "name": "采用新技术、新工艺、新材料且无技术标准的工程",
                 "keywords": ("新技术", "新工艺", "新材料", "无技术标准", "四新"),
                 "standards": [],
                 "threshold": None,
@@ -297,9 +358,9 @@ HAZARD_CATEGORIES: list[dict] = [
             #    旧行为（threshold=None）把人工挖孔桩**一律**判为超规模，
             #    10m 挖孔桩也被要求专家论证 —— 与部文不符（属过判）。
             {
-                "id": "ot_bored_pile", "name": "人工挖孔桩工程",
-                "keywords": ("人工挖孔桩", "人工挖孔", "挖孔桩", "干作业挖孔",
-                            "混凝土护壁"),
+                "id": "ot_bored_pile",
+                "name": "人工挖孔桩工程",
+                "keywords": ("人工挖孔桩", "人工挖孔", "挖孔桩", "干作业挖孔", "混凝土护壁"),
                 "standards": ["桩基"],
                 "threshold": "ot_bored_pile",
             },
@@ -338,10 +399,8 @@ HAZARD_THRESHOLDS: dict[str, dict] = {
     # 模板支撑体系：搭设高度≥5m 或 跨度≥10m 或 总荷载≥10 或 线荷载≥15 → 危大
     "fw_support": {
         "params": ("height", "span", "total_load", "line_load"),
-        "hazard_when": [("height", ">=", 5), ("span", ">=", 10),
-                        ("total_load", ">=", 10), ("line_load", ">=", 15)],
-        "oversize_when": [("height", ">=", 8), ("span", ">=", 18),
-                          ("total_load", ">=", 15), ("line_load", ">=", 20)],
+        "hazard_when": [("height", ">=", 5), ("span", ">=", 10), ("total_load", ">=", 10), ("line_load", ">=", 15)],
+        "oversize_when": [("height", ">=", 8), ("span", ">=", 18), ("total_load", ">=", 15), ("line_load", ">=", 20)],
         "any_match": True,
     },
     # 高大模板：建办质〔2018〕31号 附件二 —— 搭设高度8m及以上、跨度18m及以上、
@@ -352,10 +411,8 @@ HAZARD_THRESHOLDS: dict[str, dict] = {
     #    现统一改为 >=，并按附件二口径修正 total_load/line_load 阈值。
     "fw_tall": {
         "params": ("height", "span", "total_load", "line_load"),
-        "hazard_when": [("height", ">=", 8), ("span", ">=", 18),
-                        ("total_load", ">=", 15), ("line_load", ">=", 20)],
-        "oversize_when": [("height", ">=", 8), ("span", ">=", 18),
-                          ("total_load", ">=", 15), ("line_load", ">=", 20)],
+        "hazard_when": [("height", ">=", 8), ("span", ">=", 18), ("total_load", ">=", 15), ("line_load", ">=", 20)],
+        "oversize_when": [("height", ">=", 8), ("span", ">=", 18), ("total_load", ">=", 15), ("line_load", ">=", 20)],
         "any_match": True,
     },
     # 起重吊装：非常规起重设备/方法且单件≥10kN → 危大；采用起重机械安装 → 危大
@@ -469,15 +526,24 @@ HAZARD_THRESHOLDS: dict[str, dict] = {
 #   category_fields  按危大类别追加的必填字段（由 required_fields_for_chapter 合并）
 NINE_CHAPTERS: list[dict] = [
     {
-        "chapter": 1, "key": "overview", "title": "工程概况",
+        "chapter": 1,
+        "key": "overview",
+        "title": "工程概况",
         "source_items": ["projectBasicInfo", "overviewParams"],
-        "base_fields": ["工程名称", "工程地点", "建设规模", "结构形式",
-                        "参建各方责任主体单位", "风险辨识与分级", "气候特征",
-                        # R52（2026-10-07）：一致性主题键对齐 —— 「总工期」是
-                        # CONSISTENCY_KEY_RULES 的数据字典权威键，此前九大章节
-                        # 无落点（数据字典有值但要素清单不要求）。追加到尾部，
-                        # 与 content_data_contract 判据同源（parity 护栏锁定）。
-                        "总工期"],
+        "base_fields": [
+            "工程名称",
+            "工程地点",
+            "建设规模",
+            "结构形式",
+            "参建各方责任主体单位",
+            "风险辨识与分级",
+            "气候特征",
+            # R52（2026-10-07）：一致性主题键对齐 —— 「总工期」是
+            # CONSISTENCY_KEY_RULES 的数据字典权威键，此前九大章节
+            # 无落点（数据字典有值但要素清单不要求）。追加到尾部，
+            # 与 content_data_contract 判据同源（parity 护栏锁定）。
+            "总工期",
+        ],
         "category_fields": {
             "foundation_pit": ["基坑周长/面积/深度", "支护形式", "降水方式", "监测要求"],
             "formwork": ["模板类型", "支撑高度", "跨度", "荷载", "混凝土等级"],
@@ -488,10 +554,11 @@ NINE_CHAPTERS: list[dict] = [
         },
     },
     {
-        "chapter": 2, "key": "basis", "title": "编制依据",
+        "chapter": 2,
+        "key": "basis",
+        "title": "编制依据",
         "source_items": ["compilationBasis"],
-        "base_fields": ["适用法规清单", "适用标准清单", "施工图编号",
-                        "施工组织设计编号", "施工合同编号"],
+        "base_fields": ["适用法规清单", "适用标准清单", "施工图编号", "施工组织设计编号", "施工合同编号"],
         "category_fields": {
             "foundation_pit": ["JGJ120", "GB50497", "GB50202"],
             "formwork": ["JGJ162", "GB51210", "JGJ300"],
@@ -502,55 +569,74 @@ NINE_CHAPTERS: list[dict] = [
         },
     },
     {
-        "chapter": 3, "key": "plan", "title": "施工计划",
+        "chapter": 3,
+        "key": "plan",
+        "title": "施工计划",
         "source_items": ["deploymentSchedule", "resourceAllocation"],
-        "base_fields": ["计划开工日期", "计划竣工日期", "分项进度节点",
-                        "材料需求清单", "设备配置清单", "劳动力配置表"],
+        "base_fields": ["计划开工日期", "计划竣工日期", "分项进度节点", "材料需求清单", "设备配置清单", "劳动力配置表"],
         "category_fields": {},
     },
     {
-        "chapter": 4, "key": "technique", "title": "施工工艺技术",
+        "chapter": 4,
+        "key": "technique",
+        "title": "施工工艺技术",
         "source_items": ["constructionTechnique"],
-        "base_fields": ["材料选型", "规格", "技术参数", "工艺流程步骤",
-                        "施工方法描述", "操作要求", "质量检查标准"],
+        "base_fields": ["材料选型", "规格", "技术参数", "工艺流程步骤", "施工方法描述", "操作要求", "质量检查标准"],
         "category_fields": {},
     },
     {
-        "chapter": 5, "key": "safety", "title": "施工安全保证措施",
+        "chapter": 5,
+        "key": "safety",
+        "title": "施工安全保证措施",
         "source_items": ["safetyMeasures"],
-        "base_fields": ["安全组织机构", "安全职责分工", "技术措施清单",
-                        "监测方案参数", "预警值"],
+        "base_fields": ["安全组织机构", "安全职责分工", "技术措施清单", "监测方案参数", "预警值"],
         "category_fields": {},
     },
     {
-        "chapter": 6, "key": "personnel", "title": "施工管理及作业人员配备和分工",
+        "chapter": 6,
+        "key": "personnel",
+        "title": "施工管理及作业人员配备和分工",
         "source_items": ["resourceAllocation", "projectBasicInfo"],
-        "base_fields": ["管理人员名单及岗位", "安全员名单",
-                        "特种作业人员及证书编号", "作业人员配置"],
+        "base_fields": ["管理人员名单及岗位", "安全员名单", "特种作业人员及证书编号", "作业人员配置"],
         "category_fields": {},
     },
     {
-        "chapter": 7, "key": "acceptance", "title": "验收要求",
+        "chapter": 7,
+        "key": "acceptance",
+        "title": "验收要求",
         "source_items": ["qualityAcceptance"],
-        "base_fields": ["验收标准编号", "验收程序步骤", "验收内容清单",
-                        "验收人员组成",
-                        # R52：一致性主题键对齐 —— 「保修期与缺陷责任期」
-                        # （CONSISTENCY_KEY_RULES 权威键）此前无落点。
-                        "保修期与缺陷责任期"],
+        "base_fields": [
+            "验收标准编号",
+            "验收程序步骤",
+            "验收内容清单",
+            "验收人员组成",
+            # R52：一致性主题键对齐 —— 「保修期与缺陷责任期」
+            # （CONSISTENCY_KEY_RULES 权威键）此前无落点。
+            "保修期与缺陷责任期",
+        ],
         "category_fields": {},
     },
     {
-        "chapter": 8, "key": "emergency", "title": "应急处置措施",
+        "chapter": 8,
+        "key": "emergency",
+        "title": "应急处置措施",
         "source_items": ["emergencyResponse"],
-        "base_fields": ["应急组织架构", "应急联系人及电话", "应急物资清单",
-                        "救援线路", "附近医院信息",
-                        # R52：一致性主题键对齐 —— 「响应时限」
-                        # （CONSISTENCY_KEY_RULES 权威键）此前无落点。
-                        "响应时限"],
+        "base_fields": [
+            "应急组织架构",
+            "应急联系人及电话",
+            "应急物资清单",
+            "救援线路",
+            "附近医院信息",
+            # R52：一致性主题键对齐 —— 「响应时限」
+            # （CONSISTENCY_KEY_RULES 权威键）此前无落点。
+            "响应时限",
+        ],
         "category_fields": {},
     },
     {
-        "chapter": 9, "key": "calc_drawings", "title": "计算书及相关施工图纸",
+        "chapter": 9,
+        "key": "calc_drawings",
+        "title": "计算书及相关施工图纸",
         "source_items": ["calcAndDrawings"],
         "base_fields": ["计算书类型", "计算参数", "图纸清单", "图纸编号"],
         "category_fields": {},
@@ -601,12 +687,14 @@ def match_category_keywords(text: str) -> list[dict]:
                     key = (cat["id"], sub["id"])
                     if key not in seen:
                         seen.add(key)
-                        hits.append({
-                            "category_id": cat["id"],
-                            "category_name": cat["name"],
-                            "sub_id": sub["id"],
-                            "sub_name": sub["name"],
-                        })
+                        hits.append(
+                            {
+                                "category_id": cat["id"],
+                                "category_name": cat["name"],
+                                "sub_id": sub["id"],
+                                "sub_name": sub["name"],
+                            }
+                        )
                     break
     return hits
 
@@ -692,8 +780,7 @@ def resolve_threshold_key(sub_id: Optional[str]) -> Optional[str]:
     return sub_id
 
 
-def evaluate_hazard_level(threshold_key: Optional[str],
-                          params: Optional[dict] = None) -> dict:
+def evaluate_hazard_level(threshold_key: Optional[str], params: Optional[dict] = None) -> dict:
     """依据阈值记录判定危大 / 超规模。
 
     Args:
@@ -716,10 +803,7 @@ def evaluate_hazard_level(threshold_key: Optional[str],
     #    避免上游误以为「参数齐全」。
     if rule is not None and rule.get("hazard_always"):
         oversize_reasons = _check_oversize(rule, params)
-        missing_oversize = [
-            p for p in rule.get("params", ())
-            if p not in params
-        ]
+        missing_oversize = [p for p in rule.get("params", ()) if p not in params]
         # ✅ 2026-10-02：超规模判定的**缺参方向必须显式声明**。
         #    本分支默认「缺参 → 不判超规模」（参数型危大如基坑 3m 未给深度时
         #    不该断言超规模）。但人工挖孔桩不同：它**本身即危大**、超规模与否
@@ -729,8 +813,7 @@ def evaluate_hazard_level(threshold_key: Optional[str],
         conservative = bool(rule.get("oversize_conservative_missing"))
         if conservative and missing_oversize:
             oversize_reasons = oversize_reasons + [
-                f"缺少 {'、'.join(missing_oversize)}，按保守口径暂判为超过一定规模"
-                "（部文附件二阈值待补全后复核）"
+                f"缺少 {'、'.join(missing_oversize)}，按保守口径暂判为超过一定规模" "（部文附件二阈值待补全后复核）"
             ]
         return {
             "is_hazardous": True,
@@ -743,15 +826,21 @@ def evaluate_hazard_level(threshold_key: Optional[str],
     # 非参数型子类（拆除/暗挖/四新/附着式/悬挑/门型等）：出现即危大
     if rule is None or not rule.get("hazard_when"):
         if threshold_key is None:
-            return {"is_hazardous": True, "is_oversize": True,
-                    "hazard_reasons": ["非参数型危大工程（出现即危大）"],
-                    "oversize_reasons": ["非参数型危大工程（同属超规模）"],
-                    "missing_params": []}
+            return {
+                "is_hazardous": True,
+                "is_oversize": True,
+                "hazard_reasons": ["非参数型危大工程（出现即危大）"],
+                "oversize_reasons": ["非参数型危大工程（同属超规模）"],
+                "missing_params": [],
+            }
         # 有阈值键但 hazard_when 为空（附着式等本身即危大）
-        return {"is_hazardous": True, "is_oversize": True,
-                "hazard_reasons": ["该类危大工程本身即属危大（部文附件一）"],
-                "oversize_reasons": ["该类危大工程本身即属危大"],
-                "missing_params": []}
+        return {
+            "is_hazardous": True,
+            "is_oversize": True,
+            "hazard_reasons": ["该类危大工程本身即属危大（部文附件一）"],
+            "oversize_reasons": ["该类危大工程本身即属危大"],
+            "missing_params": [],
+        }
 
     missing: list[str] = [p for p in rule["params"] if p not in params]
     hazard_reasons: list[str] = []
@@ -795,6 +884,7 @@ def evaluate_hazard_level(threshold_key: Optional[str],
 @dataclass
 class SchemeClassification:
     """方案分类结果（可序列化为 JSON 落库 schemes.scheme_classification_json）。"""
+
     scheme_name: str = ""
     category_ids: list[str] = field(default_factory=list)
     category_names: list[str] = field(default_factory=list)
@@ -821,8 +911,7 @@ class SchemeClassification:
         }
 
 
-def classify_scheme(scheme_name: str, params: Optional[dict] = None,
-                    extra_text: str = "") -> SchemeClassification:
+def classify_scheme(scheme_name: str, params: Optional[dict] = None, extra_text: str = "") -> SchemeClassification:
     """综合「名称关键词 + 阈值参数」给出方案分类结果。
 
     Args:
@@ -873,13 +962,15 @@ def classify_scheme(scheme_name: str, params: Optional[dict] = None,
         lvl = evaluate_hazard_level(resolve_threshold_key(h["sub_id"]), params)
         any_hazard = any_hazard or lvl["is_hazardous"]
         any_oversize = any_oversize or lvl["is_oversize"]
-        hazards.append({
-            "category_id": h["category_id"],
-            "category_name": h["category_name"],
-            "sub_id": h["sub_id"],
-            "sub_name": h["sub_name"],
-            **lvl,
-        })
+        hazards.append(
+            {
+                "category_id": h["category_id"],
+                "category_name": h["category_name"],
+                "sub_id": h["sub_id"],
+                "sub_name": h["sub_name"],
+                **lvl,
+            }
+        )
 
     return SchemeClassification(
         scheme_name=scheme_name,
@@ -915,26 +1006,23 @@ def format_classification_hint(cls: "SchemeClassification") -> str:
         level.append("危大工程")
     if cls.is_oversize:
         level.append("超过一定规模的危大工程")
-    lines.append("危大级别：" + ("、".join(level) if level
-                                  else "按名称特征未识别为危大工程（仍请完整抽取）"))
+    lines.append("危大级别：" + ("、".join(level) if level else "按名称特征未识别为危大工程（仍请完整抽取）"))
     if cls.standards_keys:
         lines.append("建议重点匹配编制规范类别：" + "、".join(cls.standards_keys))
     lines.append(
         "提取要求：请按上述危大工程类别，重点、完整地抽取九大章节对应字段——"
         "工程概况、编制依据、施工计划、施工工艺技术、施工安全保证措施、"
         "施工管理及作业人员配备和分工、验收要求、应急处置措施、计算书及相关施工图纸；"
-        "不漏项、不错位、不臆造。")
+        "不漏项、不错位、不臆造。"
+    )
     return "\n".join(lines)
 
 
-def build_classification_hint(scheme_name: str,
-                             params: Optional[dict] = None,
-                             extra_text: str = "") -> str:
+def build_classification_hint(scheme_name: str, params: Optional[dict] = None, extra_text: str = "") -> str:
     """便捷封装：方案名称(+可选参数/文本) → 分类提示串。"""
     if not (scheme_name or extra_text):
         return ""
-    return format_classification_hint(
-        classify_scheme(scheme_name, params or {}, extra_text))
+    return format_classification_hint(classify_scheme(scheme_name, params or {}, extra_text))
 
 
 # =========================================================================
@@ -968,9 +1056,7 @@ def match_chapter_by_title(title: str) -> Optional[str]:
     return None
 
 
-def top_ancestor(section_id: str,
-                 nodes_map: dict,
-                 by_parent: Optional[dict] = None) -> Optional[dict]:
+def top_ancestor(section_id: str, nodes_map: dict, by_parent: Optional[dict] = None) -> Optional[dict]:
     """沿 parent_id 向上走到一级章节（顶层祖先），返回其节点 dict；传入非法 id 返回 None。
 
     nodes_map: section_id → section 节点（建议预构建，避免逐章重建）。
@@ -986,9 +1072,7 @@ def top_ancestor(section_id: str,
     return cur
 
 
-def build_chapter_extraction_text(extraction_items: list[dict],
-                                  chapter_key: str,
-                                  max_chars: int = 2000) -> str:
+def build_chapter_extraction_text(extraction_items: list[dict], chapter_key: str, max_chars: int = 2000) -> str:
     """把某九大章节对应的提取项拼成「本章专项提取成果」文本块（纯函数，不查库）。
 
     extraction_items: 形如 [{"label":..., "content":...}, ...]（来自 bid_analysis_items）。
@@ -1007,8 +1091,7 @@ def build_chapter_extraction_text(extraction_items: list[dict],
 # =========================================================================
 # 七、九大章节字段映射与完整性校验
 # =========================================================================
-def required_fields_for_chapter(chapter_key: str,
-                                category_id: Optional[str] = None) -> list[str]:
+def required_fields_for_chapter(chapter_key: str, category_id: Optional[str] = None) -> list[str]:
     """返回某章节在给定危大类别下的必填字段（通用 + 类别追加）。"""
     for ch in NINE_CHAPTERS:
         if ch["key"] == chapter_key:
@@ -1049,8 +1132,7 @@ def map_extraction_to_chapters(extraction: dict) -> dict:
     return out
 
 
-def validate_chapter_fields(extraction: dict,
-                           category_id: Optional[str] = None) -> dict:
+def validate_chapter_fields(extraction: dict, category_id: Optional[str] = None) -> dict:
     """九大章节字段完整性校验（差集分析）。
 
     判定策略（可解释、可测试）：
@@ -1074,8 +1156,7 @@ def validate_chapter_fields(extraction: dict,
         fields = required_fields_for_chapter(ch["key"], category_id)
         total_required += len(fields)
         # 合并来源内容
-        blob = _norm_text(" ".join(
-            (extraction.get(s) or "") for s in ch["source_items"]))
+        blob = _norm_text(" ".join((extraction.get(s) or "") for s in ch["source_items"]))
         missing_fields: list[str] = []
         for f in fields:
             # 字段名含 "/"（如「基坑周长/面积/深度」）表示「或」关系：
@@ -1087,8 +1168,7 @@ def validate_chapter_fields(extraction: dict,
                 covered += 1
             else:
                 missing_fields.append(f)
-        chapter_filled = not any(
-            not (extraction.get(s) or "").strip() for s in ch["source_items"])
+        chapter_filled = not any(not (extraction.get(s) or "").strip() for s in ch["source_items"])
         if not chapter_filled:
             result["missing_chapters"].append(ch["key"])
         result["chapters"][ch["key"]] = {
@@ -1097,8 +1177,7 @@ def validate_chapter_fields(extraction: dict,
             "required_fields": fields,
             "missing_fields": missing_fields,
             "chapter_filled": chapter_filled,
-            "field_coverage": round(1 - len(missing_fields) / len(fields), 3)
-            if fields else 1.0,
+            "field_coverage": round(1 - len(missing_fields) / len(fields), 3) if fields else 1.0,
         }
 
     result["total_required"] = total_required

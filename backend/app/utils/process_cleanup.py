@@ -22,6 +22,7 @@
 
 兼容性：新增模块，不改动任何既有调用点；默认行为向后兼容（仅在显式调用时生效）。
 """
+
 from __future__ import annotations
 
 import ctypes
@@ -88,8 +89,7 @@ if IS_WIN:
     _kernel32.CreateJobObjectW.restype = ctypes.c_void_p
     _kernel32.CreateJobObjectW.argtypes = [ctypes.c_void_p, ctypes.c_wchar_p]
     _kernel32.SetInformationJobObject.restype = ctypes.c_bool
-    _kernel32.SetInformationJobObject.argtypes = [
-        ctypes.c_void_p, ctypes.c_int, ctypes.c_void_p, ctypes.c_uint32]
+    _kernel32.SetInformationJobObject.argtypes = [ctypes.c_void_p, ctypes.c_int, ctypes.c_void_p, ctypes.c_uint32]
     _kernel32.AssignProcessToJobObject.restype = ctypes.c_bool
     _kernel32.AssignProcessToJobObject.argtypes = [ctypes.c_void_p, ctypes.c_void_p]
     _kernel32.OpenProcess.restype = ctypes.c_void_p
@@ -151,8 +151,7 @@ def assign_pid_to_kill_job(pid: int) -> bool:
         return False
     proc_handle = None
     try:
-        proc_handle = _kernel32.OpenProcess(
-            _PROCESS_SET_QUOTA | _PROCESS_TERMINATE, False, pid)
+        proc_handle = _kernel32.OpenProcess(_PROCESS_SET_QUOTA | _PROCESS_TERMINATE, False, pid)
         if not proc_handle:
             return False
         return bool(_kernel32.AssignProcessToJobObject(job, proc_handle))
@@ -187,7 +186,8 @@ def kill_process_tree(pid: int, grace_sec: float = 3.0) -> bool:
         if IS_WIN:
             subprocess.run(
                 ["taskkill", "/T", "/F", "/PID", str(pid)],
-                capture_output=True, timeout=8,
+                capture_output=True,
+                timeout=8,
                 creationflags=_no_window_flags(),
             )
         else:
@@ -212,11 +212,16 @@ def kill_process_tree(pid: int, grace_sec: float = 3.0) -> bool:
 def _pid_alive(pid: int) -> bool:
     if IS_WIN:
         try:
-            out = subprocess.run(
-                ["tasklist", "/FI", f"PID eq {pid}", "/NH"],
-                capture_output=True, text=True, timeout=5,
-                creationflags=_no_window_flags(),
-            ).stdout or ""
+            out = (
+                subprocess.run(
+                    ["tasklist", "/FI", f"PID eq {pid}", "/NH"],
+                    capture_output=True,
+                    text=True,
+                    timeout=5,
+                    creationflags=_no_window_flags(),
+                ).stdout
+                or ""
+            )
             return str(pid) in out
         except Exception:  # noqa: BLE001
             return True  # 探测失败时保守视为存活
@@ -253,7 +258,10 @@ def run_child(
       3. 超时抛 `subprocess.TimeoutExpired`（语义与 subprocess.run 一致）。
     """
     popen_kwargs: dict = dict(
-        stdout=subprocess.PIPE, stderr=subprocess.PIPE, cwd=cwd, env=env,
+        stdout=subprocess.PIPE,
+        stderr=subprocess.PIPE,
+        cwd=cwd,
+        env=env,
     )
     if text:
         popen_kwargs.update(encoding=encoding, errors=errors)
@@ -340,6 +348,7 @@ def sweep_temp(
 
 def _rmtree_quiet(path: Path) -> None:
     import shutil
+
     shutil.rmtree(path, ignore_errors=True)
 
 
@@ -355,8 +364,7 @@ def _run_shutdown_cleanup() -> None:
         try:
             cb()
         except Exception as e:  # noqa: BLE001
-            logger.warning("关闭清理回调 %s 异常（不阻塞关闭）: %s",
-                           getattr(cb, "__name__", repr(cb)), e)
+            logger.warning("关闭清理回调 %s 异常（不阻塞关闭）: %s", getattr(cb, "__name__", repr(cb)), e)
 
 
 def register_shutdown_cleanup(
@@ -379,6 +387,7 @@ def register_shutdown_cleanup(
 
     if not _hooks_installed:
         import atexit
+
         atexit.register(_run_shutdown_cleanup)
         _hooks_installed = True
 

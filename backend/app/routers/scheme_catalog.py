@@ -1,4 +1,5 @@
 """专项方案清单路由：按分类返回预置方案清单，支持搜索和获取标准目录"""
+
 from fastapi import APIRouter, Depends, HTTPException
 
 from app.db import get_db
@@ -26,14 +27,17 @@ async def list_catalog(category: str = "", keyword: str = "", db=Depends(get_db)
     grouped: dict[str, list] = {}
     for r in rows:
         cat = r["type"] or "其他"
-        grouped.setdefault(cat, []).append({
-            "id": r["id"],
-            "name": r["name"],
-            "ref_count": r["ref_count"],
-        })
+        grouped.setdefault(cat, []).append(
+            {
+                "id": r["id"],
+                "name": r["name"],
+                "ref_count": r["ref_count"],
+            }
+        )
 
     # ✅ 分类顺序直接取自预置清单定义，避免清单调整后此处硬编码列表失同步
     from app.seed_data import SCHEME_CATALOG
+
     categories = list(SCHEME_CATALOG.keys())
     ordered = {c: grouped.get(c, []) for c in categories}
     for k in grouped:

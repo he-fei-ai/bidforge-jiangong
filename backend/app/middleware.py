@@ -1,4 +1,6 @@
-"""CORS / 请求日志 / API 鉴权中间件"""
+"""CORS / 请求日志 / API 鉴权 / 事件循环延迟中间件"""
+
+import asyncio
 import json
 import logging
 import secrets
@@ -15,10 +17,14 @@ logger = logging.getLogger("http")
 #   - /health 供探活与前端启动自检使用；
 #   - /docs、/redoc、/openapi.json 供内网排障查阅，本身不含业务数据。
 # 其余 /api/v1/* 在配置了 API_AUTH_TOKEN 后一律要求携带凭据。
-_AUTH_EXEMPT_PATHS = frozenset({
-    "/api/v1/health",
-    "/docs", "/redoc", "/openapi.json",
-})
+_AUTH_EXEMPT_PATHS = frozenset(
+    {
+        "/api/v1/health",
+        "/docs",
+        "/redoc",
+        "/openapi.json",
+    }
+)
 _AUTH_EXEMPT_PREFIXES = ("/docs/", "/redoc/")
 
 
@@ -61,8 +67,7 @@ class ApiAuthMiddleware:
 
         method = scope.get("method", "")
         path = scope.get("path", "")
-        if method == "OPTIONS" or path in _AUTH_EXEMPT_PATHS \
-                or path.startswith(_AUTH_EXEMPT_PREFIXES):
+        if method == "OPTIONS" or path in _AUTH_EXEMPT_PATHS or path.startswith(_AUTH_EXEMPT_PREFIXES):
             await self.app(scope, receive, send)
             return
 
@@ -71,27 +76,27 @@ class ApiAuthMiddleware:
         #    纯 ASCII，攻击者只要发一个非 ASCII 字节的 X-API-Key（例如 0xE9），
         #    就会让它抛 TypeError → 未捕获 → 500，既暴露异常堆栈又污染日志。
         #    bytes 形态没有这个限制，且依然是常数时间比较。
-        if provided and secrets.compare_digest(provided.encode("utf-8"),
-                                              self._token.encode("utf-8")):
+        if provided and secrets.compare_digest(provided.encode("utf-8"), self._token.encode("utf-8")):
             await self.app(scope, receive, send)
             return
 
-        logger.warning("拒绝未授权请求 %s %s（客户端地址 %s）", method, path,
-                       (scope.get("client") or ("?",))[0])
+        logger.warning("拒绝未授权请求 %s %s（客户端地址 %s）", method, path, (scope.get("client") or ("?",))[0])
         body = json.dumps(
-            {"detail": "未授权：请在请求头携带 X-API-Key 或 Authorization: Bearer <token>"},
-            ensure_ascii=False).encode("utf-8")
-        await send({
-            "type": "http.response.start",
-            "status": 401,
-            "headers": [
-                (b"content-type", b"application/json; charset=utf-8"),
-                (b"content-length", str(len(body)).encode("latin-1")),
-                # 让浏览器端能读到 401 语义，且不缓存
-                (b"cache-control", b"no-store"),
-                (b"www-authenticate", b'Bearer realm="scheme-assistant"'),
-            ],
-        })
+            {"detail": "未授权：请在请求头携带 X-API-Key 或 Authorization: Bearer <token>"}, ensure_ascii=False
+        ).encode("utf-8")
+        await send(
+            {
+                "type": "http.response.start",
+                "status": 401,
+                "headers": [
+                    (b"content-type", b"application/json; charset=utf-8"),
+                    (b"content-length", str(len(body)).encode("latin-1")),
+                    # 让浏览器端能读到 401 语义，且不缓存
+                    (b"cache-control", b"no-store"),
+                    (b"www-authenticate", b'Bearer realm="scheme-assistant"'),
+                ],
+            }
+        )
         await send({"type": "http.response.body", "body": body})
 
 
@@ -103,7 +108,8 @@ def log_auth_configuration() -> None:
     else:
         logger.warning(
             "API 鉴权未启用（API_AUTH_TOKEN 为空）：任何可达网络客户端均可读写项目数据。"
-            "若服务监听 0.0.0.0 或暴露到内网/公网，请在 backend/.env 设置 API_AUTH_TOKEN")
+            "若服务监听 0.0.0.0 或暴露到内网/公网，请在 backend/.env 设置 API_AUTH_TOKEN"
+        )
 
 
 class RequestLogMiddleware:
@@ -128,9 +134,7 @@ class RequestLogMiddleware:
         for raw_name, raw_value in headers:
             name = raw_name.decode("latin-1").lower()
             if name in ("x-trace-id", "x-request-id"):
-                tid = "".join(
-                    ch for ch in raw_value.decode("latin-1").strip()
-                    if ch.isalnum() or ch == "-")[:64]
+                tid = "".join(ch for ch in raw_value.decode("latin-1").strip() if ch.isalnum() or ch == "-")[:64]
                 if tid:
                     return tid
         return ""
@@ -141,6 +145,8 @@ class RequestLogMiddleware:
             return
         start = time.time()
         status_code = 500
+        # ✅ R178（F-13）：4xx/5xx 响应体首段（失败原因）的暂存位。
+        err_detail = ""
         method = scope.get("method", "")
         path = scope.get("path", "")
 
@@ -154,13 +160,22 @@ class RequestLogMiddleware:
             trace_id = new_trace_id()
 
         async def send_wrapper(message: dict) -> None:
-            nonlocal status_code
+            nonlocal status_code, err_detail
             if message["type"] == "http.response.start":
                 status_code = message["status"]
                 headers = list(message.get("headers") or [])
                 if not any(h[0].lower() == b"x-trace-id" for h in headers):
                     headers.append((b"x-trace-id", trace_id.encode("latin-1")))
                 message = dict(message, headers=headers)
+            elif message["type"] == "http.response.body" and status_code >= 400 and not err_detail:
+                # ✅ R178（F-13 · 2026-11-05）：4xx/5xx 的失败原因（FastAPI
+                #    ``HTTPException.detail``）**只存在于响应体**，服务端访问日志
+                #    此前只记 status/cost → 400 的失败原因 **100% 不可反查**
+                #    （生产实证：14 条 400 的访问日志里零条能看出原因）。
+                #    这里只截首段 body（错误体都很短），供访问日志附上可行动文案。
+                raw = (message.get("body") or b"")[:1024]
+                if raw:
+                    err_detail = raw.decode("utf-8", "replace").replace("\n", " ")[:300]
             await send(message)
 
         try:
@@ -170,8 +185,93 @@ class RequestLogMiddleware:
             raise
         cost = (time.time() - start) * 1000
         if path not in ("/api/v1/health",):
-            logger.info("%s %s -> %s (%.0fms) [trace=%s]", method, path,
-                        status_code, cost, trace_id)
+            logger.info("%s %s -> %s (%.0fms) [trace=%s]", method, path, status_code, cost, trace_id)
+            # ✅ R178（F-13）：失败原因补记（加法式，不改既有访问日志格式）。
+            if err_detail:
+                logger.warning(
+                    "%s %s -> %s 失败原因：%s [trace=%s]", method, path, status_code, err_detail, trace_id
+                )
+
+
+_loop_lag_logger = logging.getLogger("loop")
+
+
+def _positive(value, default: float) -> float:
+    """读取正数配置；非法（非数值 / ≤0）一律回落默认值（fail-soft）。"""
+    try:
+        v = float(value)
+    except (TypeError, ValueError):
+        return default
+    return v if v > 0 else default
+
+
+async def _loop_lag_monitor(
+    interval: float | None = None,
+    threshold: float | None = None,
+    cooldown: float | None = None,
+) -> None:
+    """事件循环延迟心跳：实测「应唤醒时刻 - 实际唤醒时刻」的偏差。
+
+    ✅ 2026-11-05（第二轮日志驱动分析 P0-1）：旧日志只能看到请求总耗时，
+    `/sections` 8.6~10.2s 与 `/sse/tasks` 同期 8.6s 究竟是「请求自身慢」还是
+    「事件循环被同步 CPU 任务整体阻塞」无法区分（两者表现完全一样）。
+    心跳任务本身只 `sleep`，不做事；若它醒晚了，说明循环确实被别人的同步
+    CPU 工作占住 —— 这是唯一能从应用侧直接观测到的证据。
+
+    参数单位：秒。缺省时读 settings（非法值回落 0.5 / 1.0 / 30）。
+    冷却用于「默认不刷屏」：一次长阻塞只会触发一条 WARNING。
+    """
+    interval_s = interval if interval is not None else _positive(settings.loop_lag_interval_ms, 500) / 1000.0
+    threshold_s = threshold if threshold is not None else _positive(settings.loop_lag_threshold_ms, 1000) / 1000.0
+    cooldown_s = cooldown if cooldown is not None else _positive(settings.loop_lag_log_cooldown_s, 30.0)
+    expected = time.monotonic() + interval_s
+    last_log = 0.0
+    while True:
+        await asyncio.sleep(max(0.0, expected - time.monotonic()))
+        now = time.monotonic()
+        lag = now - expected
+        # 下一轮以「应醒时刻」为基准推进：这样连续多次小延迟会累积体现，
+        # 而不是每轮重新对齐把长阻塞稀释掉。
+        expected += interval_s
+        if lag >= threshold_s and now - last_log >= cooldown_s:
+            last_log = now
+            _loop_lag_logger.warning(
+                "事件循环延迟 %.0fms（阈值 %.0fms，采样间隔 %.0fms）："
+                "同步 CPU 任务阻塞了事件循环，期间所有请求/SSE 都会同步变慢",
+                lag * 1000,
+                threshold_s * 1000,
+                interval_s * 1000,
+            )
+
+
+class LoopLagMiddleware:
+    """事件循环延迟埋点（纯 ASGI；首个 HTTP 请求时懒启动心跳任务）。
+
+    为什么懒启动而不是 lifespan：测试里的 TestClient 每个用例都可能新建
+    事件循环，模块级全局任务会跨 loop 残留（pending task 警告 / 已在别的
+    loop 上冻结）。挂在中间件实例上、按当前运行中的 loop 创建，生命周期
+    与 app 一致，且无需改 lifespan 的启停顺序。
+    """
+
+    def __init__(self, app: ASGIApp) -> None:
+        self.app = app
+        self._monitor: asyncio.Task | None = None
+
+    def _ensure_monitor(self) -> None:
+        if self._monitor is not None and not self._monitor.done():
+            return
+        self._monitor = None
+        if not getattr(settings, "loop_lag_monitor", True):
+            return
+        try:
+            self._monitor = asyncio.create_task(_loop_lag_monitor())
+        except RuntimeError:  # 无运行中的事件循环（同步测试路径）：下次请求再启
+            self._monitor = None
+
+    async def __call__(self, scope: Scope, receive: Receive, send: Send) -> None:
+        if scope["type"] == "http":
+            self._ensure_monitor()
+        await self.app(scope, receive, send)
 
 
 def setup_middleware(app):
@@ -181,11 +281,16 @@ def setup_middleware(app):
     # 开发环境全放行（Vite proxy 同源转发时不会真的跨域，这里主要为直接跨域访问和 LAN origin 场景）
     # ✅ 跨域部署时浏览器默认只暴露简单响应头；图表渲染统计/修复统计/缓存状态
     # 必须显式 expose，否则前端读取恒为 undefined，统计与降级提示静默失效。
-    _expose_headers = ["X-Chart-Render-Stats", "X-Fix-Stats", "X-Cache-Status",
-                       # 导出文件名/轮次（blob 下载时前端用它设置 a.download，否则跨域下读不到）
-                       "X-Export-Filename", "X-Export-Round",
-                       # ✅ 可观测性（2026-09-23）：请求级追踪 ID，前端/网关可读取用于报障定位
-                       "X-Trace-Id"]
+    _expose_headers = [
+        "X-Chart-Render-Stats",
+        "X-Fix-Stats",
+        "X-Cache-Status",
+        # 导出文件名/轮次（blob 下载时前端用它设置 a.download，否则跨域下读不到）
+        "X-Export-Filename",
+        "X-Export-Round",
+        # ✅ 可观测性（2026-09-23）：请求级追踪 ID，前端/网关可读取用于报障定位
+        "X-Trace-Id",
+    ]
     if "*" in origins or not origins:
         cors_kwargs = dict(
             allow_origins=["*"],
@@ -205,7 +310,9 @@ def setup_middleware(app):
     # ⚠️ add_middleware 的注册顺序 = 内层 → 外层（最后注册的最先看到请求）。
     #    这里刻意让 CORS 处于最外层：预检 OPTIONS 由 CORSMiddleware 直接短路应答，
     #    否则会被鉴权中间件拦成 401，导致浏览器端跨域调用全部失败。
-    #    实际执行顺序：CORS → RequestLog → ApiAuth → 路由。
+    #    实际执行顺序：LoopLag（仅启动心跳、透传）→ CORS → RequestLog → ApiAuth → 路由。
     app.add_middleware(ApiAuthMiddleware)
     app.add_middleware(RequestLogMiddleware)
     app.add_middleware(CORSMiddleware, **cors_kwargs)
+    # 最外层：只做「确保心跳任务已启动」的透传，不影响 CORS / 鉴权判定顺序。
+    app.add_middleware(LoopLagMiddleware)

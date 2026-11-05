@@ -1,4 +1,5 @@
 """自适应并发控制 + 熔断器 + 超时工具"""
+
 import asyncio
 import time
 from collections import deque
@@ -6,9 +7,7 @@ from contextvars import ContextVar
 
 #: 当前 AI 调用所属的后台任务。ContextVar 会随 asyncio Task 上下文自动复制，
 #: 避免用全局变量把并发方案的 task_id 串台。默认空串保持旧调用行为。
-current_ai_task_id: ContextVar[str] = ContextVar(
-    "current_ai_task_id", default=""
-)
+current_ai_task_id: ContextVar[str] = ContextVar("current_ai_task_id", default="")
 
 
 class ResizableSemaphore:
@@ -136,14 +135,28 @@ class AnalysisCircuitBreaker:
         #   "state": str, "failures": int, "opened_at": float,
         #   "effective_cooldown": int, "last_failure_at": float
         # }
+        # ✅ R175（2026-11-03 · BUG-07）取舍说明：这里刻意保持 **provider 维度**，
+        #    不改成 config 维度：
+        #      1) 真实故障源绝大多数是厂商级（欠费/限流/网络/region 故障），
+        #         provider 级熔断能最快止损，config 级会让同厂商其它坏配置继续打；
+        #      2) config 级会把内存态放大 N 倍（同厂商每配置一份状态），
+        #         且 HALF_OPEN 探测预算被切碎，恢复更慢；
+        #      3) 「单条配置坏、其余健康」的场景已由 reliability 的
+        #         provider+model+config_id+base_url 维度成功率和 _health_rank 兜住。
+        #    残余风险：同厂商一条配置持续 401 会连带熔断该厂商的健康配置，
+        #    表现为「同厂商其它配置也被跳过」——可在告警文案中提示用户检查该厂商。
         self._per_provider: dict[str, dict] = {}
 
     def _get_or_init(self, provider_name: str) -> dict:
         entry = self._per_provider.get(provider_name)
         if entry is None:
-            entry = {"state": "CLOSED", "failures": 0, "opened_at": 0.0,
-                     "effective_cooldown": self.cooldown_seconds,
-                     "last_failure_at": 0.0}
+            entry = {
+                "state": "CLOSED",
+                "failures": 0,
+                "opened_at": 0.0,
+                "effective_cooldown": self.cooldown_seconds,
+                "last_failure_at": 0.0,
+            }
             self._per_provider[provider_name] = entry
         return entry
 
@@ -213,8 +226,7 @@ class AnalysisCircuitBreaker:
             entry["last_failure_at"] = now
             # ✅ BUG-5: 429 加倍冷却，最多 120 秒
             if is_429:
-                entry["effective_cooldown"] = min(
-                    entry["effective_cooldown"] * 2, 120)
+                entry["effective_cooldown"] = min(entry["effective_cooldown"] * 2, 120)
             if entry["state"] == "HALF_OPEN" or entry["failures"] >= self.failure_threshold:
                 entry["state"] = "OPEN"
                 entry["opened_at"] = now
@@ -304,10 +316,11 @@ class AdaptiveConcurrencyController:
         #    出现「三处 5 各说各话」的漂移；调用方显式传 max_c 仍然优先。
         if max_c is None:
             from app.config import settings as _settings
+
             max_c = max(1, int(getattr(_settings, "max_concurrency", 5) or 5))
         self._sem = ResizableSemaphore(initial)
         self.current = initial
-        self.target = initial      # 目标档位（配置值 / 用户档位），自适应围绕它波动
+        self.target = initial  # 目标档位（配置值 / 用户档位），自适应围绕它波动
         self.min_c = min_c
         self.max_c = max_c
         self._window: deque = deque(maxlen=self.WINDOW_SIZE)
@@ -364,8 +377,7 @@ class AdaptiveConcurrencyController:
             return
         # ③ 响应慢但成功率高 → **保持不变**（旧实现在此处降并发，是本次修正的核心）
         # ④ 快且健康 → 升并发（上限为目标档位 target）
-        if (self.avg_response() < self.FAST_THRESHOLD
-                and fr < self.FAILURE_RATE_HEALTHY_THRESHOLD):
+        if self.avg_response() < self.FAST_THRESHOLD and fr < self.FAILURE_RATE_HEALTHY_THRESHOLD:
             self._change(+1)
 
     def _change(self, delta: int):

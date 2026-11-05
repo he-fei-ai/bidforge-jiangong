@@ -171,6 +171,9 @@ CREATE TABLE IF NOT EXISTS project_documents (
     created_at TEXT DEFAULT (datetime('now','localtime'))
 );
 CREATE INDEX IF NOT EXISTS idx_project_documents_project ON project_documents(project_id);
+-- ✅ R175 · BUG-1：同名唯一约束不写在本 DDL —— 老库可能已有重复行，直接建唯一
+--    索引会让整个 schema 脚本失败。由 db._migrate 先按 (project_id, file_name)
+--    去重、再建 uq_project_documents_pid_fname（可重入）。
 
 -- ===========================================================================
 -- ✅ 文件上传解析结果四层存储（规范 §5 数据库设计）
@@ -423,6 +426,10 @@ CREATE TABLE IF NOT EXISTS consistency_audit (
     issues TEXT DEFAULT '[]',
     -- ✅ 2026-10-07：与 compliance_check 同口径的正文指纹（空串 = 历史行，fail-open）
     content_fingerprint TEXT DEFAULT '',
+    -- ✅ R180（2026-11-05 · 可观测性）：每次审计的覆盖摘要（批次数/覆盖字数/总字数/
+    --    问题数）。此前只有 score + issues，无法回答「这次覆盖了多少章、多少字」。
+    --    历史行默认 '{}'，读侧 fail-open 解析为空对象（旧数据不迁移、不报错）。
+    counts_json TEXT DEFAULT '{}',
     created_at TEXT DEFAULT (datetime('now','localtime'))
 );
 -- ✅ 性能优化（2026-09-24 · 遗留项 #3）：一致性审计「最近一次」与历史列表
@@ -538,6 +545,9 @@ CREATE TABLE IF NOT EXISTS ai_config (
     --    历史行全部为空串 → 未设置「当前环境」时行为与引入前完全一致。
     env TEXT DEFAULT '',
     is_active INTEGER DEFAULT 0,
+    -- ✅ R175（2026-11-03 · BUG-03）：是否参与真实调用（主配置之外的降级候选）。
+    --    1 = 参与（默认，保持旧库行为）；0 = 用户显式停用，不进入降级链与视觉候选。
+    enabled INTEGER DEFAULT 1,
     priority INTEGER DEFAULT 0,
     remark TEXT DEFAULT '',
     created_at TEXT DEFAULT (datetime('now','localtime')),
@@ -583,6 +593,16 @@ CREATE TABLE IF NOT EXISTS ai_audit_logs (
     -- ✅ 2026-09-24：可靠性统计粒度（同一 provider 的不同配置/模型/地址独立统计）
     config_id TEXT DEFAULT '',
     base_url TEXT DEFAULT '',
+    -- ✅ 2026-11-05（审计合并 · 错误分类）：
+    --    error_class：失败类别机器码（rate_limit/auth/timeout/truncated/network/
+    --      upstream_5xx/invalid_response/circuit_skipped/cancelled/unknown）；
+    --      历史行 NULL/'' = 未分类（读侧按 unknown 展示，不报错）。
+    --    attempt_count：该逻辑调用包含的底层尝试数（含重试/降级/对冲；历史行默认 1）。
+    --    attempts_json：逐次尝试的简要结果 JSON 数组（provider/model/ok/duration/
+    --      error_class/error 摘要），保留诊断能力；历史行 '' = 无逐次记录。
+    error_class TEXT DEFAULT '',
+    attempt_count INTEGER DEFAULT 1,
+    attempts_json TEXT DEFAULT '',
     created_at TEXT DEFAULT (datetime('now','localtime'))
 );
 
@@ -668,7 +688,12 @@ CREATE TABLE IF NOT EXISTS prompt_templates (
     updated_at TEXT DEFAULT (datetime('now','localtime'))
 );
 
--- 提示词配置变更审计：仅存内容指纹与变量集合，不复制完整提示词正文。
+-- 提示词配置变更审计：记录 before/after 内容指纹与变量集合，
+-- ✅ R175（2026-11-03 · 修复注释与实现矛盾 D1）：本表 **也会** 存变更前后的
+--    提示词正文快照（prompt_snapshot_json，供一键回滚用；超过
+--    prompt_audit_snapshot_max_chars 时截断并标记 truncated）。
+--    早期注释写「不复制完整提示词正文」，与 audit_service 的实际实现相反，
+--    已按实现修正（合规审阅时请以本注释为准）。
 CREATE TABLE IF NOT EXISTS prompt_audit_logs (
     id TEXT PRIMARY KEY,
     prompt_key TEXT NOT NULL,

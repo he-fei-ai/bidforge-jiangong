@@ -19,6 +19,7 @@ consistency_scanner 都 import 本模块 —— 分叉在结构上不可能发�
 计算失败返回空串（空指纹 = 无法判定 = 视为不过期，不误导用户，与
 ``_run_is_stale`` 对历史行 fail-open 的约定一致）。
 """
+
 import hashlib
 import logging
 
@@ -32,47 +33,58 @@ async def content_fingerprint(db, scheme_id: str) -> str:
     """方案正文 / 图表 / 事实状态 / 字数预算的内容指纹。"""
     parts: list[str] = []
     try:
-        parts.extend("|".join(str(v) for v in review_db.row_values(row))
-                     for row in await review_db.fetch_all(
-            db,
-            "SELECT sort_order, level, title, word_count, content FROM sections"
-            " WHERE scheme_id=? ORDER BY sort_order, level, id", (scheme_id,),
-            what="内容指纹：读取章节"))
-        parts.extend("|".join(str(v) for v in review_db.row_values(row))
-                     for row in await review_db.fetch_all(
-            db,
-            "SELECT chart_type, status FROM chart_predictions WHERE scheme_id=?"
-            " ORDER BY rowid", (scheme_id,), what="内容指纹：读取图表"))
-        parts.extend("|".join(str(v) for v in review_db.row_values(row))
-                     for row in await review_db.fetch_all(
-            db,
-            # ✅ 收敛（2026-10-11 · 跨模块数据链 R70）：此处原为**第四份**内联的
-            #    「方案私有 + 同项目共享」作用域谓词（用 f-string 把
-            #    `scheme_id=? OR (project_id=(SELECT …)` 拆成 3 段字面量拼接）。
-            #    R69 已把该判据收敛为 facts_extractor.FACT_SCOPE_PREDICATE 单一事实源
-            #    （global_facts / export / compliance / input_coverage 全部引用它），
-            #    唯独本文件遗漏 —— 判据改一处漏一处的安全关键分叉。现改为引用常量。
-            #
-            # ⚠️ 参数语义（2026-10-12 修正 · 上一轮收敛引入的真实缺陷）：
-            #    作用域常量的第二个占位符是**项目 ID 本身**；而这里的旧写法是
-            #    一个「由方案 ID 反查项目 ID」的**标量子查询**，第二个占位符填的
-            #    是**方案 ID**。上一轮只换了 SQL 片段、没换参数元组，于是共享半句
-            #    实际在拿方案 ID 去比对项目 ID，恒不成立 ⇒
-            #    **项目共享事实从指纹里整体消失**：共享事实的确认状态/过期状态
-            #    变化都不会改变指纹，总检与一致性审计的「结论已过期」判定
-            #    对共享事实永久失灵（且无任何报错，极难发现）。
-            #    修法：先用单一出口反查到真实项目 ID，再把「方案 ID + 项目 ID」
-            #    两个值按常量约定的顺序传入（与其在 global_facts / export /
-            #    facts_builder 的用法完全一致）。
-            #    ⚠️ 本注释刻意不写具体的 SQL 与参数元组文本：多处护栏按源码子串
-            #    扫描这些内容，写在注释里会让护栏误报（本仓 §5.14 同族教训）。
-            "SELECT is_simulated,is_resolved,has_conflict,is_stale,updated_at "
-            "FROM global_facts WHERE " + FACT_SCOPE_PREDICATE + " ORDER BY rowid",
-            (scheme_id, await resolve_scheme_project_id(db, scheme_id)),
-            what="内容指纹：读取全局事实状态"))
+        parts.extend(
+            "|".join(str(v) for v in review_db.row_values(row))
+            for row in await review_db.fetch_all(
+                db,
+                "SELECT sort_order, level, title, word_count, content FROM sections"
+                " WHERE scheme_id=? ORDER BY sort_order, level, id",
+                (scheme_id,),
+                what="内容指纹：读取章节",
+            )
+        )
+        parts.extend(
+            "|".join(str(v) for v in review_db.row_values(row))
+            for row in await review_db.fetch_all(
+                db,
+                "SELECT chart_type, status FROM chart_predictions WHERE scheme_id=?" " ORDER BY rowid",
+                (scheme_id,),
+                what="内容指纹：读取图表",
+            )
+        )
+        parts.extend(
+            "|".join(str(v) for v in review_db.row_values(row))
+            for row in await review_db.fetch_all(
+                db,
+                # ✅ 收敛（2026-10-11 · 跨模块数据链 R70）：此处原为**第四份**内联的
+                #    「方案私有 + 同项目共享」作用域谓词（用 f-string 把
+                #    `scheme_id=? OR (project_id=(SELECT …)` 拆成 3 段字面量拼接）。
+                #    R69 已把该判据收敛为 facts_extractor.FACT_SCOPE_PREDICATE 单一事实源
+                #    （global_facts / export / compliance / input_coverage 全部引用它），
+                #    唯独本文件遗漏 —— 判据改一处漏一处的安全关键分叉。现改为引用常量。
+                #
+                # ⚠️ 参数语义（2026-10-12 修正 · 上一轮收敛引入的真实缺陷）：
+                #    作用域常量的第二个占位符是**项目 ID 本身**；而这里的旧写法是
+                #    一个「由方案 ID 反查项目 ID」的**标量子查询**，第二个占位符填的
+                #    是**方案 ID**。上一轮只换了 SQL 片段、没换参数元组，于是共享半句
+                #    实际在拿方案 ID 去比对项目 ID，恒不成立 ⇒
+                #    **项目共享事实从指纹里整体消失**：共享事实的确认状态/过期状态
+                #    变化都不会改变指纹，总检与一致性审计的「结论已过期」判定
+                #    对共享事实永久失灵（且无任何报错，极难发现）。
+                #    修法：先用单一出口反查到真实项目 ID，再把「方案 ID + 项目 ID」
+                #    两个值按常量约定的顺序传入（与其在 global_facts / export /
+                #    facts_builder 的用法完全一致）。
+                #    ⚠️ 本注释刻意不写具体的 SQL 与参数元组文本：多处护栏按源码子串
+                #    扫描这些内容，写在注释里会让护栏误报（本仓 §5.14 同族教训）。
+                "SELECT is_simulated,is_resolved,has_conflict,is_stale,updated_at "
+                "FROM global_facts WHERE " + FACT_SCOPE_PREDICATE + " ORDER BY rowid",
+                (scheme_id, await resolve_scheme_project_id(db, scheme_id)),
+                what="内容指纹：读取全局事实状态",
+            )
+        )
         sc = await review_db.fetch_one(
-            db, "SELECT word_budget FROM schemes WHERE id=?", (scheme_id,),
-            what="内容指纹：读取字数预算")
+            db, "SELECT word_budget FROM schemes WHERE id=?", (scheme_id,), what="内容指纹：读取字数预算"
+        )
         budget = int(sc["word_budget"]) if sc and sc["word_budget"] else 0
         parts.append(f"budget={budget}")
     except Exception as e:  # noqa: BLE001 - 指纹算不出来按「无法判定」处理

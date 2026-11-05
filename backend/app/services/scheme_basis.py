@@ -34,6 +34,7 @@
 4. 关键词库按**长度倒序**匹配，保证最长最具体者优先（"SMW工法桩" 先于 "桩"，
    "地下连续墙" 先于 "墙"），避免短词抢占导致误判。
 """
+
 from __future__ import annotations
 
 import logging
@@ -57,75 +58,307 @@ logger = logging.getLogger("scheme_basis")
 #: 施工工序（施工动作/步骤，按工程语序排列）
 PROCESS_KEYWORDS: tuple[str, ...] = (
     # 土方与基坑
-    "开挖", "清底", "验槽", "修边", "放坡", "支护", "锚固", "张拉", "注浆", "旋喷",
-    "搅拌", "压注", "静压", "换填", "回填", "夯实", "压实", "降水", "回灌", "截水",
-    "抽降", "封底", "换撑",
+    "开挖",
+    "清底",
+    "验槽",
+    "修边",
+    "放坡",
+    "支护",
+    "锚固",
+    "张拉",
+    "注浆",
+    "旋喷",
+    "搅拌",
+    "压注",
+    "静压",
+    "换填",
+    "回填",
+    "夯实",
+    "压实",
+    "降水",
+    "回灌",
+    "截水",
+    "抽降",
+    "封底",
+    "换撑",
     # 桩基与基础
-    "成孔", "清孔", "沉渣", "灌注", "浇筑", "振捣", "养护", "拆模", "回弹",
-    "承台", "垫层", "绑扎", "支模", "接桩", "截桩", "试桩", "检测",
+    "成孔",
+    "清孔",
+    "沉渣",
+    "灌注",
+    "浇筑",
+    "振捣",
+    "养护",
+    "拆模",
+    "回弹",
+    "承台",
+    "垫层",
+    "绑扎",
+    "支模",
+    "接桩",
+    "截桩",
+    "试桩",
+    "检测",
     # 模板支撑与脚手架
-    "搭设", "支设", "拆除", "卸载", "顶升", "附着", "下降", "上升", "拉结", "验收",
+    "搭设",
+    "支设",
+    "拆除",
+    "卸载",
+    "顶升",
+    "附着",
+    "下降",
+    "上升",
+    "拉结",
+    "验收",
     # 起重吊装与机械
-    "安装", "拆卸", "安拆", "吊装", "就位", "试运转",
+    "安装",
+    "拆卸",
+    "安拆",
+    "吊装",
+    "就位",
+    "试运转",
     # 用电与临建
-    "布线", "敷设", "架设", "接地", "穿线", "接引",
+    "布线",
+    "敷设",
+    "架设",
+    "接地",
+    "穿线",
+    "接引",
     # 防水 / 装饰 / 砌体 / 机电
-    "清扫", "湿润", "涂刷", "滚涂", "喷涂", "铺贴", "热熔", "冷粘", "试水", "蓄水",
-    "甩浆", "挂网", "抹灰", "吊顶", "打胶", "钻孔", "开槽", "剔凿", "封堵",
-    "套管", "预埋", "试压", "冲洗", "通球", "调试", "联动",
+    "清扫",
+    "湿润",
+    "涂刷",
+    "滚涂",
+    "喷涂",
+    "铺贴",
+    "热熔",
+    "冷粘",
+    "试水",
+    "蓄水",
+    "甩浆",
+    "挂网",
+    "抹灰",
+    "吊顶",
+    "打胶",
+    "钻孔",
+    "开槽",
+    "剔凿",
+    "封堵",
+    "套管",
+    "预埋",
+    "试压",
+    "冲洗",
+    "通球",
+    "调试",
+    "联动",
     # 拆除与监测
-    "静力破碎", "爆破", "支撑", "监测", "测点布置", "巡视", "复测",
+    "静力破碎",
+    "爆破",
+    "支撑",
+    "监测",
+    "测点布置",
+    "巡视",
+    "复测",
 )
 
 #: 施工工艺 / 工法（具体工艺名，最长优先）
 TECHNIQUE_KEYWORDS: tuple[str, ...] = (
     # 基坑支护
-    "地下连续墙", "SMW工法桩", "钻孔灌注桩", "人工挖孔桩", "水泥搅拌桩", "旋喷桩",
-    "静压桩", "预制桩", "碎石桩", "树根桩", "微型桩", "排桩", "桩间土",
-    "止水帷幕", "高压旋喷", "压密注浆", "袖阀管注浆", "降水井", "回灌井",
-    "土钉墙", "土钉", "锚索", "钢支撑", "混凝土支撑", "格构柱", "立柱桩",
-    "逆作法", "盖挖法", "放坡开挖", "分级放坡", "分层分段开挖", "跳槽开挖",
+    "地下连续墙",
+    "SMW工法桩",
+    "钻孔灌注桩",
+    "人工挖孔桩",
+    "水泥搅拌桩",
+    "旋喷桩",
+    "静压桩",
+    "预制桩",
+    "碎石桩",
+    "树根桩",
+    "微型桩",
+    "排桩",
+    "桩间土",
+    "止水帷幕",
+    "高压旋喷",
+    "压密注浆",
+    "袖阀管注浆",
+    "降水井",
+    "回灌井",
+    "土钉墙",
+    "土钉",
+    "锚索",
+    "钢支撑",
+    "混凝土支撑",
+    "格构柱",
+    "立柱桩",
+    "逆作法",
+    "盖挖法",
+    "放坡开挖",
+    "分级放坡",
+    "分层分段开挖",
+    "跳槽开挖",
     # 模板支撑与脚手架
-    "承插型盘扣式", "盘扣式", "扣件式", "落地式脚手架", "悬挑式脚手架", "附着式升降",
-    "卸料平台", "爬架", "混凝土泵架", "早拆体系", "大体积混凝土", "后浇带",
-    "施工缝", "装配整体式",
+    "承插型盘扣式",
+    "盘扣式",
+    "扣件式",
+    "落地式脚手架",
+    "悬挑式脚手架",
+    "附着式升降",
+    "卸料平台",
+    "爬架",
+    "混凝土泵架",
+    "早拆体系",
+    "大体积混凝土",
+    "后浇带",
+    "施工缝",
+    "装配整体式",
     # 起重吊装
-    "塔式起重机", "施工升降机", "人货电梯", "汽车吊", "人字桅杆", "群塔作业",
+    "塔式起重机",
+    "施工升降机",
+    "人货电梯",
+    "汽车吊",
+    "人字桅杆",
+    "群塔作业",
     "起重吊装",
     # 临时用电与临建
-    "三级配电两级保护", "三级配电一级保护", "TN-S", "TN-C-S", "二级漏电保护",
-    "一级配电", "二级配电", "三级配电", "临时用水", "临时用电", "消防管网",
+    "三级配电两级保护",
+    "三级配电一级保护",
+    "TN-S",
+    "TN-C-S",
+    "二级漏电保护",
+    "一级配电",
+    "二级配电",
+    "三级配电",
+    "临时用水",
+    "临时用电",
+    "消防管网",
     # 防水 / 装饰 / 砌体 / 机电
-    "卷材防水", "涂膜防水", "刚性防水", "种植屋面", "屋面防水", "地下防水",
-    "外墙外保温", "外墙内保温", "幕墙安装", "吊顶工程", "二次结构", "构造柱",
-    "植筋", "砌体", "填充墙", "加气块砌筑", "机电安装", "管线综合", "电气安装",
-    "给排水安装", "通风空调", "智能化", "节能改造", "绿色施工",
+    "卷材防水",
+    "涂膜防水",
+    "刚性防水",
+    "种植屋面",
+    "屋面防水",
+    "地下防水",
+    "外墙外保温",
+    "外墙内保温",
+    "幕墙安装",
+    "吊顶工程",
+    "二次结构",
+    "构造柱",
+    "植筋",
+    "砌体",
+    "填充墙",
+    "加气块砌筑",
+    "机电安装",
+    "管线综合",
+    "电气安装",
+    "给排水安装",
+    "通风空调",
+    "智能化",
+    "节能改造",
+    "绿色施工",
     # 拆除 / 监测 / 季节
-    "静力破碎拆除", "机械拆除", "人工拆除", "爆破拆除", "控制爆破",
-    "基坑监测", "变形监测", "沉降观测", "第三方监测", "冬期施工", "雨期施工",
-    "高温施工", "冬雨季施工", "专项应急预案",
+    "静力破碎拆除",
+    "机械拆除",
+    "人工拆除",
+    "爆破拆除",
+    "控制爆破",
+    "基坑监测",
+    "变形监测",
+    "沉降观测",
+    "第三方监测",
+    "冬期施工",
+    "雨期施工",
+    "高温施工",
+    "冬雨季施工",
+    "专项应急预案",
 )
 
 #: 施工对象（部位 / 构件 / 设施），用于三级目录标题必须具体到部位
 OBJECT_KEYWORDS: tuple[str, ...] = (
     # 基坑与地基
-    "基坑", "边坡", "沟槽", "土壁", "坑底", "坑外", "洞口", "井道",
-    "桩基", "承台", "筏板", "基础", "地下室", "地下室外墙", "底板", "后浇带",
-    "桩头", "冠梁", "腰梁", "围护墙", "桩身",
+    "基坑",
+    "边坡",
+    "沟槽",
+    "土壁",
+    "坑底",
+    "坑外",
+    "洞口",
+    "井道",
+    "桩基",
+    "承台",
+    "筏板",
+    "基础",
+    "地下室",
+    "地下室外墙",
+    "底板",
+    "后浇带",
+    "桩头",
+    "冠梁",
+    "腰梁",
+    "围护墙",
+    "桩身",
     # 主体与围护
-    "主体结构", "楼面", "屋面", "外墙", "内墙", "女儿墙", "幕墙", "吊顶", "地面",
-    "卫生间", "楼梯间", "砌体", "填充墙", "构造柱", "圈梁", "过梁",
-    "变形缝", "施工缝", "伸缩缝",
+    "主体结构",
+    "楼面",
+    "屋面",
+    "外墙",
+    "内墙",
+    "女儿墙",
+    "幕墙",
+    "吊顶",
+    "地面",
+    "卫生间",
+    "楼梯间",
+    "砌体",
+    "填充墙",
+    "构造柱",
+    "圈梁",
+    "过梁",
+    "变形缝",
+    "施工缝",
+    "伸缩缝",
     # 支撑与临建
-    "模板", "支撑体系", "脚手架", "作业层", "卸料平台", "爬架", "安全网",
-    "临边", "塔吊", "施工电梯", "人货梯", "吊篮", "配电箱", "配电柜",
-    "电箱", "线路", "开关箱", "电缆", "电缆沟", "水管", "消火栓", "消防箱",
-    "临建", "围挡", "大门", "道路", "排水沟", "沉淀池", "洗车槽",
+    "模板",
+    "支撑体系",
+    "脚手架",
+    "作业层",
+    "卸料平台",
+    "爬架",
+    "安全网",
+    "临边",
+    "塔吊",
+    "施工电梯",
+    "人货梯",
+    "吊篮",
+    "配电箱",
+    "配电柜",
+    "电箱",
+    "线路",
+    "开关箱",
+    "电缆",
+    "电缆沟",
+    "水管",
+    "消火栓",
+    "消防箱",
+    "临建",
+    "围挡",
+    "大门",
+    "道路",
+    "排水沟",
+    "沉淀池",
+    "洗车槽",
     # 工艺部位
-    "支撑", "防水层", "涂膜", "卷材", "保护层", "面层", "基层", "结合层",
-    "找平层", "保温层",
+    "支撑",
+    "防水层",
+    "涂膜",
+    "卷材",
+    "保护层",
+    "面层",
+    "基层",
+    "结合层",
+    "找平层",
+    "保温层",
 )
-
 
 
 # ============================================================================
@@ -192,7 +425,7 @@ def text_keywords(text: str) -> set[str]:
         return kws
     for seg in _CJK_SEG_RE.findall(text):
         for i in range(len(seg) - 1):
-            kws.add(seg[i:i + 2])
+            kws.add(seg[i : i + 2])
     for w in _ASCII_WORD_RE.findall(text):
         kws.add(w.lower())
     return kws
@@ -240,8 +473,7 @@ class SchemeBasis:
         = 施工内容 + 工序 + 工艺 + 对象 的 2-gram / ASCII 并集。
         无任何命中时返回空集 —— 调用方**不得**据此删除数据（宁可不加权也不丢）。
         """
-        parts = list(self.scope_items) + list(self.process_steps) + \
-            list(self.techniques) + list(self.objects)
+        parts = list(self.scope_items) + list(self.process_steps) + list(self.techniques) + list(self.objects)
         return text_keywords("".join(parts))
 
     def relevance(self, text: str) -> int:
@@ -268,8 +500,7 @@ class SchemeBasis:
             lines.append(f"施工对象：{'、'.join(self.objects)}")
         if self.hazard_hits:
             names = "、".join(
-                f"{h.get('category_name', '')}·{h.get('sub_name', '')}".strip("·")
-                for h in self.hazard_hits[:4]
+                f"{h.get('category_name', '')}·{h.get('sub_name', '')}".strip("·") for h in self.hazard_hits[:4]
             )
             if names:
                 lines.append(f"危大分类：{names}（危大工程，章节须覆盖九大必要章节）")
@@ -312,6 +543,7 @@ def parse_scheme_basis(scheme_name: str) -> SchemeBasis:
     # ---- 1. 主要施工内容（既有 service） ----
     try:
         from app.services.scheme_scope import extract_construction_scope
+
         basis.scope_items = extract_construction_scope(name)
     except Exception:  # pragma: no cover - 既有 service 为纯函数，异常即代码缺陷
         logger.warning("解析方案名称主要施工内容失败（降级为空）", exc_info=True)
@@ -319,6 +551,7 @@ def parse_scheme_basis(scheme_name: str) -> SchemeBasis:
     # ---- 2. 危大六大类及子类（既有 service） ----
     try:
         from app.services.scheme_classification import classify_scheme_name
+
         basis.hazard_hits = classify_scheme_name(name)
         basis.is_dangerous = bool(basis.hazard_hits)
     except Exception:
@@ -327,6 +560,7 @@ def parse_scheme_basis(scheme_name: str) -> SchemeBasis:
     # ---- 3. 标准章节模板（既有 service） ----
     try:
         from app.services.outline_templates import match_template
+
         basis.template_key = match_template(name) or "general"
     except Exception:
         logger.warning("匹配标准章节模板失败（降级为 general）", exc_info=True)
@@ -339,6 +573,7 @@ def parse_scheme_basis(scheme_name: str) -> SchemeBasis:
     if not basis.scheme_type:
         try:
             from app.services.outline_templates import _TEMPLATE_NAMES
+
             basis.scheme_type = _TEMPLATE_NAMES.get(basis.template_key, "")
         except Exception:
             basis.scheme_type = ""
@@ -354,6 +589,7 @@ def parse_scheme_basis(scheme_name: str) -> SchemeBasis:
     # ---- 6. 名称主体（剥后缀，失败不影响其余字段） ----
     try:
         from app.services.scheme_scope import _strip_suffix
+
         basis.core = _strip_suffix(name)
     except Exception:
         basis.core = name.strip()
@@ -365,8 +601,7 @@ def parse_scheme_basis(scheme_name: str) -> SchemeBasis:
 # ============================================================================
 
 
-def rank_by_relevance(rows: list, basis: SchemeBasis | None,
-                      text_fn, *, stable: bool = True) -> tuple[list, int]:
+def rank_by_relevance(rows: list, basis: SchemeBasis | None, text_fn, *, stable: bool = True) -> tuple[list, int]:
     """把 ``rows`` 按与方案名称的相关性**前置**排序（不删除任何一行）。
 
     供「头部优先截断」的下游使用（``_render_facts_text`` 遇到预算即 ``break``）：
@@ -408,8 +643,7 @@ def rank_by_relevance(rows: list, basis: SchemeBasis | None,
     return [r for _, _, r in scored], hit
 
 
-def relevance_weights(rows: list, basis: SchemeBasis | None,
-                      text_fn, *, relevant_boost: float = 2.0) -> list[float]:
+def relevance_weights(rows: list, basis: SchemeBasis | None, text_fn, *, relevant_boost: float = 2.0) -> list[float]:
     """为「按 `## ` 小节配额截断」生成**相关性权重**（依据二专用）。
 
     ``sse_handlers._allocate_char_budgets`` 按「各节原始长度占比」分配字符预算。
@@ -445,4 +679,3 @@ def relevance_weights(rows: list, basis: SchemeBasis | None,
             s = 0
         out.append(float(relevant_boost) if s > 0 else 1.0)
     return out
-
