@@ -16,7 +16,7 @@ from pathlib import Path
 import aiosqlite
 
 from app.config import DATA_DIR, settings
-from app.schema_sql import SCHEMA_SQL, SCORING_DDL
+from app.schema_sql import DEFECT_LEDGER_DDL, SCHEMA_SQL, SCORING_DDL
 
 logger = logging.getLogger("db")
 
@@ -326,6 +326,11 @@ _CRITICAL_SCHEMA: tuple[tuple[str, tuple[str, ...]], ...] = (
     ("ai_scene_routes", ("scene", "config_id")),
     ("ai_runtime_settings", ("key", "value")),
     ("prompt_templates", ("key", "content")),
+    # ✅ R179 Phase C（2026-11-06）：缺陷账本两表纳入只读结构自检。
+    #    只做「表/关键列是否存在」诊断（不改 user_version 语义、不写库）；
+    #    迁移失败时 /health 能提前告警，而不是等开关打开后才 500。
+    ("scheme_defects", ("scheme_id", "id", "fingerprint")),
+    ("fix_decisions", ("id", "defect_id", "decision")),
 )
 
 
@@ -1326,6 +1331,15 @@ async def _migrate(conn: aiosqlite.Connection):
         await conn.executescript(SCORING_DDL)
     except Exception as e:
         _record_migration_degraded("M1 评分项新表迁移", e)
+
+    # --- ✅ R179 Phase C（2026-11-06）：统一缺陷账本新表兜底 ---
+    #    全为新表且语句全部 IF NOT EXISTS，重复执行零副作用，不改动既有表结构。
+    #    正常库由 init_db 的 executescript(SCHEMA_SQL) 建好；此处兜底只跑 _migrate 的
+    #    老库/测试路径。失败走既有降级登记，不阻断启动；不改 user_version 只读语义。
+    try:
+        await conn.executescript(DEFECT_LEDGER_DDL)
+    except Exception as e:
+        _record_migration_degraded("Phase C 缺陷账本新表迁移", e)
 
     # --- 迁移索引（CREATE INDEX IF NOT EXISTS 自带幂等性，无需先探存） ---
     index_migrations = [

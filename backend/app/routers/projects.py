@@ -100,6 +100,10 @@ _PROJECT_SCOPED_TABLES = (
     #    均以 project_id 关联且无外键 → 必须显式清理，否则删项目后残留孤儿行。
     "scheme_scoring_extract_runs",
     "scheme_scoring_items",
+    # ✅ R179 Phase C（2026-11-06）：缺陷账本两表（缺陷条目 / 修复裁决），
+    #    均以 project_id 关联且无外键 → 必须显式清理，否则删项目后残留孤儿行。
+    "scheme_defects",
+    "fix_decisions",
 )
 
 #: 方案级表（按 scheme_id 清理）。⚠️ consistency_scan_cache 曾长期漏删 ——
@@ -123,6 +127,10 @@ _SCHEME_SCOPED_TABLES = (
     "preflight_runs",
     "review_records",
     "placeholder_baselines",
+    # ✅ R179 Phase C（2026-11-06）：删方案时同步清理缺陷账本，避免同名 scheme_id
+    #    复用后命中旧缺陷（与 consistency_scan_cache 的教训同构）。
+    "scheme_defects",
+    "fix_decisions",
 )
 
 

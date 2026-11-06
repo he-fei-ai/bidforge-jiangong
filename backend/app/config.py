@@ -440,6 +440,9 @@ class Settings(BaseSettings):
     #      现有 sections.outline_json；关闭时 AI 目录生成链路完全不变。
     genre_tag_enabled: bool = False
     outline_instantiate_enabled: bool = False
+    # ✅ R179 Phase C（2026-11-06）：统一缺陷账本总开关。
+    #    默认关闭 —— 关闭时新路由一律 404，预检/一致性扫描的既有写路径零改动。
+    defect_ledger_enabled: bool = False
 
     # ---------- 正文生成·全文一致性扫描优化（2026-09-22，P0-1） ----------
     # 扫描的「单次调用合并章数」：1 = 逐章一次调用（旧行为，质量最稳）；

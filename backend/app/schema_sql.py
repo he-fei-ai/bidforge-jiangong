@@ -844,4 +844,59 @@ CREATE TABLE IF NOT EXISTS scheme_scoring_extract_runs (
 CREATE INDEX IF NOT EXISTS idx_scoring_runs_project ON scheme_scoring_extract_runs(project_id);
 """
 
-SCHEMA_SQL = SCHEMA_SQL + SCORING_DDL
+# ✅ R179 Phase C（2026-11-06）：统一缺陷账本 + 建议权/执行权分离。
+#    全为新表，纯 CREATE TABLE/INDEX IF NOT EXISTS（幂等、可重复执行），
+#    不改动任何既有表结构；独立常量供 db._migrate 兜底重放（老库/测试路径）。
+#    账本只读引用既有事实源（preflight_runs / consistency_audit），
+#    source_run_id 指向对方主键，绝不接管其写路径。
+#    before_text / after_text 为 TEXT 全文（不做任何截断），支撑并排比对。
+DEFECT_LEDGER_DDL = """
+CREATE TABLE IF NOT EXISTS scheme_defects (
+    id TEXT PRIMARY KEY,
+    project_id TEXT NOT NULL,
+    scheme_id TEXT NOT NULL,
+    source_kind TEXT NOT NULL DEFAULT 'manual',
+    source_run_id TEXT DEFAULT '',
+    source_table TEXT DEFAULT '',
+    rule_id TEXT DEFAULT '',
+    dimension TEXT DEFAULT '',
+    severity TEXT DEFAULT '',
+    title TEXT DEFAULT '',
+    detail TEXT DEFAULT '',
+    section_id TEXT DEFAULT '',
+    section_title TEXT DEFAULT '',
+    before_text TEXT DEFAULT '',
+    after_text TEXT DEFAULT '',
+    suggestion TEXT DEFAULT '',
+    fix_policy TEXT DEFAULT 'free',
+    policy_categories TEXT DEFAULT '[]',
+    status TEXT DEFAULT 'open',
+    verdict TEXT DEFAULT 'pending',
+    verdict_reason TEXT DEFAULT '',
+    fingerprint TEXT NOT NULL,
+    created_at TEXT DEFAULT (datetime('now','localtime')),
+    updated_at TEXT DEFAULT (datetime('now','localtime'))
+);
+CREATE INDEX IF NOT EXISTS idx_scheme_defects_scheme ON scheme_defects(scheme_id, status);
+CREATE INDEX IF NOT EXISTS idx_scheme_defects_project ON scheme_defects(project_id);
+CREATE UNIQUE INDEX IF NOT EXISTS uq_scheme_defects_fingerprint
+    ON scheme_defects(scheme_id, fingerprint);
+
+CREATE TABLE IF NOT EXISTS fix_decisions (
+    id TEXT PRIMARY KEY,
+    defect_id TEXT NOT NULL,
+    project_id TEXT NOT NULL,
+    scheme_id TEXT NOT NULL,
+    decision TEXT NOT NULL,
+    decided_by TEXT DEFAULT '',
+    reason TEXT DEFAULT '',
+    applied INTEGER DEFAULT 0,
+    before_text TEXT DEFAULT '',
+    after_text TEXT DEFAULT '',
+    created_at TEXT DEFAULT (datetime('now','localtime'))
+);
+CREATE INDEX IF NOT EXISTS idx_fix_decisions_defect ON fix_decisions(defect_id);
+CREATE INDEX IF NOT EXISTS idx_fix_decisions_project ON fix_decisions(project_id);
+"""
+
+SCHEMA_SQL = SCHEMA_SQL + SCORING_DDL + DEFECT_LEDGER_DDL
