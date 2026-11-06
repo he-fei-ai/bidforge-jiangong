@@ -23,6 +23,7 @@ from __future__ import annotations
 
 import re
 from dataclasses import dataclass, field
+from enum import Enum
 from typing import Optional
 
 # =========================================================================
@@ -1016,6 +1017,349 @@ def format_classification_hint(cls: "SchemeClassification") -> str:
         "不漏项、不错位、不臆造。"
     )
     return "\n".join(lines)
+
+
+# =========================================================================
+# 七、结构化文种标签（Phase A · 三态；纯加法，旧输出零变化）
+# =========================================================================
+# ⚠️ 旧输出契约：``classify_scheme`` / ``evaluate_hazard_level`` 的返回键与
+#    判定行为**保持不变**（提取提示词 hint、自动确认等旧调用点仍在消费）。
+#    本节新增能力只落在 ``GenreTag`` 上，经新接口暴露，不修改旧函数。
+# ⚠️ 遗留待决（本轮不修）：``evaluate_hazard_level`` 在参数缺失时按保守口径
+#    直接判 ``is_hazardous=True``（见本文件 865-870 行的历史塌缩）。新接口
+#    **不沿用**该塌缩：缺参一律输出 ``undetermined`` + ``missing_params``。
+
+
+class TriState(str, Enum):
+    """三态结论：通过 / 不通过 / 无法判定。
+
+    遵循「绝不把没检查显示成没问题」：缺参、无文本、规则不覆盖一律
+    ``UNDETERMINED``，不得用 ``NO`` 冒充「已检查且通过」。
+    """
+
+    YES = "yes"
+    NO = "no"
+    UNDETERMINED = "undetermined"
+
+
+def _tristate_conditions(conditions: list[tuple], params: dict) -> tuple[TriState, list[str], list[str]]:
+    """对一组 ``(参数, 运算符, 阈值)`` 条件做三态判定。
+
+    - 任一条件命中 → ``YES``（命中即确定，不因其它参数缺失而降级）；
+    - 零命中但存在缺参 / 非数值 → ``UNDETERMINED``；
+    - 参数齐全且零命中 → ``NO``。
+
+    Returns:
+        ``(状态, 命中原因列表, 缺失参数列表)``。
+    """
+    hits: list[str] = []
+    missing: list[str] = []
+    for pname, op, val in conditions:
+        if pname not in params:
+            if pname not in missing:
+                missing.append(pname)
+            continue
+        try:
+            actual = float(params[pname])
+        except (TypeError, ValueError):
+            if pname not in missing:
+                missing.append(pname)
+            continue
+        if _OPS[op](actual, float(val)):
+            hits.append(f"{pname}={actual} 满足 {op}{val}")
+    if hits:
+        return TriState.YES, hits, missing
+    if missing:
+        return TriState.UNDETERMINED, hits, missing
+    return TriState.NO, hits, missing
+
+
+def evaluate_hazard_tristate(threshold_key: Optional[str], params: Optional[dict] = None) -> dict:
+    """三态版危大 / 超规模判定（阈值**唯一来源**仍为 ``HAZARD_THRESHOLDS``）。
+
+    与旧 :func:`evaluate_hazard_level` 的差别只在「缺参」方向：旧实现缺参即
+    保守判危大（``is_hazardous=True``），本函数返回 ``undetermined`` 并列出
+    ``missing_params``，供上层标「需人工确认」而不是伪造确定性。
+
+    Returns:
+        ``{"hazard": str, "oversize": str, "missing_params": [str],
+           "hazard_reasons": [str], "oversize_reasons": [str]}``，
+        其中 ``hazard`` / ``oversize`` 取 :class:`TriState` 的字符串值。
+    """
+    params = params or {}
+    rule = HAZARD_THRESHOLDS.get(threshold_key) if threshold_key else None
+
+    # 无阈值记录（非参数型：拆除 / 四新 / 暗挖等）→ 出现即危大，与旧口径一致。
+    if rule is None:
+        return {
+            "hazard": TriState.YES.value,
+            "oversize": TriState.YES.value,
+            "missing_params": [],
+            "hazard_reasons": ["非参数型危大工程（出现即危大）"],
+            "oversize_reasons": ["非参数型危大工程（同属超规模）"],
+        }
+
+    if rule.get("hazard_always") or not rule.get("hazard_when"):
+        hazard = TriState.YES
+        hazard_reasons = ["该子类工程本身即属危大（部文附件一）"]
+        hazard_missing: list[str] = []
+    else:
+        hazard, hazard_reasons, hazard_missing = _tristate_conditions(rule["hazard_when"], params)
+
+    if rule.get("oversize_when"):
+        oversize, oversize_reasons, oversize_missing = _tristate_conditions(rule["oversize_when"], params)
+    else:
+        oversize, oversize_reasons, oversize_missing = TriState.YES, ["该类危大工程本身即属危大"], []
+
+    missing = sorted(set(hazard_missing) | set(oversize_missing))
+    return {
+        "hazard": hazard.value,
+        "oversize": oversize.value,
+        "missing_params": missing,
+        "hazard_reasons": hazard_reasons,
+        "oversize_reasons": oversize_reasons,
+    }
+
+
+def _category_by_id(cat_id: str) -> Optional[dict]:
+    for cat in HAZARD_CATEGORIES:
+        if cat.get("id") == cat_id:
+            return cat
+    return None
+
+
+def _sub_by_id(sub_id: str) -> Optional[dict]:
+    for cat in HAZARD_CATEGORIES:
+        for sub in cat.get("subs", ()):
+            if sub.get("id") == sub_id:
+                return sub
+    return None
+
+
+def _aggregate_tristate(states: list[str]) -> str:
+    """多子类聚合：任一 YES → YES；否则任一 UNDETERMINED → UNDETERMINED；否则 NO。"""
+    if TriState.YES.value in states:
+        return TriState.YES.value
+    if TriState.UNDETERMINED.value in states:
+        return TriState.UNDETERMINED.value
+    if states:
+        return TriState.NO.value
+    return TriState.UNDETERMINED.value
+
+
+def _hazard_label(state: str) -> str:
+    return {
+        TriState.YES.value: "危大工程",
+        TriState.NO.value: "非危大工程",
+        TriState.UNDETERMINED.value: "危大等级无法判定",
+    }.get(state, "危大等级无法判定")
+
+
+def _oversize_label(state: str) -> str:
+    return {
+        TriState.YES.value: "超过一定规模危大工程",
+        TriState.NO.value: "非超危大",
+        TriState.UNDETERMINED.value: "超规模等级无法判定",
+    }.get(state, "超规模等级无法判定")
+
+
+@dataclass
+class GenreTag:
+    """结构化文种标签（CE 五层设计中 L2 文种判断的输出对象）。
+
+    该对象是**加法式新契约**：旧 ``SchemeClassification`` 与本对象并存，
+    后者不改变任何旧调用点的返回值。序列化后写入
+    ``schemes.scheme_classification_json``（列已存在，无需迁移）。
+    """
+
+    scheme_name: str = ""
+    category_ids: list[str] = field(default_factory=list)
+    category_names: list[str] = field(default_factory=list)
+    sub_ids: list[str] = field(default_factory=list)
+    sub_names: list[str] = field(default_factory=list)
+    hazard: str = TriState.UNDETERMINED.value
+    oversize: str = TriState.UNDETERMINED.value
+    missing_params: list[str] = field(default_factory=list)
+    template_key: str = "general"
+    labels: list[str] = field(default_factory=list)
+    needs_calc: Optional[bool] = None
+    expert_review_required: Optional[bool] = None
+    source: str = "rules"
+    rule_trace: list[dict] = field(default_factory=list)
+    layer3: list[dict] = field(default_factory=list)
+
+    def to_dict(self) -> dict:
+        return {
+            "scheme_name": self.scheme_name,
+            "category_ids": self.category_ids,
+            "category_names": self.category_names,
+            "sub_ids": self.sub_ids,
+            "sub_names": self.sub_names,
+            "hazard": self.hazard,
+            "oversize": self.oversize,
+            "missing_params": self.missing_params,
+            "template_key": self.template_key,
+            "labels": self.labels,
+            "needs_calc": self.needs_calc,
+            "expert_review_required": self.expert_review_required,
+            "source": self.source,
+            "rule_trace": self.rule_trace,
+            "layer3": self.layer3,
+        }
+
+
+def build_genre_tag(
+    scheme_name: str,
+    params: Optional[dict] = None,
+    extra_text: str = "",
+    text: str = "",
+    assist: Optional[dict] = None,
+) -> GenreTag:
+    """构建结构化文种标签（规则为主，LLM 辅助仅补类别、绝不产出危大结论）。
+
+    Args:
+        scheme_name: 方案名称（规则层关键词识别依据）。
+        params: 危大阈值判定参数（单位见 ``HAZARD_THRESHOLDS``）。
+        extra_text: 补充匹配文本（资料片段等）。
+        text: 第三层规则检查文本（编制说明 / 方案正文片段）；为空时该层
+            输出 ``undetermined``，不得当作「未发现问题」。
+        assist: 规则零命中时由 :mod:`app.services.genre_assist` 给出的类别
+            建议（仅 ``category_ids`` / ``sub_ids`` / ``reason``），不参与
+            危大等级判定。
+
+    Returns:
+        :class:`GenreTag`。无类别命中时 ``hazard`` / ``oversize`` 恒为
+        ``undetermined``（「没识别到」≠「确认不是危大」）。
+    """
+    from app.services.outline_templates import match_template
+
+    params = params or {}
+    hits = classify_scheme_name(scheme_name)
+    if extra_text:
+        hits.extend(match_category_keywords(extra_text))
+
+    seen_sub: set[str] = set()
+    uniq: list[dict] = []
+    for h in hits:
+        if h["sub_id"] not in seen_sub:
+            seen_sub.add(h["sub_id"])
+            uniq.append(h)
+
+    category_ids: list[str] = []
+    category_names: list[str] = []
+    sub_ids: list[str] = []
+    sub_names: list[str] = []
+    hazard_states: list[str] = []
+    oversize_states: list[str] = []
+    missing_params: set[str] = set()
+    rule_trace: list[dict] = []
+    needs_calc = False
+
+    for h in uniq:
+        if h["category_id"] not in category_ids:
+            category_ids.append(h["category_id"])
+            category_names.append(h["category_name"])
+        sub_ids.append(h["sub_id"])
+        sub_names.append(h["sub_name"])
+        threshold_key = resolve_threshold_key(h["sub_id"])
+        lvl = evaluate_hazard_tristate(threshold_key, params)
+        hazard_states.append(lvl["hazard"])
+        oversize_states.append(lvl["oversize"])
+        missing_params.update(lvl["missing_params"])
+        # 参数型子类才需计算书（阈值复核依赖计算）；非参数型不臆造。
+        rule = HAZARD_THRESHOLDS.get(threshold_key) if threshold_key else None
+        if rule and rule.get("params"):
+            needs_calc = True
+        rule_trace.append(
+            {
+                "layer": 1,
+                "rule_id": f"HZ-{threshold_key}",
+                "sub_id": h["sub_id"],
+                "conclusion": lvl["hazard"],
+                "oversize_conclusion": lvl["oversize"],
+                "evidence": lvl["hazard_reasons"],
+                "oversize_evidence": lvl["oversize_reasons"],
+                "missing_params": lvl["missing_params"],
+            }
+        )
+
+    source = "rules"
+    if not uniq and assist:
+        # LLM 仅补「类别/子类」建议。危大与超规模结论一律保持 undetermined，
+        # 且必须留下规则校验记录（source=llm_suggested 可被审计识别）。
+        for cid in assist.get("category_ids") or []:
+            cat = _category_by_id(cid)
+            if cat and cid not in category_ids:
+                category_ids.append(cid)
+                category_names.append(cat.get("name", cid))
+        for sid in assist.get("sub_ids") or []:
+            sub = _sub_by_id(sid)
+            if sub and sid not in sub_ids:
+                sub_ids.append(sid)
+                sub_names.append(sub.get("name", sid))
+                cat_id = next(
+                    (c["id"] for c in HAZARD_CATEGORIES if any(s.get("id") == sid for s in c.get("subs", ()))), ""
+                )
+                cat = _category_by_id(cat_id)
+                if cat and cat["id"] not in category_ids:
+                    category_ids.append(cat["id"])
+                    category_names.append(cat.get("name", cat["id"]))
+        if category_ids or sub_ids:
+            source = "llm_suggested"
+            rule_trace.append(
+                {
+                    "layer": 2,
+                    "rule_id": "LLM-SUGGEST",
+                    "conclusion": TriState.UNDETERMINED.value,
+                    "evidence": [str(assist.get("reason") or "规则零命中，由 LLM 建议类别")],
+                    "missing_params": [],
+                }
+            )
+
+    hazard = _aggregate_tristate(hazard_states)
+    oversize = _aggregate_tristate(oversize_states)
+    template_key = match_template(scheme_name)
+    rule_trace.append(
+        {
+            "layer": 2,
+            "rule_id": f"TPL-{template_key}",
+            "conclusion": TriState.YES.value,
+            "evidence": [f"方案名称按模板规则路由到 {template_key}"],
+            "missing_params": [],
+        }
+    )
+
+    from app.services.genre_rules import evaluate_genre_text
+
+    layer3 = evaluate_genre_text(text, oversize=oversize)
+
+    labels: list[str] = ["、".join(category_names) if category_names else "未识别类别"]
+    labels.append(_hazard_label(hazard))
+    labels.append(_oversize_label(oversize))
+    if needs_calc:
+        labels.append("需附计算书")
+
+    expert_review_required = (
+        True if oversize == TriState.YES.value else (False if oversize == TriState.NO.value else None)
+    )
+
+    return GenreTag(
+        scheme_name=scheme_name,
+        category_ids=category_ids,
+        category_names=category_names,
+        sub_ids=sub_ids,
+        sub_names=sub_names,
+        hazard=hazard,
+        oversize=oversize,
+        missing_params=sorted(missing_params),
+        template_key=template_key,
+        labels=labels,
+        needs_calc=True if needs_calc else (False if uniq else None),
+        expert_review_required=expert_review_required,
+        source=source,
+        rule_trace=rule_trace,
+        layer3=layer3,
+    )
 
 
 def build_classification_hint(scheme_name: str, params: Optional[dict] = None, extra_text: str = "") -> str:

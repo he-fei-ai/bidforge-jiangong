@@ -104,6 +104,8 @@ from app.services._outline_tpl_scaffold import (
 __all__ = [
     "BUILDERS",
     "C",
+    "CONTENT_TYPES",
+    "FACT_DEP_ALIASES",
     "RULES",
     "S",
     "TEMPLATE_META",
@@ -165,7 +167,10 @@ __all__ = [
     "_t_underwater",
     "_t_waterproof",
     "_t_work_at_height",
+    "annotate_outline_meta",
     "build_outline",
+    "content_type_of",
+    "fact_deps_of",
     "get_meta",
     "list_templates",
     "match_template",
@@ -714,6 +719,114 @@ TEMPLATE_META: dict[str, dict[str, str]] = {
 }
 
 
+# ---------------------------------------------------------------------
+# 节点元数据（R179 Phase B）：内容类型 + 事实依赖
+# ---------------------------------------------------------------------
+# 设计约定：
+# - 两个标签都是**加法字段**：仅 ``build_outline(..., with_meta=True)`` 才写入，
+#   默认 False 时输出与拆分前逐字一致（零行为变更）。
+# - ``content_type`` 由标题确定性派生，必落在五类枚举内 —— 这是路由到
+#   「经验驱动 / 规范驱动」生成策略的依据，取值不允许自由扩展。
+# - ``fact_deps`` 只声明「需要哪些事实」，不携带事实值；事实命中与未命中
+#   由 ``services.outline_instance`` 判定（本模块不查库）。
+
+CONTENT_TYPES: tuple[str, ...] = ("experience", "standard", "calculation", "schedule", "verification")
+
+# 顺序即优先级（先命中先定档）：
+#   计算书 → 验收/检测 → 计划/资源 → 规范/安全类 → 其余按经验驱动
+_CONTENT_TYPE_RULES: tuple[tuple[tuple[str, ...], str], ...] = (
+    (("计算书", "验算", "计算", "荷载取值"), "calculation"),
+    (("验收", "检验", "检测", "试验", "实测"), "verification"),
+    (("施工计划", "进度", "工期", "资源", "劳动力", "材料", "设备", "机具", "准备", "部署"), "schedule"),
+    (
+        ("依据", "规范", "标准", "法规", "安全", "应急", "保证措施", "防护", "监测", "文明", "环保", "消防", "质量"),
+        "standard",
+    ),
+)
+
+# 标题关键词 → 事实依赖键（dep key 的语义与别名见 FACT_DEP_ALIASES）。
+_TITLE_FACT_DEPS: tuple[tuple[tuple[str, ...], tuple[str, ...]], ...] = (
+    (("工程概况", "概况"), ("project_name", "participants")),
+    (("设计文件", "设计"), ("design_params", "ground_conditions")),
+    (("地质", "岩土", "土层"), ("ground_conditions",)),
+    (("周边", "环境"), ("surroundings",)),
+    (("开挖", "土方", "基坑"), ("excavation_depth",)),
+    (("模板", "支撑", "支架"), ("support_height", "span", "total_load", "line_load")),
+    (("脚手架", "搭设"), ("scaffold_height",)),
+    (("吊装", "起重", "塔机", "升降机", "吊"), ("single_weight", "crane_capacity")),
+    (("人员", "资质", "特种作业"), ("personnel",)),
+    (("计划", "进度", "工期", "资源"), ("schedule",)),
+    (("验收", "检测"), ("acceptance",)),
+    (("应急", "风险", "危险源"), ("risk_sources",)),
+    (("监测",), ("monitoring_items",)),
+)
+
+#: 事实依赖键 → 匹配 global_facts 的别名（标题/内容/fact_key 任一命中即可）。
+#: 只做语义别名，不改变任何既有事实口径。
+FACT_DEP_ALIASES: dict[str, tuple[str, ...]] = {
+    "project_name": ("工程名称", "项目名称", "工程名"),
+    "participants": ("建设单位", "施工单位", "监理单位", "设计单位"),
+    "design_params": ("设计", "结构", "层高", "建筑面积", "参数"),
+    "ground_conditions": ("地质", "土层", "岩土", "地基承载力", "勘察", "地下水位"),
+    "surroundings": ("周边", "管线", "相邻", "环境", "道路"),
+    "excavation_depth": ("开挖深度", "基坑深度", "depth"),
+    "support_height": ("搭设高度", "支撑高度", "支模高度", "height"),
+    "span": ("跨度", "span"),
+    "total_load": ("总荷载", "total_load"),
+    "line_load": ("线荷载", "line_load"),
+    "scaffold_height": ("脚手架高度", "搭设高度", "scaffold"),
+    "single_weight": ("单件重量", "单件", "吊重", "起重量", "weight"),
+    "crane_capacity": ("起重能力", "额定起重量", "起重机械", "capacity"),
+    "personnel": ("人员", "资质", "证书", "特种作业"),
+    "schedule": ("工期", "进度", "节点", "日历天"),
+    "acceptance": ("验收", "检测", "试验"),
+    "risk_sources": ("风险", "危险源", "隐患"),
+    "monitoring_items": ("监测项目", "监测频率", "预警值"),
+}
+
+
+def content_type_of(title: str) -> str:
+    """按标题确定性给出内容类型（五类枚举，默认 experience）。"""
+    text = title or ""
+    for keywords, ctype in _CONTENT_TYPE_RULES:
+        if any(kw in text for kw in keywords):
+            return ctype
+    return "experience"
+
+
+def fact_deps_of(title: str) -> list[str]:
+    """按标题给出事实依赖键（去重保序；无依赖返回空列表）。"""
+    text = title or ""
+    deps: list[str] = []
+    for keywords, keys in _TITLE_FACT_DEPS:
+        if any(kw in text for kw in keywords):
+            for k in keys:
+                if k not in deps:
+                    deps.append(k)
+    return deps
+
+
+def annotate_outline_meta(nodes: list, template_key: str = "") -> list:
+    """就地给目录节点补 ``content_type`` / ``fact_deps`` / ``placeholder``。
+
+    仅由 ``build_outline(..., with_meta=True)`` 与模板实例化路径调用；
+    未调用时节点保持 ``{title, description, children}`` 原形。
+    """
+    for node in nodes or []:
+        if not isinstance(node, dict):
+            continue
+        title = str(node.get("title") or "")
+        node["content_type"] = content_type_of(title)
+        deps = fact_deps_of(title)
+        node["fact_deps"] = deps
+        if deps:
+            node["placeholder"] = "；".join("{" + d + "}" for d in deps)
+        children = node.get("children")
+        if isinstance(children, list) and children:
+            annotate_outline_meta(children, template_key)
+    return nodes
+
+
 def match_template(scheme_name: str) -> str:
     """按方案名称匹配最合适的模板 key（未命中返回 general）"""
     name = scheme_name or ""
@@ -724,11 +837,18 @@ def match_template(scheme_name: str) -> str:
     return "general"
 
 
-def build_outline(scheme_name: str) -> list[dict]:
-    """生成方案的标准化三级目录树（未编号，由 renumber_outline 统一重排）"""
+def build_outline(scheme_name: str, with_meta: bool = False) -> list[dict]:
+    """生成方案的标准化三级目录树（未编号，由 renumber_outline 统一重排）。
+
+    ``with_meta=True`` 时额外给每个节点补内容类型/事实依赖标签（Phase B）；
+    默认 False 时输出与拆分前逐字一致，既有调用点零感知。
+    """
     key = match_template(scheme_name)
     builder = BUILDERS.get(key) or _t_general
-    return builder()
+    outline = builder()
+    if with_meta:
+        annotate_outline_meta(outline, key)
+    return outline
 
 
 def get_meta(scheme_name: str) -> dict:

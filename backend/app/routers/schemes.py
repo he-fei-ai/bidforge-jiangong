@@ -7,6 +7,7 @@ from datetime import datetime
 
 from fastapi import APIRouter, Depends, HTTPException
 
+from app.config import settings
 from app.db import get_db, read_db
 from app.models import SchemeCreate, SchemeUpdate
 from app.services.content_utils import DEFAULT_WORD_BUDGET
@@ -458,3 +459,121 @@ async def archive_scheme(project_id: str, scheme_id: str, db=Depends(get_db)):
     )
     await db.commit()
     return {"status": new_status}
+
+
+# =========================================================================
+# 文种标签（R179 Phase A · 开关 genre_tag_enabled，默认关闭）
+# =========================================================================
+# ⚠️ 关闭时两个路由直接 404（与「该路由不存在」的现状一致），旧
+#    classify_scheme / evaluate_hazard_level 链路零改动。
+
+
+async def _load_scheme_row(db, project_id: str, scheme_id: str):
+    cur = await db.execute(
+        "SELECT id, name, scheme_classification_json FROM schemes WHERE id=? AND project_id=?",
+        (scheme_id, project_id),
+    )
+    row = await cur.fetchone()
+    if not row:
+        raise HTTPException(404, "方案不存在")
+    return row
+
+
+@router.get("/{scheme_id}/genre")
+async def get_scheme_genre(project_id: str, scheme_id: str, db=Depends(read_db)):
+    """读取已落库的结构化文种标签（未评估过时 ``genre`` 为 null）。"""
+    if not settings.genre_tag_enabled:
+        raise HTTPException(404, "文种标签功能未启用")
+    row = await _load_scheme_row(db, project_id, scheme_id)
+    raw = row["scheme_classification_json"] or ""
+    genre = None
+    if raw:
+        try:
+            genre = json.loads(raw)
+        except (json.JSONDecodeError, TypeError):
+            genre = None
+    return {"enabled": True, "genre": genre}
+
+
+@router.post("/{scheme_id}/genre/evaluate")
+async def evaluate_scheme_genre(project_id: str, scheme_id: str, data: dict | None = None, db=Depends(get_db)):
+    """按规则引擎（+ 可选 LLM 类别建议）评估文种标签并落库。
+
+    三态约束：参数缺失 / 无类别命中 / 未提供检查文本一律输出
+    ``undetermined``；LLM 只补类别建议，不产出危大等级。
+    """
+    if not settings.genre_tag_enabled:
+        raise HTTPException(404, "文种标签功能未启用")
+    row = await _load_scheme_row(db, project_id, scheme_id)
+
+    from app.services.scheme_classification import build_genre_tag
+
+    payload = data or {}
+    params = payload.get("params") or {}
+    if not isinstance(params, dict):
+        raise HTTPException(400, "params 必须是对象")
+    extra_text = str(payload.get("extra_text") or "")
+    text = str(payload.get("text") or "")
+    allow_llm = bool(payload.get("allow_llm", True))
+
+    tag = build_genre_tag(row["name"] or "", params=params, extra_text=extra_text, text=text)
+
+    # 仅「规则零命中」才调用 LLM；结果只补类别，危大/超规模仍为 undetermined。
+    if allow_llm and not tag.category_ids:
+        from app.services.genre_assist import suggest_category
+
+        assist = await suggest_category(row["name"] or "", extra_text)
+        if assist:
+            tag = build_genre_tag(row["name"] or "", params=params, extra_text=extra_text, text=text, assist=assist)
+
+    await db.execute(
+        "UPDATE schemes SET scheme_classification_json=?, updated_at=? WHERE id=?",
+        (json.dumps(tag.to_dict(), ensure_ascii=False), datetime.now().isoformat(), scheme_id),
+    )
+    await db.commit()
+    return {"enabled": True, "genre": tag.to_dict()}
+
+
+# =========================================================================
+# 目录模板实例化（R179 Phase B · 开关 outline_instantiate_enabled，默认关闭）
+# =========================================================================
+
+
+@router.post("/{scheme_id}/outline/instantiate")
+async def instantiate_scheme_outline(project_id: str, scheme_id: str, dry_run: bool = True, db=Depends(get_db)):
+    """按名称选模板 → 已确认事实填充 → 返回带元数据的目录树。
+
+    ``dry_run=true``（默认）只返回不落库；``dry_run=false`` 时元数据随节点写入
+    ``sections.outline_json``（不新增列、不动 ``db.py``）。
+    未命中的事实依赖标 ``fact_status="missing"``，不做「按实际情况确定」式填充。
+    """
+    if not settings.outline_instantiate_enabled:
+        raise HTTPException(404, "目录模板实例化功能未启用")
+
+    from app.services.outline_instance import instantiate_for_scheme
+
+    try:
+        res = await instantiate_for_scheme(db, scheme_id, project_id)
+    except ValueError:
+        raise HTTPException(404, "方案不存在")
+
+    if dry_run:
+        return {"enabled": True, "dry_run": True, **res}
+
+    from app.routers.sections import _save_outline_to_db
+
+    saved = await _save_outline_to_db(
+        db,
+        scheme_id,
+        res["tree"],
+        source="template_instance",
+        allow_empty_chapters=True,
+        preserve_node_meta=True,
+    )
+    return {
+        "enabled": True,
+        "dry_run": False,
+        "template_key": res["template_key"],
+        "stats": res["stats"],
+        "saved": saved,
+    }

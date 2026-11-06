@@ -1650,6 +1650,8 @@ KNOWN_SCENES: dict[str, str] = {
     "outline_fix": "目录修复",
     "outline_adjust": "目录调整",
     "outline_recognition": "上传目录 AI 识别",
+    # —— 文种标签（R179 Phase A）：仅规则零命中时补类别建议，不产出危大结论 ——
+    "genre_tag_assist": "文种标签辅助判断",
     # —— 正文 ——
     # ⚠️ 不设 "content" 总调度场景：正文链路的每个调用点都已细分打标
     #    （draft / continue / shrink），再留一个从不使用的"总调度"入口只会

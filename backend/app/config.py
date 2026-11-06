@@ -431,6 +431,16 @@ class Settings(BaseSettings):
     #    置 False 回退到"仅用通用九大章节骨架"的旧行为。
     outline_template_inject: bool = True
 
+    # ---------- 智能体文种标签 / 目录模板实例化（R179 Phase A/B） ----------
+    # ✅ 2026-11-06：两项均为**纯加法**开关，默认 False = 与现状零差异。
+    #    · genre_tag_enabled：启用 GET/POST /schemes/{id}/genre 路由，
+    #      输出结构化 GenreTag（三态）并写入 schemes.scheme_classification_json；
+    #      关闭时新路由按不存在处理（404），旧 classify_scheme 链路完全不变。
+    #    · outline_instantiate_enabled：启用模板实例化路由，节点元数据写入
+    #      现有 sections.outline_json；关闭时 AI 目录生成链路完全不变。
+    genre_tag_enabled: bool = False
+    outline_instantiate_enabled: bool = False
+
     # ---------- 正文生成·全文一致性扫描优化（2026-09-22，P0-1） ----------
     # 扫描的「单次调用合并章数」：1 = 逐章一次调用（旧行为，质量最稳）；
     # >1 时一次调用扫描 k 章（调用次数降为 ⌈N/k⌉），代价是批内上下文变长。

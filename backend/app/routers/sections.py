@@ -106,6 +106,19 @@ router = APIRouter(prefix="/api/v1/schemes/{scheme_id}/sections", tags=["section
 OUTLINE_EMPTY_STATUS = "目录待生成"
 OUTLINE_SAVED_STATUS = "目录已确认"
 
+# ✅ R179 Phase B（2026-11-06）：模板实例化路径允许随节点写入 outline_json 的
+#    元数据白名单。仅 ``preserve_node_meta=True`` 时生效；白名单外字段一律不落库，
+#    避免把临时对象（__original_id 等）写进交付数据。
+_OUTLINE_NODE_META_KEYS = (
+    "content_type",
+    "fact_deps",
+    "placeholder",
+    "fact_values",
+    "fact_status",
+    "missing_fact_deps",
+    "fact_source_ref",
+)
+
 
 async def _build_tree(db, scheme_id: str, include_content: bool = False) -> list:
     # ✅ 性能优化：树构建默认不拉 content 大字段（单章可达数 KB，全方案 MB 级传输浪费）；
@@ -1113,6 +1126,7 @@ async def _save_outline_to_db(
     lock_roots: bool = False,
     allow_empty_chapters: bool = False,
     snapshot_before: str | None = None,
+    preserve_node_meta: bool = False,
 ) -> dict:
     """核心保存逻辑：将目录树写入 sections 表（智能保留已有正文）。
 
@@ -1372,7 +1386,15 @@ async def _save_outline_to_db(
             # ✅ 统一形态（2026-09-22）：outline_json 固定写 id/level/confidence 三键。
             #    旧实现缺 level 键，与 renumber_sections_after_reorder / 上传落库的
             #    写入口径不一致（三处写入形态各异，消费方需逐处容错）。
-            outline_json = json.dumps({"id": numbered_id, "level": level, "confidence": confidence}, ensure_ascii=False)
+            _payload = {"id": numbered_id, "level": level, "confidence": confidence}
+            # ✅ R179 Phase B（2026-11-06）：模板实例化路径才透传节点元数据
+            #    （content_type / fact_deps / placeholder / fact_values / …）。
+            #    默认 False → 三键形态逐字不变，既有写入口零影响。
+            if preserve_node_meta:
+                for _k in _OUTLINE_NODE_META_KEYS:
+                    if _k in node:
+                        _payload[_k] = node[_k]
+            outline_json = json.dumps(_payload, ensure_ascii=False)
             is_new = not original_id or original_id.startswith("local_") or original_id not in existing_by_id
             # ✅ BUG 修复：请求未携带 word_budget 时保留库中已有预算。
             #    旧实现无条件回落 1500——"只改标题/结构调整"的保存会把用户
