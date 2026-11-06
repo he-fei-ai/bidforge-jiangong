@@ -50,6 +50,11 @@ def _payload_src() -> str:
     return _PAYLOADS_PATH.read_text(encoding="utf-8")
 
 
+def _quote_insensitive(src: str) -> str:
+    """把源码中的单引号统一为双引号，使字段锁断言对格式化（引号风格）免疫。"""
+    return src.replace("'", '"')
+
+
 # ============================================================================
 # 端到端 harness（沿用 test_content_fence_contract_20260929 的桩 DB 思路）
 # ============================================================================
@@ -300,7 +305,7 @@ class TestR2StoppedPayloadParity:
         return src[i : src.index("\ndef build_error_payload(", i + 10)]
 
     def test_helper_carries_all_fields(self):
-        block = self._helper_block()
+        block = _quote_insensitive(self._helper_block())
         for field in (
             "'event': 'stopped'",
             "'progress': progress",
@@ -308,7 +313,7 @@ class TestR2StoppedPayloadParity:
             "'failed_sections'",
             "'standard_summary': standard_summary",
         ):
-            assert field in block, f"stopped 拼装点缺少 {field}"
+            assert _quote_insensitive(field) in block, f"stopped 拼装点缺少 {field}"
 
     def test_both_stopped_paths_go_through_helper(self):
         src = _src()
@@ -345,7 +350,7 @@ class TestR3ErrorPayloadParity:
         return src[i:]
 
     def test_helper_carries_all_fields(self):
-        block = self._helper_block()
+        block = _quote_insensitive(self._helper_block())
         for field in (
             "'event': 'error'",
             "'progress': progress",
@@ -354,7 +359,7 @@ class TestR3ErrorPayloadParity:
             "'standard_summary': standard_summary",
             "'failed_sections'",
         ):
-            assert field in block, f"error 拼装点缺少 {field}"
+            assert _quote_insensitive(field) in block, f"error 拼装点缺少 {field}"
 
     def test_both_error_paths_go_through_helper(self):
         src = _src()

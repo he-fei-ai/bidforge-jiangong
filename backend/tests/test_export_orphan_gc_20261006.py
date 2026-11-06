@@ -34,6 +34,7 @@ E. 缓存状态接口契约（前端消费点）：cache_status 必须返回 tot
    互补而非互相替代。
 """
 
+import ast
 import inspect
 import json
 import os
@@ -55,6 +56,26 @@ def _export_sources() -> str:
     segs = [open(EXPORT_PY, encoding="utf-8").read()]
     segs += [open(p, encoding="utf-8").read() for p in sorted(glob.glob(os.path.join(base, "_export_*.py")))]
     return "\n".join(segs)
+
+
+def _export_config_keys_node(text: str):
+    """定位 `_EXPORT_CONFIG_KEYS = frozenset({...})` 的赋值节点（与格式化无关）。"""
+    for node in ast.walk(ast.parse(text)):
+        if isinstance(node, ast.Assign) and any(
+            isinstance(t, ast.Name) and t.id == "_EXPORT_CONFIG_KEYS" for t in node.targets
+        ):
+            return node
+    raise AssertionError("未找到 _EXPORT_CONFIG_KEYS 声明")
+
+
+def _span_offsets(text: str, node) -> tuple[int, int]:
+    """把 AST 的 (行, 列) 位置换算为拼接文本中的绝对偏移（含换行符长度）。"""
+    starts = [0]
+    for line in text.splitlines(keepends=True):
+        starts.append(starts[-1] + len(line))
+    start = starts[node.lineno - 1] + node.col_offset
+    end = starts[node.end_lineno - 1] + node.end_col_offset
+    return start, end
 
 
 # 产 issue 的函数：collect_export_issues 本体 + 四个独立检测器
@@ -495,9 +516,11 @@ class TestExportConfigKeyParity:
     def test_every_whitelisted_key_is_actually_used_elsewhere(self):
         """反向：白名单里不得残留无人读取的死键（拼写错误会静默漏入指纹）。"""
         text = _export_sources()
-        i = text.index("_EXPORT_CONFIG_KEYS = frozenset({")
-        j = text.index("})", i)
-        body = text[:i] + text[j + 2 :]  # 剔除白名单定义本体
+        # ✅ 2026-11-06：白名单定义体的定位改走 AST —— 旧实现硬编码
+        #    `_EXPORT_CONFIG_KEYS = frozenset({` 同行文本，ruff format 换成
+        #    `frozenset(\n    {`（换行）后 `index` 直接抛 ValueError。
+        start, end = _span_offsets(text, _export_config_keys_node(text))
+        body = text[:start] + text[end:]  # 剔除白名单定义本体
         unused = sorted(k for k in E._EXPORT_CONFIG_KEYS if body.count(f'"{k}"') + body.count(f"'{k}'") == 0)
         assert not unused, f"白名单中存在无人读取的键（疑似拼写错误）：{unused}"
 

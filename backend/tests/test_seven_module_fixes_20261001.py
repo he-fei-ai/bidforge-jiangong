@@ -34,6 +34,11 @@ def _src(path):
         return f.read()
 
 
+def _quote_insensitive(src):
+    """把源码中的单引号统一为双引号，使文本锁断言对格式化（引号风格）免疫。"""
+    return src.replace("'", '"')
+
+
 # ---------------------------------------------------------------------------
 # C-1：word_budget_override 归一化接线
 # ---------------------------------------------------------------------------
@@ -105,7 +110,7 @@ def test_c3_all_stopped_events_carry_failed_count():
     payloads = _src(PAYLOADS_PATH)
     i = payloads.index("def build_stopped_payload(")
     block = payloads[i : payloads.index("\ndef build_error_payload(", i + 10)]
-    assert "'event': 'stopped'" in block
+    assert '"event": "stopped"' in _quote_insensitive(block)
     assert "failed_count" in block, f"stopped 载荷拼装点必须含 failed_count: {block[:200]}"
     assert (
         "max(total - len(done_ids), 0)" in block

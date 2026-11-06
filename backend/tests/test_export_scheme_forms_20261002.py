@@ -55,6 +55,17 @@ def _fn(name, src=None):
     raise AssertionError("未找到函数 " + name)
 
 
+def _declared_export_config_keys(src=None) -> set:
+    """按 AST 读取 `_EXPORT_CONFIG_KEYS = frozenset({...})` 的字面量键集合。"""
+    src = src or _src()
+    for node in ast.walk(ast.parse(src)):
+        if isinstance(node, ast.Assign) and any(
+            isinstance(t, ast.Name) and t.id == "_EXPORT_CONFIG_KEYS" for t in node.targets
+        ):
+            return {n.value for n in ast.walk(node.value) if isinstance(n, ast.Constant) and isinstance(n.value, str)}
+    raise AssertionError("未找到 _EXPORT_CONFIG_KEYS 声明")
+
+
 # ---------------------------------------------------------------------------
 # 1. 开关默认关闭（向后兼容：产物与旧版逐字一致）
 # ---------------------------------------------------------------------------
@@ -89,11 +100,10 @@ def test_scheme_forms_config_defaults_off(key):
 def test_scheme_forms_in_fingerprint_whitelist():
     """必须进 _EXPORT_CONFIG_KEYS：否则切换开关后 config_hash 不变 →
     命中旧缓存 → 用户打开开关却看不到表单。"""
-    src = _src()
-    i = src.find("_EXPORT_CONFIG_KEYS = frozenset({")
-    assert i > 0
-    seg = src[i : src.find("})", i)]
-    assert '"scheme_forms"' in seg, "scheme_forms 未纳入内容指纹白名单"
+    # ✅ 2026-11-06：改按 AST 读取声明（旧实现硬编码 `frozenset({` 同行文本，
+    #    ruff format 把它拆成 `frozenset(\n    {` 后 `find` 返回 -1）。
+    keys = _declared_export_config_keys()
+    assert "scheme_forms" in keys, "scheme_forms 未纳入内容指纹白名单"
 
 
 def test_render_branch_guarded_by_truthiness():

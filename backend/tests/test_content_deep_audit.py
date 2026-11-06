@@ -31,6 +31,11 @@ def _payload_src() -> str:
     return _PAYLOADS_PATH.read_text(encoding="utf-8")
 
 
+def _quote_insensitive(src: str) -> str:
+    """把源码中的单引号统一为双引号，使文本锁断言对格式化（引号风格）免疫。"""
+    return src.replace("'", '"')
+
+
 # ============================================================
 # E-1：正文终态收尾顺序（checkpoint → finish_task → yield）
 # ============================================================
@@ -90,9 +95,12 @@ class TestTerminalOrdering:
         #    这里用「到下一个模块级 def 为止」的边界，与实现长度解耦。
         i_end = src.index("\ndef build_error_payload(", i_def + 10)
         block = src[i_def:i_end]
-        assert "'progress': progress" in block, "stopped 载荷必须带 progress"
-        assert "'standard_summary': standard_summary" in block, "stopped 载荷必须带 standard_summary"
-        assert "'failed_count': max(total - len(done_ids), 0)" in block
+        # ✅ 2026-11-06：断言改为引号无关（ruff format 会统一引号风格，
+        #    纯文本锁不该因此失效）；锁的仍是「拼装点字典里必须有这三个键值」。
+        flat = _quote_insensitive(block)
+        assert '"progress": progress' in flat, "stopped 载荷必须带 progress"
+        assert '"standard_summary": standard_summary' in flat, "stopped 载荷必须带 standard_summary"
+        assert '"failed_count": max(total - len(done_ids), 0)' in flat
 
     def test_cancelled_writes_checkpoint_before_finish_and_yield(self):
         """✅ BUG 修复（2026-09-21）：except CancelledError 也必须保护 checkpoint。

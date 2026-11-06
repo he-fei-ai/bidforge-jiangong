@@ -22,6 +22,11 @@ from app.services import content_runtime as crt
 from app.services.ai.prompts._registry import render
 
 
+def _quote_insensitive(src: str) -> str:
+    """把源码中的单引号统一为双引号，使文本锁断言对格式化（引号风格）免疫。"""
+    return src.replace("'", '"')
+
+
 # ============================================================
 # L-1：目标字数区间与硬上限
 # ============================================================
@@ -96,10 +101,10 @@ class TestTerminalSemantics:
         #    无法发现拼装点本身把字段删掉。
         assert "_error_payload(_all_msg)" in tail, "全章失败必须经 _error_payload 单一拼装点产出 error 事件"
         # B1 拆分：拼装点本体下沉到 _sse_content_payloads，字段断言改读其源码。
-        helper = inspect.getsource(cp.build_error_payload)
-        assert "'event': 'error'" in helper
+        helper = _quote_insensitive(inspect.getsource(cp.build_error_payload))
+        assert '"event": "error"' in helper
         assert "failed_sections" in helper  # 明细随 error 事件下发
-        assert "'standard_summary': standard_summary" in helper
+        assert '"standard_summary": standard_summary' in helper
 
     def test_completed_message_distinguishes_run_and_total(self):
         src = self._src()
