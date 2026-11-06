@@ -298,6 +298,7 @@ import {
   findFirstContentDescendant,
   findSectionById,
   flattenTreeKeys,
+  hasAnyContent,
   hasUnsavedLocalNodes,
   moveSiblingInTree,
   scrollToNodeInContainer,
@@ -337,6 +338,7 @@ import { UnknownTaskBanner } from "./schemeWorkbench/UnknownTaskBanner.tsx";
 import { useOutlineEditTreeRender } from "./schemeWorkbench/useOutlineEditTreeRender.tsx";
 import { useOutlineViewTree } from "./schemeWorkbench/useOutlineViewTree.tsx";
 import { useOutlineGate } from "./schemeWorkbench/useOutlineGate.tsx";
+import { useOutlineAutoConfirm } from "./schemeWorkbench/useOutlineAutoConfirm.tsx";
 import { useWorkbenchDataLoaders } from "./schemeWorkbench/useWorkbenchDataLoaders.ts";
 // ✅ any 清理专项（2026-11-02）：R-P1 拆分 hook 已定稿的域契约 —— 页面 state
 //    类型与 hook deps 对齐（setter 传入前受 hook props 类型约束）
@@ -939,6 +941,10 @@ export default function SchemeWorkbenchPage() {
   const baSseAbortRef = useRef<AbortController | null>(null);
   const baDefsRef = useRef<BaItemDef[]>([]);
   const [activeTab, setActiveTab] = useState("content");
+  // ✅ R179 N1（2026-11-05）：目录自动确认（默认关 = 完全现状人工闸门）。
+  //    开关存后端 governance_settings kv；delay 为后端只读倒计时（运维环境变量）。
+  const [outlineAutoConfirmEnabled, setOutlineAutoConfirmEnabled] = useState(false);
+  const [outlineAutoConfirmDelayMs, setOutlineAutoConfirmDelayMs] = useState(8000);
   // ✅ 2026-09-23「上传解析 + 提取项目」合并：import 内部子 Tab（docs = 文档解析 / extract = 项目提取）
   //    顶层 Tab 数量从 7 降到 6，bidAnalysis 不再是独立 Tab key，而是 import 下的子 Tab。
   const [importSubTab, setImportSubTab] = useState<"docs" | "extract">("docs");
@@ -1041,6 +1047,9 @@ export default function SchemeWorkbenchPage() {
   // ✅ 修复 stale closure：用 ref 保存 selectedSection 最新值，避免 load 回调读到旧值
   const selectedSectionRef = useRef<SelectedSectionLike | null>(null);
   selectedSectionRef.current = selectedSection;
+  // ✅ R179 M1（2026-11-05）：「新增建议章节」后待定位的新章节 id —— load 回调
+  //    拿到新树后据此选中定位（方案 §1.7：新增成功后自动定位，只定位不生成正文）。
+  const pendingLocateSectionIdRef = useRef<string>("");
   // ✅ SSE 取消控制器：组件卸载或用户中止时中断 fetch
   const abortControllerRef = useRef<AbortController | null>(null);
   // ✅ 性能优化：SSE 事件高频 setState 的 rAF 批量器（sectionLogs / progress / progressMsg / genStats）。
@@ -1091,12 +1100,36 @@ export default function SchemeWorkbenchPage() {
         const fresh = findSectionById(newTree, currentSelected.key!);
         if (fresh) setSelectedSection(fresh);
       }
+      // ✅ R179 M1：新增建议章节后定位到新节点（只定位，不生成正文）
+      if (pendingLocateSectionIdRef.current) {
+        const created = findSectionById(newTree, pendingLocateSectionIdRef.current);
+        if (created) setSelectedSection(created);
+        pendingLocateSectionIdRef.current = "";
+      }
     } catch (e: unknown) {
       const err = e as { message?: string };
       if (requestedSchemeId === currentSchemeIdRef.current) msg.error(err.message || "加载失败");
     }
     if (requestedSchemeId === currentSchemeIdRef.current) setLoading(false);
   }, [id]);
+
+  // ✅ R179 M1（2026-11-05）：评分项缺失项「新增建议章节」——只新增结构节点，
+  //    不生成正文、不调用 AI；创建后刷新目录、自动定位新节点，并交由面板重新
+  //    计算覆盖率。
+  const handleCreateSuggestedSection = useCallback(
+    async (title: string, parentId: string | null, level: number) => {
+      if (!id) throw new Error("方案未加载");
+      const { data } = await sectionsApi.create(id, {
+        title,
+        parent_id: parentId || "",
+        level: Math.min(Math.max(level, 1), 3),
+        sort_order: 9999,
+      });
+      pendingLocateSectionIdRef.current = String(data?.id || "");
+      await load();
+    },
+    [id, load],
+  );
 
   // ✅ 后台任务监听：轮询本方案运行中的后台任务（实时态同步到全局 Header 消息中心
   //    展示进度提示）；任务进入终态后自动刷新页面数据（兑现「完成后自动刷新」）。
@@ -1325,6 +1358,24 @@ export default function SchemeWorkbenchPage() {
         if (Number.isFinite(t) && t > 0) setMaxUploadTotalBytes(t);
         const f = Number(data?.max_files_per_request);
         if (Number.isFinite(f) && f > 0) setMaxUploadFiles(f);
+      })
+      .catch(() => {});
+    return () => {
+      alive = false;
+    };
+  }, []);
+
+  // ✅ R179 N1（2026-11-05）：读取目录自动确认开关（kv，默认 false）。
+  //    失败/旧后端一律保持默认关 —— 绝不因读不到配置而改变人工路径行为。
+  useEffect(() => {
+    let alive = true;
+    systemApi
+      .getOutlineAutoConfirm()
+      .then(({ data }) => {
+        if (!alive) return;
+        setOutlineAutoConfirmEnabled(!!data?.enabled);
+        const d = Number(data?.delay_ms);
+        if (Number.isFinite(d) && d > 0) setOutlineAutoConfirmDelayMs(d);
       })
       .catch(() => {});
     return () => {
@@ -1711,7 +1762,11 @@ export default function SchemeWorkbenchPage() {
                 summarizeOutlineReviewBasis(ckpt.review).logs.forEach((line) =>
                   pushOutlineLog(1, line),
                 );
-                openOutlineGate(ckpt.outline);
+                if (outlineAutoConfirmEnabled) {
+                  handleOutlineReady(ckpt.outline, ckpt.auto_confirm);
+                } else {
+                  openOutlineGate(ckpt.outline);
+                }
               } else if (st.status === "completed") {
                 msg.success("后台任务已完成，正在刷新");
                 load();
@@ -1884,6 +1939,54 @@ export default function SchemeWorkbenchPage() {
     load,
   });
 
+  // ✅ R179 N1（2026-11-05）：目录自动确认编排。
+  //    开关关闭（默认）时 `handleOutlineReady` 逐字委托 `openOutlineGate`，
+  //    人工路径行为与旧版完全一致（有等价性用例锁定）。
+  const {
+    handleOutlineReady,
+    cancelAuto: cancelOutlineAutoConfirm,
+    modal: outlineAutoConfirmModal,
+    banner: outlineAutoConfirmBanner,
+  } = useOutlineAutoConfirm({
+    id,
+    enabled: outlineAutoConfirmEnabled,
+    delayMs: outlineAutoConfirmDelayMs,
+    hasExistingContent: () => hasContentRef.current || hasAnyContent(treeRef.current),
+    openOutlineGate,
+    saveAuto: async (outline, snapshotBefore) => {
+      if (!id) return false;
+      try {
+        const { data } = await sectionsApi.saveOutline(id, {
+          outline,
+          source: "ai",
+          lock_roots: true,
+          snapshot_before: snapshotBefore,
+        });
+        msg.success(`目录已自动确认保存（${outline.length} 个一级章节已锁定）`);
+        notifyClearedContent(data);
+        notifyGenericResidual(data);
+        pushOutlineLog(1, "⚡ 自动确认已生效（保存前已创建可回退的目录快照）");
+        load();
+        return true;
+      } catch (saveErr: unknown) {
+        const err = saveErr as { message?: string };
+        msg.error(`自动确认保存失败：${err?.message || "未知错误"}，已切回人工确认`);
+        return false;
+      }
+    },
+    onSwitchToManual: async () => {
+      try {
+        await systemApi.updateOutlineAutoConfirm({ enabled: false });
+        setOutlineAutoConfirmEnabled(false);
+        msg.info("已切回人工确认（目录自动确认已关闭）");
+      } catch (e: unknown) {
+        const err = e as { message?: string };
+        msg.error(`切回人工失败：${err?.message || "未知错误"}，请到 AI 配置页关闭开关`);
+      }
+    },
+    msg,
+  });
+
   // ✅ G12：目录生成主链迁至 useOutlineGeneration.tsx（函数体逐字搬运）。
   const { handleGenerateOutline } = useOutlineGeneration({
     id,
@@ -1893,6 +1996,8 @@ export default function SchemeWorkbenchPage() {
     setTree,
     hasContentRef,
     openOutlineGate,
+    autoConfirmEnabled: outlineAutoConfirmEnabled,
+    handleOutlineReady,
     notifyClearedContent,
     notifyGenericResidual,
     load,
@@ -2497,7 +2602,7 @@ export default function SchemeWorkbenchPage() {
 
   // ✅ 2026-11-04 拆分（G11）：全局事实提取主链迁至
   //    schemeWorkbench/useFactsGeneration.ts（函数体逐字搬运）。
-  const { handleGenerateFacts } = useFactsGeneration({
+  const { handleGenerateFacts, handleRetryFailedSegments } = useFactsGeneration({
     id,
     msg,
     modal,
@@ -2876,6 +2981,9 @@ export default function SchemeWorkbenchPage() {
           score: data.score,
           issues: data.issues || [],
           created_at: data.created_at,
+          // ✅ R181（遗留问题 6）：沿用后端评分口径说明
+          score_rule: data.score_rule,
+          score_note: data.score_note,
         });
       }
     } catch {
@@ -2890,6 +2998,7 @@ export default function SchemeWorkbenchPage() {
     scheme,
     msg,
     exportForm,
+    modal,
     exportingRef,
     exportSeqRef,
     exportAbortRef,
@@ -3128,6 +3237,7 @@ export default function SchemeWorkbenchPage() {
       ),
       children: (
         <OutlineTab
+          autoConfirmNotice={outlineAutoConfirmBanner}
           requirements={requirements}
           setRequirements={setRequirements}
           saveRequirements={saveRequirements}
@@ -3164,6 +3274,10 @@ export default function SchemeWorkbenchPage() {
           setExpandedKeys={setExpandedKeys}
           onOutlineTreeDrop={onOutlineTreeDrop}
           msg={msg}
+          schemeId={id || ""}
+          projectId={schemeProjectId || ""}
+          onCreateSuggestedSection={handleCreateSuggestedSection}
+          onOutlineRestored={load}
         />
       ),
     },
@@ -3230,6 +3344,7 @@ export default function SchemeWorkbenchPage() {
           handleParseDocument={handleParseDocument}
           handleDeleteDocument={handleDeleteDocument}
           handleGenerateFacts={handleGenerateFacts}
+          handleRetryFailedSegments={handleRetryFailedSegments}
           openFactCreate={openFactCreate}
           handleClearAllFacts={handleClearAllFacts}
           openFactEdit={openFactEdit}
@@ -3594,7 +3709,11 @@ export default function SchemeWorkbenchPage() {
         >
           <Tabs
             activeKey={activeTab}
-            onChange={setActiveTab}
+            onChange={(key) => {
+              // ✅ R179 N1：切换页面立即取消自动确认倒计时（无计时器时为空操作）
+              cancelOutlineAutoConfirm("切换页面");
+              setActiveTab(key);
+            }}
             items={tabItems}
             className="swb-tabs-flex"
             style={{ flex: 1, minHeight: 0, display: "flex", flexDirection: "column" }}
@@ -3602,6 +3721,9 @@ export default function SchemeWorkbenchPage() {
           />
         </div>
       </div>
+
+      {/* ✅ R179 N1：自动确认倒计时 Modal（开关关闭时 open=false，不渲染任何内容） */}
+      {outlineAutoConfirmModal}
 
       {/* ===== ✅ 全局事实新增 / 编辑 ===== */}
       <WorkbenchModals

@@ -26,6 +26,18 @@ export interface ExportIssueItem {
   title?: string;
   detail?: string;
   chart_type?: string;
+  /** ✅ B-16（R182 · 2026-11-06）：来源标记；`content_audit` = 内容体检并入项。 */
+  source?: string;
+  /** ✅ B-16：内容体检级别（error / warn），仅用于展示着色，不参与阻断判定。 */
+  audit_level?: string;
+}
+
+/** ✅ B-17（R182 · 2026-11-06）：交叉引用检查三态（无图表集合时为「无法判定」）。 */
+export interface CrossrefCheckState {
+  undetermined?: boolean;
+  reason?: string;
+  fig_count?: number;
+  tbl_count?: number;
 }
 
 /** 导出统计（exportStats state；页面读 total_words/generated_count/section_count/empty_ratio/chart_*） */
@@ -36,6 +48,8 @@ export interface ExportStats {
   empty_ratio?: number;
   chart_total?: number;
   chart_done?: number;
+  /** ✅ B-17：交叉引用三态；`undetermined=true` 时前端必须显示「无法判定」而非通过。 */
+  crossref_check?: CrossrefCheckState;
 }
 
 /** 导出预检结论（exportPreflight state；页面读 released/total/stale/grade/verdict/rule_version） */

@@ -54,6 +54,16 @@ import {
 
 const { Text, Paragraph } = Typography;
 
+/** 章节树校验问题（R181 · G10）：后端 /checklist 显式回传，前端必须可见。 */
+interface ChecklistTreeIssue {
+  code: string;
+  message?: string;
+  id?: string;
+  parent_id?: string;
+  count?: number;
+  ids?: string[];
+}
+
 const REVIEWER_STORAGE_KEY = "scheme_review_reviewer_name";
 // ✅ G8：评审轨迹分页大小（与后端 /records 的 limit 上限对齐，前端一次一页）
 const RECORDS_PAGE_SIZE = 50;
@@ -100,6 +110,9 @@ function ReviewWorkflowPanel({ schemeId, refreshKey = 0, onChanged }: ReviewWork
   const msg = useAntdMessageHub(_antdMsg, "审核流程");
   const [loading, setLoading] = useState(false);
   const [items, setItems] = useState<ReviewChecklistItem[]>([]);
+  // ✅ R181（G10）：章节树校验问题（重复 ID / 缺父节点 / 环），非空时必须提示，
+  //    避免后端已明确报错、前端却静默按残缺清单继续批量送审。
+  const [treeIssues, setTreeIssues] = useState<ChecklistTreeIssue[]>([]);
   const [summary, setSummary] = useState<ReviewSummary | null>(null);
   const [selected, setSelected] = useState<string[]>([]);
   const [reviewer, setReviewer] = useState(() => localStorage.getItem(REVIEWER_STORAGE_KEY) || "");
@@ -130,8 +143,12 @@ function ReviewWorkflowPanel({ schemeId, refreshKey = 0, onChanged }: ReviewWork
     ]);
     if (requestId !== loadRequestId.current) return;
     if (clRes.status === "fulfilled") {
-      const cl = clRes.value.data as { items?: ReviewChecklistItem[] };
+      const cl = clRes.value.data as {
+        items?: ReviewChecklistItem[];
+        tree_issues?: ChecklistTreeIssue[];
+      };
       setItems(cl.items || []);
+      setTreeIssues(cl.tree_issues || []);
       // ✅ 修复：items 刷新后，把已删除/被过滤掉的 section_id 从 selected 中移除，
       //    否则跨页 rowSelection 会保留"幽灵 id"，批量提交会命中不存在的章节。
       setSelected((prev) => {
@@ -140,6 +157,8 @@ function ReviewWorkflowPanel({ schemeId, refreshKey = 0, onChanged }: ReviewWork
         return next.length === prev.length ? prev : next;
       });
     } else {
+      // ✅ R181（G10）：加载失败时清空树问题，避免展示上一次方案的残留告警
+      setTreeIssues([]);
       msg.error(clRes.reason?.message || "审核清单加载失败");
     }
     if (smRes.status === "fulfilled") {
@@ -155,6 +174,7 @@ function ReviewWorkflowPanel({ schemeId, refreshKey = 0, onChanged }: ReviewWork
     loadRequestId.current += 1;
     recordsRequestId.current += 1;
     setItems([]);
+    setTreeIssues([]);
     setSummary(null);
     setSelected([]);
     setRecords([]);
@@ -624,6 +644,25 @@ function ReviewWorkflowPanel({ schemeId, refreshKey = 0, onChanged }: ReviewWork
               </Space>
             </Col>
           </Row>
+        )}
+
+        {treeIssues.length > 0 && (
+          <Alert
+            type="warning"
+            showIcon
+            style={{ marginBottom: 8 }}
+            data-testid="review-checklist-tree-issues"
+            message={<Text style={{ fontSize: 12 }}>章节结构异常，审核清单可能不完整</Text>}
+            description={
+              <ul style={{ margin: 0, paddingLeft: 18, fontSize: 12 }}>
+                {treeIssues.map((issue, idx) => (
+                  <li key={`${issue.code}-${issue.id || issue.ids?.join(",") || idx}`}>
+                    {issue.message || issue.code}
+                  </li>
+                ))}
+              </ul>
+            }
+          />
         )}
 
         {selected.length > 0 && (

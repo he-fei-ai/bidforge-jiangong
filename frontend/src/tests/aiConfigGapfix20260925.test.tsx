@@ -81,6 +81,13 @@ vi.mock("../api", () => ({
     cleanupAuditLogs: vi.fn(),
     fetchCustomModels: vi.fn(),
   },
+  // ✅ R179 N1（2026-11-05）：页面挂载即读取目录自动确认开关，systemApi 必须存在
+  systemApi: {
+    getGovernance: vi.fn(),
+    updateGovernance: vi.fn(),
+    getOutlineAutoConfirm: vi.fn(async () => ({ data: { enabled: false, delay_ms: 8000 } })),
+    updateOutlineAutoConfirm: vi.fn(async () => ({ data: { enabled: false, delay_ms: 8000 } })),
+  },
 }));
 
 // /ai/stats 走模块级 30s TTL 缓存（性能优化项）。它是**模块级单例**，会把前一个

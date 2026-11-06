@@ -9,6 +9,7 @@ export interface outline_result {
   review?: Record<string, unknown>;
   failed_chapters?: string[];
   failed_count?: number;
+  auto_confirm?: Record<string, unknown>;
 }
 
 export interface content_result {

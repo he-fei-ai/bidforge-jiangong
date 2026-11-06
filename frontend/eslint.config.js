@@ -5,14 +5,7 @@ import reactRefresh from "eslint-plugin-react-refresh";
 
 export default tseslint.config(
   {
-    ignores: [
-      "dist",
-      "logs",
-      "node_modules",
-      "**/*.bak*",
-      "junk_*.log",
-      "tsconfig.tsbuildinfo",
-    ],
+    ignores: ["dist", "logs", "node_modules", "**/*.bak*", "junk_*.log", "tsconfig.tsbuildinfo"],
   },
   {
     files: ["**/*.{ts,tsx}"],
@@ -33,10 +26,7 @@ export default tseslint.config(
       "react-hooks/immutability": "off",
       "react-hooks/refs": "off",
       "react-hooks/purity": "off",
-      "react-refresh/only-export-components": [
-        "warn",
-        { allowConstantExport: true },
-      ],
+      "react-refresh/only-export-components": ["warn", { allowConstantExport: true }],
       // ✅ any 清理专项（2026-11-02）：no-explicit-any 升级为 error 作为 CI 门禁。
       // src（非测试）存量显式 any 已全部清零；测试目录见下方 per-directory override。
       "@typescript-eslint/no-explicit-any": "error",

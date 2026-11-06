@@ -75,7 +75,22 @@ export function NumberingConsistencyPanel({ schemeId }: { schemeId: string }) {
       } else if (data?.mismatched > 0) {
         antdMsg.warning(`发现 ${data.mismatched} 个章节的正文编号与目录漂移，可一键修复`);
       } else {
-        antdMsg.success(`编号一致性校验通过（共检查 ${data?.checked ?? 0} 章）`);
+        // ✅ R181（2026-11-06）：三态呈现 —— 通过 / 不通过 / 无法判定。
+        //    skipped=true（编号规范化开关关闭 / 无编号可判定）此前被归入
+        //    "校验通过"，把"无法判定"错报成"通过"，会误导用户直接导出。
+        const skippedCount = ((data?.sections || []) as NumberingSectionRow[]).filter(
+          (s) => s.skipped,
+        ).length;
+        const checked = data?.checked ?? 0;
+        if (skippedCount > 0 || checked === 0) {
+          antdMsg.info(
+            checked === 0
+              ? "无法判定：未检查到可判定的章节（可能编号规范化开关关闭）"
+              : `部分章节无法判定：${skippedCount} 章被跳过，仅 ${checked} 章完成一致性判定`,
+          );
+        } else {
+          antdMsg.success(`编号一致性校验通过（共检查 ${checked} 章）`);
+        }
       }
     } catch (e: unknown) {
       antdMsg.error((e as { message?: string })?.message || "编号一致性校验失败");
@@ -164,6 +179,11 @@ export function NumberingConsistencyPanel({ schemeId }: { schemeId: string }) {
   };
 
   const driftSections = (report?.sections || []).filter((s) => !s.consistent && !s.skipped);
+  // ✅ R181：无法判定 ≠ 通过 —— 有跳过章节或根本没检查到章节时单独呈现
+  const skippedCount = (report?.sections || []).filter((s) => s.skipped).length;
+  const checkedCount = report?.checked ?? 0;
+  const undetermined =
+    !report?.error && !((report?.mismatched ?? 0) > 0) && (skippedCount > 0 || checkedCount === 0);
 
   return (
     <Card
@@ -173,10 +193,17 @@ export function NumberingConsistencyPanel({ schemeId }: { schemeId: string }) {
           <NumberOutlined />
           <Text strong>编号一致性（目录 vs 正文子标题编号）</Text>
           {report && !report.error && (
-            <Tag data-testid="numbering-summary-tag" color={report.mismatched ? "red" : "green"}>
+            <Tag
+              data-testid="numbering-summary-tag"
+              color={report.mismatched ? "red" : undetermined ? "gold" : "green"}
+            >
               {report.mismatched
-                ? `${report.mismatched}/${report.checked} 章漂移`
-                : `已检查 ${report.checked ?? 0} 章，全部一致`}
+                ? `${report.mismatched}/${checkedCount} 章漂移`
+                : undetermined
+                  ? skippedCount > 0
+                    ? `已检查 ${checkedCount} 章，${skippedCount} 章无法判定`
+                    : "无法判定：未检查到章节"
+                  : `已检查 ${checkedCount} 章，全部一致`}
             </Tag>
           )}
         </Space>
@@ -224,6 +251,17 @@ export function NumberingConsistencyPanel({ schemeId }: { schemeId: string }) {
       {!report && (
         <div style={{ marginTop: 8 }} data-testid="numbering-empty">
           <Text type="secondary">尚未检查。点击右上角「检查编号一致性」开始。</Text>
+        </div>
+      )}
+
+      {/* ✅ R181：无法判定单独提示，绝不以"通过"外观呈现 */}
+      {report && undetermined && (
+        <div style={{ marginTop: 8 }} data-testid="numbering-undetermined-hint">
+          <Text type="warning">
+            {skippedCount > 0
+              ? `${skippedCount} 章因编号规范化开关关闭或缺少可判定编号被跳过，本次结论为「无法判定」，不代表已通过。`
+              : "本次未检查到可判定的章节，结论为「无法判定」，不代表已通过。"}
+          </Text>
         </div>
       )}
 

@@ -61,11 +61,12 @@ export type DocumentParseListProps = {
 /**
  * 文件分类 → Ant Design Tag color 映射。
  *
- * 后端唯一事实源是 `app/services/doc_categories.py::DOC_CATEGORIES`（9 类），
+ * 后端唯一事实源是 `app/services/doc_categories.py::DOC_CATEGORIES`（10 类），
  * 本表与其逐条对齐；`getCategoryColor` 对未登记分类返回 "default"，
  * 故后端新增分类不会导致前端崩溃或空标签（只是配色降级）。
  */
 const CATEGORY_COLOR_MAP: Record<string, string> = {
+  补遗文件: "volcano",
   招标文件: "red",
   合同文件: "orange",
   设计文件: "geekblue",

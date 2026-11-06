@@ -281,6 +281,10 @@ export type UploadOutlineSummary = {
   outline: OutlineRow[];
   nodeCount: number;
   reorganized: boolean;
+  /** ✅ R179（D-40）：后端 AI 兜底识别链路「截断字数」（>0 表示仅部分文本参与识别） */
+  truncatedChars: number;
+  /** ✅ R179（D-40）：规则识别不足、走了 AI 兜底识别 */
+  usedAiFallback: boolean;
 };
 
 /**
@@ -301,6 +305,9 @@ export function summarizeUploadOutlineResult(data: unknown): UploadOutlineSummar
     reorganize_report?: unknown;
     warning?: unknown;
     file_name?: unknown;
+    // ✅ R179（D-40）：AI 兜底识别的两个降级信号（upload_outline.py B2-2 起回传）
+    truncated_chars?: unknown;
+    used_ai_fallback?: unknown;
   };
   const outline: OutlineRow[] = Array.isArray(d.outline) ? (d.outline as OutlineRow[]) : [];
   const nodeCount = countOutline(outline);
@@ -317,6 +324,18 @@ export function summarizeUploadOutlineResult(data: unknown): UploadOutlineSummar
     const desc = describeReorganizeReport(d.reorganize_report);
     if (desc) notices.push(desc);
   }
+  // ✅ R179（D-40）：消费后端 AI 兜底识别的两个降级信号。此前只进响应体、
+  //    前端零展示 —— 用户误以为整份文件都参与了 AI 识别（承诺落空）。
+  //    两者都走 notices（不阻断应用目录），与 parse_warnings 同层如实告知。
+  const truncatedChars = Number(d.truncated_chars ?? 0);
+  if (Number.isFinite(truncatedChars) && truncatedChars > 0) {
+    notices.push(
+      `文件较长，仅部分内容参与 AI 识别（截断 ${truncatedChars} 字），识别结果可能遗漏后文章节`,
+    );
+  }
+  if (d.used_ai_fallback === true) {
+    notices.push("规则识别结果不足，已用 AI 兜底识别，建议人工核对章节层级");
+  }
 
   // 空结果：以「不替换目录树」为前提，如实回传后端给出的失败原因
   if (nodeCount === 0) {
@@ -332,6 +351,8 @@ export function summarizeUploadOutlineResult(data: unknown): UploadOutlineSummar
       outline: [],
       nodeCount: 0,
       reorganized,
+      truncatedChars,
+      usedAiFallback: d.used_ai_fallback === true,
     };
   }
 
@@ -347,6 +368,8 @@ export function summarizeUploadOutlineResult(data: unknown): UploadOutlineSummar
     outline,
     nodeCount,
     reorganized,
+    truncatedChars,
+    usedAiFallback: d.used_ai_fallback === true,
   };
 }
 

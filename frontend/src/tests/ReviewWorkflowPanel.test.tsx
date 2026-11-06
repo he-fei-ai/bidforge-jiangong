@@ -212,6 +212,35 @@ describe("ReviewWorkflowPanel · 章节审核工作流", () => {
     expect(reviewApi.summary).toHaveBeenCalledWith(SCHEME);
   });
 
+  it("checklist 返回 tree_issues → 必须显式告警并展示后端定位文案", async () => {
+    // ✅ R181（G10）：后端已判定结构异常（缺父节点/环/重复 ID），前端不得静默
+    //    按残缺清单继续送审。断言 data-testid + 后端 message 原文，防止告警被删。
+    (reviewApi.checklist as any).mockResolvedValueOnce({
+      data: {
+        items: DATA.CHECKLIST.items,
+        tree_ok: false,
+        tree_issues: [
+          {
+            code: "missing_parent",
+            id: "sec-2",
+            parent_id: "ghost",
+            message: "章节「第4章 降水」的父节点 ghost 不存在",
+          },
+        ],
+      },
+    });
+    const { container } = render(
+      <App>
+        <ReviewWorkflowPanel schemeId={SCHEME} />
+      </App>,
+    );
+    await waitFor(() => expect(container.textContent || "").toContain("第3章 基坑支护"));
+    const alert = container.querySelector('[data-testid="review-checklist-tree-issues"]');
+    expect(alert, "结构异常告警不得缺失").toBeTruthy();
+    expect(alert!.textContent || "").toContain("章节结构异常");
+    expect(alert!.textContent || "").toContain("父节点 ghost 不存在");
+  });
+
   it("未填评审人 → 点击「通过」被前置拦截，弹窗不打开、reviewSection 不被调用", async () => {
     // ✅ BUG 修复回归：评审人必填，避免空评审人落库
     const { container } = render(

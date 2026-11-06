@@ -308,6 +308,10 @@ export interface AIPrecheckAllResponse {
   skipped_no_url: number;
   /** ✅ R179：其中被用户停用（enabled=0）的条数 */
   disabled_by_user?: number;
+  /** ✅ R181：本次被超时闸掐断的条数（诊断用） */
+  timeout_count?: number;
+  /** ✅ R181：本次实际生效的探测并发上限（诊断用） */
+  concurrency_limit?: number;
 }
 
 /** 动态拉取的模型项（/config/fetch-models、/custom-models） */
@@ -513,6 +517,8 @@ export interface AIConfigExport {
   runtime?: Record<string, string>;
   scene_route_count?: number;
   runtime_keys?: string[];
+  /** ✅ R181（N-02）：场景路由读取是否成功；false = 导出文件缺少场景路由 */
+  scene_routes_ok?: boolean;
 }
 
 /** POST /ai/config/import 响应 */

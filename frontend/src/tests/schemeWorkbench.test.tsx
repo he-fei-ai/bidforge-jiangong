@@ -228,6 +228,30 @@ describe("SchemeWorkbenchPage · 组件级冒烟与目录树编辑", () => {
     expect(screen.queryByText("加载中...")).toBeNull();
   }, 60000); // ✅ 后续修复（2026-09-28）：重型组件全量并行时偶发 20s 超时，放大到 60s
 
+  it("载入上次一致性结果 → 展示「多批取最小」评分口径说明", async () => {
+    // ✅ R181（遗留问题 6）：后端评分口径为 min_across_batches（有意保守）。
+    //    前端必须显式展示 score_note，否则用户会误以为分数无故下降。
+    apiDefaults["complianceApi.consistencyLatest"] = {
+      data: {
+        exists: true,
+        score: 82,
+        issues: [],
+        created_at: "2026-11-06T00:00:00",
+        score_rule: "min_across_batches",
+        score_note: "一致性分数取各批审计的最低分（本次 3 批），以保守口径呈现整体风险。",
+      },
+    };
+    renderPage();
+    const label = await screen.findByText("审核与预检");
+    fireEvent.click(label.closest('[role="tab"]') || label);
+    const load = await screen.findByText("载入上次结果");
+    fireEvent.click(load.closest("button") || load);
+    await waitFor(() => expect(screen.getByTestId("consistency-score-note")).toBeTruthy());
+    expect(screen.getByTestId("consistency-score-note").textContent || "").toContain(
+      "取各批审计的最低分",
+    );
+  });
+
   it("渲染冒烟：六个工作流 Tab 全部存在，点击可切换", async () => {
     renderPage();
     await gotoOutlineTab();

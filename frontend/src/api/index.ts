@@ -49,6 +49,7 @@ import type {
   FactDangerResponse,
   FactListResponse,
   FactResolveResponse,
+  FactRetryFailedResponse,
 } from "../types/facts";
 // ✅ any 清理专项（2026-11-02）：错误体 / SSE 事件 / 写路径载荷契约
 import type {
@@ -164,6 +165,30 @@ function getApiToken(): string {
 function authHeaders(): Record<string, string> {
   const t = getApiToken();
   return t ? { "X-API-Key": t } : {};
+}
+
+// ✅ R179（2026-11-05 · 管理面鉴权）：`/admin/*` 使用独立凭据 ADMIN_API_TOKEN。
+//    本地默认（回环来源）无需该头，行为与改造前完全一致；仅当后端配置了
+//    ADMIN_API_TOKEN 且从前端远程访问时才需要注入。取值优先构建期
+//    VITE_ADMIN_TOKEN，其次 localStorage.admin_token（与 api_token 同型）。
+//    刻意只注入到管理面请求，不随全站请求外发，缩小凭据暴露面。
+function getAdminToken(): string {
+  try {
+    const env = import.meta.env?.VITE_ADMIN_TOKEN;
+    if (typeof env === "string" && env) return env;
+  } catch {
+    // import.meta 不可用时忽略
+  }
+  try {
+    return localStorage.getItem("admin_token") || "";
+  } catch {
+    return "";
+  }
+}
+
+function adminHeaders(): Record<string, string> {
+  const t = getAdminToken();
+  return t ? { "X-Admin-Token": t } : {};
 }
 
 api.interceptors.request.use((config) => {
@@ -315,6 +340,34 @@ export const sectionsApi = {
     api.get(`/schemes/${schemeId}/sections/report/${sectionId}`),
   /** F-CONTENT-STANDARD(2026-09-26)：方案所有章节生成标准校验汇总 */
   reportSummary: (schemeId: string) => api.get(`/schemes/${schemeId}/sections/report-summary`),
+  // ✅ R179 N1（2026-11-05）：目录版本（复用 scheme_snapshots，保留最近 5 条）。
+  //    回退后端强制失效导出缓存 + 一致性扫描缓存并重挂图表（前端无需额外动作）。
+  outlineVersions: (schemeId: string, limit = 5) =>
+    api.get(`/schemes/${schemeId}/sections/outline-versions`, { params: { limit } }),
+  restoreOutlineVersion: (schemeId: string, snapshotId: string) =>
+    api.post(`/schemes/${schemeId}/sections/outline-versions/${snapshotId}/restore`),
+};
+
+// ✅ R179 M1（2026-11-05）：评分项 → 目录覆盖校验（三条接口，全部为新增）。
+//    覆盖率报告不缓存，每次调用实时计算；抽取结果由后端落库快照。
+export const scoringApi = {
+  /** 触发评分项抽取（v1 全自动扫候选页块；doc_ids 仅做类型校验） */
+  extract: (projectId: string, data?: { doc_ids?: string[]; force?: boolean }) =>
+    api.post<import("../types/scoring").ScoringExtractResponse>(
+      `/projects/${projectId}/scoring-items/extract`,
+      data || {},
+      { timeout: 300000 },
+    ),
+  /** 列出评分项 + 最近一次抽取运行状态 */
+  listItems: (projectId: string) =>
+    api.get<import("../types/scoring").ScoringItemsListResponse>(
+      `/projects/${projectId}/scoring-items`,
+    ),
+  /** 计算并返回方案目录覆盖率报告（不缓存） */
+  coverage: (schemeId: string) =>
+    api.get<import("../types/scoring").ScoringCoverageResponse>(
+      `/schemes/${schemeId}/scoring-coverage`,
+    ),
 };
 
 // 目录库
@@ -453,6 +506,13 @@ export const factsApi = {
     api.post<FactResolveResponse>(
       "/global-facts/ack-stale",
       { scheme_id: schemeId, fact_ids: factIds },
+      { signal: options?.signal },
+    ),
+  // ✅ T-05（2026-11-06）：立即重试失败/退避段（后端只清退避窗口，不改事实数据）
+  retryFailed: (schemeId: string, chunkHashes?: string[], options?: { signal?: AbortSignal }) =>
+    api.post<FactRetryFailedResponse>(
+      "/global-facts/retry-failed",
+      { scheme_id: schemeId, chunk_hashes: chunkHashes ?? [] },
       { signal: options?.signal },
     ),
   delete: (id: string, schemeId?: string) =>
@@ -950,10 +1010,15 @@ export const exportApi = {
     config: ExportFormatConfig,
     chartImages?: { chart_type: string; mermaid_code: string; png: string }[],
     signal?: AbortSignal,
+    overrideHighIssues = false,
   ) =>
     api.post(
       `/schemes/${schemeId}/export/docx`,
-      { config, chart_images: chartImages || [] },
+      {
+        config,
+        chart_images: chartImages || [],
+        ...(overrideHighIssues ? { override_high_issues: true } : {}),
+      },
       { responseType: "blob", timeout: 600000, signal },
     ),
   pdf: (
@@ -961,10 +1026,15 @@ export const exportApi = {
     config: ExportFormatConfig,
     chartImages?: { chart_type: string; mermaid_code: string; png: string }[],
     signal?: AbortSignal,
+    overrideHighIssues = false,
   ) =>
     api.post(
       `/schemes/${schemeId}/export/pdf`,
-      { config, chart_images: chartImages || [] },
+      {
+        config,
+        chart_images: chartImages || [],
+        ...(overrideHighIssues ? { override_high_issues: true } : {}),
+      },
       { responseType: "blob", timeout: 600000, signal },
     ),
   cacheStatus: (schemeId: string, signal?: AbortSignal) =>
@@ -1166,6 +1236,7 @@ export const promptsApi = {
     api.post<PromptSyncResult>("/admin/prompts/sync-from-code", null, {
       baseURL: "",
       params: { force },
+      headers: adminHeaders(),
     }),
 };
 
@@ -1212,6 +1283,13 @@ export interface GovernanceSettings {
   prompt_injection_defense: boolean;
 }
 
+/** GET/PUT /system/outline-auto-confirm（R179 N1；默认 enabled=false）。 */
+export interface OutlineAutoConfirmSettings {
+  enabled: boolean;
+  /** 后端有效倒计时（运维经环境变量配置，前端只读）。 */
+  delay_ms: number;
+}
+
 /** 提示词运行时指标快照（GET /system/prompt-metrics；进程内存计数，重启清零） */
 export interface PromptMetricsSnapshot {
   render_total: Record<string, number>;
@@ -1250,6 +1328,11 @@ export const systemApi = {
   getGovernance: () => api.get<GovernanceSettings>("/system/governance"),
   updateGovernance: (body: GovernanceSettings) =>
     api.put<GovernanceSettings>("/system/governance", body),
+  /** ✅ R179 N1（2026-11-05）：目录自动确认开关（存 governance_settings kv，默认关）。
+   *  `delay_ms` 为后端有效倒计时，前端只读展示，不提供修改入口。 */
+  getOutlineAutoConfirm: () => api.get<OutlineAutoConfirmSettings>("/system/outline-auto-confirm"),
+  updateOutlineAutoConfirm: (body: { enabled: boolean }) =>
+    api.put<OutlineAutoConfirmSettings>("/system/outline-auto-confirm", body),
   activity: (limit = 8) => api.get("/system/activity", { params: { limit } }),
   /** SSE 实时流：任务 / AI 状态变更时立即推送快照 */
   activityStream: (limit = 8, signal?: AbortSignal, softStop?: Promise<void>) =>

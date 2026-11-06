@@ -34,6 +34,12 @@ export interface OutlineGenerationDeps {
   setTree: Dispatch<SetStateAction<TreeNode[]>>;
   hasContentRef: MutableRefObject<boolean>;
   openOutlineGate: (outline: OutlineNodeInput[]) => void;
+  /** ✅ R179 N1（2026-11-05）：自动确认开关（默认 false）。
+   *  开启时 completed/重挂路径改走 `handleOutlineReady`；关闭时**逐字走原
+   *  `openOutlineGate(...)`**，人工路径零行为变化。 */
+  autoConfirmEnabled: boolean;
+  /** 自动确认编排入口（开关关闭时内部逐字委托 openOutlineGate）。 */
+  handleOutlineReady: (outline: OutlineNodeInput[], rawSignal?: unknown) => void;
   notifyClearedContent: (data: { cleared_content_sections?: number } | null | undefined) => void;
   notifyGenericResidual: (data: unknown) => void;
   load: () => Promise<void>;
@@ -72,6 +78,8 @@ export function useOutlineGeneration(deps: OutlineGenerationDeps) {
     setTree,
     hasContentRef,
     openOutlineGate,
+    autoConfirmEnabled,
+    handleOutlineReady,
     notifyClearedContent,
     notifyGenericResidual,
     load,
@@ -225,7 +233,12 @@ export function useOutlineGeneration(deps: OutlineGenerationDeps) {
             // 一级目录确认闸门（对齐 OpenBidKit outline-selection）：
             //    旧实现 completed 即自动入库，用户没有确认一级结构的机会；
             //    现改为弹闸门勾选确认后再保存（lock_roots=true 锁定一级章节）。
-            openOutlineGate(evt.outline);
+            // ✅ R179 N1：开关开启时交给自动确认编排；关闭时保留原路径一字不变。
+            if (autoConfirmEnabled) {
+              handleOutlineReady(evt.outline, evt.auto_confirm);
+            } else {
+              openOutlineGate(evt.outline);
+            }
           } else {
             msg.warning("AI 返回空目录，未保存");
           }
@@ -373,7 +386,11 @@ export function useOutlineGeneration(deps: OutlineGenerationDeps) {
               summarizeOutlineReviewBasis(ckpt.review).logs.forEach((line) =>
                 pushOutlineLog(1, line),
               );
-              openOutlineGate(restoredOutline);
+              if (autoConfirmEnabled) {
+                handleOutlineReady(restoredOutline, ckpt.auto_confirm);
+              } else {
+                openOutlineGate(restoredOutline);
+              }
             } else {
               msg.success("目录生成已在后台完成，正在刷新");
               load();

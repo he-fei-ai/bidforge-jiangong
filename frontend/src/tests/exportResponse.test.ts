@@ -14,9 +14,12 @@ import {
   ganttTruncatedWarning,
   headerValue,
   globalFactsStatusWarning,
+  noHttpFallbackWarning,
   noPilFallbackWarning,
   parseChartRenderStats,
+  parseExportBlock,
   parseExportDegraded,
+  parseExportOverride,
   parseFixStats,
   parseGlobalFactsStatus,
   resolveExportError,
@@ -264,6 +267,25 @@ describe("noPilFallbackWarning · 无本地兜底告警（G-06）", () => {
   it("0 / 缺省时返回 null（不发无关提示）", () => {
     expect(noPilFallbackWarning({})).toBeNull();
     expect(noPilFallbackWarning({ no_pil_fallback: 0 })).toBeNull();
+  });
+
+  it("R181：甘特 JSON 失败单独提示「无 HTTP 兜底」，与 no_pil_fallback 区分", () => {
+    const w = noHttpFallbackWarning({
+      failed: 1,
+      no_http_fallback: 1,
+      no_http_fallback_types: ["gantt"],
+    });
+    expect(w).toBeTruthy();
+    expect(w).toContain("1 张");
+    expect(w).toContain("gantt");
+    expect(w).toContain("没有 HTTP 渲染兜底");
+    // 不得误导为「开启 PIL 兜底可补救」
+    expect(w).not.toContain("PIL 兜底");
+  });
+
+  it("R181：no_http_fallback 缺省/0 时返回 null", () => {
+    expect(noHttpFallbackWarning({})).toBeNull();
+    expect(noHttpFallbackWarning({ no_http_fallback: 0 })).toBeNull();
   });
 
   it("X-Chart-Render-Stats 可解析出新增字段", () => {
@@ -533,5 +555,62 @@ describe("SchemeWorkbenchPage · 导出错误体接线锚点（R175 BUG-7）", (
     expect(src).toContain("parseGlobalFactsStatus(resp.headers)");
     expect(src).toContain("parseGlobalFactsStatus(errHeaders)");
     expect(src).toContain("globalFactsStatusWarning");
+  });
+});
+
+/**
+ * ✅ B-15（R182 · 2026-11-06）：high 级问题阻断错误体的运行时解析。
+ * 后端 409 体经 axios 可能是对象，也可能在 blob 响应类型下是 Blob —— 两种形态
+ * 都必须可读；非阻断错误必须返回 null，交给 resolveExportError 的既有文案路径。
+ */
+describe("parseExportBlock · 阻断错误体（B-15）", () => {
+  const payload = {
+    error: "export_blocked_high_issues",
+    detail: "导出已被阻断：存在 1 类高风险问题（共 2 处）",
+    blocked: true,
+    high_issue_count: 1,
+    high_issue_total: 2,
+    high_issues: [
+      { type: "empty_section", rule_id: "DLV-01", severity: "high", count: 2, title: "空章节" },
+    ],
+    override_hint: "如确认已知悉，请在请求体传入 override_high_issues=true（会写入导出留痕）",
+  };
+
+  it("对象形态：解析出阻断项与可执行提示", async () => {
+    const info = await parseExportBlock({ response: { data: payload } });
+    expect(info?.code).toBe("export_blocked_high_issues");
+    expect(info?.issueCount).toBe(1);
+    expect(info?.issueTotal).toBe(2);
+    expect(info?.issues[0].rule_id).toBe("DLV-01");
+    expect(info?.overrideHint).toContain("override_high_issues");
+  });
+
+  it("Blob 形态（responseType=blob）同样可读，不得因 Blob 退化成泛化文案", async () => {
+    const blob = new Blob([JSON.stringify(payload)], { type: "application/json" });
+    const info = await parseExportBlock({ response: { data: blob } });
+    expect(info?.detail).toContain("导出已被阻断");
+  });
+
+  it("非阻断错误 / 非 JSON / 无响应 → null（走既有错误文案路径）", async () => {
+    expect(await parseExportBlock({ response: { data: { detail: "参数错误" } } })).toBeNull();
+    expect(await parseExportBlock({ response: { data: new Blob(["not json"]) } })).toBeNull();
+    expect(await parseExportBlock(new Error("network"))).toBeNull();
+  });
+});
+
+/**
+ * ✅ B-15：覆写信号头解析 —— 未覆写时必须为 null（零提示不变），
+ * 覆写时返回稳定枚举，前端据此提示「已按已知悉并继续执行」。
+ */
+describe("parseExportOverride · 覆写信号（B-15）", () => {
+  it("头存在（大小写不敏感）→ 返回 high-issues", () => {
+    expect(parseExportOverride({ "X-Export-Override": "high-issues" })).toBe("high-issues");
+    expect(parseExportOverride({ "x-export-override": "HIGH-ISSUES" })).toBe("high-issues");
+  });
+
+  it("头缺失 / 空值 → null（不得伪造覆写提示）", () => {
+    expect(parseExportOverride({})).toBeNull();
+    expect(parseExportOverride({ "X-Export-Override": "" })).toBeNull();
+    expect(parseExportOverride(null)).toBeNull();
   });
 });

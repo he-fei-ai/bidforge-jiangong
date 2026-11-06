@@ -81,7 +81,18 @@ beforeEach(() => {
     data: {
       fixed: 1,
       total: 3,
-      report: { ...REPORT, mismatched: 0, consistent: true },
+      // ✅ R181：修复后的报告不应再有 skipped 章节，否则三态口径下结论是
+      //    「无法判定」而非「全部一致」（旧断言把跳过也当成通过，属语义过期）。
+      report: {
+        checked: 3,
+        mismatched: 0,
+        consistent: true,
+        sections: [
+          { section_id: "sec-a", consistent: true, skipped: false, changed: false, diffs: [] },
+          { section_id: "sec-b", consistent: true, skipped: false, changed: true, diffs: [] },
+          { section_id: "sec-c", consistent: true, skipped: false, changed: false, diffs: [] },
+        ],
+      },
       snapshot_id: "snap-123",
     },
   } as never);
@@ -189,6 +200,49 @@ describe("NumberingConsistencyPanel · 编号一致性接线（R174 F1）", () =
   it("初始空态：未检查时展示引导文案", () => {
     renderPanel();
     expect(screen.getByTestId("numbering-empty").textContent).toContain("尚未检查");
+  });
+
+  /**
+   * ✅ R181（2026-11-06）：校验三态 —— 通过 / 不通过 / 无法判定。
+   * 旧实现只看 mismatched：skipped 章节被归入「全部一致 / 校验通过」，
+   * 用户会把「无法判定」当成「通过」直接导出。
+   */
+  it("R181：有跳过章节且无漂移 → 无法判定（金色汇总 + 明确提示，不得显示通过）", async () => {
+    mockedCheck.mockResolvedValue({
+      data: {
+        checked: 2,
+        mismatched: 0,
+        consistent: true,
+        sections: [
+          { section_id: "sec-a", consistent: true, skipped: false, changed: false, diffs: [] },
+          { section_id: "sec-b", consistent: true, skipped: false, changed: false, diffs: [] },
+          { section_id: "sec-c", consistent: true, skipped: true, changed: false, diffs: [] },
+        ],
+      },
+    } as never);
+    renderPanel();
+    fireEvent.click(screen.getByTestId("numbering-check-btn"));
+    await waitFor(() => {
+      const tag = screen.getByTestId("numbering-summary-tag").textContent || "";
+      expect(tag).toContain("1 章无法判定");
+      expect(tag).not.toContain("全部一致");
+    });
+    expect(screen.getByTestId("numbering-undetermined-hint").textContent).toContain("无法判定");
+    await waitFor(() => {
+      expect(document.body.textContent).toContain("部分章节无法判定");
+    });
+  });
+
+  it("R181：未检查到任何章节 → 无法判定，而不是通过", async () => {
+    mockedCheck.mockResolvedValue({
+      data: { checked: 0, mismatched: 0, consistent: true, sections: [] },
+    } as never);
+    renderPanel();
+    fireEvent.click(screen.getByTestId("numbering-check-btn"));
+    await waitFor(() => {
+      expect(screen.getByTestId("numbering-summary-tag").textContent).toContain("无法判定");
+    });
+    expect(screen.getByTestId("numbering-undetermined-hint")).toBeTruthy();
   });
 });
 

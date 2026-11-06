@@ -26,7 +26,7 @@ function corsPreflightProxy(): Connect.NextHandleFunction {
           }
           res.statusCode = proxyRes.statusCode || 200;
           proxyRes.pipe(res);
-        }
+        },
       );
       proxyReq.on("error", () => {
         res.setHeader("Access-Control-Allow-Origin", (req.headers.origin as string) || "*");
@@ -80,11 +80,7 @@ export default defineConfig({
           const isSSE = (url?: string) => {
             if (!url) return false;
             const lower = url.toLowerCase();
-            return (
-              lower.includes("sse") ||
-              lower.endsWith("/stream") ||
-              lower.includes("/stream?")
-            );
+            return lower.includes("sse") || lower.endsWith("/stream") || lower.includes("/stream?");
           };
 
           // 后端不可达（未启动 / 崩溃 / 端口被占）时，http-proxy 默认直接断开与浏览器的
@@ -109,7 +105,7 @@ export default defineConfig({
                 detail: "后端服务不可达，请确认 8000 端口已启动",
                 target: "http://localhost:8000",
                 reason: [e?.code, e?.message].filter(Boolean).join(" ") || String(err),
-              })
+              }),
             );
           });
           proxy.on("proxyReq", (proxyReq, req) => {

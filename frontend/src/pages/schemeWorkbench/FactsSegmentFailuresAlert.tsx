@@ -1,7 +1,10 @@
-import { Alert } from "antd";
+import { Alert, Button } from "antd";
+import { ReloadOutlined } from "@ant-design/icons";
 
 export function FactsSegmentFailuresAlert({
   stats,
+  onRetry,
+  retrying,
 }: {
   stats: {
     ok?: number;
@@ -12,6 +15,10 @@ export function FactsSegmentFailuresAlert({
     declared_failed?: number;
     declared_failed_details?: Array<{ index?: number; heading?: string; reason?: string }>;
   } | null;
+  /** ✅ T-05（2026-11-06）：立即重试失败/退避段（后端释放退避后重跑提取）。 */
+  onRetry?: () => void | Promise<void>;
+  /** 重试请求/提取进行中，按钮显示 loading 并禁用重复点击。 */
+  retrying?: boolean;
 }) {
   const s = stats || {};
   const failed = Number(s.failed) || 0;
@@ -19,9 +26,7 @@ export function FactsSegmentFailuresAlert({
   const declared = Number(s.declared_failed) || 0;
   const allFailed = failed > 0 && failed === total;
   const details = Array.isArray(s.failed_details) ? s.failed_details : [];
-  const declaredDetails = Array.isArray(s.declared_failed_details)
-    ? s.declared_failed_details
-    : [];
+  const declaredDetails = Array.isArray(s.declared_failed_details) ? s.declared_failed_details : [];
   // ✅ R179：仅 declared_failed>0（failed=0）时不再静默 —— 此前该提示只挂在
   //    failed>0 条件上，模型声明「无事实」的段既不显示失败明细也不显示原因，
   //    用户只看到 ok 数变少，无法判断是失败还是空段。
@@ -57,6 +62,25 @@ export function FactsSegmentFailuresAlert({
             <div>未获取到失败明细，建议稍后点击「③ AI 提取事实」重新提取。</div>
           )}
           {failed > 0 && <div>常见原因：模型超时/限流、网络抖动、单段内容过长。</div>}
+          {/* ✅ T-05（2026-11-06）：失败段必须有可执行的「立即重试」入口；
+              模型声明空段（declared）不显示，避免把有效空段误当失败重跑。 */}
+          {failed > 0 && onRetry && (
+            <div style={{ marginTop: 8 }}>
+              <Button
+                size="small"
+                icon={<ReloadOutlined />}
+                loading={Boolean(retrying)}
+                disabled={Boolean(retrying)}
+                onClick={() => void onRetry()}
+                data-testid="facts-retry-failed-btn"
+              >
+                立即重试失败段
+              </Button>
+              <span style={{ marginLeft: 8, color: "#8c8c8c" }}>
+                将绕过退避窗口，立即重新提取这些段
+              </span>
+            </div>
+          )}
         </div>
       }
     />

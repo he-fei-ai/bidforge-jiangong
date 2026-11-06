@@ -31,6 +31,9 @@ export interface TaskTerminalInfo {
     event?: string;
     /** partial=true 表示成果不完整（停止 / 失败兜底），需提示用户手动补齐 */
     partial?: boolean;
+    /** ✅ R179 N1（2026-11-05）：checkpoint 白名单新增 `auto_confirm`，
+     *  断线重挂/刷新接管与在线 completed 的自动确认判定同构（加法式）。 */
+    auto_confirm?: unknown;
   };
   /** ✅ G12-6：正文生成 checkpoint（后端 `_CHECKPOINT_KINDS.content_generation` 白名单） */
   content_result?: {

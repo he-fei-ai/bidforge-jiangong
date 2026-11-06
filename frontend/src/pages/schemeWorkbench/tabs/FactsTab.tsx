@@ -110,6 +110,8 @@ export interface FactsTabProps {
   handleParseDocument: (docId: string, fileName: string, force?: boolean) => void | Promise<void>;
   handleDeleteDocument: (docId: string, fileName: string) => void | Promise<void>;
   handleGenerateFacts: () => void | Promise<void>;
+  /** ✅ T-05（2026-11-06）：释放失败段退避并立即重跑提取。 */
+  handleRetryFailedSegments: () => void | Promise<void>;
   openFactCreate: () => void;
   handleClearAllFacts: () => void;
   openFactEdit: (group: FactGroupLike) => void;
@@ -168,6 +170,7 @@ export function FactsTab({
   handleParseDocument,
   handleDeleteDocument,
   handleGenerateFacts,
+  handleRetryFailedSegments,
   openFactCreate,
   handleClearAllFacts,
   openFactEdit,
@@ -494,7 +497,11 @@ export function FactsTab({
       {/* ✅ 组件级可测（2026-09-21）：渲染抽到模块级 FactsSegmentFailuresAlert */}
       {factsSegmentStats &&
         ((factsSegmentStats.failed ?? 0) > 0 || (factsSegmentStats.declared_failed ?? 0) > 0) && (
-          <FactsSegmentFailuresAlert stats={factsSegmentStats} />
+          <FactsSegmentFailuresAlert
+            stats={factsSegmentStats}
+            onRetry={handleRetryFailedSegments}
+            retrying={generating && genType === "facts"}
+          />
         )}
 
       {/* ===== 筛选器 ===== */}

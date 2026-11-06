@@ -355,4 +355,48 @@ describe("summarizeUploadOutlineResult（识别结果诊断）", () => {
     expect(r.ok).toBe(true);
     expect(r.notices[0]).toContain("截断");
   });
+
+  // ✅ R179（D-40）：AI 兜底识别的两个降级信号必须有用户可见出口
+  it("truncated_chars>0：提示仅部分内容参与 AI 识别并透传字段", () => {
+    const r = summarizeUploadOutlineResult({
+      outline: [{ title: "A" }],
+      truncated_chars: 3200,
+    });
+    expect(r.ok).toBe(true);
+    expect(r.truncatedChars).toBe(3200);
+    expect(r.usedAiFallback).toBe(false);
+    expect(r.notices.some((n) => n.includes("截断 3200 字") && n.includes("AI 识别"))).toBe(true);
+  });
+
+  it("used_ai_fallback=true：提示已走 AI 兜底并建议人工核对", () => {
+    const r = summarizeUploadOutlineResult({
+      outline: [{ title: "A" }],
+      used_ai_fallback: true,
+    });
+    expect(r.usedAiFallback).toBe(true);
+    expect(r.truncatedChars).toBe(0);
+    expect(r.notices.some((n) => n.includes("AI 兜底") && n.includes("人工核对"))).toBe(true);
+  });
+
+  it("反例：两键为 0/false 时不出任何兜底 notice", () => {
+    const r = summarizeUploadOutlineResult({
+      outline: [{ title: "A" }],
+      truncated_chars: 0,
+      used_ai_fallback: false,
+    });
+    expect(r.truncatedChars).toBe(0);
+    expect(r.usedAiFallback).toBe(false);
+    expect(r.notices).toHaveLength(0);
+  });
+
+  it("反例：旧后端（无两键）不报错、不出 notice，行为与既往逐字一致", () => {
+    const r = summarizeUploadOutlineResult({
+      outline: [{ title: "A" }],
+      file_name: "f.docx",
+    });
+    expect(r.truncatedChars).toBe(0);
+    expect(r.usedAiFallback).toBe(false);
+    expect(r.notices).toHaveLength(0);
+    expect(r.message).toContain("识别完成");
+  });
 });

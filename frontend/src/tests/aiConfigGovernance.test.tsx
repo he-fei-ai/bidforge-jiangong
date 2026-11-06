@@ -62,6 +62,9 @@ const h = vi.hoisted(() => ({
   // ✅ 2026-10-11（治理开关 UI 测试覆盖）：提示词治理 GET/PUT
   getGovernance: vi.fn(),
   updateGovernance: vi.fn(),
+  // ✅ R179 N1（2026-11-05）：目录自动确认开关 GET/PUT（默认关）
+  getOutlineAutoConfirm: vi.fn(async () => ({ data: { enabled: false, delay_ms: 8000 } })),
+  updateOutlineAutoConfirm: vi.fn(async () => ({ data: { enabled: false, delay_ms: 8000 } })),
 }));
 
 vi.mock("../api", () => ({
@@ -96,6 +99,8 @@ vi.mock("../api", () => ({
   systemApi: {
     getGovernance: h.getGovernance,
     updateGovernance: h.updateGovernance,
+    getOutlineAutoConfirm: h.getOutlineAutoConfirm,
+    updateOutlineAutoConfirm: h.updateOutlineAutoConfirm,
     getPromptMetrics: vi.fn(),
     resetPromptMetrics: vi.fn(),
     syncPromptsFromCode: vi.fn(),

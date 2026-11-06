@@ -5,10 +5,11 @@ import type { ModalFuncProps } from "antd";
 import { sectionsApi, schemesApi } from "../../api";
 import { STANDARD_LABELS, normalizeStandard } from "../../utils/contentStandard";
 import type { GenerationStandardChoice } from "../../utils/contentStandard";
+import { sectionSaveFenceNotice } from "../../utils/diagnosticsText";
 import { findSectionById, updateNodeFields, type TreeNode } from "./outlineTreeModel.ts";
+import type { SchemeRecord, WorkbenchSection } from "./workbenchTypes";
 
 const { Text } = Typography;
-import type { SchemeRecord, WorkbenchSection } from "./workbenchTypes";
 
 /**
  * ✅ 2026-11-04 拆分（G7 姊妹组）：正文编辑动作自 SchemeWorkbenchPage 原位搬迁。
@@ -164,6 +165,9 @@ export function useSectionEditing(deps: SectionEditingDeps) {
         status: content.trim() ? "generated" : "empty",
       });
       msg.success(`已保存，当前 ${data.word_count || 0} 字`);
+      // ✅ R181（N-06）：围栏自动补齐必须让用户看见（尤其「疑似吞入正文」时）。
+      const fenceNotice = sectionSaveFenceNotice(data);
+      if (fenceNotice) msg.warning(fenceNotice);
       setIsEditingSection(false);
       setEditDirty(false);
       // ✅ G10（2026-09-21）：正文已变 → 审核结论随之失效。

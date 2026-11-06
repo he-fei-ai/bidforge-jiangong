@@ -91,6 +91,10 @@ export interface OutlineSavePayload {
    *  仅在用户于空章确认框点「仍要保存」后置 true，此时后端响应会加法式
    *  回传 empty_top_chapters 明细（由 notifyGenericResidual 统一提示）。 */
   allow_empty_chapters?: boolean;
+  /** ✅ R179 N1（2026-11-05）：保存前在同一事务内先建目录快照（结构 + 正文全量）。
+   *  取值即快照 type：`outline_auto_confirm`（自动确认前，可一键回退）。
+   *  不传 ⇒ 后端零行为变化（不建快照、响应不含 snapshot_id）。 */
+  snapshot_before?: string;
 }
 
 /** POST /outline-library/{id}/review 请求体 */

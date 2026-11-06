@@ -46,11 +46,13 @@ const HIGH_EXPORT_ISSUE_TYPES = new Set([
 ]);
 
 /**
- * 导出门禁（2026-10-01 起改为「只提示、不阻断」）：
- * 审核与预检属于质量辅助流程，完成与否**不再作为导出文档的前置条件** ——
- * 未预检、存在 high 问题、就绪度未跑 / 过期 / 未放行，均不影响导出。
+ * 导出门禁（前端只提示、按钮不置灰；后端已于 R182 起默认阻断 high 级问题）：
+ * 审核与预检属于质量辅助流程，不作为导出按钮的前置条件 —— 未预检、存在 high
+ * 问题、就绪度未跑 / 过期 / 未放行，按钮均保持可点击。
  *
- * 保留 highIssueCount 统计，供导出页给出「建议整改」的非阻断提示。
+ * ✅ B-15（R182 · 2026-11-06）：后端在导出前按 severity 拦截 high 级 issue，
+ * 返回 409 并要求前端「已知悉并继续」显式覆写。因此这里保留 highIssueCount
+ * 统计，但文案必须与后端行为一致（不再声称"不影响导出"）。
  */
 export function deriveExportGate(input: ExportGateInput): ExportGateResult {
   const issues = input.issues || [];
@@ -65,8 +67,8 @@ export function deriveExportGate(input: ExportGateInput): ExportGateResult {
 
   const reason =
     highIssueCount > 0
-      ? `导出预检提示：仍有 ${highIssueCount} 个高风险问题，建议整改后再交付（不影响导出）`
-      : "导出不受审核与预检状态限制，可随时导出";
+      ? `导出预检提示：仍有 ${highIssueCount} 个高风险问题，导出前将被拦截（确认已知悉后可覆写继续，覆写会留痕）`
+      : "导出按钮不受审核与预检状态限制；若预检发现高风险问题，导出前会拦截并允许确认覆写";
   return { allowed: true, reason, highIssueCount };
 }
 

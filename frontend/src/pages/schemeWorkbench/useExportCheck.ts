@@ -18,6 +18,8 @@ export interface ExportCheckDeps {
     success: (s: string, d?: number) => void;
     error: (s: string) => void;
     warning: (s: string) => void;
+    /** ✅ B-17：无图表集合时用 info 播报「无法判定」，不得借用 success 语义。 */
+    info: (s: string, d?: number) => void;
   };
   currentSchemeIdRef: { current: string };
   exportCheckAbortRef: { current: AbortController | null };
@@ -87,6 +89,8 @@ export function useExportCheck(deps: ExportCheckDeps) {
         empty_ratio: data.empty_ratio,
         chart_total: data.chart_total,
         chart_done: data.chart_done,
+        // ✅ B-17（R182 · 2026-11-06）：交叉引用三态（无图表集合 → 无法判定）。
+        crossref_check: data.crossref_check,
       });
       // ✅ G1：导出预检反向打通就绪度总检 —— 同一份数据、同一套规则词表，
       // 用户不用在两个页面之间来回比对「到底能不能交付」
@@ -119,8 +123,14 @@ export function useExportCheck(deps: ExportCheckDeps) {
           );
         }
       }
+      const crossrefUndetermined = Boolean(data.crossref_check?.undetermined);
       if (!data.issues?.length) {
-        msg.success(`预检通过：${data.section_count} 个章节均无异常`);
+        if (crossrefUndetermined) {
+          // ✅ B-17：无图表集合时交叉引用「无法判定」，不得提示成「预检通过」。
+          msg.info("预检完成：方案无图表，交叉引用无法判定（不代表通过）");
+        } else {
+          msg.success(`预检通过：${data.section_count} 个章节均无异常`);
+        }
       } else {
         msg.warning(`发现 ${data.issues.length} 个问题，建议处理后再导出`);
       }

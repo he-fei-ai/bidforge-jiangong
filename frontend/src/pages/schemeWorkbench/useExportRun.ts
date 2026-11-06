@@ -1,6 +1,6 @@
 import { useRef } from "react";
 import type { Dispatch, SetStateAction } from "react";
-import type { FormInstance } from "antd";
+import type { FormInstance, ModalFuncProps } from "antd";
 import { chartsApi, exportApi } from "../../api";
 import {
   renderChartsForExport,
@@ -14,9 +14,12 @@ import {
   fixStatsParts,
   ganttTruncatedWarning,
   globalFactsStatusWarning,
+  noHttpFallbackWarning,
   noPilFallbackWarning,
   parseChartRenderStats,
+  parseExportBlock,
   parseExportDegraded,
+  parseExportOverride,
   parseFixStats,
   parseGlobalFactsStatus,
   resolveExportError,
@@ -43,6 +46,8 @@ export interface ExportRunDeps {
     info: (s: string, d?: number) => void;
   };
   exportForm: FormInstance;
+  /** ✅ B-15：high 级问题阻断后的「已知悉并继续」确认弹窗（显式覆写，非静默开关）。 */
+  modal: { confirm: (config: ModalFuncProps) => unknown };
   exportingRef: { current: boolean };
   exportSeqRef: { current: number };
   exportAbortRef: { current: AbortController | null };
@@ -61,6 +66,7 @@ export function useExportRun(deps: ExportRunDeps) {
     scheme,
     msg,
     exportForm,
+    modal,
     exportingRef,
     exportSeqRef,
     exportAbortRef,
@@ -76,7 +82,7 @@ export function useExportRun(deps: ExportRunDeps) {
   // ✅ 导出图表渲染进度：上一次已刷新的整数百分比（同百分比内不再排队刷新）
   const exportPctRef = useRef(-1);
 
-  const handleExport = async (format: "docx" | "pdf" = "docx") => {
+  const handleExport = async (format: "docx" | "pdf" = "docx", overrideHighIssues = false) => {
     if (!id || exportingRef.current) return;
     const sid = id;
     const controller = new AbortController();
@@ -89,6 +95,8 @@ export function useExportRun(deps: ExportRunDeps) {
     setExportStage("charts");
     setExportPct(0);
     setExportPhase("正在渲染图表...");
+    // ✅ B-15：阻断后用户确认覆写 → 本轮结束后带着显式标记重试一次。
+    let retryOverride = false;
     try {
       const validated = await exportForm.validateFields();
       const config = deepMergeExportConfig(exportForm.getFieldsValue(true), validated);
@@ -131,8 +139,8 @@ export function useExportRun(deps: ExportRunDeps) {
       setExportPhase(format === "pdf" ? "正在生成文档并转换PDF..." : "正在生成文档...");
       const resp =
         format === "pdf"
-          ? await exportApi.pdf(sid, config, chartImages, controller.signal)
-          : await exportApi.docx(sid, config, chartImages, controller.signal);
+          ? await exportApi.pdf(sid, config, chartImages, controller.signal, overrideHighIssues)
+          : await exportApi.docx(sid, config, chartImages, controller.signal, overrideHighIssues);
       if (
         controller.signal.aborted ||
         exportSeqRef.current !== exportSeq ||
@@ -173,7 +181,10 @@ export function useExportRun(deps: ExportRunDeps) {
         //    类型（mindmap/sequence 等）单独走 noPilFallbackWarning，避免给出
         //    「开启允许 PIL 兜底」这种对它们完全无效的建议。
         const noPil = Math.max(0, Number(stats.no_pil_fallback || 0));
-        const genericFailed = Math.max(0, Number(stats.failed || 0) - noPil);
+        // ✅ R181（2026-11-06）：甘特 JSON 只有本地 PIL、没有 HTTP 兜底，
+        //    失败单独成类展示；从泛化 failed 中扣除，避免双重提示误导。
+        const noHttp = Math.max(0, Number(stats.no_http_fallback || 0));
+        const genericFailed = Math.max(0, Number(stats.failed || 0) - noPil - noHttp);
         if (genericFailed > 0) {
           msg.warning(
             `${genericFailed} 张图表渲染失败，建议检查图表代码或开启「允许 PIL 兜底」后重试`,
@@ -181,6 +192,8 @@ export function useExportRun(deps: ExportRunDeps) {
         }
         const noPilWarn = noPilFallbackWarning(stats);
         if (noPilWarn) msg.warning(noPilWarn, 8);
+        const noHttpWarn = noHttpFallbackWarning(stats);
+        if (noHttpWarn) msg.warning(noHttpWarn, 8);
         const fbWarn = fallbackBorrowWarning(stats);
         if (fbWarn) msg.warning(fbWarn, 8);
         const ganttWarn = ganttTruncatedWarning(stats);
@@ -193,19 +206,46 @@ export function useExportRun(deps: ExportRunDeps) {
       }
       const degraded = parseExportDegraded(resp.headers);
       if (degraded) msg.warning(degraded.message, 8);
+      // ✅ B-15：覆写放行必须让用户看得见（本次是显式动作且已写入导出留痕）。
+      const overrideSignal = parseExportOverride(resp.headers);
+      if (overrideSignal) {
+        msg.warning(
+          "本次导出已按「已知悉并继续」执行：存在未修复的高风险问题，覆写动作已写入导出留痕",
+          8,
+        );
+      }
       const factsWarn = globalFactsStatusWarning(parseGlobalFactsStatus(resp.headers));
       if (factsWarn) msg.warning(factsWarn, 8);
     } catch (e: unknown) {
-      const resolved = await resolveExportError(e);
-      if (
-        !resolved.canceled &&
-        exportSeqRef.current === exportSeq &&
-        currentSchemeIdRef.current === sid
-      ) {
-        msg.error(resolved.message);
-        const errHeaders = (e as { response?: { headers?: unknown } } | null)?.response?.headers;
-        const factsWarn = globalFactsStatusWarning(parseGlobalFactsStatus(errHeaders));
-        if (factsWarn) msg.warning(factsWarn, 8);
+      // ✅ B-15：默认阻断 → 显式确认后才带 override 重试；非阻断错误走原路径。
+      const blocked = overrideHighIssues ? null : await parseExportBlock(e);
+      if (blocked && exportSeqRef.current === exportSeq && currentSchemeIdRef.current === sid) {
+        retryOverride = await new Promise<boolean>((resolve) => {
+          modal.confirm({
+            title: "导出已被阻断：存在高风险问题",
+            content: blocked.detail,
+            okText: "已知悉并继续",
+            cancelText: "返回修复",
+            okButtonProps: { danger: true },
+            onOk: () => resolve(true),
+            onCancel: () => resolve(false),
+          });
+        });
+        if (!retryOverride) {
+          msg.warning("已取消导出：请先修复高风险问题后再重试", 6);
+        }
+      } else {
+        const resolved = await resolveExportError(e);
+        if (
+          !resolved.canceled &&
+          exportSeqRef.current === exportSeq &&
+          currentSchemeIdRef.current === sid
+        ) {
+          msg.error(resolved.message);
+          const errHeaders = (e as { response?: { headers?: unknown } } | null)?.response?.headers;
+          const factsWarn = globalFactsStatusWarning(parseGlobalFactsStatus(errHeaders));
+          if (factsWarn) msg.warning(factsWarn, 8);
+        }
       }
     } finally {
       if (exportSeqRef.current === exportSeq && exportAbortRef.current === controller) {
@@ -216,6 +256,14 @@ export function useExportRun(deps: ExportRunDeps) {
         setExportStage("idle");
         setExportPct(0);
       }
+    }
+    if (
+      retryOverride &&
+      !controller.signal.aborted &&
+      exportSeqRef.current === exportSeq &&
+      currentSchemeIdRef.current === sid
+    ) {
+      await handleExport(format, true);
     }
   };
 

@@ -45,6 +45,10 @@ export interface ConsistencyAuditResult {
   score: number;
   issues: ConsistencyIssueItem[];
   created_at?: string;
+  // ✅ R181（遗留问题 6）：后端加法式回传评分口径，前端原样展示，
+  //    避免用户误以为「分数比单批时低」是正文变差。
+  score_rule?: string;
+  score_note?: string;
 }
 
 /** 专家论证预检结果（POST /compliance/expert-review 响应；页面读 ready/missing/score/suggestions） */
@@ -336,7 +340,12 @@ export function useReviewAudit(deps: ReviewAuditDeps) {
     try {
       const { data } = await complianceApi.consistencyAudit(id, controller.signal);
       if (controller.signal.aborted) return;
-      setConsistencyResult({ score: data.score, issues: data.issues || [] });
+      setConsistencyResult({
+        score: data.score,
+        issues: data.issues || [],
+        score_rule: data.score_rule,
+        score_note: data.score_note,
+      });
       const high = (data.issues || []).filter(
         (i: ConsistencyIssueItem) => i.severity === "high",
       ).length;

@@ -421,6 +421,14 @@ export function ReviewTab({
             ? `（上次审计：${consistencyResult.created_at.replace("T", " ").slice(0, 19)}）`
             : ""}
         </Text>
+        {/* ✅ R181（遗留问题 6）：显式展示后端评分口径（多批取最小为有意设计） */}
+        {consistencyResult?.score_note && (
+          <div>
+            <Text type="secondary" style={{ fontSize: 12 }} data-testid="consistency-score-note">
+              {consistencyResult.score_note}
+            </Text>
+          </div>
+        )}
         {auditRunning && (
           <div style={{ marginTop: 8 }}>
             <Progress percent={70} status="active" showInfo={false} size="small" />
@@ -631,9 +639,23 @@ export function ReviewTab({
               <ul style={{ margin: 0, paddingLeft: 20, fontSize: 12 }}>
                 {exportIssues.map((iss, idx) => (
                   <li key={idx}>
-                    {/* 后端契约：预检 issue 一定携带英文 type 键（ExportIssueItem 未收录） */}
-                    {EXPORT_ISSUE_LABEL[iss.type!] || iss.type}：
-                    <Text strong>{describeExportIssue(iss)}</Text>
+                    {/* ✅ B-16（R182 · 2026-11-06）：内容体检结果已并入 issues，
+                        带 source=content_audit；用来源标记区分，避免与规则问题混淆。 */}
+                    {iss.source === "content_audit" ? (
+                      <>
+                        <Tag color="blue" style={{ marginRight: 4 }}>
+                          内容体检
+                        </Tag>
+                        {iss.title || iss.type}
+                        {iss.detail ? `：${iss.detail}` : ""}
+                      </>
+                    ) : (
+                      <>
+                        {/* 后端契约：预检 issue 一定携带英文 type 键（ExportIssueItem 未收录） */}
+                        {EXPORT_ISSUE_LABEL[iss.type!] || iss.type}：
+                        <Text strong>{describeExportIssue(iss)}</Text>
+                      </>
+                    )}
                   </li>
                 ))}
               </ul>
@@ -699,17 +721,31 @@ export function ReviewTab({
                 </div>
               </Col>
             </Row>
-            {(exportStats.empty_ratio || 0) > 0 ||
-            (exportStats.chart_total || 0) > (exportStats.chart_done || 0) ? (
+            {exportStats.crossref_check?.undetermined && (
+              // ✅ B-17（R182 · 2026-11-06）：无图表集合 → 交叉引用「无法判定」，
+              //    绝不能显示成「✓ 已就绪 / 通过」。
+              <div
+                data-testid="export-crossref-undetermined"
+                style={{ marginTop: 8, fontSize: 12, color: "#d48806" }}
+              >
+                ⚠️ 因方案中没有任何图表（图/表），交叉引用检查
+                <Text strong>无法判定</Text>
+                ——这不代表通过；补充图表并重新预检后可核对正文「图 X-X / 表 X-X」引用是否失效。
+              </div>
+            )}
+            {/* 无法判定只额外提示，不吞掉「空章节 / 未完成图表」的原有提示 */}
+            {!exportStats.crossref_check?.undetermined &&
+            ((exportStats.empty_ratio || 0) > 0 ||
+              (exportStats.chart_total || 0) > (exportStats.chart_done || 0)) ? (
               <div style={{ marginTop: 8, fontSize: 12, color: "#999" }}>
                 💡 仍有空章节 /
                 未完成图表：可回「正文生成」页用「补全生成」，或在章节正文中手动补图后重新预检。
               </div>
-            ) : (
+            ) : !exportStats.crossref_check?.undetermined ? (
               <div style={{ marginTop: 8, fontSize: 12, color: "#52c41a" }}>
                 ✓ 章节与图表均已就绪，可前往「导出」页生成文档。
               </div>
-            )}
+            ) : null}
           </Card>
         )}
         {/* ✅ G1：导出预检与就绪度总检共用同一份数据，结论直接在此呈现，

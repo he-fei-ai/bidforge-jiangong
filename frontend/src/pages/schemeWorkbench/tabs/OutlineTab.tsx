@@ -4,7 +4,7 @@
  * 页面级状态 / handler / setter 全部显式注入；JSX / DOM / 文案 / 条件 / key /
  * 事件绑定逐字搬运，未做任何逻辑修改。
  */
-import type { Dispatch, Key, RefObject, SetStateAction } from "react";
+import type { Dispatch, Key, ReactNode, RefObject, SetStateAction } from "react";
 import type { MessageInstance } from "antd/es/message/interface";
 import type { TreeDataNode, TreeProps } from "antd";
 import {
@@ -35,6 +35,7 @@ import {
   hasUnsavedLocalNodes,
   type TreeNode,
 } from "../outlineTreeModel";
+import { ScoringCoveragePanel } from "./ScoringCoveragePanel";
 import { NEXT_TAB } from "../../../utils/workflowDerived";
 import {
   UPLOAD_FILE_ACCEPT,
@@ -44,6 +45,7 @@ import {
 } from "../../../utils/uploadAccept";
 import type { MultiSectionHint, OutlineNodeInput, WorkbenchSection } from "../workbenchTypes";
 import { OutlineTreeActions } from "../OutlineTreeActions";
+import { OutlineVersionsPanel } from "../OutlineVersionsPanel";
 import { OutlineNodeBudgetPanel } from "../OutlineNodeBudgetPanel";
 import { TaskControlButtons } from "../TaskControlButtons";
 
@@ -51,6 +53,9 @@ const { Text } = Typography;
 
 /** 「目录生成」Tab（Tab 2）面板：页面级状态 / handler / setter 全部显式注入。 */
 export interface OutlineTabProps {
+  /** ✅ R179 N1（2026-11-05）：自动确认风险提示条（开关开启时才有内容）。
+   *  关闭（默认）时传 null，界面与旧版完全一致。 */
+  autoConfirmNotice?: ReactNode;
   // 编制要求
   requirements: string;
   setRequirements: Dispatch<SetStateAction<string>>;
@@ -94,9 +99,20 @@ export interface OutlineTabProps {
   setExpandedKeys: Dispatch<SetStateAction<Key[]>>;
   onOutlineTreeDrop: (info: Parameters<NonNullable<TreeProps["onDrop"]>>[0]) => void;
   msg: MessageInstance;
+  // ✅ R179 M1（2026-11-05）：评分项覆盖校验面板所需的最小注入
+  schemeId: string;
+  projectId: string;
+  onCreateSuggestedSection: (
+    title: string,
+    parentId: string | null,
+    level: number,
+  ) => Promise<void>;
+  /** ✅ R181 N1：目录版本回退成功后重新加载目录/章节（不传则面板只刷新自身）。 */
+  onOutlineRestored?: () => void | Promise<void>;
 }
 
 export function OutlineTab({
+  autoConfirmNotice,
   requirements,
   setRequirements,
   saveRequirements,
@@ -133,7 +149,38 @@ export function OutlineTab({
   setExpandedKeys,
   onOutlineTreeDrop,
   msg,
+  schemeId,
+  projectId,
+  onCreateSuggestedSection,
+  onOutlineRestored,
 }: OutlineTabProps) {
+  // ✅ R179 M1（2026-11-05）：评分项缺失/多余章节的「定位」——复用既有
+  //    findSectionById 与 selectedSection 选中态（不新增第二个选中状态），
+  //    同时展开目标祖先节点保证节点可见。
+  const handleLocateScoringSection = (sectionId: string) => {
+    const sec = findSectionById(tree, sectionId);
+    if (!sec) return;
+    setSelectedSection(sec);
+    const trail: Key[] = [];
+    const walk = (nodes: TreeNode[], key: string, parents: Key[]): boolean => {
+      for (const n of nodes) {
+        if (n.key === key) {
+          trail.push(...parents);
+          return true;
+        }
+        if (n.children && n.children.length > 0 && walk(n.children, key, [...parents, n.key!])) {
+          return true;
+        }
+      }
+      return false;
+    };
+    walk(tree, sectionId, []);
+    setExpandedKeys(
+      (prev) => Array.from(new Set([...(prev as Key[]), ...trail, sec.key!])) as Key[],
+    );
+    const el = document.querySelector<HTMLElement>(`[data-section-id="${sectionId}"]`);
+    el?.scrollIntoView({ behavior: "smooth", block: "center" });
+  };
   return (
     // ✅ 修复：目录生成内容（编制要求卡 + 多标段提示 + 编辑树 + 目录库/AI 生成区）较长，
     //    与其余 Tab 同一模式：根容器必须 flex:1 + minHeight:0 + overflowY:auto，
@@ -142,6 +189,8 @@ export function OutlineTab({
       className="scroll-area"
       style={{ flex: 1, minHeight: 0, overflowY: "auto", paddingRight: 4 }}
     >
+      {/* ✅ R179 N1：自动确认风险提示（开关关闭时 autoConfirmNotice 为 null，不渲染） */}
+      {autoConfirmNotice}
       {/* 编制要求 / 评审要点（对齐 OpenBidKit score-planning：要求→目录必含映射） */}
       <Card
         size="small"
@@ -170,6 +219,14 @@ export function OutlineTab({
           autoSize={{ minRows: 3, maxRows: 8 }}
         />
       </Card>
+      {/* ✅ R179 M1（2026-11-05）：评分项 → 目录映射覆盖校验（只读校验，不自动生成正文） */}
+      <ScoringCoveragePanel
+        schemeId={schemeId}
+        projectId={projectId}
+        msg={msg}
+        onLocate={handleLocateScoringSection}
+        onCreateSuggested={onCreateSuggestedSection}
+      />
       {/* ✅ 多标段提示（对齐 OpenBidKit bidSectionDetector）：导入的招标文件疑似多标段时给出拆分建议 */}
       {multiSectionHint?.has_multiple && (
         <Alert
@@ -282,6 +339,9 @@ export function OutlineTab({
       </Space>
 
       {/* ✅ 目录生成进度已统一到页面顶部进度区（此处不再重复渲染第二个进度条） */}
+
+      {/* ✅ R181 N1：目录版本列表 + 二次确认回退（后端已强制失效缓存） */}
+      <OutlineVersionsPanel schemeId={schemeId} msg={msg} onRestored={onOutlineRestored} />
 
       {/* 目录树编辑区 */}
       <Card

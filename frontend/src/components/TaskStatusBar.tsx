@@ -699,22 +699,24 @@ function TaskStatusBar({ collapsed }: { collapsed: boolean }) {
               <>（{ai.attempts_today} 次尝试）</>
             )}
             {ai?.success_rate != null && <> · 成功率(调用) {ai.success_rate}%</>}
-            {ai?.attempt_success_rate != null && (
-              <> · 尝试成功率 {ai.attempt_success_rate}%</>
-            )}
+            {ai?.attempt_success_rate != null && <> · 尝试成功率 {ai.attempt_success_rate}%</>}
             {ai && (ai.tokens_today ?? 0) > 0 && <> · Token {fmtTokens(ai.tokens_today)}</>}
-            {ai && (ai.avg_duration ?? 0) > 0 && <> · 平均(成功调用) {ai.avg_duration?.toFixed(1)}s</>}
-            {ai && (ai.skipped_today ?? 0) > 0 && <> · 跳过 {ai.skipped_today} 次</>}
-            {ai && (ai.failed_today ?? 0) > 0 && Object.keys(ai.error_classes_today || {}).length > 0 && (
-              <>
-                {" · "}失败类别{" "}
-                {Object.entries(ai.error_classes_today || {})
-                  .sort((a, b) => b[1] - a[1])
-                  .slice(0, 3)
-                  .map(([cls, n]) => `${cls} ${n}`)
-                  .join(" / ")}
-              </>
+            {ai && (ai.avg_duration ?? 0) > 0 && (
+              <> · 平均(成功调用) {ai.avg_duration?.toFixed(1)}s</>
             )}
+            {ai && (ai.skipped_today ?? 0) > 0 && <> · 跳过 {ai.skipped_today} 次</>}
+            {ai &&
+              (ai.failed_today ?? 0) > 0 &&
+              Object.keys(ai.error_classes_today || {}).length > 0 && (
+                <>
+                  {" · "}失败类别{" "}
+                  {Object.entries(ai.error_classes_today || {})
+                    .sort((a, b) => b[1] - a[1])
+                    .slice(0, 3)
+                    .map(([cls, n]) => `${cls} ${n}`)
+                    .join(" / ")}
+                </>
+              )}
             {ai && (ai.calls ?? 0) > 0 && (
               <span
                 style={ai.call_failed ? { color: "#FF4D4F" } : undefined}

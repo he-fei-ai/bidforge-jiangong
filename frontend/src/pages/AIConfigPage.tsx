@@ -83,6 +83,7 @@ import type {
 } from "../types/aiConfig";
 
 import { PageHero, StatCards, StatItem } from "../utils/ui";
+import { exportSceneRoutesNotice, importDryRunDisabledNotice } from "../utils/diagnosticsText";
 
 const { Title, Text } = Typography;
 
@@ -275,6 +276,11 @@ export default function AIConfigPage() {
   const [govBudget, setGovBudget] = useState<number>(0);
   const [govLoading, setGovLoading] = useState(false);
   const [govSaving, setGovSaving] = useState(false);
+  // ✅ R179 N1（2026-11-05）：目录生成自动确认开关（kv，默认关；零迁移）。
+  //    delay 由后端环境变量决定，界面**只读展示**，不提供修改入口。
+  const [autoConfirmOn, setAutoConfirmOn] = useState(false);
+  const [autoConfirmDelayMs, setAutoConfirmDelayMs] = useState(8000);
+  const [autoConfirmSaving, setAutoConfirmSaving] = useState(false);
 
   // configs 变化时按 priority ASC 同步可排序的降级链（后端 priority 越小越先尝试）
   useEffect(() => {
@@ -447,6 +453,36 @@ export default function AIConfigPage() {
   useEffect(() => {
     void loadGovernance();
   }, []);
+
+  // ✅ R179 N1：加载自动确认开关（失败保持默认关，不影响页面其余部分）
+  useEffect(() => {
+    systemApi
+      .getOutlineAutoConfirm()
+      .then(({ data }) => {
+        setAutoConfirmOn(!!data?.enabled);
+        const d = Number(data?.delay_ms);
+        if (Number.isFinite(d) && d > 0) setAutoConfirmDelayMs(d);
+      })
+      .catch(() => {});
+  }, []);
+
+  const saveAutoConfirm = async (enabled: boolean) => {
+    setAutoConfirmSaving(true);
+    try {
+      const { data } = await systemApi.updateOutlineAutoConfirm({ enabled });
+      setAutoConfirmOn(!!data?.enabled);
+      msg.success(
+        enabled
+          ? "目录自动确认已开启：生成完成后倒计时无操作将自动保存（任何交互立即回人工）"
+          : "目录自动确认已关闭：恢复为人工确认闸门",
+      );
+    } catch (e: unknown) {
+      const err = e as { message?: string };
+      msg.error(err.message || "保存目录自动确认开关失败");
+    } finally {
+      setAutoConfirmSaving(false);
+    }
+  };
 
   const handleSave = async () => {
     try {
@@ -869,6 +905,8 @@ export default function AIConfigPage() {
         `已导出 ${data.count} 条配置（不含 API Key，导入后需重新填写）` +
           (extras.length ? `，附${extras.join("、")}` : ""),
       );
+      const sceneRoutesNotice = exportSceneRoutesNotice(data.scene_routes_ok);
+      if (sceneRoutesNotice) msg.warning(sceneRoutesNotice, 8);
     } catch (e: unknown) {
       const err = e as { message?: string };
       msg.error(err.message || "导出失败");
@@ -977,6 +1015,10 @@ export default function AIConfigPage() {
         if (dry.scene_routes.planned > 0) extras.push(`场景路由 ${dry.scene_routes.planned} 条`);
         if (dry.runtime.planned.length) extras.push(`运行时设置 ${dry.runtime.planned.join("、")}`);
         if (extras.length) msg.info(`导入预演：将同时写入 ${extras.join("、")}`, 5);
+        // ✅ R181（N-02 遗留）：消费 dry-run 的 planned.enabled，让「导入后仍停用」
+        //    在预演阶段就可见（不等到导入成功后才靠列表发现）。
+        const disabledNotice = importDryRunDisabledNotice(dry.planned);
+        if (disabledNotice) msg.info(disabledNotice, 5);
       } catch {
         // 预演接口不可用（例如后端未重启）时静默跳过，不影响导入本身
       }
@@ -2822,6 +2864,21 @@ export default function AIConfigPage() {
             />
             <Text type="secondary" style={{ fontSize: 12 }}>
               ≤0 关闭；&gt;0 时超出预算的外部资料会被截断
+            </Text>
+          </Space>
+          {/* ✅ R179 N1（2026-11-05）：目录生成自动确认（默认关；零迁移 kv） */}
+          <Space align="center">
+            <Switch
+              checked={autoConfirmOn}
+              loading={autoConfirmSaving}
+              onChange={(checked) => void saveAutoConfirm(checked)}
+            />
+            <Text strong>目录自动确认</Text>
+            <Text type="secondary" style={{ fontSize: 12 }}>
+              默认关闭（人工确认闸门）。开启后目录生成完成且校验通过时，
+              {Math.round(autoConfirmDelayMs / 1000)} 秒内无操作将自动保存并锁定一级章节； 任何点击
+              / 切页 / 报错都会立即切回人工；已存在正文的项目永不自动确认。
+              倒计时时长由运维环境变量配置，界面不提供修改。
             </Text>
           </Space>
         </Space>

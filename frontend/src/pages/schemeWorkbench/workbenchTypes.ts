@@ -65,8 +65,12 @@ export interface OutlineGenEvent extends SseBaseEvent, SseStatsFields {
   outline?: OutlineNodeInput[];
   failed_chapters?: string[];
   failed_count?: number;
-  /** 生成后自动校验报告（summarizeOutlineQuality / summarizeOutlineReviewBasis 消费） */
+  /** 生成后自动校验报告（summarizeOutlineQuality / summarizeReviewBasis 消费） */
   review?: unknown;
+  /** ✅ R179 N1（2026-11-05）：目录自动确认前置判定（加法式，旧后端不带此键）。
+   *  `{ready, blockers}` 由后端 `outline_auto_confirm.evaluate()` 产出；
+   *  前端只在开关开启且 ready 时启动倒计时，否则逐字回落到人工闸门。 */
+  auto_confirm?: unknown;
   elapsed_ms?: number;
   eta_ms?: number | null;
 }

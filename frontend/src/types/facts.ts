@@ -423,3 +423,30 @@ export interface FactResolveResponse {
   updated_items?: number;
   applied?: { updated: number; deleted: number; added: number };
 }
+
+/** ✅ T-05（2026-11-06）：手动重试失败/退避段的返回契约（诊断字段均为加法式）。 */
+export interface FactRetryFailedSegment {
+  chunk_hash: string;
+  fail_count: number;
+  last_failed_at: string;
+  previous_next_retry_at: string;
+  /** 该段此前是否处于退避窗口内（true = 本次手动重试绕过了退避） */
+  bypassed_backoff: boolean;
+}
+
+export interface FactRetryFailedResponse {
+  ok: boolean;
+  scheme_id: string;
+  project_id: string;
+  released: number;
+  segments: FactRetryFailedSegment[];
+  /** manual_retry_bypass / manual_retry_no_failed_segments / manual_retry_no_project_scope */
+  skipped_source: string;
+  diagnostics: {
+    scoped_failed_segments: number;
+    bypassed_backoff: number;
+    already_immediate: number;
+    requested_filter: number;
+    last_manual_retry_at: string;
+  };
+}

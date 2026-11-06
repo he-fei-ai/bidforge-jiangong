@@ -65,6 +65,14 @@ export interface ChartRenderStats {
   no_pil_fallback?: number;
   /** 上述失败涉及的类型明细（后端去重后给出，最多展示前几个）。 */
   no_pil_fallback_types?: string[];
+  /**
+   * ✅ R181（2026-11-06）：**无 HTTP 兜底**的 chart-json 甘特图渲染失败张数。
+   * 甘特图 JSON 载荷只走本地 PIL，不经过 Mermaid HTTP 服务；失败时与
+   * `no_pil_fallback`（本地兜底缺失）是相反的缺口。0/缺省时不展示。
+   */
+  no_http_fallback?: number;
+  /** 上述失败涉及的类型明细（后端去重后给出）。 */
+  no_http_fallback_types?: string[];
 }
 
 /** 解析 X-Chart-Render-Stats；头缺失或 JSON 非法返回 null。 */
@@ -131,6 +139,23 @@ export function noPilFallbackWarning(stats: ChartRenderStats): string | null {
     : [];
   const detail = types.length ? `（${types.join("、")}）` : "";
   return `${n} 张图表依赖 Mermaid HTTP 渲染服务失败${detail}，这些类型没有本地渲染兜底，开启「允许 PIL 兜底」也无法补救；请确认图表服务可用后重试`;
+}
+
+/**
+ * 无 HTTP 出口告警文案（R181）。返回 null 表示无需提示。
+ *
+ * 甘特图 chart-json 载荷与 Mermaid 甘特轨出口不同：JSON 只在本地 PIL 渲染，
+ * 不会回退到 HTTP 图表服务。失败时旧实现只并入泛化 `failed`，用户会被
+ * 「检查图表服务」类建议误导；这里明确区分「该形态没有 HTTP 兜底」。
+ */
+export function noHttpFallbackWarning(stats: ChartRenderStats): string | null {
+  const n = Number(stats?.no_http_fallback || 0);
+  if (!Number.isFinite(n) || n <= 0) return null;
+  const types = Array.isArray(stats?.no_http_fallback_types)
+    ? stats.no_http_fallback_types.filter((t): t is string => typeof t === "string").slice(0, 5)
+    : [];
+  const detail = types.length ? `（${types.join("、")}）` : "";
+  return `${n} 张甘特图使用 JSON 数据格式，本地渲染失败${detail}；该形态没有 HTTP 渲染兜底，请检查任务/日期数据或改用 Mermaid 甘特语法后重试`;
 }
 
 export interface FixStats {
@@ -398,4 +423,95 @@ export async function resolveExportError(e: unknown): Promise<ExportErrorResolut
       : GENERIC_EXPORT_FAILURE,
     generic: true,
   };
+}
+
+// =========================================================================
+// ✅ B-15（R182 · 2026-11-06）：high 级问题阻断导出 + 显式覆写
+//
+// 后端在导出前按 severity 拦截 high 级 issue，返回 409 + 结构化错误体
+// （error=export_blocked_high_issues）。前端必须让用户**显式**选择「已知悉并继续」，
+// 不得静默放行；覆写续行后后端回 `X-Export-Override: high-issues` 并在审核留痕
+// 中记录本次覆写。覆写信号与 `X-Export-Degraded`（后端降级）语义分离，互不复用。
+// =========================================================================
+
+/** 阻断项（后端 high_issues 数组元素）。 */
+export interface ExportBlockedIssue {
+  type: string;
+  rule_id: string;
+  severity: string;
+  count: number;
+  title: string;
+}
+
+/** 导出被阻断的结构化信息。 */
+export interface ExportBlockedInfo {
+  code: "export_blocked_high_issues";
+  detail: string;
+  issueCount: number;
+  issueTotal: number;
+  issues: ExportBlockedIssue[];
+  overrideHint: string;
+}
+
+/** 把 Blob / 对象错误体统一读成 JSON 对象；非 JSON 返回 null。 */
+async function readJsonBody(data: unknown): Promise<Record<string, unknown> | null> {
+  let parsed: unknown = data;
+  if (typeof Blob !== "undefined" && data instanceof Blob) {
+    try {
+      const text = (await data.text()).trim();
+      if (!text.startsWith("{")) return null;
+      parsed = JSON.parse(text);
+    } catch {
+      return null;
+    }
+  }
+  if (typeof parsed !== "object" || parsed === null) return null;
+  return parsed as Record<string, unknown>;
+}
+
+/**
+ * 解析「high 级问题阻断导出」错误体；非该错误（网络错误 / 其它 4xx）返回 null。
+ * 返回 null 时调用方继续走 `resolveExportError` 的既有文案路径。
+ */
+export async function parseExportBlock(error: unknown): Promise<ExportBlockedInfo | null> {
+  const err = (typeof error === "object" && error !== null ? error : {}) as {
+    response?: { data?: unknown };
+  };
+  const obj = await readJsonBody(err.response?.data);
+  if (!obj || obj.error !== "export_blocked_high_issues") return null;
+  const rawIssues = Array.isArray(obj.high_issues) ? obj.high_issues : [];
+  const issues: ExportBlockedIssue[] = rawIssues.map((it) => {
+    const rec = (typeof it === "object" && it !== null ? it : {}) as Record<string, unknown>;
+    return {
+      type: typeof rec.type === "string" ? rec.type : "",
+      rule_id: typeof rec.rule_id === "string" ? rec.rule_id : "",
+      severity: typeof rec.severity === "string" ? rec.severity : "high",
+      count: typeof rec.count === "number" ? rec.count : 1,
+      title: typeof rec.title === "string" ? rec.title : "",
+    };
+  });
+  const issueCount =
+    typeof obj.high_issue_count === "number" ? obj.high_issue_count : issues.length;
+  const issueTotal =
+    typeof obj.high_issue_total === "number"
+      ? obj.high_issue_total
+      : issues.reduce((sum, it) => sum + it.count, 0);
+  return {
+    code: "export_blocked_high_issues",
+    detail:
+      stringField(obj, "detail") ??
+      `导出已被阻断：存在 ${issueCount} 类高风险问题（共 ${issueTotal} 处），请先修复或确认已知悉后继续`,
+    issueCount,
+    issueTotal,
+    issues,
+    overrideHint: stringField(obj, "override_hint") ?? "",
+  };
+}
+
+/** 解析 `X-Export-Override`；头缺失返回 null（未覆写时零提示不变）。 */
+export function parseExportOverride(headers: unknown): string | null {
+  const raw = headerValue(headers, "x-export-override");
+  if (!raw) return null;
+  const signal = raw.trim().toLowerCase();
+  return signal || null;
 }

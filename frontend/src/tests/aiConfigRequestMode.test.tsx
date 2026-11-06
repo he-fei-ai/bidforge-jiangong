@@ -77,6 +77,13 @@ vi.mock("../api", () => ({
     setEnv: vi.fn(),
     rollbackConfig: vi.fn(),
   },
+  // ✅ R179 N1（2026-11-05）：页面挂载即读取目录自动确认开关，systemApi 必须存在
+  systemApi: {
+    getGovernance: vi.fn(),
+    updateGovernance: vi.fn(),
+    getOutlineAutoConfirm: vi.fn(async () => ({ data: { enabled: false, delay_ms: 8000 } })),
+    updateOutlineAutoConfirm: vi.fn(async () => ({ data: { enabled: false, delay_ms: 8000 } })),
+  },
 }));
 
 import AIConfigPage from "../pages/AIConfigPage";

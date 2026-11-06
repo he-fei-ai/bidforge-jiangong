@@ -1,7 +1,7 @@
 import type { Dispatch, MutableRefObject, SetStateAction } from "react";
 import type { ModalFuncProps } from "antd";
 import type { MessageInstance } from "antd/es/message/interface";
-import { sseFetch, tasksApi } from "../../api";
+import { factsApi, sseFetch, tasksApi } from "../../api";
 import { createSseBatcher } from "../../utils/sseBatcher";
 import { isTerminalContentEvent, isTerminalTaskStatus } from "../../utils/contentEvents";
 import { isDocFailed, isDocParsed, type DocRecord } from "../../utils/workflowDerived";
@@ -257,10 +257,7 @@ export function useFactsGeneration(deps: FactsGenerationDeps) {
                 setFactsSegmentStats(_d.segmentStats);
                 setFactsCrossConflicts(_d.crossConflicts);
                 // segment_stats 为生成的宽松契约（Record<string, unknown>），failed 实际为 number
-                if (
-                  _isDegraded ||
-                  ((_fin.segment_stats?.failed as number | undefined) || 0) > 0
-                ) {
+                if (_isDegraded || ((_fin.segment_stats?.failed as number | undefined) || 0) > 0) {
                   msg.warning(_doneMsg);
                 } else {
                   msg.success(_doneMsg);
@@ -338,5 +335,41 @@ export function useFactsGeneration(deps: FactsGenerationDeps) {
     await runGenerateFactsSse();
   };
 
-  return { runGenerateFactsSse, handleGenerateFacts };
+  /**
+   * ✅ T-05（2026-11-06）：失败段的「立即重试」入口。
+   *
+   * 语义：先请求后端释放失败段的退避窗口（仅清 `next_retry_at` 并记录诊断，
+   * 不改动任何事实数据），然后原样重跑事实提取。失败段若再次失败，后端按
+   * 既有指数退避继续生效，不会变成无限重试。
+   */
+  const handleRetryFailedSegments = async () => {
+    if (!id) return;
+    if (hasUnknownTask()) {
+      guardUnknownTaskGeneration("立即重试失败段", () => void handleRetryFailedSegments());
+      return;
+    }
+    if (docList.filter((d) => isDocParsed(d)).length === 0) {
+      msg.warning("没有已解析的资料文档，无法重试失败段");
+      return;
+    }
+    try {
+      const res = await factsApi.retryFailed(id);
+      const released = res.data?.released ?? 0;
+      if (released <= 0) {
+        msg.info(
+          res.data?.skipped_source === "manual_retry_no_failed_segments"
+            ? "当前没有处于失败或退避状态的段，无需重试"
+            : "未释放任何失败段（可能已恢复或已被清理）",
+        );
+        return;
+      }
+      const bypassed = res.data?.diagnostics?.bypassed_backoff ?? 0;
+      msg.success(`已释放 ${released} 个失败段（其中 ${bypassed} 段绕过退避），开始重新提取…`);
+      await runGenerateFactsSse();
+    } catch (err) {
+      msg.error(err instanceof Error && err.message ? err.message : "重试失败段请求失败");
+    }
+  };
+
+  return { runGenerateFactsSse, handleGenerateFacts, handleRetryFailedSegments };
 }
