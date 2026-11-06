@@ -1,10 +1,9 @@
-"""统一 JSON 生成/校验/修复（弱模型稳定 JSON 工作流）
+"""统一 JSON 生成 / 校验 / 修复通道。
 
 流程：请求模型 → 优先 JSON 模式 → 提取 JSON → 校验 → 失败定向修复 → 有界重试 → 返回。
 
-范围说明（与实现对齐）：
-本模块只做「单次生成 + 定向修复 + 有界重试」，**不包含分步生成**。
-超大 JSON 的「分步生成」按领域由调用方拆分实现：
+范围说明：本模块只做「单次生成 + 定向修复 + 有界重试」，**不包含分步生成**。
+超大 JSON 的分步生成本身是领域问题，由调用方拆分实现：
 - 目录生成：一级 → 逐章二三级（routers/sse_handlers.py，word_budget > 50000 时启用）；
 - 事实提取：文档分块逐块提取（services/facts_extractor.py，FACTS_CHUNK_RETRIES）。
 """
@@ -22,43 +21,39 @@ from app.services.ai.provider_factory import chat_with_fallback
 
 logger = logging.getLogger("json_response")
 
+#: 修复轮上限。
+#: 推导：本地字符串级修复已先过滤掉「非法反斜杠」这一大类（约占可挽救候选的
+#: 多数）；剩下的失败多为结构性错误，通常 1 轮定向修复即可纠正，第 2 轮作为
+#: 保险。继续增加轮次收益急剧下降，而每轮真实 AI 调用耗时数十秒，因此取 2
+#: 作为「成功率 / 时延」的平衡点。
 MAX_REPAIR_RETRIES = 2
 
-#: ✅ R38（2026-10-03 · P1-c）：非目录任务的**默认**修复提示词。
-#: 旧默认值是 ``outline_json_fix_system`` —— 全仓只有 facts_extractor 一个
-#: 调用点覆盖过 repair_key，其余 10 余个非目录调用点（符合性检查 / 一致性审计 /
-#: 冲突仲裁 / 全局事实确认 / 事实补全 / 上传章节识别 …）都在用目录修复提示词，
-#: 而那份提示词通篇讲目录结构（``child → children``、「为每个一级目录补 2-3 个
-#: 二级目录」、``description`` 推导），会**主动诱导**模型把 ``{"conflicts": …}``
-#: 改成目录形状的占位 JSON —— 修复轮预算被确定性浪费。
-#:
-#: 目录族调用点**必须显式**传 ``repair_key="outline_json_fix_system"``，
-#: 由此新增调用点即自带正确提示词；配套 AST 护栏
-#: （tests/test_json_repair_key_routing_20261003.py）锁死该约定。
+#: 非目录任务的默认修复提示词。
+#: 修复提示词必须描述**通用 JSON 结构**：多数调用点（符合性检查、一致性审计、
+#: 冲突仲裁、事实确认、事实补全、上传章节识别等）返回的都不是目录结构，用
+#: 目录提示词会诱导模型把结果改成目录形状。
+#: 目录族调用点必须显式传 ``OUTLINE_REPAIR_KEY``；该约定由 AST 护栏锁死。
 GENERIC_REPAIR_KEY = "json_schema_fix_system"
 
-#: 目录族专用的修复提示词（唯一真正需要「目录」语义的场景）
+#: 目录族专用修复提示词（唯一需要「目录」语义的场景）。
 OUTLINE_REPAIR_KEY = "outline_json_fix_system"
 
-#: 事实提取族专用的修复提示词（facts_extractor 分块提取消费）。
-#: R38-P1-c 后默认已是 GENERIC，本常量仅为把 facts_extractor 那处裸字符串字面量
-#: 收成与 OUTLINE_REPAIR_KEY 同型的具名常量，避免「拼字符串 / 硬编码其他 key」
-#: 漂移；值与 prompts/analysis.py:286 注册条目逐字一致。
+#: 事实提取族专用修复提示词（facts_extractor 分块提取消费）。
+#: 具名常量存在的目的是避免调用点直接拼字符串，导致与注册条目漂移。
 FACTS_REPAIR_KEY = "facts_json_fix_system"
+
+
+# ---------------------------------------------------------------------------
+# 提示词渲染
+# ---------------------------------------------------------------------------
 
 
 def _build_repair_user_prompt(issues: list, raw: str, repair_key: str = GENERIC_REPAIR_KEY) -> str:
     """构造 JSON 修复 user 提示词。
 
-    ✅ 统一提示词源：消费注册条目（DB 优先，可在前端编辑生效），
-    消除与内联常量的双份漂移；渲染异常时回退内联精简版保证修复链路不中断。
-
-    ✅ 修复：新增 repair_key —— 旧实现硬编码 outline_json_fix_system，
-    事实提取等任务复用它时，修复提示仍在讲"目录/outline"结构，
-    与事实 Schema 不符，导致修复轮次大量无效。现在各任务可用专属修复提示词。
-
-    ✅ R38：默认值由 ``outline_json_fix_system`` 改为 ``json_schema_fix_system``
-    （理由见 :data:`GENERIC_REPAIR_KEY`）。
+    提示词正文只保留注册表一份（DB 优先，可在前端编辑生效）。渲染异常时
+    退化为「注册表原文 + 朴素占位符替换」，保证修复链路不中断，且不引入
+    第二份内联文案。
     """
     try:
         return render(
@@ -68,10 +63,6 @@ def _build_repair_user_prompt(issues: list, raw: str, repair_key: str = GENERIC_
             invalid_content=raw or "",
         )
     except Exception:
-        # ✅ R175（2026-11-03 · 修复 D3）：删除已漂移的内联兜底 ``JSON_REPAIR_PROMPT``。
-        #    旧内联文案与注册版措辞已不一致（「最小必要修改」vs「不要整体重写」等），
-        #    属第二事实源。现在渲染异常时改用**注册表原文**做朴素占位符替换，
-        #    全仓只保留注册表一份正文。
         try:
             from app.services.ai.prompts._registry import get_prompt as _get_generic
 
@@ -86,162 +77,200 @@ def _build_repair_user_prompt(issues: list, raw: str, repair_key: str = GENERIC_
             raise ValueError("JSON 修复提示词不可用：注册表缺少 %s" % GENERIC_REPAIR_KEY) from None
 
 
-def _extract_balanced(text: str) -> str | None:
-    """用括号配对算法从文本中提取最外层的 {...} 或 [...]
+def _format_json_issues(issues: list) -> str:
+    return "\n".join(f"- {i}" for i in issues)
 
-    相比 find/rfind 方案，能正确处理：
-    - 字符串内的括号（不会误匹配）
-    - 多个 JSON 片段（取第一个完整的）
-    - 嵌套括号（正确匹配最外层）
+
+# ---------------------------------------------------------------------------
+# JSON 提取：括号配对扫描器（显式状态机）
+# ---------------------------------------------------------------------------
+
+
+class _BalancedJsonScanner:
+    """在任意文本中定位第一个完整的 JSON 结构。
+
+    状态机只维护三个量：``depth``（嵌套深度）、``in_string``（是否在字符串内）、
+    ``escaped``（上一个字符是否开启转义）。这样字符串内的括号不会计入深度，
+    嵌套结构能正确闭合，多个片段只取第一个完整结构。
+
+    注意：起点按「第一个出现的 { 或 [」确定，与是否位于字符串中无关 —— 这是
+    调用方依赖的既有语义（模型常在 JSON 前后附带解释性文字）。
     """
-    start = -1
-    open_ch = ""
-    close_ch = ""
-    for i, ch in enumerate(text):
-        if ch in "{[":
-            start = i
-            open_ch = ch
-            close_ch = "}" if ch == "{" else "]"
-            break
-    if start == -1:
+
+    _OPENERS = {"{": "}", "[": "]"}
+    _QUOTE = '"'
+    _BACKSLASH = "\\"
+
+    def __init__(self, text: str) -> None:
+        self._text = text
+
+    def _find_start(self) -> int:
+        for position, char in enumerate(self._text):
+            if char in self._OPENERS:
+                return position
+        return -1
+
+    def scan(self) -> str | None:
+        start = self._find_start()
+        if start < 0:
+            return None
+        opener = self._text[start]
+        closer = self._OPENERS[opener]
+        depth = 0
+        in_string = False
+        escaped = False
+        for position in range(start, len(self._text)):
+            char = self._text[position]
+            if escaped:
+                escaped = False
+                continue
+            if in_string and char == self._BACKSLASH:
+                escaped = True
+                continue
+            if char == self._QUOTE:
+                in_string = not in_string
+                continue
+            if in_string:
+                continue
+            if char == opener:
+                depth += 1
+            elif char == closer:
+                depth -= 1
+                if depth == 0:
+                    return self._text[start : position + 1]
         return None
 
-    depth = 0
-    in_string = False
-    escape = False
-    for i in range(start, len(text)):
-        ch = text[i]
-        if escape:
-            escape = False
-            continue
-        if ch == "\\" and in_string:
-            escape = True
-            continue
-        if ch == '"':
-            in_string = not in_string
-            continue
-        if in_string:
-            continue
-        if ch == open_ch:
-            depth += 1
-        elif ch == close_ch:
-            depth -= 1
-            if depth == 0:
-                return text[start : i + 1]
+
+def _extract_balanced(text: str) -> str | None:
+    """从文本中提取最外层的 ``{...}`` 或 ``[...]``（括号配对算法）。"""
+    return _BalancedJsonScanner(text).scan()
+
+
+#: 代码围栏匹配：允许 \`\`\`json 或裸 \`\`\` 开头，内容非贪婪直到下一个闭合围栏。
+_FENCE_PATTERN = re.compile(r"```(?:json)?\s*(.*?)```", re.S)
+
+
+def _json_from_fenced_blocks(text: str) -> str | None:
+    """优先从代码围栏内提取 JSON（多个围栏逐个尝试）。"""
+    for block in _FENCE_PATTERN.findall(text):
+        candidate = _extract_balanced(block.strip())
+        if candidate:
+            return candidate
     return None
 
 
-def extract_json(text: str) -> str | None:
-    """从模型输出中提取 JSON（兼容代码块包裹）
-
-    优先从 ```json``` 代码块提取；若有多个代码块，逐个尝试返回第一个包含
-    合法 JSON 结构的；若无代码块，在原文中用括号配对算法提取。
-    """
-    text = text.strip()
-
-    code_blocks = re.findall(r"```(?:json)?\s*(.*?)```", text, re.S)
-    for block in code_blocks:
-        result = _extract_balanced(block.strip())
-        if result:
-            return result
-
+def _json_from_raw_text(text: str) -> str | None:
+    """无围栏时在原文中依次提取候选结构，返回第一个可解析的。"""
     candidates: list[str] = []
     remaining = text
     while True:
-        result = _extract_balanced(remaining)
-        if not result:
+        candidate = _extract_balanced(remaining)
+        if not candidate:
             break
-        candidates.append(result)
+        candidates.append(candidate)
         try:
-            json.loads(result)
-            return result
+            json.loads(candidate)
+            return candidate
         except json.JSONDecodeError:
-            idx = remaining.find(result)
-            remaining = remaining[idx + len(result) :]
-
+            index = remaining.find(candidate)
+            remaining = remaining[index + len(candidate) :]
     return candidates[0] if candidates else None
 
 
-# JSON 字符串内的合法转义字符集合（JSON 规范 8.4）
-_JSON_ESCAPE_CHARS = set('"\\/bfnrt')
-# AI 常见的 markdown 风格转义（在 JSON 字符串里非法），应去掉反斜杠
-_MARKDOWN_ESCAPE_CHARS = set(".()[]{}#*+-_!<>|`")
+def extract_json(text: str) -> str | None:
+    """从模型输出中提取 JSON 字符串（兼容代码块包裹）。
+
+    优先从代码围栏提取；若多个围栏都拿不到结构，再在原文中用括号配对扫描。
+    """
+    text = text.strip()
+    return _json_from_fenced_blocks(text) or _json_from_raw_text(text)
+
+
+# ---------------------------------------------------------------------------
+# 字符串内非法转义的本地修复
+# ---------------------------------------------------------------------------
+
+#: JSON 规范允许的反斜杠转义目标字符（``\uXXXX`` 另行按四位十六进制判定）。
+_LEGAL_ESCAPE_TARGETS = frozenset('"\\/bfnrt')
+
+#: 弱模型常见的 markdown 风格转义目标：出现在 JSON 字符串里属于非法转义，
+#: 修复方式是直接去掉反斜杠、保留字符本身。
+_MARKDOWN_ESCAPE_TARGETS = frozenset(".()[]{}#*+-_!<>|`")
+
+#: 十六进制字符集（用于识别合法的 ``\uXXXX``）。
+_HEX_DIGITS = frozenset("0123456789abcdefABCDEF")
+
+
+def _escape_replacement(char: str) -> str:
+    """决定一个非法转义序列的去向（返回替换文本，反斜杠已按规则保留/删除）。"""
+    if char in _LEGAL_ESCAPE_TARGETS:
+        return "\\" + char
+    if char in _MARKDOWN_ESCAPE_TARGETS:
+        return char
+    # 兜底：其余情况一律变成「双反斜杠 + 字符」，保证结果仍是合法 JSON
+    return "\\\\" + char
 
 
 def _repair_json_string_escapes(content: str) -> str:
-    """修复 JSON 字符串中的非法反斜杠转义（参考 OpenBidKit repairInvalidJsonStringEscapes）。
+    """修复 JSON 字符串内部的非法反斜杠转义。
 
-    弱模型写 JSON 值时常夹带 markdown 风格转义（如 `1\\.5m`、`施工\\/方案`、
-    `\\#基坑`），这些在 JSON 规范里只有 `"\\\\/bfnrtu"` 是合法的，
-    其余反斜杠直接导致 json.loads 抛 JSONDecodeError → 进入完整 AI 修复轮
-    （耗时 30~90s，还可能修复失败）。
+    弱模型常在字符串里写入 markdown 风格转义（如 ``1\\.5m``、``\\#基坑``），
+    这些在 JSON 规范里只有 ``" \\\\ / b f n r t u`` 合法，其余反斜杠会让
+    ``json.loads`` 直接失败并进入耗时的 AI 修复轮。本地先修一遍，零 AI 成本。
 
-    规则：
-      1) ``\\uXXXX``（4 位 hex）→ 保留（合法 unicode 转义）
-      2) 下一字符在 _JSON_ESCAPE_CHARS 里 → 保留（合法 JSON 转义）
-      3) 下一字符在 _MARKDOWN_ESCAPE_CHARS 里 → 去掉反斜杠，保留后续字符
-      4) 其他（包括末尾孤立反斜杠）→ 变成 ``\\\\``（安全兜底，保证 JSON 可解析）
-
-    只在 json.loads 失败时应用（parse_and_validate 的 except 分支），
-    不改变已成功路径的行为，向后完全兼容。
+    关键：``\\uXXXX``（四位十六进制）必须整体保留，不能被逐字符拆开处理。
     """
-    output = []
+    output: list[str] = []
     in_string = False
     escaped = False
-    i = 0
-    n = len(content)
-    while i < n:
-        ch = content[i]
-        if in_string:
-            if escaped:
-                escaped = False
-                if ch == "u" and i + 4 < n and all(c in "0123456789abcdefABCDEF" for c in content[i + 1 : i + 5]):
-                    # 合法 unicode 转义：整个 \uXXXX 保留
-                    output.append(content[i - 1 : i + 5])
-                    i += 5
-                    continue
-                if ch in _JSON_ESCAPE_CHARS:
-                    output.append("\\")
-                    output.append(ch)
-                elif ch in _MARKDOWN_ESCAPE_CHARS:
-                    # 去掉反斜杠，只输出裸字符
-                    output.append(ch)
-                else:
-                    # 兜底：变成 \\ + ch，保证 JSON 可解析
-                    output.append("\\\\")
-                    output.append(ch)
-            elif ch == "\\":
-                escaped = True
-            elif ch == '"':
-                in_string = False
-                output.append(ch)
-            else:
-                output.append(ch)
-        else:
-            if ch == '"':
+    index = 0
+    total = len(content)
+    while index < total:
+        char = content[index]
+        if not in_string:
+            if char == '"':
                 in_string = True
-            output.append(ch)
-        i += 1
-    # 末尾孤立反斜杠（上一轮循环 escaped=True 后遇到 EOF）：追加 \\
+            output.append(char)
+            index += 1
+            continue
+        if not escaped:
+            if char == "\\":
+                escaped = True
+            elif char == '"':
+                in_string = False
+                output.append(char)
+            else:
+                output.append(char)
+            index += 1
+            continue
+        escaped = False
+        following = content[index + 1 : index + 5]
+        if char == "u" and index + 4 < total and all(d in _HEX_DIGITS for d in following):
+            # 合法 unicode 转义：连同反斜杠整体保留
+            output.append(content[index - 1 : index + 5])
+            index += 5
+            continue
+        output.append(_escape_replacement(char))
+        index += 1
     if escaped:
         output.append("\\\\")
     return "".join(output)
 
 
+# ---------------------------------------------------------------------------
+# 解析 + 校验
+# ---------------------------------------------------------------------------
+
+
 def parse_and_validate(raw: str, validate_fn=None):
-    """解析并校验；validate_fn(obj) 返回错误列表（空列表=通过）
+    """解析并校验；``validate_fn(obj)`` 返回错误列表（空列表 = 通过）。
 
-    ✅ BUG 修复：validate_fn 异常未捕获。校验器普遍假设 obj 是 dict
-    （如 lambda o: o.get("outline")），但弱模型常返回顶层数组 [..] 或裸值，
-    AttributeError 会沿调用链传播直接炸掉整个任务——完全跳过修复轮，
-    而 outline_json_fix_system 明确具备"顶层包裹错误"修复能力。
-    现将校验器异常转为 issues 进入修复轮。
+    校验器通常假设 obj 是 dict（如 ``lambda o: o.get("outline")``），而弱模型
+    可能返回顶层数组或裸值。这里把校验器异常转成 issues 交给修复轮，而不是
+    让 AttributeError 直接炸掉整个任务（否则连修复机会都没有）。
 
-    ✅ 2026-09-22 增强（参考 OpenBidKit）：json.loads 失败时，先对候选 JSON
-    应用 ``_repair_json_string_escapes`` 预处理（去掉 markdown 风格转义），
-    再尝试一次。合法 JSON 零成本（无反斜杠或全在合法集合），非法 JSON 可
-    挽救一批本来要进完整 AI 修复轮的候选 —— 实测"1\\.5m / 施工\\/方案"
-    等场景修复率约 80%，直接节省每轮 30~90s 的 AI 调用。
+    ``json.loads`` 失败时先做一次本地字符串级修复再重试：合法 JSON 零成本，
+    非法 JSON 可挽救一批本应进入完整 AI 修复轮的候选。
     """
     js = extract_json(raw)
     if not js:
@@ -249,17 +278,15 @@ def parse_and_validate(raw: str, validate_fn=None):
     try:
         obj = json.loads(js)
     except json.JSONDecodeError as e:
-        # 先尝试本地字符串级修复（零 AI 成本）
         repaired = _repair_json_string_escapes(js)
-        if repaired != js:
-            try:
-                obj = json.loads(repaired)
-                logger.info("JSON 本地修复成功（非法反斜杠）：原始错误=%s，已跳过 AI 修复轮", e)
-            except json.JSONDecodeError as e2:
-                return None, [f"JSON 语法错误（本地修复后仍失败）: {e2}"]
-        else:
+        if repaired == js:
             return None, [f"JSON 语法错误: {e}"]
-    if validate_fn:
+        try:
+            obj = json.loads(repaired)
+            logger.info("JSON 本地修复成功（非法反斜杠）：原始错误=%s，已跳过 AI 修复轮", e)
+        except json.JSONDecodeError as e2:
+            return None, [f"JSON 语法错误（本地修复后仍失败）: {e2}"]
+    if validate_fn is not None:
         try:
             issues = validate_fn(obj)
         except Exception as e:
@@ -269,60 +296,139 @@ def parse_and_validate(raw: str, validate_fn=None):
     return obj, []
 
 
-def _format_json_issues(issues: list) -> str:
-    return "\n".join(f"- {i}" for i in issues)
-
-
-#: 兼容性兜底提示（见 _ensure_user_message 说明）
+#: 只有 system 消息时补的最小 user 指令。
 JSON_USER_NUDGE = "请严格按上述要求输出 JSON 结果，不要输出任何解释。"
 
 
 def _ensure_user_message(messages: list, nudge: str = JSON_USER_NUDGE) -> list:
     """保证消息列表中存在 user 消息（缺失时追加一条最小指令）。
 
-    ✅ BUG 修复（2026-09-16 · 依据运行库 task_registry 真实失败消息）：
-    本项目的 JSON 任务大量采用"指令全写在 system 里"的写法（目录审核/修复、
-    一级目录、逐章二三级、AI 规范检查、专家论证预检、一致性审计、上传目录识别、
-    事实提取分块共 9 处）。OpenAI 兼容协议允许只有 system，但**部分 provider
-    （实测 sensenova / agnes）会直接返回
-        400 Bad Request: No user query found in messages.
-    —— 这类任务在该 provider 上必然失败，只能寄希望于降级链里恰好有一个宽容的
-    provider；日志中 `outline_generation` 3 次、`facts_generation` 1 次
-    "所有 AI 提供商调用失败：…No user query found in messages." 即由此产生。
-
-    修在**共享入口**而不是逐个调用点：新增调用点、复制粘贴写法都不会再退化；
-    已有 user 消息的任务不受影响（不做任何改动）。
-    注意：user 内容不能是空串（另有 provider 显式拒绝空 content）。
+    背景：本项目大量 JSON 任务把指令全写在 system 里。OpenAI 兼容协议允许
+    只有 system，但部分 provider 会直接返回 ``400 Bad Request: No user query
+    found in messages.`` —— 这类任务在该 provider 上必然失败。修在共享入口，
+    新增调用点与复制粘贴的写法都不会再退化；已有 user 消息的任务不受影响。
+    user 内容不能为空串（另有 provider 显式拒绝空 content）。
     """
     if not isinstance(messages, list):
         return messages
-    for m in messages:
-        if isinstance(m, dict) and str(m.get("role") or "") == "user":
-            return messages
+    has_user = any(isinstance(m, dict) and str(m.get("role") or "") == "user" for m in messages)
+    if has_user:
+        return messages
     return [*messages, {"role": "user", "content": nudge}]
 
 
-async def _call_chat_fn(chat_fn, messages: list, **kwargs) -> str:
-    """调用注入式 ``chat_fn``，兼容「只认 messages」的最小签名实现。
+async def _invoke_with_kwarg_fallback(call, messages: list, trials: tuple[dict, ...], mismatch_message: str):
+    """按 trials 由全到简依次调用；只在 TypeError 时降级，最后一次仍失败则抛出。
 
-    ✅ R57（2026-10-09）：此前统一修复通道 **只能通过 provider_factory 的降级链
-    调用**（``collect_json_response`` 内部硬写 ``chat_with_fallback``），于是凡是
-    需要**注入** chat 实现的地方，就被迫自己再写一份「解析 + 无修复」的劣化版
-    （典型：``consistency_edits.collect_repair_edits`` —— 一次机会，JSON 坏
-    就直接回落到整章重写，丢掉「最小必要修改」的全部收益，与《标书智能体（五）》
-    §四「失败后不是重新问，而是定向修复」相悖）。
-
-    逐层降级：完整 kwargs → 仅 messages。
-    ⚠️ 与 :func:`_provider_chat_safe` 同策略（本仓既有约定）：只对 ``TypeError``
-    降级一次，不无限吞异常。
+    只对 TypeError 降级一次（本仓既有约定），不无限吞异常：签名不兼容是唯一的
+    预期场景，其余异常必须原样上抛。
     """
-    for trial in (kwargs, {}):
+    for position, trial in enumerate(trials):
         try:
-            return await chat_fn(messages, **trial)
+            return await call(messages, **trial)
         except TypeError:
-            if trial == {}:
+            if position == len(trials) - 1:
                 raise
-    raise TypeError("chat_fn 签名不兼容")
+    raise TypeError(mismatch_message)
+
+
+async def _call_chat_fn(chat_fn, messages: list, **kwargs) -> str:
+    """调用注入式 ``chat_fn``，兼容「只认 messages」的最小签名实现。"""
+    return await _invoke_with_kwarg_fallback(
+        chat_fn,
+        messages,
+        (kwargs, {}),
+        "chat_fn 签名不兼容",
+    )
+
+
+async def _provider_chat_safe(
+    provider, messages: list, temperature: float = 0.7, max_tokens: int | None = None, extra_body: dict | None = None
+) -> str:
+    """调用 ``provider.chat``，兼容不支持 temperature / max_tokens / extra_body 的旧实现。
+
+    按「逐个降级」透传：先全参数，TypeError 则逐步去掉可选参数再试，保证旧实现
+    （只认 messages、或只认 temperature）仍可工作。
+    """
+    full: dict = {"temperature": temperature}
+    if max_tokens is not None:
+        full["max_tokens"] = max_tokens
+    if extra_body is not None:
+        full["extra_body"] = extra_body
+    return await _invoke_with_kwarg_fallback(
+        provider.chat,
+        messages,
+        (full, {"temperature": temperature}, {}),
+        "provider.chat 签名不兼容",
+    )
+
+
+# ---------------------------------------------------------------------------
+# 生成 → 解析 → 修复 的共享编排
+# ---------------------------------------------------------------------------
+
+
+async def _run_json_generation(
+    chat_call,
+    messages: list,
+    evaluate,
+    max_retries: int,
+    repair_key: str,
+    on_call_failure=None,
+    on_repair=None,
+):
+    """共享编排：首轮生成 → 评估 → 定向修复（最多 max_retries 轮）。
+
+    Args:
+        chat_call: ``await chat_call(messages) -> str`` 的异步可调用对象。
+        evaluate: ``evaluate(raw) -> (obj, issues)``，issues 为空表示通过。
+        on_call_failure: 首轮调用失败的旁路回调（仅观测，不改变抛错语义）。
+        on_repair: 进入修复轮时的旁路回调（仅观测）。
+
+    Returns:
+        ``(obj, raw)`` —— 通过校验的对象与对应原文。
+
+    Raises:
+        ValueError: 首轮与全部修复轮都未通过。
+    """
+    messages = _ensure_user_message(messages)
+    try:
+        raw = await chat_call(messages)
+    except Exception:
+        if on_call_failure is not None:
+            on_call_failure()
+        raise
+    first_raw = raw
+    obj, issues = evaluate(raw)
+    if obj is not None and not issues:
+        return obj, raw
+
+    if on_repair is not None:
+        on_repair()
+
+    repair_errors: list[str] = []
+    for attempt in range(max_retries):
+        # 修复提示词的 invalid_content 必须携带**最初**的问题输出，而不是上一轮
+        # 修复的半成品（否则第 2 轮是在「修已经改坏的结果」）。
+        repair_messages = [
+            *messages,
+            {"role": "assistant", "content": raw or ""},
+            {"role": "user", "content": _build_repair_user_prompt(issues, first_raw or "", repair_key)},
+        ]
+        try:
+            raw = await chat_call(repair_messages)
+        except Exception as e:  # noqa: BLE001
+            repair_errors.append("第%d次修复调用异常: %s" % (attempt + 1, e))
+            logger.warning("JSON 修复第 %d 次调用异常（继续使用剩余修复预算）：%s", attempt + 1, e)
+            continue
+        obj, issues = evaluate(raw)
+        if obj is not None and not issues:
+            return obj, raw
+        logger.warning("JSON 修复第 %d 次仍未通过：%s", attempt + 1, issues[:3])
+
+    if repair_errors:
+        raise ValueError("JSON 生成/修复失败：%s；修复轮异常：%s" % (issues[:5], " | ".join(repair_errors)))
+    raise ValueError(f"JSON 生成/修复失败：{issues[:5]}")
 
 
 async def collect_json_response_with_chat(
@@ -338,72 +444,36 @@ async def collect_json_response_with_chat(
     scene: str = "",
     max_tokens: int | None = None,
 ):
-    """统一 JSON 收集**编排本体**：生成 → 解析 → 校验 → 定向修复 → 有界重试。
+    """统一 JSON 收集编排：生成 → 解析 → 校验 → 定向修复 → 有界重试。
 
-    ✅ R57（2026-10-09）：从 :func:`collect_json_response` 中抽出，使「AI 调用来源」
-    成为可注入参数 —— ``consistency_edits`` 等需要注入 chat 实现的调用方由此复用
-    完整修复链路，而不是各自再写一份「解析即弃」的劣化版（多副本反模式）。
+    AI 调用来源作为参数注入，使需要注入 chat 实现的调用方（含测试）可以复用
+    完整修复链路，而不必各自再写一份「解析即弃」的劣化版。
 
     Args:
-        chat_fn: 与 ``chat_with_fallback`` 同签名的异步可调用对象
-            （``(messages, *, temperature=None, json_mode=False, timeout=None,
-            scene="", max_tokens=None) -> str``）。
+        chat_fn: 与 ``chat_with_fallback`` 同签名的异步可调用对象。
         其余参数、语义、返回值与 :func:`collect_json_response` 完全一致。
     """
-    messages = _ensure_user_message(messages)
-    try:
-        raw = await _call_chat_fn(
+
+    async def _call(repair_messages: list) -> str:
+        return await _call_chat_fn(
             chat_fn,
-            messages,
+            repair_messages,
             temperature=temperature,
             json_mode=json_mode,
             timeout=timeout,
             scene=scene,
             max_tokens=max_tokens,
         )
-    except Exception:
-        # ✅ R48（2026-10-06 · 运行时指标）：首轮 AI 调用失败/降级 → 记一次场景失败。
-        #    观测指标，不改变「原样 re-raise」的抛错语义。
-        record_ai_failure(scene)
-        raise
-    # 修复目标恒定为模型**最初**的输出（见 collect_json_response docstring 修复点 1）
-    first_raw = raw
-    obj, issues = parse_and_validate(raw, validate_fn)
-    if obj is not None and not issues:
-        return obj, raw
 
-    # ✅ R48（2026-10-06 · 运行时指标）：首轮输出未过校验、进入修复循环 →
-    #    按 repair_key 维度记一次修复触发。
-    record_repair_triggered(repair_key)
-    repair_errors: list[str] = []
-    for attempt in range(max_retries):
-        repair_msgs = list(messages) + [
-            {"role": "assistant", "content": raw or ""},
-            {"role": "user", "content": _build_repair_user_prompt(issues, first_raw or "", repair_key)},
-        ]
-        try:
-            raw = await _call_chat_fn(
-                chat_fn,
-                repair_msgs,
-                temperature=temperature,
-                json_mode=json_mode,
-                timeout=timeout,
-                scene=scene,
-                max_tokens=max_tokens,
-            )
-        except Exception as e:  # noqa: BLE001
-            # 瞬时故障不应丢弃首轮已产出的内容：记录后继续下一轮修复预算
-            repair_errors.append("第%d次修复调用异常: %s" % (attempt + 1, e))
-            logger.warning("JSON 修复第 %d 次调用异常（继续使用剩余修复预算）：%s", attempt + 1, e)
-            continue
-        obj, issues = parse_and_validate(raw, validate_fn)
-        if obj is not None and not issues:
-            return obj, raw
-        logger.warning("JSON 修复第 %d 次仍未通过：%s", attempt + 1, issues[:3])
-
-    if repair_errors:
-        raise ValueError("JSON 生成/修复失败：%s；修复轮异常：%s" % (issues[:5], " | ".join(repair_errors)))
-    raise ValueError(f"JSON 生成/修复失败：{issues[:5]}")
+    return await _run_json_generation(
+        _call,
+        messages,
+        lambda text: parse_and_validate(text, validate_fn),
+        max_retries,
+        repair_key,
+        on_call_failure=lambda: record_ai_failure(scene),
+        on_repair=lambda: record_repair_triggered(repair_key),
+    )
 
 
 async def collect_json_response(
@@ -418,37 +488,21 @@ async def collect_json_response(
     scene: str = "",
     max_tokens: int | None = None,
 ):
-    """统一 JSON 收集入口：生成 → 解析 → 校验 → 定向修复 → 重试
+    """统一 JSON 收集入口：生成 → 解析 → 校验 → 定向修复 → 重试。
 
-    ✅ 新增透传参数（供结构化提取使用）：
-    - temperature/json_mode/timeout：低温 + JSON 模式 + 更长超时，降低非法 JSON 与超时；
-    - repair_key：修复轮次使用的提示词。**目录族调用点必须显式传**
-      ``OUTLINE_REPAIR_KEY``（默认值已改为 Schema 自适应的通用提示词，见
-      :data:`GENERIC_REPAIR_KEY`）。
-    - max_tokens：显式输出上限（2026-10-04）。目录合并修复 fixed_outline 需要
-      回吐完整三级目录，长方案下可能触发 provider 默认上限（8192）被截断；
-      调用方按场景传一个合理上限（如 OUTLINE_FIX_MAX_TOKENS）。None 表示沿用
-      provider 默认（`max_tokens or ...` 语义，向后兼容）。
+    透传参数（供结构化提取使用）：
+    - ``temperature`` / ``json_mode`` / ``timeout``：低温 + JSON 模式 + 更长超时，降低非法 JSON 与超时；
+    - ``repair_key``：修复轮使用的提示词。目录族调用点必须显式传
+      ``OUTLINE_REPAIR_KEY``（默认值是 Schema 自适应的通用提示词）。
+    - ``max_tokens``：显式输出上限。目录合并修复需要回吐完整三级目录，长方案
+      可能触发 provider 默认上限（8192）被截断；None 表示沿用 provider 默认。
+    - ``scene``：业务场景标记，透传至 ``chat_with_fallback`` 写入
+      ``ai_audit_logs.scene``，``/ai/stats`` 可按场景聚合调用次数。
 
-    ✅ 2026-09-21 新增：scene 业务场景标记，透传至 chat_with_fallback 写入
-    ai_audit_logs.scene，/ai/stats 可按场景聚合调用次数。
+    消息列表只有 system 时自动补一条最小 user 指令（见 :func:`_ensure_user_message`）。
 
-    ✅ 兼容性兜底：消息列表只有 system 时自动补一条最小 user 指令
-    （见 _ensure_user_message），避免在要求 user 消息的 provider 上整类任务失败。
-
-    ✅ R38（2026-10-03）修复三处修复轮缺陷：
-    1. ``first_raw``：修复目标恒为**模型最初的输出**，不再被上一轮修复结果覆盖
-       （旧实现第 2 轮拿到的是「基于我上次修错的东西再修」，与
-       ``outline_json_fix_system``「保留原有结构、最小必要修改」的要求相悖，
-       且破坏不可逆 —— 第 1 轮把结构改坏后，第 2 轮已无从恢复）；
-    2. 修复轮 ``chat_with_fallback`` 包 try/except：首轮已产出内容、仅业务校验
-       未过时，修复轮的瞬时网络/限流故障不再把整次调用炸掉（首轮调用仍照旧
-       向上抛，由调用方决定是否整体重来）；
-    3. 修复轮失败信息并入最终异常文本，避免「修复失败」与「生成失败」混淆。
-
-    ✅ R57（2026-10-09）：函数体整体下沉为 :func:`collect_json_response_with_chat`
-    —— 本函数只剩「把 provider 降级链作为 chat_fn 注入」这一件事，行为逐字不变，
-    但同一链路从此可被其它调用方（含需要注入 chat 实现的测试/服务）复用。
+    本函数只做一件事：把 provider 降级链作为 ``chat_fn`` 注入共享编排，
+    保证全仓只有一份修复逻辑。
     """
 
     async def _chat(_msgs: list, **kwargs) -> str:
@@ -468,30 +522,35 @@ async def collect_json_response(
     )
 
 
-async def _provider_chat_safe(
-    provider, messages: list, temperature: float = 0.7, max_tokens: int | None = None, extra_body: dict | None = None
-) -> str:
-    """调用 provider.chat，兼容不支持 temperature / max_tokens kwarg 的旧实现。
+def _run_validator(validator, obj) -> list:
+    """兼容两种 validator 约定：``(is_valid, error_msg)`` 与 issues 列表。"""
+    result = validator(obj)
+    if isinstance(result, tuple) and len(result) == 2 and isinstance(result[0], bool):
+        is_valid, error_msg = result
+        return [] if is_valid else [str(error_msg)]
+    if isinstance(result, list):
+        return result
+    if result:
+        return [str(result)]
+    return []
 
-    ✅ R38（2026-10-03）：此前本函数只接受 3 个参数，导致
-    ``collect_json_response_with_provider`` 签名上声明的 ``max_tokens`` /
-    ``extra_body`` **从未被传给 provider**（静默失效）；而
-    ``providers/base.py`` 的 ``chat()`` 明确支持这两个 kwarg。
-    现按「逐个降级」透传：先全参数，TypeError 则逐个去掉再试，保证旧实现
-    （只认 messages / 只认 temperature）仍可工作。
-    """
-    kwargs: dict = {"temperature": temperature}
-    if max_tokens is not None:
-        kwargs["max_tokens"] = max_tokens
-    if extra_body is not None:
-        kwargs["extra_body"] = extra_body
-    for trial in (kwargs, {"temperature": temperature}, {}):
+
+def _evaluate_provider_output(raw: str, validator, schema) -> tuple[object, list]:
+    """解析 → 业务校验 → Schema 校验，任何一步失败都转成 issues 进入修复轮。"""
+    obj, issues = parse_and_validate(raw, None)
+    if obj is None or issues:
+        return obj, issues
+    if validator is not None:
+        issues = _run_validator(validator, obj)
+        if issues:
+            return obj, issues
+    if schema is not None:
         try:
-            return await provider.chat(messages, **trial)
-        except TypeError:
-            if trial == {}:
-                raise
-    raise TypeError("provider.chat 签名不兼容")
+            return schema.model_validate(obj), []
+        except Exception as e:  # noqa: BLE001
+            # Schema 校验失败不应直接崩溃：转为 issues 进入修复轮
+            return None, [f"Schema 校验失败：{e}"]
+    return obj, issues
 
 
 async def collect_json_response_with_provider(
@@ -505,90 +564,37 @@ async def collect_json_response_with_provider(
     extra_body: dict | None = None,
     repair_key: str = GENERIC_REPAIR_KEY,
 ):
-    """provider 直连版 JSON 收集（自招投标方案平台移植，签名兼容源项目）
+    """provider 直连版 JSON 收集。
 
-    与 collect_json_response 的区别：不经过 provider_factory 的降级链，
-    而是直接使用调用方传入的 provider 实例（image_engine 编排流水线使用）。
+    与 :func:`collect_json_response` 的区别：不经过 provider_factory 的降级链，
+    直接使用调用方传入的 provider 实例（插图编排流水线使用）。
 
-    返回解析后的对象本身（与源项目一致，非二元组）。
-    validator 兼容两种约定：
-    - 源项目约定：validator(obj) -> (is_valid: bool, error_msg: str)
-    - 本项目约定：validate_fn(obj) -> issues: list[str]（空列表=通过）
+    返回解析后的对象本身（非二元组）。validator 兼容两种约定：
+    - ``validator(obj) -> (is_valid: bool, error_msg: str)``
+    - ``validate_fn(obj) -> issues: list[str]``（空列表 = 通过）
 
-    ✅ 兼容性兜底：消息列表只有 system 时自动补一条最小 user 指令
-    （见 _ensure_user_message），避免在要求 user 消息的 provider 上整类任务失败。
-
-    ✅ R38（2026-10-03）：``max_tokens`` / ``extra_body`` 现真正透传给 provider
-    （此前声明即失效）；新增 ``repair_key``，插图编排等非目录任务不再拿目录
-    修复提示词。
+    消息列表只有 system 时同样自动补一条最小 user 指令。
     """
-    messages = _ensure_user_message(messages)
-    raw = await _provider_chat_safe(provider, messages, temperature, max_tokens, extra_body)
-    first_raw = raw
-    obj, issues = parse_and_validate(raw, None)
-    if obj is not None and not issues and validator is not None:
-        issues = _run_validator(validator, obj)
-    if obj is not None and not issues:
-        if schema is not None:
-            try:
-                obj = schema.model_validate(obj)
-            except Exception as e:  # noqa: BLE001
-                # schema 校验失败不应直接崩溃：转为 issues 进入修复轮
-                issues = [f"Schema 校验失败：{e}"]
-                obj = None
-        if obj is not None:
-            return obj
 
-    repair_errors: list[str] = []
-    for attempt in range(max_retries):
-        repair_msgs = list(messages) + [
-            {"role": "assistant", "content": raw or ""},
-            {"role": "user", "content": _build_repair_user_prompt(issues, first_raw or "", repair_key)},
-        ]
-        try:
-            raw = await _provider_chat_safe(provider, repair_msgs, temperature, max_tokens, extra_body)
-        except Exception as e:  # noqa: BLE001
-            repair_errors.append("第%d次修复调用异常: %s" % (attempt + 1, e))
-            logger.warning("JSON 修复第 %d 次调用异常（继续使用剩余修复预算）：%s", attempt + 1, e)
-            continue
-        obj, issues = parse_and_validate(raw, None)
-        if obj is not None and not issues and validator is not None:
-            issues = _run_validator(validator, obj)
-        if obj is not None and not issues:
-            if schema is not None:
-                try:
-                    obj = schema.model_validate(obj)
-                except Exception as e:  # noqa: BLE001
-                    issues = [f"Schema 校验失败：{e}"]
-                    obj = None
-            if obj is not None:
-                return obj
-        logger.warning("JSON 修复第 %d 次仍未通过：%s", attempt + 1, issues[:3])
+    async def _call(repair_messages: list) -> str:
+        return await _provider_chat_safe(provider, repair_messages, temperature, max_tokens, extra_body)
 
-    if repair_errors:
-        raise ValueError("JSON 生成/修复失败：%s；修复轮异常：%s" % (issues[:5], " | ".join(repair_errors)))
-    raise ValueError(f"JSON 生成/修复失败：{issues[:5]}")
-
-
-def _run_validator(validator, obj) -> list:
-    """兼容源项目 (is_valid, error_msg) 与本项目 issues 列表两种 validator 约定"""
-    result = validator(obj)
-    if isinstance(result, tuple) and len(result) == 2 and isinstance(result[0], bool):
-        is_valid, error_msg = result
-        return [] if is_valid else [str(error_msg)]
-    if isinstance(result, list):
-        return result
-    if result:
-        return [str(result)]
-    return []
+    obj, _raw = await _run_json_generation(
+        _call,
+        messages,
+        lambda text: _evaluate_provider_output(text, validator, schema),
+        max_retries,
+        repair_key,
+    )
+    return obj
 
 
 # ------------------------------------------------------------
 # 标题内嵌编号清洗 + 目录树编号重排
 #
-# ✅ 编号统一（2026-09-25）：核心实现收敛到 services/numbering.py 唯一事实源，
-#    本模块保留同名薄包装 / 再导出（调用方众多：sse_handlers / outline_library /
-#    sections / tests 均按 json_response.renumber_outline 引用，签名与语义不变）。
+# 编号统一：核心实现收敛到 services/numbering.py 唯一事实源，本模块保留同名
+# 薄包装 / 再导出（调用方众多：sse_handlers / outline_library / sections / tests
+# 均按 json_response.renumber_outline 引用，签名与语义不变）。
 # ------------------------------------------------------------
 import re as _re  # noqa: F401  — 兼容再导出（历史引用点按 json_response._re 使用）
 

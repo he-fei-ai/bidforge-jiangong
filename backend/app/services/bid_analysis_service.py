@@ -24,7 +24,7 @@ import json
 import logging
 import re
 from dataclasses import dataclass, field
-from typing import Optional
+from typing import Callable, Optional
 
 # ✅ R39 · T1：提示词统一出口（DB 优先 → 出厂默认回退）+ 注册入口。
 #
@@ -244,9 +244,9 @@ ANALYSIS_ITEMS: list[dict] = [
 
 # ================================================================
 # ✅ 2026-09-30（第十一轮 · 招标响应域引入）
-# 本软件原有 18 项属「专项方案编制域」(domain="scheme")，服务于专项方案正文编制；
-# 易标（OpenBidKit）的 18 项属「招标响应域」(domain="bid_response")，服务于招标文件
-# 响应分析（技术评分项、商务评分、废标项、评标要求、合同授予等）。
+# 本仓原有 18 项属「专项方案编制域」(domain="scheme")，服务于专项方案正文编制；
+# 另设 18 项属「招标响应域」(domain="bid_response")，服务于招标文件响应分析
+# （技术评分项、商务评分、废标项、评标要求、合同授予等）。
 #
 # ⚠️ 两域 item_id 零交集、业务域完全不同。故按「加法引入」而非替换：
 #   - 默认 domain="scheme"，`ANALYSIS_ITEMS` 引用与主键格式保持旧值，
@@ -598,8 +598,8 @@ MARKDOWN_MISSING_RESULT = "未提取到"
 
 # ================================================================
 # ✅ 2026-09-30（第十一轮 · 提取内容标准统一出口）
-# 对齐易标 bidAnalysisTask.cjs 的两套「缺失标注规范」：
-#   · JSON 任务统一模板（jsonTask 的 3 条约束）
+# 本仓存在两套「缺失标注规范」：
+#   · JSON 任务统一模板的 3 条约束
 #   · Markdown 任务「整体无结果规则」（整项 vs 局部两种缺失语义严格区分）
 # ⚠️ 此前本仓把这两套规范散落在 STABLE_SYSTEM_PROMPT 与各单项 prompt 里，
 #    改一处漏一处（本仓 §4.3/§4.7/§4.14 反复踩的同构陷阱）。现收敛为唯一出口
@@ -609,7 +609,7 @@ MARKDOWN_MISSING_RESULT = "未提取到"
 #: 局部字段缺失的统一填充值（JSON 项字段值 / Markdown 项局部小节）
 PARTIAL_MISSING_TEXT = "没有提及"
 
-#: JSON 任务统一模板（对齐易标 jsonTask，键结构由字段字典生成）
+#: JSON 任务统一模板（键结构由字段字典生成）
 _JSON_TASK_TEMPLATE = """任务：{title}
 
 目标：{goals}
@@ -645,10 +645,9 @@ _TECH_SCORE_ITEMS_RE = re.compile(
 def is_missing_technical_score_items(content: str) -> bool:
     """判断「技术评分要求」项中**技术评分项小节**是否为空。
 
-    ⚠️ 对齐易标 isMissingTechnicalScoreItems：技术评分项是技术方案编制的
-    主要依据（每一项都要在方案里展开编写），它缺失时用户会带着空白进入
-    目录生成，而 techRequirements 整体不算「未提取到」—— 因为「技术评分要求」
-    小节可能有内容。故必须单独判定该小节。
+    ⚠️ 技术评分项是技术方案编制的主要依据（每一项都要在方案里展开编写），
+    它缺失时用户会带着空白进入目录生成，而 techRequirements 整体不算「未提取到」
+    —— 因为「技术评分要求」小节可能有内容。故必须单独判定该小节。
     """
     text = (content or "").strip()
     if text == MARKDOWN_MISSING_RESULT:
@@ -666,6 +665,7 @@ STABLE_SYSTEM_PROMPT = """你是建筑工程专项方案资料分析专家。严
 2. 已提取到内容但局部未提及时，明确写「没有提及」。
 3. 只输出最终结果，不输出过程、思考、提示语或客套话。
 4. 始终使用简体中文。
+5. 资料中带【补遗/澄清文件】标记的文档与主文件（招标文件、合同文件等）同名条款（如工期、资质要求、技术标准、评分办法）不一致时，一律以补遗/澄清文件为准。
 
 JSON 格式任务的额外约束：
 - 严格按照给定的 JSON 模板输出，只填写 value，不要改动 key 和结构。
@@ -1379,7 +1379,7 @@ def get_item_fields(item_id: str) -> list[tuple]:
 
 
 def build_json_template(item_id: str) -> str:
-    """按字段字典生成 JSON 任务模板（对齐易标 ``jsonTask`` 的「只改 value 禁止改 key」）。
+    """按字段字典生成 JSON 任务模板（键名固定为英文、只允许修改 value）。
 
     模板值填中文标签，模型按标签理解语义后回填真实取值；键名固定为英文键。
     """
@@ -1486,7 +1486,7 @@ def build_system_prompt(section_hint: str = "", classification_hint: str = "") -
     ⚠️ 本函数把标段上下文**拼进同一条** system 消息，是历史契约（既有单测
     ``test_bid_section_context.py::test_system_prompt_appends_hint_when_present``
     锁定）。标段上下文要作为**独立第二条 system 消息**下发时，请改用
-    :func:`build_system_messages`（对齐易标 ``buildTenderContextMessages``）。
+    :func:`build_system_messages`（独立 system 消息版）。
     """
     prompt = get_bid_system_prompt()
     if section_hint:
@@ -1497,17 +1497,17 @@ def build_system_prompt(section_hint: str = "", classification_hint: str = "") -
 
 
 def build_system_messages(section_hint: str = "", classification_hint: str = "") -> list[dict]:
-    """组装 messages 里的 **system 段**（对齐易标 ``buildTenderContextMessages``）。
+    """组装 messages 里的 **system 段**（标段上下文使用独立消息）。
 
-    易标把「标段上下文」作为**独立的第二条 system 消息**下发，而不是拼进通用
+    把「标段上下文」作为**独立的第二条 system 消息**下发，而不是拼进通用
     system 提示词。两者对模型的差别在于：后者会与「必须逐条输出结构化结果」等
     硬性纪律混在同一段里，弱模型容易把标段限定当成可忽略的上下文；独立消息
     则在消息层级上表达「这是作用域约束」。
 
     **向后兼容保证**：
-    - 两个 hint 都为空 → 返回**单条** system 消息，内容与旧版逐字一致
-      （与 :func:`build_system_prompt` 返回值完全相同）；
-    - 只有 ``classification_hint`` → 与旧版逐字一致（仍拼在同一条）；
+    - 两个 hint 都为空 → 返回**单条** system 消息，内容与
+      :func:`build_system_prompt` 返回值完全相同；
+    - 只有 ``classification_hint`` → 仍拼在同一条，结果保持不变；
     - 只有 ``section_hint`` → 改为两条 system 消息（这正是本函数的目的）。
 
     Args:
@@ -1522,13 +1522,13 @@ def build_system_messages(section_hint: str = "", classification_hint: str = "")
         system += f"\n\n【本方案危大工程分类结论（提取重点参考）】" f"{classification_hint}"
     msgs: list[dict] = [{"role": "system", "content": system}]
     if section_hint:
-        # 独立第二条 system 消息（易标口径）
+        # 独立第二条 system 消息（作用域约束单独表达）
         msgs.append({"role": "system", "content": f"【当前处理标段上下文】{section_hint}"})
     return msgs
 
 
 # =========================================================================
-# 四、分段策略（从 facts_extractor.py split_into_chunks 复用思路）
+# 四、分段策略
 # =========================================================================
 # 项目资料常超 20 万字符，单次 AI 调用会被截断或超模型上下文上限。
 # 按固定上限切分，留出 500 字符 overlap 确保跨段内容不丢失。
@@ -1536,69 +1536,74 @@ DEFAULT_CHUNK_SIZE = 16000  # 每段字符数（约 8000-12000 token）
 DEFAULT_CHUNK_OVERLAP = 500
 
 # ---------------------------------------------------------------------------
-# 增强分段策略（2026-09-23 吸收 OpenBidKit userTextSplitter.cjs 成熟思路）
-#   旧实现只在 ±200 窗口内回退到「最近的换行符」，存在两类质量问题：
-#     ① 会把 Markdown 代码块 / 表格从中间切断（本软件解析产物含大量表格与围栏），
-#        切断后模型看到残缺片段，提取质量下降；
-#     ② 窗口内无换行时只能硬切，遇到「整段无换行的长文」直接从句中截断。
-#   借鉴参考实现补两点（复用思路而非照搬代码，保持签名/overlap/终止契约不变）：
-#     · 代码围栏保护：断点绝不落在 ``` / ~~~ 围栏内部；硬切点若命中围栏则顺延到围栏结束；
-#     · 多级边界优先级：标题/空行 > 换行 > 句末标点 > 分号 > 逗号/冒号，逐级放宽。
+# 边界优先分段
+#   本仓解析产物以 Markdown 表格与代码围栏为主，只在「最近的换行符」上回退会
+#   产生两类质量问题：① 把围栏/表格从中间切断；② 整段无换行时只能句中硬切。
+#   因此改为「按边界强度逐级搜索 + 硬切兜底」，并保证断点不落在围栏内部。
 # ---------------------------------------------------------------------------
 
-#: ⚠️ R76b · G1：此处原有的行锚定围栏正则副本已删除。它只判「同种字符 + 长度 ≥」
-#: 而**不判闭合行不得带信息串**，于是块内 ```json 这类行会被当成收尾（实测保护区
-#: 被拆成两段、其后的 {"k": 1} 与裸 ``` 落到保护区外），分块断点得以落在围栏中间
-#: —— 正是本模块注释声明要避免的「把代码块从中间切断」。判据现由 fence_common 单一供给。
 
-#: 边界优先级分组（越靠前越优先），在每个分组内挑「离理想断点最近且不在代码块内」者。
-#: 断点取匹配结束位置（分隔符之后），使标点/换行归属当前段。
-_BOUNDARY_GROUPS = (
-    re.compile(r"\r?\n(?=[ \t]{0,3}#{1,6}\s)|\r?\n[ \t]*\r?\n"),  # 标题前换行 / 空行
-    re.compile(r"\r?\n"),  # 普通换行
-    re.compile(r"[。！？!?]"),  # 句末标点
-    re.compile(r"[；;]"),  # 分号
-    re.compile(r"[，,、：:]"),  # 逗号/顿号/冒号
+@dataclass(frozen=True)
+class _BoundaryTier:
+    """一层边界规则：``name`` 仅用于日志与调试，``pattern`` 的匹配结束位置即断点。"""
+
+    name: str
+    pattern: "re.Pattern[str]"
+
+
+#: 边界优先级声明表（越靠前越优先）。
+#: 依据 Markdown 结构层级：标题/空行是块级分界，换行是行级，句末标点是完整句子，
+#: 分号/逗号只是句中停顿。优先在更强边界处切开，模型看到的每一段都是语义完整的
+#: 块；只有前几级在窗口内都找不到可用断点时，才降级到更弱的边界。
+#: 断点取匹配结束位置（分隔符归属当前段），与正文的自然阅读顺序一致。
+_BOUNDARY_TIERS = (
+    _BoundaryTier("block", re.compile(r"\r?\n(?=[ \t]{0,3}#{1,6}\s)|\r?\n[ \t]*\r?\n")),
+    _BoundaryTier("line", re.compile(r"\r?\n")),
+    _BoundaryTier("sentence", re.compile(r"[。！？!?]")),
+    _BoundaryTier("clause", re.compile(r"[；;]")),
+    _BoundaryTier("phrase", re.compile(r"[，,、：:]")),
 )
 
-_BACK_WINDOW = 200  # 向前搜索边界的最大回退字符数（与旧实现一致）
-_FWD_WINDOW = 100  # 向后搜索边界的最大前伸字符数（与旧实现一致）
+#: 滑动窗口模式下，断点相对理想位置的最大回退 / 前伸字符数。
+#: 依据：中文技术文档的单行/单句多为 30~80 字，±200 / +100 足以覆盖 1~3 个自然
+#: 边界；窗口再大，相邻段长度差会超过一个句子的规模，AI 各段负载明显失衡。
+_BACK_WINDOW = 200
+_FWD_WINDOW = 100
 
 
 # ---------------------------------------------------------------------------
-# ✅ 2026-09-30（第十一轮 · 均分分段策略）
-# 对齐 OpenBidKit userTextSplitter.cjs 的分段算法口径：
-#   · 段数由总长与「上下文上限 × 比例」推得，再**尽量均分**（旧滑动窗口会让前几段
-#     满额、最后一段只剩零头，AI 各段负载严重不均）；
-#   · 断点在「理想点 ± radius」窗口内搜索，先严格窗口(0.12×段长)再放宽(0.25×段长)；
-#   · 候选点必须落在 [min, max] 段长区间内，且**剩余长度 ≥ 剩余段数**、
-#     **剩余长度 / 剩余段数 ≤ max** —— 保证后面的每一段都填得满，不会尾段塌缩；
-#   · 硬切点做 Unicode 代理对保护（旧实现会拆散 emoji/生僻字的代理对）。
-# ⚠️ 默认关闭：`split_for_analysis(..., even=False)` 走旧滑动窗口，行为逐字不变。
+# 均分分段策略
+#   滑动窗口模式会让前几段满额、最后一段只剩零头，AI 各段负载严重不均。均分
+#   模式先由总长推得段数，再在每个理想点附近搜索自然边界，并对候选断点做
+#   「段长区间 + 剩余量」双重校验，保证尾段不会被压扁。
+#   默认关闭：``split_for_analysis(..., even=False)`` 仍走滑动窗口，行为不变。
 # ---------------------------------------------------------------------------
 
-#: 上下文上限（字符数）。0 = 不启用均分模式。对齐易标 DEFAULT_CONTEXT_LENGTH_LIMIT。
+#: 上下文上限（字符数）。0 是「未启用均分」的哨兵值，不是由容量换算来的值。
 SEGMENT_CONTEXT_LENGTH_LIMIT = 0
-#: 单段上限 = 上下文上限 × 本比例。对齐易标 DEFAULT_CONTEXT_LIMIT_RATIO。
+#: 单段上限 = 上下文上限 × 本比例。取 0.8：预留 20% 给输出 token 与消息骨架，
+#: 否则输入打满上限时，输出末尾容易被 provider 截断（JSON 首尾不完整）。
 SEGMENT_LIMIT_RATIO = 0.8
-#: 严格窗口半径 = 目标段长 × 本比例（先搜）。对齐易标 STRICT_WINDOW_RATIO。
+#: 严格搜索半径 = 目标段长 × 本比例。0.12：一个完整句块通常不超过目标段长的
+#: 12%，在这个半径内几乎总能找到句末/换行边界。
 SEGMENT_STRICT_RATIO = 0.12
-#: 放宽窗口半径 = 目标段长 × 本比例（严格窗口搜不到时）。对齐 RELAXED_WINDOW_RATIO。
+#: 放宽搜索半径（严格窗口无果时启用）。0.25：覆盖「跨句引用 + 表格行」的情形，
+#: 再大就会明显破坏均分目标。
 SEGMENT_RELAXED_RATIO = 0.25
-#: 单段最小长度 = 目标段长 × 本比例。对齐 MIN_SEGMENT_RATIO。
+#: 单段下限 = 目标段长 × 本比例。低于 35% 的段落信息量不足以抵消一次调用
+#: （system 提示 + 消息骨架）的固定开销，尾段尤其容易塌缩到这个区间以下。
 SEGMENT_MIN_RATIO = 0.35
-#: 单段最大长度 = 段上限 × 本比例（给自然边界让路留余量）。对齐 MAX_SEGMENT_LIMIT_RATIO。
+#: 单段上限 = 段上限 × 本比例。允许边界搜索向前多伸 10%，仍显著低于上下文上限。
 SEGMENT_MAX_RATIO = 1.1
 
 
 def _avoids_surrogate_pair(text: str, cut: int) -> int:
     """若切点正好落在 Unicode 代理对中间，顺延 1 个字符。
 
-    对齐易标 ``avoidsBreakingSurrogatePair``：CJK 扩展 B 区汉字与 emoji 在
-    Python ``len()`` 下占 1 个码点、不涉及代理对；但经 JSON/编码往返或来自
-    UTF-16 中间态的文本仍可能残留孤立代理对（``\\uD800-\\uDBFF`` 高半 +
-    ``\\uDC00-\\uDFFF`` 低半）。切在中间会产生两个不可编码的孤立代理对，
-    下游 ``.encode('utf-8')`` 直接 UnicodeEncodeError。
+    经 JSON / UTF-16 中间态往返的文本可能残留孤立代理对（高半区 ``\\uD800-\\uDBFF``
+    紧跟低半区 ``\\uDC00-\\uDFFF``）。切在两者中间会产生两个不可编码的孤立码点，
+    下游 ``.encode('utf-8')`` 直接抛 UnicodeEncodeError。CJK 扩展 B 区汉字与
+    emoji 在 Python ``len()`` 下是单码点，不涉及代理对，因此只需处理这一种形态。
     """
     if cut <= 0 or cut >= len(text):
         return cut
@@ -1609,72 +1614,76 @@ def _avoids_surrogate_pair(text: str, cut: int) -> int:
     return cut
 
 
-def _can_use_candidate(
-    candidate: int,
-    *,
-    previous_cut: int,
-    total_length: int,
-    remaining_segments: int,
-    minimum_segment_length: int,
-    maximum_segment_length: int,
-) -> bool:
-    """判断候选切点是否合法（对齐易标 ``canUseCandidate`` 的四重约束）。
+@dataclass(frozen=True)
+class _CutConstraints:
+    """均分切分过程中恒定不变的长度约束（一次性构造，循环内只读）。"""
 
-    关键在**剩余量校验**：保证剩余长度至少够填满剩余段数，且平均起来不超过
-    单段上限 —— 否则最后几段会塌缩成极短片段，AI 提取质量骤降。
+    total_length: int
+    minimum_length: int
+    maximum_length: int
+
+    def permits(self, cut: int, previous_cut: int, remaining_segments: int) -> bool:
+        """候选断点是否合法：段长在区间内，且剩余量既够填满也不超上限。
+
+        剩余量校验是尾段不塌缩的关键：若把切点太靠后，最后几段就只剩零头；
+        若太靠前，剩余部分每段又会超过上限。
+        """
+        if cut <= previous_cut or cut >= self.total_length:
+            return False
+        length = cut - previous_cut
+        if length < self.minimum_length or length > self.maximum_length:
+            return False
+        if remaining_segments <= 0:
+            return True
+        remaining = self.total_length - cut
+        return remaining >= remaining_segments and remaining / remaining_segments <= self.maximum_length
+
+
+def _nearest_boundary(text: str, lo: int, hi: int, ideal, accept: Callable[[int], bool]) -> int:
+    """在 ``[lo, hi)`` 内按边界强度逐级挑「离 ideal 最近且可接受」的断点。
+
+    逐级下降是刻意的：高优先级只要存在任一合法断点，就不再考虑低优先级，
+    于是「标题处切开」永远优先于「逗号处切开」。同一级别内取距离最近者，
+    距离相同则取先出现者（``<`` 严格比较）。
     """
-    if candidate <= previous_cut or candidate >= total_length:
-        return False
-    current_length = candidate - previous_cut
-    if current_length < minimum_segment_length or current_length > maximum_segment_length:
-        return False
-    if remaining_segments > 0:
-        remaining_length = total_length - candidate
-        if remaining_length < remaining_segments:
-            return False
-        if remaining_length / remaining_segments > maximum_segment_length:
-            return False
-    return True
-
-
-def _find_boundary_for_group(
-    text: str, from_: int, to: int, pattern: "re.Pattern", state: dict, fence_ranges: list[tuple[int, int]]
-) -> int:
-    """在 [from_, to) 内按单组边界正则挑「离理想点最近且不在围栏内」的切点。"""
-    best_cut = 0
-    best_score = None
-    content = text[from_:to]
-    for m in pattern.finditer(content):
-        candidate = from_ + m.end()
-        if _inside_fence(candidate, fence_ranges):
-            continue
-        if not _can_use_candidate(
-            candidate,
-            previous_cut=state["previous_cut"],
-            total_length=state["total_length"],
-            remaining_segments=state["remaining_segments"],
-            minimum_segment_length=state["minimum_segment_length"],
-            maximum_segment_length=state["maximum_segment_length"],
-        ):
-            continue
-        score = abs(candidate - state["ideal_cut"])
-        if best_score is None or score < best_score:
-            best_score = score
-            best_cut = candidate
-    return best_cut
-
-
-def _find_natural_cut(text: str, radius: int, state: dict, fence_ranges: list[tuple[int, int]]) -> int:
-    """在理想点 ± radius 窗口内按边界优先级找切点；找不到返回 0。"""
-    from_ = max(state["previous_cut"] + 1, int(state["ideal_cut"] - radius))
-    to = min(state["total_length"] - state["remaining_segments"], int(state["ideal_cut"] + radius))
-    if to <= from_:
+    if hi <= lo:
         return 0
-    for group in _BOUNDARY_GROUPS:
-        cut = _find_boundary_for_group(text, from_, to, group, state, fence_ranges)
-        if cut:
-            return cut
+    window = text[lo:hi]
+    for tier in _BOUNDARY_TIERS:
+        best_cut = 0
+        best_distance = None
+        for match in tier.pattern.finditer(window):
+            cut = lo + match.end()
+            if not accept(cut):
+                continue
+            distance = abs(cut - ideal)
+            if best_distance is None or distance < best_distance:
+                best_distance = distance
+                best_cut = cut
+        if best_cut:
+            return best_cut
     return 0
+
+
+def _find_natural_cut(
+    text: str,
+    radius: int,
+    ideal: float,
+    previous_cut: int,
+    remaining_segments: int,
+    constraints: _CutConstraints,
+    fence_ranges: list[tuple[int, int]],
+) -> int:
+    """在理想点 ± radius 窗口内找自然断点；找不到返回 0（由调用方降级或硬切）。"""
+    lo = max(previous_cut + 1, int(ideal - radius))
+    hi = min(constraints.total_length - remaining_segments, int(ideal + radius))
+    return _nearest_boundary(
+        text,
+        lo,
+        hi,
+        ideal,
+        lambda cut: not _inside_fence(cut, fence_ranges) and constraints.permits(cut, previous_cut, remaining_segments),
+    )
 
 
 def _collect_fence_ranges(text: str) -> list[tuple[int, int]]:
@@ -1715,34 +1724,64 @@ def _fence_end_at(idx: int, ranges: list[tuple[int, int]]) -> Optional[int]:
 
 
 def _choose_boundary_cut(text: str, start: int, end: int, limit: int, fence_ranges: list[tuple[int, int]]) -> int:
-    """在 end 附近的 ±窗口内按边界优先级挑一个「不在代码围栏内」的最佳断点。
+    """在 ``end`` 附近窗口内按边界优先级挑断点；找不到返回 -1。
 
-    返回断点位置（>start）；窗口内找不到任何可接受边界时返回 -1。
+    可接受条件是「严格落在 (start, limit) 内」且不在代码围栏内部：前者保证当前段
+    非空、且不越过总长，后者保证表格/代码块不会被从中间切开。
     """
     back = max(start + 1, end - _BACK_WINDOW)
     fwd = min(limit, end + _FWD_WINDOW)
-    if fwd <= back:
-        return -1
-    window = text[back:fwd]
-    for pattern in _BOUNDARY_GROUPS:
-        best = -1
-        best_score = None
-        for m in pattern.finditer(window):
-            cut = back + m.end()
-            if cut <= start or cut >= limit:
-                continue
-            if _inside_fence(cut, fence_ranges):
-                continue
-            score = abs(cut - end)
-            if best_score is None or score < best_score:
-                best_score = score
-                best = cut
-        if best > 0:
-            return best
-    return -1
+    cut = _nearest_boundary(
+        text,
+        back,
+        fwd,
+        end,
+        lambda position: start < position < limit and not _inside_fence(position, fence_ranges),
+    )
+    return cut if cut > 0 else -1
 
 
-def _split_even(
+@dataclass(frozen=True)
+class _BalancedPlan:
+    """均分切分的派生参数（由总长与上下文上限一次性算出，循环内只读）。"""
+
+    segment_count: int
+    target_size: int
+    strict_radius: int
+    relaxed_radius: int
+    constraints: _CutConstraints
+
+    @classmethod
+    def derive(
+        cls,
+        total_length: int,
+        context_length_limit: int,
+        limit_ratio: float,
+        strict_ratio: float,
+        relaxed_ratio: float,
+        min_ratio: float,
+        max_ratio: float,
+    ) -> "_BalancedPlan | None":
+        """返回 None 表示文本不超过单段上限，无需切分。"""
+        segment_limit = max(1, int(context_length_limit * limit_ratio))
+        if total_length <= segment_limit:
+            return None
+        segment_count = max(1, -(-total_length // segment_limit))  # 向上取整
+        target_size = max(1, -(-total_length // segment_count))
+        strict_radius = max(1, int(target_size * strict_ratio))
+        relaxed_radius = max(strict_radius, int(target_size * relaxed_ratio))
+        maximum_length = max(target_size, int(segment_limit * max_ratio))
+        minimum_length = max(1, int(target_size * min_ratio))
+        return cls(
+            segment_count=segment_count,
+            target_size=target_size,
+            strict_radius=strict_radius,
+            relaxed_radius=relaxed_radius,
+            constraints=_CutConstraints(total_length, minimum_length, maximum_length),
+        )
+
+
+def _split_balanced(
     text: str,
     context_length_limit: int,
     limit_ratio: float = SEGMENT_LIMIT_RATIO,
@@ -1751,56 +1790,47 @@ def _split_even(
     min_ratio: float = SEGMENT_MIN_RATIO,
     max_ratio: float = SEGMENT_MAX_RATIO,
 ) -> list[str]:
-    """均分切分（对齐易标 ``splitUserTextByContextLimit``）。
+    """均分切分：由总长推得段数，在每个理想点先搜严格窗口再放宽，最后硬切兜底。
 
-    步骤：① 段上限 = 上下文上限 × limit_ratio；② 段数 = ceil(总长 / 段上限)；
-    ③ 目标段长 = ceil(总长 / 段数)（尽量均分）；④ 每个理想点先搜严格窗口
-    再搜放宽窗口，最后硬切兜底。每段都过 :func:`_can_use_candidate` 校验，
-    保证尾段不塌缩。
+    所有候选断点都要通过 :meth:`_CutConstraints.permits`：这样既保证每段不超上限，
+    也保证剩余的段数都能被填满，尾段不会塌缩成零头。
     """
     source = text or ""
     if not source:
         return []
     if limit_ratio <= 0:
         limit_ratio = SEGMENT_LIMIT_RATIO
-    segment_limit = max(1, int(context_length_limit * limit_ratio))
-    if len(source) <= segment_limit:
+    plan = _BalancedPlan.derive(
+        len(source),
+        context_length_limit,
+        limit_ratio,
+        strict_ratio,
+        relaxed_ratio,
+        min_ratio,
+        max_ratio,
+    )
+    if plan is None:
         return [source]
-
-    segment_count = max(1, -(-len(source) // segment_limit))  # 向上取整
-    target_size = max(1, -(-len(source) // segment_count))
-    strict_radius = max(1, int(target_size * strict_ratio))
-    relaxed_radius = max(strict_radius, int(target_size * relaxed_ratio))
-    maximum_segment_length = max(target_size, int(segment_limit * max_ratio))
-    minimum_segment_length = max(1, int(target_size * min_ratio))
     fence_ranges = _collect_fence_ranges(source)
 
     cuts: list[int] = []
     previous_cut = 0
-    for segment_index in range(1, segment_count):
-        ideal_cut = (len(source) * segment_index) / segment_count
-        remaining_segments = segment_count - segment_index
-        state = {
-            "ideal_cut": ideal_cut,
-            "previous_cut": previous_cut,
-            "total_length": len(source),
-            "remaining_segments": remaining_segments,
-            "minimum_segment_length": minimum_segment_length,
-            "maximum_segment_length": maximum_segment_length,
-        }
-        cut = _find_natural_cut(source, strict_radius, state, fence_ranges) or _find_natural_cut(
-            source, relaxed_radius, state, fence_ranges
+    for segment_index in range(1, plan.segment_count):
+        ideal = len(source) * segment_index / plan.segment_count
+        remaining_segments = plan.segment_count - segment_index
+        cut = _find_natural_cut(
+            source, plan.strict_radius, ideal, previous_cut, remaining_segments, plan.constraints, fence_ranges
+        ) or _find_natural_cut(
+            source, plan.relaxed_radius, ideal, previous_cut, remaining_segments, plan.constraints, fence_ranges
         )
         if not cut:
             # 硬切兜底：夹在 [previous_cut+1, 总长-剩余段数] 内，保证每段非空
             minimum_cut = previous_cut + 1
             maximum_cut = len(source) - remaining_segments
-            ideal = (
-                min(maximum_cut, max(minimum_cut, round(ideal_cut)))
-                if maximum_cut >= minimum_cut
-                else min(len(source), minimum_cut)
-            )
-            cut = _avoids_surrogate_pair(source, ideal)
+            if maximum_cut >= minimum_cut:
+                cut = _avoids_surrogate_pair(source, min(maximum_cut, max(minimum_cut, round(ideal))))
+            else:
+                cut = _avoids_surrogate_pair(source, min(len(source), minimum_cut))
         cuts.append(cut)
         previous_cut = cut
 
@@ -1829,11 +1859,11 @@ def split_for_analysis(
 
     ✅ 2026-09-30 新增 ``even`` / ``context_length_limit``（默认关闭）：
       均分模式下段数由总长推导后尽量均分，并做段长区间与剩余量校验、
-      硬切点做 Unicode 代理对保护。默认参数下行为与旧版**逐字一致**。
+      硬切点做 Unicode 代理对保护。默认参数下行为保持不变。
     """
     text = text or ""
     if even and context_length_limit > 0:
-        return _split_even(text, context_length_limit)
+        return _split_balanced(text, context_length_limit)
     if len(text) <= chunk_size:
         return [text]
     fence_ranges = _collect_fence_ranges(text)
@@ -2079,14 +2109,13 @@ class AnalysisConfig:
       - custom：用户勾选项 + **强制补全**必选项（保证一次跑完即得到完整必选集）
       - item  ：单项/局部重跑，**严格按勾选执行、不补全必选项**
 
-    domain 语义（2026-09-30 新增，默认 "scheme" 与旧版逐字一致）：
-      - scheme      ：本软件原有 18 项（专项方案编制域）
-      - bid_response：易标引入的 18 项（招标响应域）
+    domain 语义（2026-09-30 新增，默认 "scheme" 与旧行为一致）：
+      - scheme      ：专项方案编制域 18 项
+      - bid_response：招标响应域 18 项
 
-    skip_done 语义（2026-09-30 新增，默认 False 与旧版一致）：
+    skip_done 语义（2026-09-30 新增，默认 False 与旧行为一致）：
       为 True 时，``get_task_items(db, project_id)`` 会跳过已落库且 status=='success'
-      的项 —— 即「断点续跑」。对齐易标
-      ``tasksToRun = ... : scopedTasks.filter(t => status !== 'success')``。
+      的项 —— 即「断点续跑」，等价于只取 ``status != 'success'`` 的项。
       ⚠️ force_rerun 或显式指定 task_ids（单项重跑）时必须忽略 skip_done，
       否则「重跑失败项」会变成空操作。
     """

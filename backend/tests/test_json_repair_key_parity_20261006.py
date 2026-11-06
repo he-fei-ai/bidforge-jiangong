@@ -61,9 +61,9 @@ R148 盲区收口（2026-11-02，目录生成模块深度探索轮）
 排除
 ----
 - ``bid_analysis.py`` 自维护的简化版 ``_repair_json``（1 轮 + 正则提取），
-  不是 ``collect_json_response`` 调用，本护栏不扫（刻意移植设计，见
+  不是 ``collect_json_response`` 调用，本护栏不扫（刻意保留的设计，见
   ``round2_inventory.md`` P2-B 节）。
-- ``bid_section_extraction.py:283`` 的 ``collector = ai_collect or
+- ``bid_section_extraction`` 中 ``collector = ai_collect or
   collect_json_response`` 是赋值不是调用；下游 ``collector(...)`` 是
   间接派发，本护栏只锁直接调用点（间接派发默认走 GENERIC，合法）。
 - ``json_response.py`` 自身的函数定义节点。

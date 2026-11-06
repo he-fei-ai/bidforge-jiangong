@@ -9,11 +9,11 @@
                               成为唯一出口（sse_handlers / facts_extractor
                               均改为调用它）
 知识库/原方案补丁源未接          ``facts_enrich.apply_knowledge_patches``
-                              （对齐易标 :876-891）
+                              （知识库补充补丁合并）
 最终整理（finalize）未引入      ``facts_enrich.finalize_facts``
-                              （对齐易标 :909-920）
+                              （最终整理）
 上下文预算分段未接线            ``facts_extractor.resolve_chunk_size``
-                              （对齐易标 :363-377）
+                              （上下文预算分段）
 英文归一化键不走九大章节规则    ``facts_classification.FACT_KEY_TO_CHAPTER``
 ============================  ==============================================
 
@@ -85,7 +85,7 @@ class TestMissingValueSingleSource:
 
 
 # =========================================================================
-# 二、遗留项 ②：知识库补充（对齐易标 :876-891）
+# 二、遗留项 ②：知识库补充（补丁合并）
 # =========================================================================
 class TestKnowledgePatchStage:
     def test_prompt_registered_and_renders(self):
@@ -163,7 +163,7 @@ class TestKnowledgePatchStage:
 
 
 # =========================================================================
-# 三、遗留项 ③：最终整理（对齐易标 :909-920）
+# 三、遗留项 ③：最终整理
 # =========================================================================
 class TestFinalizeStage:
     def test_prompt_registered_and_renders(self):
@@ -256,7 +256,7 @@ class TestFinalizeStage:
 
 
 # =========================================================================
-# 四、遗留项 ④：上下文预算分段（对齐易标 :363-377）
+# 四、遗留项 ④：上下文预算分段
 # =========================================================================
 class TestContextBudgetSplit:
     def test_disabled_returns_input_unchanged(self, monkeypatch):

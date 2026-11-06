@@ -1,8 +1,6 @@
 """多标段「投标范围」上下文注入回归测试（2026-09-22）。
 
-引入背景（对齐 OpenBidKit `utils/bidSectionContext.cjs` +
-`services/bidAnalysisTask.cjs` 的 sectionHint 注入）：
-同一份多标段招标文件里各标段的工程规模/技术参数/工期完全不同。若不显式告诉
+引入背景：同一份多标段招标文件里各标段的工程规模/技术参数/工期完全不同。若不显式告诉
 模型「本次只处理 X 标段」，模型会把其它标段的参数抽进本次方案。
 
 本文件覆盖：
@@ -138,10 +136,10 @@ async def test_run_single_call_injects_section_hint(monkeypatch):
     await ba._run_single_call(item, "项目资料", "markdown", section_hint=hint)
 
     assert captured, "必须发生一次 AI 调用"
-    # ✅ 2026-09-30 第十四轮：标段上下文改为**独立的第二条 system 消息**
-    #    （对齐易标 buildTenderContextMessages），不再拼进通用 system 提示词。
+    # ✅ 2026-09-30 第十四轮：标段上下文改为**独立的第二条 system 消息**，
+    #    不再拼进通用 system 提示词。
     #    断言因此从「第一条 system 含 hint」升级为「messages 里存在一条
-    #    只承载标段上下文的 system 消息」——后者才真正锁住参考实现的口径。
+    #    只承载标段上下文的 system 消息」——后者才真正锁住注入口径。
     systems = [m for m in captured[0] if m["role"] == "system"]
     assert systems, "必须存在 system 消息"
     assert (
@@ -209,7 +207,7 @@ async def test_segment_merge_carries_section_hint_and_task_schema(monkeypatch):
     assert {c["text"] for c in seg_calls} == {"段1", "段2"}
     assert all(c["section_hint"] == hint for c in seg_calls)
     assert all(c["classification_hint"] == class_hint for c in seg_calls)
-    # ✅ 标段上下文已是独立第二条 system 消息（易标口径）；
+    # ✅ 标段上下文已是独立第二条 system 消息；
     #    危大分类结论仍拼在第一条（它与通用纪律同属「提取要求」）。
     systems = [m for m in merge_calls[0] if m["role"] == "system"]
     assert len(systems) == 2, "合并调用也要带独立的标段 system 消息"

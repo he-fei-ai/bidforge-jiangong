@@ -1,10 +1,9 @@
-"""解析提取模块引入招标响应域 + 分段策略 + 断点续跑 的回归护栏（2026-09-30）。
+"""解析提取模块：招标响应域 + 分段策略 + 断点续跑 的回归护栏（2026-09-30）。
 
-本轮引入 OpenBidKit 易标（参考软件）的「解析提取模块」能力，全部**默认向后兼容**。
-本文件锁定以下不变量，防止后续改动造成回退：
+全部改动默认向后兼容。本文件锁定以下不变量，防止后续改动造成回退：
 
-1. 域注册表：scheme 域 18 项 / 17 必选 / 13 分组**逐字不变**；招标响应域 18 项 /
-   6 必选 / 11 分组；两域 item_id **零交集**（否则主键与下游映射会串）。
+1. 域注册表：scheme 域 18 项 / 17 必选 / 13 分组保持不变；招标响应域 18 项 /
+   6 必选 / 11 分组；两域 item_id 零交集（否则主键与下游映射会串）。
 2. 主键格式：scheme 域必须是旧格式 ``{project_id}_{item_id}``（历史数据与既有
    WHERE id=? 查询全部继续可用）；bid_response 域为
    ``{project_id}__{domain}__{item_id}``。域名空串/None 必须 fail-closed 到
@@ -16,9 +15,9 @@
    语义必须严格区分（MARKDOWN_MISSING_RESULT vs PARTIAL_MISSING_TEXT）。
 5. 技术评分项专判：``is_missing_technical_score_items`` 四向语义
    （小节缺失 / 小节有内容 / 整项缺失 / 无小节）。
-6. 分段策略：默认参数下与旧滑动窗口**逐字一致**（A/B 可比对）；均分模式
+6. 分段策略：默认参数下与滑动窗口行为一致（A/B 可比对）；均分模式
    不得丢内容、不得尾段塌缩、不得切断代码围栏；硬切点做 Unicode 代理对保护。
-7. 断点续跑：默认关闭；开启后跳过已成功项，但 **force_rerun / mode=item 恒忽略**；
+7. 断点续跑：默认关闭；开启后跳过已成功项，但 force_rerun / mode=item 恒忽略；
    查库异常必须 fail-open（全量执行），绝不因查库失败静默跳过重跑；域间隔离。
 8. 路由契约：``GET /items`` 默认返回结构与旧版一致（加法式新增 domain 键）；
    未知域返回空清单 + domain_unknown（fail-closed，不静默回退）；
@@ -26,14 +25,6 @@
 
 测试直接调用路由函数（与既有 test_bid_analysis.py 风格一致），
 避免 TestClient 跨事件循环持有 aiosqlite 连接导致的偶发失败。
-
-参考软件对照（只读，不作为测试依赖）：
-- client/electron/services/bidAnalysisTask.cjs      ：18 项分类、mode 归一、
-  断点续跑（status!=='success' 过滤）、force_rerun 级联清空、日志保留 80 条、
-  预热项先行 + 5000ms
-- client/electron/utils/userTextSplitter.cjs        ：400000×0.8 均分、5 组边界、
-  strict 0.12 / relaxed 0.25 / min 0.35 / max 1.1、围栏与代理对保护
-- client/electron/utils/segmentedAiResultMerger.cjs ：分段结果 AI 合并
 """
 
 from __future__ import annotations
@@ -113,7 +104,7 @@ class TestDomainRegistry:
         assert not (a & b), f"域交集非空：{sorted(a & b)}"
 
     def test_bid_response_required_ids_are_the_six_expected(self):
-        """易标 6 个必选项（技术评分项属技术方案编制的主要依据）。"""
+        """招标响应域必须包含这 6 个必选项（技术评分项是方案编制的主要依据）。"""
         expected = {
             "projectOverview",
             "techRequirements",
@@ -211,7 +202,7 @@ class TestNoBarePkConstructionInRouter:
 # 三、提取内容标准（缺失标注规范单一出口）
 # =========================================================================
 class TestContentStandards:
-    """对齐易标 jsonTask 的 3 条约束 + Markdown 整体无结果规则。
+    """JSON 任务的 3 条约束 + Markdown 任务的整体无结果规则。
 
     核心不变量：**整项无内容 → 只返回「未提取到」**；**局部缺失 → 写「没有提及」**。
     两者不可混用，否则 is_missing_result 无法区分「真缺失」与「部分缺失」。
@@ -271,7 +262,7 @@ class TestContentStandards:
 
 
 # =========================================================================
-# 四、技术评分项专判（对齐易标 isMissingTechnicalScoreItems）
+# 四、技术评分项专判
 # =========================================================================
 class TestTechnicalScoreItems:
     """技术评分项小节是技术方案编制的主要依据：它缺失时用户会带着空白进入
@@ -310,7 +301,7 @@ class TestTechnicalScoreItems:
 
 
 # =========================================================================
-# 五、分段策略（对齐 userTextSplitter.cjs）
+# 五、分段策略
 # =========================================================================
 class TestSegmentStrategy:
     """均分分段策略：默认关闭，开启后不得丢内容 / 尾段塌缩 / 切断围栏。"""
@@ -363,7 +354,7 @@ class TestSegmentStrategy:
     def test_even_mode_no_tail_collapse(self):
         """尾段不得塌缩：所有段长都必须在目标段长的 35% 以上。
 
-        这是易标 canUseCandidate 的「剩余量校验」要解决的问题 —— 滑动窗口
+        这正是「剩余量校验」要解决的问题 —— 滑动窗口
         会让最后一段只剩零头，AI 各段负载严重不均。
         """
         text = self._long_text()
@@ -377,7 +368,7 @@ class TestSegmentStrategy:
         assert not short, f"存在塌缩段（min={min_len}）：{short[:5]}"
 
     def test_even_mode_segment_count_matches_formula(self):
-        """段数必须等于 ceil(总长 / (上限 × 0.8)) —— 与易标公式一致。"""
+        """段数必须等于 ceil(总长 / (上限 × 0.8)) —— 段数由文档长度推导。"""
         text = self._long_text()
         limit = 2000
         segment_limit = max(1, int(limit * 0.8))
@@ -404,23 +395,32 @@ class TestSegmentStrategy:
         assert svc._avoids_surrogate_pair(text, 2) == 2
         assert svc._avoids_surrogate_pair("abcd", 1) == 1
 
-    def test_ratio_constants_match_reference(self):
-        """分段比例必须与易标 userTextSplitter.cjs 逐值一致。
+    def test_segment_ratios_shape_observable_splitting(self):
+        """比例常量必须体现在可观测的切分结果上。
 
-        参考实现常量：DEFAULT_CONTEXT_LENGTH_LIMIT=400000、
-        DEFAULT_CONTEXT_LIMIT_RATIO=0.8、STRICT_WINDOW_RATIO=0.12、
-        RELAXED_WINDOW_RATIO=0.25、MIN_SEGMENT_RATIO=0.35、MAX_SEGMENT_RATIO=1.1。
+        锁行为而非锁数值：段数由「预算 × 0.8」推导；上限哨兵为 0 时必须回退
+        到滑动窗口（即默认不启用均分）；任何一段都不得超过段上限的 110% 余量。
         """
-        assert svc.SEGMENT_LIMIT_RATIO == 0.8
-        assert svc.SEGMENT_STRICT_RATIO == 0.12
-        assert svc.SEGMENT_RELAXED_RATIO == 0.25
-        assert svc.SEGMENT_MIN_RATIO == 0.35
-        assert svc.SEGMENT_MAX_RATIO == 1.1
-        assert svc.SEGMENT_CONTEXT_LENGTH_LIMIT == 0  # 0 = 默认不启用均分
+        text = self._long_text()
+        limit = 2000
+        segments = split_for_analysis(text, even=True, context_length_limit=limit)
+        segment_limit = int(limit * 0.8)
+        assert len(segments) == max(1, -(-len(text) // segment_limit))
+        assert all(len(segment) <= int(segment_limit * 1.1) + 1 for segment in segments)
+        # 0 = 未启用均分：必须与滑动窗口结果一致
+        assert split_for_analysis(text, even=True, context_length_limit=0) == split_for_analysis(text)
 
-    def test_boundary_priority_group_count(self):
-        """5 组边界优先级必须保持（标题/空行 > 换行 > 句末 > 分号 > 逗号）。"""
-        assert len(svc._BOUNDARY_GROUPS) == 5
+    def test_boundary_priority_prefers_structural_breaks(self):
+        """同一搜索窗口内同时存在标题行与逗号时，切点必须落在更强的结构边界。
+
+        构造：理想断点位于 2006，逗号距理想点 40 字、标题行距理想点 106 字。
+        若按「最近」选择会切在逗号；正确行为是按「结构强度」优先切在标题行。
+        """
+        heading = "\n## 二、技术要求\n"
+        text = "甲" * 1899 + heading + "乙" * 55 + "，" + "丙" * 2045
+        segments = split_for_analysis(text, even=True, context_length_limit=3000)
+        assert segments[0] == "甲" * 1899 + "\n"
+        assert segments[1].startswith("## 二、技术要求")
 
     def test_split_even_is_config_driven_wrapper(self):
         """_split_tender_text 是唯一入口：关闭走滑动窗口，开启走均分，
@@ -485,7 +485,7 @@ class TestSegmentStrategy:
 
 
 # =========================================================================
-# 六、断点续跑（对齐易标 tasksToRun 的 status!=='success' 过滤）
+# 六、断点续跑（只跳过 status=='success' 的项）
 # =========================================================================
 async def _seed_project(db, pid: str) -> str:
     """建一个项目 + 方案，返回 scheme_id。"""

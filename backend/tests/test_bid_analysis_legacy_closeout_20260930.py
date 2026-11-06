@@ -7,7 +7,7 @@
 ============================  ==========================================
 P1 ``section_hint`` 拼进同一条    ``bid_analysis_service.build_system_messages``
     system 消息（与 docstring       —— 标段上下文作为**独立第二条 system
-    声称「独立消息」不符）          消息**（对齐易标 buildTenderContextMessages）
+    声称「独立消息」不符）          消息**（标段上下文独立下发）
 P1 ``format_downstream_context``  ``_apply_downstream_budget``（两级预算裁剪）
     无预算上限
 P2 生成链不读截断诊断              ``global_facts.load_parsed_docs`` 三层降级
@@ -33,7 +33,7 @@ from app.services import bid_analysis_service as svc
 
 
 # =========================================================================
-# 一、P1 · 标段上下文改为独立第二条 system 消息（易标口径）
+# 一、P1 · 标段上下文改为独立第二条 system 消息
 # =========================================================================
 class TestSectionHintAsSeparateSystemMessage:
     def test_no_hints_returns_single_system_byte_identical(self):

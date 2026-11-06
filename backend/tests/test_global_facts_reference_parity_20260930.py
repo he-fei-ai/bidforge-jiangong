@@ -1,28 +1,25 @@
-"""全局事实 · 引入参考软件（OpenBidKit 易标）能力的护栏
+"""全局事实 · 补丁合并 / 缺值模式 / 上下文预算的语义护栏（2026-09-30）。
 
-本轮引入的参考软件能力与其在本仓的落点
-----------------------------------------
+本文件锁定的语义
+----------------
 ===============================  ==========================================
-参考软件（globalFactsTask.cjs）  本仓落点
+语义                             落点
 ===============================  ==========================================
-``normalizeFactId``             ``facts_patches.normalize_fact_id``
-``ensureUniqueId``              ``facts_patches.ensure_unique_id``
-``valueToMarkdown``             ``facts_patches.value_to_markdown``
-``buildMissingFactRule``        ``facts_patches.build_missing_value_rule``
-``buildGlobalFactsCompletenessRules``
-                                ``facts_patches.build_completeness_rules``
-``normalizeGlobalFactsPatchResponse``
-                                ``facts_patches.normalize_patches_response``
-``validateGlobalFactsPatchResponse``
+标识非空 + 序号兜底              ``facts_patches.normalize_fact_id``
+唯一 id 追加后缀                ``facts_patches.ensure_unique_id``
+任意形状值 → Markdown            ``facts_patches.value_to_markdown``
+缺值模式三选一                  ``facts_patches.build_missing_value_rule``
+完整性规则单一出口              ``facts_patches.build_completeness_rules``
+补丁归一化 / fail-closed 校验    ``facts_patches.normalize_patches_response``
                                 ``facts_patches.validate_patches_response``
-``mergeGlobalFactPatches``      ``facts_patches.merge_fact_patches``
-``batchRenderedItems``          ``facts_patches.batch_rendered_items``
-``waitAllOrThrow``              ``facts_patches.wait_all_or_throw``
-``getGlobalFactsSegmentLimit``  ``facts_patches.get_segment_limit``
-``HAZARD_THRESHOLDS`` 脚手架闭区间修正
-                                ``scheme_classification.HAZARD_THRESHOLDS``
+补丁合并（id → 标题 → 新建）     ``facts_patches.merge_fact_patches``
+分箱（按渲染长度）              ``facts_patches.batch_rendered_items``
+并发等待（首个异常上抛）         ``facts_patches.wait_all_or_throw``
+上下文预算分段                  ``facts_patches.get_segment_limit``
+危大阈值闭区间                  ``scheme_classification.HAZARD_THRESHOLDS``
 
-护栏分三组：与参考软件逐条对齐的语义断言、危大阈值闭区间、静态护栏。
+护栏分三组：语义断言（输入 → 输出）、危大阈值闭区间、静态护栏
+（公开 API 面 / 单一出口 / 无循环导入）。
 """
 
 from __future__ import annotations
@@ -58,20 +55,19 @@ APP_DIR = Path(__file__).resolve().parents[1] / "app"
 
 
 # =========================================================================
-# 一、标识符与内容归一化（参考 normalizeFactId / ensureUniqueId /
-#    valueToMarkdown）
+# 一、标识符与内容归一化（id 清洗 / 唯一化 / 值转 Markdown）
 # =========================================================================
 class TestIdAndValueNormalization:
     def test_normalize_fact_id_keeps_ascii(self):
-        """参考 :127-134：非 ASCII 清洗后仍保留 a-z0-9_-。"""
+        """非 ASCII 字符清洗后仍保留 a-z0-9_-。"""
         assert normalize_fact_id("Project_Team-01") == "project_team-01"
         assert normalize_fact_id("  ABC  ") == "abc"
 
     def test_normalize_fact_id_pure_chinese_falls_back_to_index(self):
         """纯中文 id 清洗后为空 → 必须落到 fact_00N 兜底（不得返回空串）。
 
-        参考 ``validateGlobalFactsResponse`` 要求 id 必填，空 id 会让整轮
-        结果被拒；本仓的 fact_key 同样不允许为空。
+        下游校验要求 id 必填，空 id 会让整轮结果被拒；本仓的 fact_key
+        同样不允许为空。
         """
         assert normalize_fact_id("项目组", 0) == "fact_001"
         assert normalize_fact_id("项目组", 4) == "fact_005"
@@ -82,7 +78,7 @@ class TestIdAndValueNormalization:
             assert normalize_fact_id(raw, 0).strip()
 
     def test_ensure_unique_id_appends_suffix(self):
-        """参考 :136-144：冲突时依次追加 _2 / _3。"""
+        """冲突时依次追加 _2 / _3。"""
         used: set = set()
         assert ensure_unique_id("a", used) == "a"
         assert ensure_unique_id("a", used) == "a_2"
@@ -108,13 +104,13 @@ class TestIdAndValueNormalization:
         assert value_to_markdown("  x  ") == "x"
 
     def test_value_to_markdown_never_raises(self):
-        """永不抛异常（对齐参考实现「任意形状都能吃」）。"""
+        """永不抛异常（任意形状都能吃）。"""
         for raw in (None, 0, 1.5, True, [], {}, {1: 2}, [[[1]]], object()):
             assert isinstance(value_to_markdown(raw), str)
 
 
 # =========================================================================
-# 二、缺值模式（参考 buildMissingFactRule / buildGlobalFactsCompletenessRules）
+# 二、缺值模式（build_missing_value_rule / build_completeness_rules）
 # =========================================================================
 class TestMissingValueMode:
     def test_normalize_mode_value_domain(self):
@@ -126,7 +122,7 @@ class TestMissingValueMode:
         assert normalize_missing_value_mode("") == "fabricate"
 
     def test_fabricate_mode_has_no_completeness_rules(self):
-        """参考 :47：fabricate 模式返回空串（保持默认行为逐字一致）。"""
+        """fabricate 模式返回空串（默认模式不注入完整性规则）。"""
         assert build_completeness_rules("fabricate") == ""
 
     def test_omit_and_placeholder_rules_are_distinct(self):
@@ -146,7 +142,7 @@ class TestMissingValueMode:
             rules = build_completeness_rules(mode)
             assert rules.strip()
             assert "事实补全规则" in rules
-            # 两种模式都必须强制保留工期类变量（参考 :32/:44）
+            # 两种模式都必须强制保留工期类变量
             assert "工期" in rules
 
     def test_completeness_rules_mode_label_distinct(self):
@@ -155,16 +151,16 @@ class TestMissingValueMode:
 
 
 # =========================================================================
-# 三、补丁归一化 / 校验（参考 normalize/validateGlobalFactsPatchResponse）
+# 三、补丁归一化 / 校验
 # =========================================================================
 class TestPatchNormalizeValidate:
     def test_normalize_drops_empty_content(self):
-        """参考 :229：``if (!content) return null`` —— 空补丁必须被丢弃。"""
+        """空内容补丁必须被丢弃（否则会产生无内容的新事实行）。"""
         got = normalize_patches_response({"patches": [{"target_group_id": "g1", "content": "A"}, {"content": "   "}]})
         assert len(got["patches"]) == 1
 
-    def test_normalize_accepts_reference_key_aliases(self):
-        """参考 :214-224 的多键回退在本仓同样成立。"""
+    def test_normalize_accepts_key_aliases(self):
+        """多键回退：补丁数组可能挂在 patches / supplements / additions / items 下。"""
         for key in ("patches", "supplements", "additions", "items"):
             got = normalize_patches_response({key: [{"content": "A"}]})
             assert len(got["patches"]) == 1, key
@@ -174,7 +170,7 @@ class TestPatchNormalizeValidate:
         assert len(got["patches"]) == 1
 
     def test_normalize_mode_whitelist_defaults_to_append(self):
-        """参考 :230-231：非法 mode 归一为 append。"""
+        """非法 mode 归一为 append。"""
         got = normalize_patches_response(
             {"patches": [{"content": "A", "mode": "delete-all"}, {"content": "B", "mode": "REPLACE"}]}
         )
@@ -198,7 +194,7 @@ class TestPatchNormalizeValidate:
         assert got["patches"][1].create is True
 
     def test_target_group_id_alias_property(self):
-        """兼容别名（跨语言比对参考软件字段名）。"""
+        """兼容别名（历史调用方按分组语义读取目标 id）。"""
         p = FactPatch(content="A", target_fact_id="g1")
         assert p.target_group_id == "g1"
         assert p.to_dict()["target_fact_id"] == "g1"
@@ -219,7 +215,7 @@ class TestPatchNormalizeValidate:
 
 
 # =========================================================================
-# 四、补丁合并（参考 mergeGlobalFactPatches）
+# 四、补丁合并
 # =========================================================================
 class TestMergePatches:
     def test_apply_patch_mode_three_modes(self):
@@ -237,7 +233,7 @@ class TestMergePatches:
         assert len(out) == 1
 
     def test_merge_falls_back_to_title(self):
-        """参考 :258-261：id 未命中时按 title 定位。"""
+        """id 未命中时按 title 定位。"""
         groups = [{"id": "g1", "title": "工期变量", "content": "base"}]
         out = merge_fact_patches(groups, [FactPatch(content="A", title="工期变量")])
         assert out[0]["content"] == "base\n\nA"
@@ -272,7 +268,7 @@ class TestMergePatches:
 
 
 # =========================================================================
-# 五、分批与并发等待（参考 batchRenderedItems / waitAllOrThrow）
+# 五、分批与并发等待
 # =========================================================================
 class TestBatchAndWait:
     def test_batch_respects_limit(self):
@@ -319,13 +315,16 @@ class TestBatchAndWait:
 
 
 # =========================================================================
-# 六、上下文预算分段（参考 getGlobalFactsSegmentLimit）
+# 六、上下文预算分段
 # =========================================================================
 class TestSegmentLimit:
-    def test_ratio_and_floor_constants_match_reference(self):
+    def test_budget_constants_bound_segment_sizing(self):
+        """预算常量必须参与实际计算：上限 × 比例 − 固定消息长度 = 单段可用长度。"""
         assert fp.DEFAULT_CONTEXT_LENGTH_LIMIT == 400_000
         assert fp.GLOBAL_FACTS_CONTEXT_LIMIT_RATIO == 0.8
         assert fp.MIN_GLOBAL_FACTS_SEGMENT_CHARS == 1_000
+        # 常量不是孤立数字：默认值直接决定无参调用的返回值
+        assert get_segment_limit() == int(fp.DEFAULT_CONTEXT_LENGTH_LIMIT * fp.GLOBAL_FACTS_CONTEXT_LIMIT_RATIO)
 
     def test_segment_limit_subtracts_fixed_messages(self):
         empty = get_segment_limit(400_000, [])
@@ -515,7 +514,7 @@ class TestHazardThresholdClosure:
 # 九、静态护栏
 # =========================================================================
 class TestStaticGuards:
-    def test_module_exports_all_reference_parity_functions(self):
+    def test_module_exposes_patch_pipeline_api(self):
         for name in (
             "normalize_fact_id",
             "ensure_unique_id",
@@ -532,11 +531,11 @@ class TestStaticGuards:
         ):
             assert callable(getattr(fp, name)), name
 
-    def test_patch_modes_match_reference_whitelist(self):
+    def test_patch_modes_whitelist_is_enforced(self):
         assert fp.PATCH_MODES == ("append", "prepend", "replace")
         assert fp.DEFAULT_PATCH_MODE == "append"
 
-    def test_missing_value_modes_match_reference(self):
+    def test_missing_value_modes_are_closed_set(self):
         assert fp.MISSING_VALUE_MODES == ("fabricate", "omit", "placeholder")
 
     def test_missing_value_modes_match_sse_handler_value_domain(self):
