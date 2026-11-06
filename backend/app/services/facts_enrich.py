@@ -1,13 +1,13 @@
-"""全局事实 · 知识库补充 + 最终整理（对齐参考软件易标 globalFactsTask.cjs）
+"""全局事实 · 知识库补充 + 最终整理
 
-引入背景
+阶段说明
 --------
-上一轮（第十二轮）已把易标的**纯逻辑**（补丁 / 分批 / 上下文预算）引入
-``facts_patches``，但两个 AI 阶段未接线。本模块补上接线，且**默认关闭**
+事实提取的分段逻辑（补丁 / 分批 / 上下文预算）由 ``facts_patches`` 负责，
+本模块补上两个可选 AI 阶段的接线，且**默认关闭**
 （``settings.facts_knowledge_patch_enabled`` / ``settings.facts_finalize_enabled``）：
 
-1. **知识库补充**（易标 :876-891 ``runKnowledgeGlobalFactPatches``）
-   参考软件把「项目知识库条目」当作**第二事实来源**：AI 只读知识库并产出
+1. **知识库补充**
+   把「项目知识库条目」当作**第二事实来源**：AI 只读知识库并产出
    **补丁**，补丁按 ``append/prepend/replace`` 合并回既有事实，**不重新生成
    全部事实**。
    ⚠️ 更正上一轮的一处**事实性错误记录**：上一轮 AGENTS.md §4.16.5 写「本仓
@@ -15,7 +15,7 @@
    §3.9），``sse_handlers._load_knowledge_rows`` / ``_build_knowledge_text``
    也早已被**目录生成**与**正文生成**消费；只是事实链路从不读它。现已接线。
 
-2. **最终整理**（易标 :909-920 ``finalizeGlobalFacts``）
+2. **最终整理**
    一次 AI 调用做「同义项合并 + 要求句改写为事实句 + 强制保留工期类变量」。
    本仓既有 ``merge_and_deduplicate`` 是**纯程序**归一化（按归一化 key 聚类），
    缺这一步语义改写。
@@ -24,10 +24,9 @@
 --------
 - **默认关闭**：两个开关默认 ``False``，关闭时 ``run_extraction_pipeline``
   的行为与引入前逐字节一致（零新增 AI 调用）。
-- **失败降级而非中断**：参考软件这两个阶段失败会让整轮失败；本仓按
-  ``fail-soft`` 处理——记 ``warnings`` 后用未加工的结果继续，绝不因补充
-  阶段失败而让已经成功提取的事实整批丢失（与「分段提取失败不拖垮整轮」
-  的既有策略一致）。
+- **失败降级而非中断**：这两个阶段按 ``fail-soft`` 处理——记 ``warnings``
+  后用未加工的结果继续，绝不因补充阶段失败而让已经成功提取的事实整批丢失
+  （与「分段提取失败不拖垮整轮」的既有策略一致）。
 - **保不变式**：所有回写都走 ``facts_patches.apply_patches_to_fact_items``
   （只改 ``value``，不重建 ``FactItem``），溯源/置信度/模拟值闸门全部保留。
 - **不被 AI 放大规模**：补充阶段只产补丁；整理阶段对条数做上限保护
@@ -99,7 +98,7 @@ def _timeout() -> int:
 
 
 # =========================================================================
-# 一、知识库补充（对齐易标 :876-891）
+# 一、知识库补充
 # =========================================================================
 def _validate_patches(obj: Any) -> list[str]:
     """校验知识库补充结果；空 patches 视为合法（无内容可补是正常结果）。"""
@@ -113,7 +112,7 @@ def _validate_patches(obj: Any) -> list[str]:
 
 
 async def apply_knowledge_patches(items: list, knowledge_text: str) -> tuple[list, int]:
-    """用知识库条目产出的补丁补充事实（对齐易标 ``runKnowledgeGlobalFactPatches``）。
+    """用知识库条目产出的补丁补充事实。
 
     Args:
         items: 已合并去重的 ``FactItem`` 序列（可能被追加新项）。
@@ -198,7 +197,7 @@ def _build_patches(obj: Any, items: Sequence) -> list[FactPatch]:
 
 
 # =========================================================================
-# 二、最终整理（对齐易标 :652-675 / :909-920）
+# 二、最终整理
 # =========================================================================
 def _validate_finalize(obj: Any) -> list[str]:
     if not isinstance(obj, dict):
@@ -249,7 +248,7 @@ def apply_finalize_result(items: list, obj: Any) -> tuple[list, int]:
 
 
 async def finalize_facts(items: list) -> tuple[list, int]:
-    """最终整理：去重 + 要求句改写 + 强制保留工期（对齐易标 ``finalizeGlobalFacts``）。
+    """最终整理：去重 + 要求句改写 + 强制保留工期。
 
     Args:
         items: 待整理的 ``FactItem`` 序列。

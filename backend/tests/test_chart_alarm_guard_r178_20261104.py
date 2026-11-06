@@ -238,7 +238,13 @@ class TestRenderFailureFigureNumbering:
         )
         await db_conn.commit()
 
-        resp = await E.export_docx("sr", {"config": {"allow_pil_fallback": True}}, db=db_conn)
+        resp = await E.export_docx(
+            "sr",
+            {"config": {"allow_pil_fallback": True}, "override_high_issues": True},
+            db=db_conn,
+        )
+        # 覆写路径必须留响应头，证明本轮是「已知悉并继续」而非闸门失效
+        assert resp.headers.get("X-Export-Override") == "high-issues"
 
         from docx import Document
 

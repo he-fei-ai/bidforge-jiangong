@@ -96,7 +96,9 @@ async def test_list_facts_missing_columns_default_empty(ctx):
     item = res["groups"][0]["items"][0]
     assert item["value_unit"] == ""
     assert item["evidence_kind"] == ""
-    assert item["page_ref"] == ""
+    # ✅ T-02（2026-11-06）：无页码统一为 None（此前读路径回落 ""，与
+    #    types/facts.ts 的 `page_ref?: number | null` 契约冲突）。
+    assert item["page_ref"] is None
     assert item["zone_type"] == ""
     assert item["norm_group"] == ""
     assert item["chunk_hash"] == ""

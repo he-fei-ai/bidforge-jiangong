@@ -813,6 +813,18 @@ def normalize_labor_data(data: Any) -> dict | None:
             matrix = [[cols[j][i] if i < len(cols[j]) else 0.0 for j in range(len(cols))] for i in range(n)]
             return _align_labor_axes(names, cats, matrix)
 
+    # ⑥-0 types + values 一维序列（单阶段 × 各工种）
+    #    ✅ R181（2026-11-06）：此前该形态既不判为 labor（推断层要求 labels 与
+    #    values 同现），归一化也无分支 → chart-json 被静默丢弃，前端表现为
+    #    「图表消失」。现按「types=工种轴、values=对应人数」支持，成本极低。
+    labels_probe = _as_str_list(data.get("labels"))
+    values_probe = data.get("values")
+    type_cats = _as_str_list(data.get("types"))
+    if type_cats and not labels_probe and isinstance(values_probe, (list, tuple)) and values_probe:
+        nums = [_to_float(v) for v in values_probe]
+        if any(n is not None for n in nums):
+            return _align_labor_axes(["阶段1"], type_cats, [[n if n is not None else 0.0 for n in nums]])
+
     # ⑥ labels + values 一维序列（单工种 × 各阶段）
     labels = _as_str_list(data.get("labels"))
     values = data.get("values")
@@ -2076,6 +2088,8 @@ def infer_chart_type_from_payload(payload) -> str:
         _has("trades")
         or (_has_labor_axis and (_has_labor_values or _labor_phase_objects))
         or (_has("labels") and (_has("values") or _has("series") or _has("datasets")))
+        # ✅ R181：types + values（单阶段 × 各工种）也被渲染器支持，须同口径识别
+        or (_has("types") and _has("values"))
     ):
         return "labor"
     if _has("tasks") or _has("milestones") or _has("events"):

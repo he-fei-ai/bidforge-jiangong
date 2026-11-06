@@ -26,7 +26,13 @@ def _tree(chapters: int = 2, sections: int = 2, leaves: int = 3) -> list:
     return [
         _node(
             f"第{i + 1}章 章标题",
-            [_node(f"第{i + 1}.{j + 1}节 节标题", [_node(f"第{i + 1}.{j + 1}.{k + 1}条 三级标题") for k in range(leaves)]) for j in range(sections)],
+            [
+                _node(
+                    f"第{i + 1}.{j + 1}节 节标题",
+                    [_node(f"第{i + 1}.{j + 1}.{k + 1}条 三级标题") for k in range(leaves)],
+                )
+                for j in range(sections)
+            ],
         )
         for i in range(chapters)
     ]
@@ -279,9 +285,7 @@ class TestDLV17:
     def test_compliant_outline_not_flagged(self):
         sections = [_sec("c1", "第1章", 1), _sec("s1", "1.1 节", 2, "c1")]
         for i in range(4):
-            sections.append(
-                _sec(f"l{i}", f"1.1.{i} 三级", 3, "s1", content="正文" * 200, wc=800)
-            )
+            sections.append(_sec(f"l{i}", f"1.1.{i} 三级", 3, "s1", content="正文" * 200, wc=800))
         finds = _deliverability(sections)
         assert "DLV-17" not in _ids(finds)
 
@@ -302,9 +306,7 @@ class TestDLV17:
             sections.append(_sec(f"c{c}", f"第{c + 1}章", 1))
             sections.append(_sec(f"s{c}", f"{c + 1}.1 节", 2, f"c{c}"))
             for k in range(5):
-                sections.append(
-                    _sec(f"l{c}-{k}", f"{c + 1}.1.{k + 1} 三级", 3, f"s{c}", content="正文", wc=10)
-                )
+                sections.append(_sec(f"l{c}-{k}", f"{c + 1}.1.{k + 1} 三级", 3, f"s{c}", content="正文", wc=10))
         finds = _deliverability(sections)
         assert "DLV-17" in _ids(finds)
         f = next(x for x in finds if x["rule_id"] == "DLV-17")

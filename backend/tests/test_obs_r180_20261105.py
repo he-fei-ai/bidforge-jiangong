@@ -38,14 +38,12 @@ def test_consistency_audit_schema_has_counts_json():
 async def test_consistency_audit_counts_roundtrip_and_legacy_compat(db_conn):
     # 历史行（counts_json = ''）：读侧必须 fail-open 成 {}
     await db_conn.execute(
-        "INSERT INTO consistency_audit (id, project_id, scheme_id, score, issues, counts_json) "
-        "VALUES (?,?,?,?,?,?)",
+        "INSERT INTO consistency_audit (id, project_id, scheme_id, score, issues, counts_json) " "VALUES (?,?,?,?,?,?)",
         ("old", "p1", "s1", 0.9, json.dumps([]), ""),
     )
     counts = {"sections": 21, "batches": 3, "checked_chars": 18000, "total_chars": 21000, "issues": 0}
     await db_conn.execute(
-        "INSERT INTO consistency_audit (id, project_id, scheme_id, score, issues, counts_json) "
-        "VALUES (?,?,?,?,?,?)",
+        "INSERT INTO consistency_audit (id, project_id, scheme_id, score, issues, counts_json) " "VALUES (?,?,?,?,?,?)",
         ("new", "p1", "s1", 0.8, json.dumps([{"type": "x"}]), json.dumps(counts)),
     )
     await db_conn.commit()
@@ -106,7 +104,7 @@ def test_chart_render_failure_is_structured():
     assert '"failed_details"' in EXPORT_SRC
     for _k in ("chart_type", "section_id", "section_title", "code_hash", "reason", "occupies_number"):
         assert f'"{_k}"' in EXPORT_SRC, f"失败明细缺少字段 {_k}"
-    assert "_note_render_failure(ct, code, \"render_returned_none\")" in EXPORT_SRC
+    assert '_note_render_failure(ct, code, "render_returned_none")' in EXPORT_SRC
     assert 'f"exception:{type(e).__name__}"' in EXPORT_SRC
     # 可聚合的结构化日志（图型+章节+原因+是否占号）
     assert "chart_render_failure chart_type=%s section_id=%s" in EXPORT_SRC
@@ -131,9 +129,9 @@ def test_render_stats_header_is_latin1_safe():
         end = st + 25 + nxt.start() if nxt else len(EXPORT_SRC)
         block = EXPORT_SRC[st:end]
         # 缓存命中分支是纯 ASCII 字面量（`{"cached":true}`），其余必须 ensure_ascii=True
-        assert "ensure_ascii=True" in block or '\'{"cached":true}\'' in block, (
-            f"X-Chart-Render-Stats 第 {i + 1} 处未使用 ASCII 安全序列化"
-        )
+        assert (
+            "ensure_ascii=True" in block or "'{\"cached\":true}'" in block
+        ), f"X-Chart-Render-Stats 第 {i + 1} 处未使用 ASCII 安全序列化"
         assert "ensure_ascii=False" not in block, f"X-Chart-Render-Stats 第 {i + 1} 处写入了非 ASCII 原文"
 
     # 真实可编码性：同一份含中文明细的统计可被 latin-1 编码且 JSON 回读无损
@@ -221,12 +219,9 @@ async def test_compliance_batch_audit_failure_row_is_classified(db_conn):
 
 async def test_compliance_batch_audit_success_row_keeps_empty_error_class(db_conn):
     """成功行 error_class 留空（不得把 batch= 摘要误分类成某个错误类别）。"""
-    await compliance._record_batch_audit(
-        db_conn, index=1, total=1, chars=1000, duration=0.5
-    )
+    await compliance._record_batch_audit(db_conn, index=1, total=1, chars=1000, duration=0.5)
     cur = await db_conn.execute(
-        "SELECT success, error_class FROM ai_audit_logs"
-        " WHERE action='compliance_batch' ORDER BY rowid DESC LIMIT 1"
+        "SELECT success, error_class FROM ai_audit_logs" " WHERE action='compliance_batch' ORDER BY rowid DESC LIMIT 1"
     )
     row = await cur.fetchone()
     assert row["success"] == 1

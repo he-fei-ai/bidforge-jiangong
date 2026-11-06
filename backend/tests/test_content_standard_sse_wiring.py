@@ -221,11 +221,17 @@ class TestEventPayloads:
             f"实际 {len(calls)} 次（事件侧重复扫描 = 每章白跑一遍正则）"
         )
         # 第二次调用必须位于事实冲突定点修复块内（条件性重算，不是无脑双扫）
-        autofix_at = code_only.index("autofix_section_fact_conflicts(")
-        second_at = code_only.index("report = standard_report(", autofix_at)
+        _c = code_only[code_only.index("async def generate_content(") :]
+        autofix_at = _c.index("autofix_section_fact_conflicts(")
+        second_at = _c.index("report = standard_report(", autofix_at)
         assert second_at > autofix_at, "条件性重算被移出事实冲突修复块了（失去 applied 门控即退化为" "每章双扫）"
-        # 重算必须发生在写锁之前（与原护栏同一纪律：CPU 扫描不进锁）
-        assert second_at < code_only.index("async with _db_write_lock:")
+        # 重算必须发生在写锁之前（与原护栏同一纪律：CPU 扫描不进锁）。
+        # ⚠️ 不能用「函数内首个 _db_write_lock」：generate_content 前面还有别的锁块，
+        #    首个命中恒早于重算点（§5.14 同族）。锁必须定位到**真正包住本次 UPDATE**
+        #    的那一把：从 `last_generation_standard=?, last_generation_report=?` 往前找。
+        _update_at = _c.index("last_generation_standard=?, last_generation_report=?")
+        _lock_at = _c.rindex("async with _db_write_lock:", 0, _update_at)
+        assert second_at < _lock_at
 
 
 # ============================================================
@@ -233,9 +239,16 @@ class TestEventPayloads:
 # ============================================================
 class TestValidatorOutsideWriteLock:
     def test_standard_report_not_inside_write_lock(self):
-        """标准校验必须在 `async with _db_write_lock` **之前**完成。"""
-        lock_at = _SRC.index("async with _db_write_lock:")
-        call_at = _SRC.index("report = standard_report(")
+        """标准校验必须在 `async with _db_write_lock` **之前**完成。
+
+        ⚠️ 锁必须取「真正包住本次 UPDATE」的那把（从 SQL 字面量往前找）。
+        全文件/函数内首个 `async with _db_write_lock:` 早于本段（其它锁块），
+        用它做位置比较恒失败（§5.14 锚点选错）。
+        """
+        _c = _SRC[_SRC.index("async def generate_content(") :]
+        _update_at = _c.index("last_generation_standard=?, last_generation_report=?")
+        lock_at = _c.rindex("async with _db_write_lock:", 0, _update_at)
+        call_at = _c.index("report = standard_report(")
         assert call_at < lock_at, "standard_report 又落回写锁内了（CPU 扫描会串行化高并发档）"
 
     def test_update_uses_precomputed_report_json(self):

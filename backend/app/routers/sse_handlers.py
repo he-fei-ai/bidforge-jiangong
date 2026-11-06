@@ -44,6 +44,9 @@ from app.services import facts_extractor as _fe
 from app.services import l3_standard
 from app.services.ai import task_registry as _tr
 
+# ✅ R179 U5：分阶段并发读数（outline/content 阶段；开关关=逐字现状）
+from app.services.ai import warmup as ai_warmup
+
 # ✅ 正文子标题编号规则生成方（{subheading_rule} 占位符的唯一实现）；
 #    命名空间与导出 _compute_subheading 同口径，避免提示词与成稿不一致。
 from app.services.ai.heading_templates import build_subheading_rule
@@ -125,6 +128,7 @@ from app.services.content_shrink import (
 # F-CONTENT-STANDARD(2026-09-26): generation standard (precise/fuzzy)
 from app.services.content_standard import (
     PRECISE,
+    attach_fence_swallowed_issue,
     build_system_block,
     normalize_standard,
     paragraph_structure_report,
@@ -253,6 +257,44 @@ logger = logging.getLogger("sse")
 router = APIRouter(prefix="/api/v1/sse", tags=["sse"])
 
 DANGEROUS_TYPES = {"深基坑", "高支模", "脚手架", "塔吊", "施工电梯", "临时用电", "有限空间", "爆破", "暗挖"}
+
+
+def _degrade_section_done_payload(payload: dict, max_chars: int) -> dict:
+    """section_done 事件体积闸门：超限时**显式**截断正文并附降级字段。
+
+    ✅ R181（2026-11-06）：此前事件体积没有任何上限，超大章节会把整章正文
+    原样塞进 SSE；一旦客户端消费端有内存/日志截断，表现为「正文突然少了但
+    没有任何提示」。现改为：
+      - max_chars <= 0   → 完全不干预，返回原对象（与引入前逐字节一致）；
+      - 未超限           → 返回原对象（不新增任何键）；
+      - 超限             → 只截 content，附 truncated / truncated_chars /
+                           kept_chars / content_ref / truncation_note。
+    正文已在本事件之前落库，因此截断不影响断线重挂与检查点续跑（二者都读库，
+    不依赖本次事件载荷）；前端可据 truncated=true 提示并重新拉取章节全文。
+    """
+    if max_chars <= 0:
+        return payload
+    try:
+        raw = json.dumps(payload, ensure_ascii=False)
+    except Exception:
+        return payload
+    total = len(raw)
+    if total <= max_chars:
+        return payload
+    content = str(payload.get("content") or "")
+    # 预留新增降级字段与外壳的字节开销，保证截断后整体仍不超过上限
+    overhead = max(0, total - len(content)) + 240
+    keep = max(0, max_chars - overhead)
+    kept = content[:keep]
+    out = dict(payload)
+    out["content"] = kept
+    out["truncated"] = True
+    out["truncated_chars"] = len(content) - len(kept)
+    out["kept_chars"] = len(kept)
+    out["content_ref"] = {"section_id": str(payload.get("section_id") or ""), "source": "db"}
+    out["truncation_note"] = "事件体积超出上限，正文已截断；完整正文已落库，刷新章节即可获取"
+    return out
+
 
 # ⚠️ 遗留问题 3 修复（R101）：此处**不再**定义 CONTENT_REQUEST_TIMEOUT /
 #    CONTENT_TOTAL_TIMEOUT 字面量。二者此前在本模块被定义两次（本处 300/660
@@ -780,6 +822,7 @@ from app.routers._sse_outline_review import (  # noqa: F401,E402 — 拆分兼�
     _register_task_exclusive,
     _residual_generic_notice,
     _restore_descriptions,
+    _retry_empty_chapters,
     _review_and_fix_outline,
     _scheme_basis_obj,
     _scheme_is_dangerous,
@@ -1711,7 +1754,12 @@ async def generate_outline(scheme_id: str, request: Request, db=Depends(get_db))
                 #      按章序号归位，否则 full_outline 章序会乱、编号全错；
                 #   3) 单元内多章时按 OUTLINE_CHAPTER_BATCH_SIZE 合并为一次
                 #      调用（默认 1 = 逐章，与旧行为逐字一致）。
-                _sem = asyncio.Semaphore(OUTLINE_CHAPTER_CONCURRENCY) if OUTLINE_CHAPTER_CONCURRENCY > 1 else None
+                # ✅ R179 U5：分阶段并发读数接线（outline 阶段）。开关关 →
+                #    stage_concurrency 返回 0，走 or 分支 = 逐字现状
+                #    （OUTLINE_CHAPTER_CONCURRENCY）；开关开 → 阶段上限
+                #    （默认 2，已夹取 max_concurrency）。
+                _u5_outline_conc = ai_warmup.stage_concurrency("outline") or OUTLINE_CHAPTER_CONCURRENCY
+                _sem = asyncio.Semaphore(_u5_outline_conc) if _u5_outline_conc > 1 else None
                 _merge_k = max(1, OUTLINE_CHAPTER_BATCH_SIZE)
                 _total = len(level1)
                 # 并发窗口宽度 = 本轮并行发起的单元调用数。
@@ -1723,7 +1771,8 @@ async def generate_outline(scheme_id: str, request: Request, db=Depends(get_db))
                 #   _window = 1 → 每轮 1 个单元串行（与旧实现逐字等价）
                 #   _window > 1 → 每轮 _window 个单元同时排队
                 # 配置键沿用 outline_chapter_concurrency（默认 2 不变），仅修正语义。
-                _window = max(1, OUTLINE_CHAPTER_CONCURRENCY)
+                # ✅ R179 U5：并发窗口宽度同样走阶段读数（与 _sem 同源同值）。
+                _window = max(1, _u5_outline_conc)
 
                 def _build_unit_prompts(unit_idx: list, prior_ctx: list) -> tuple:
                     """为一个「执行单元」构建 (single_prompts, batch_prompt)。
@@ -1849,6 +1898,20 @@ async def generate_outline(scheme_id: str, request: Request, db=Depends(get_db))
                     _stopped_in_unit = False
                     for j, (_w_idx, _w_prompts, _w_batch) in enumerate(_window_units):
                         _unit_status, per = results[j]
+                        # ✅ R181（2026-11-06）：空章/失败章的**单元内定向重试**。
+                        #    旧实现只能靠外层整轮重跑，一个空章会让用户重烧全部章节
+                        #    的配额；现只补该章（最多 1 次），结果原位替换，并经
+                        #    _prog["chapter_retry"] 随 progress 快照对外可追踪。
+                        per = await _retry_empty_chapters(
+                            [(i, level1[i]) for i in _w_idx],
+                            per,
+                            _w_prompts,
+                            task_id,
+                            _sem,
+                            OUTLINE_REQUEST_TIMEOUT,
+                            _push_stats,
+                            _prog.setdefault("chapter_retry", {}),
+                        )
                         _st, _added = _merge_unit_results(
                             level1, _w_idx, per, full_outline, prior_l2, failed_chapters, unit_status=_unit_status
                         )
@@ -1996,8 +2059,7 @@ async def generate_outline(scheme_id: str, request: Request, db=Depends(get_db))
                         _l3_res = l3_standard.converge_tree(full_outline)
                         if _l3_res.get("folded"):
                             logger.info(
-                                "目录深层节点折叠（分步）：%d 个 L4+ 条目并入父级三级正文引导"
-                                "（最大层级 %d）",
+                                "目录深层节点折叠（分步）：%d 个 L4+ 条目并入父级三级正文引导" "（最大层级 %d）",
                                 _l3_res["folded"],
                                 _l3_res["after"]["max_depth"],
                             )
@@ -2044,6 +2106,21 @@ async def generate_outline(scheme_id: str, request: Request, db=Depends(get_db))
                 if failed_chapters:
                     payload["failed_chapters"] = failed_chapters
                     payload["failed_count"] = len(failed_chapters)
+                # ✅ R179 N1（2026-11-05）：自动确认硬前置判定 —— 纯函数，只回传
+                #    `auto_confirm{ready, blockers}`（加法式键，旧客户端忽略）。
+                #    是否真正启动 8 秒倒计时由前端治理开关决定；M1 undetermined 不阻塞。
+                try:
+                    from app.services.outline_auto_confirm import evaluate as _evaluate_auto
+                    from app.services.outline_auto_confirm import scheme_has_content as _has_content
+
+                    payload["auto_confirm"] = _evaluate_auto(
+                        full_outline,
+                        review_obj if isinstance(review_obj, dict) else {},
+                        failed_chapters,
+                        has_content=await _has_content(db, scheme_id),
+                    )
+                except Exception as _e:
+                    logger.warning("N1 自动确认判定失败（忽略，不阻塞 completed 事件）: %s", _e)
 
                 # ✅ 成果可恢复 + 收尾顺序（2026-09-16 修复）：
                 #    先落 checkpoint → 再置终态 → 最后 yield 事件。
@@ -2503,6 +2580,7 @@ async def generate_content(scheme_id: str, request: Request, db=Depends(get_db))
             #    存量方案不迁移，再次生成/续写命中时在此覆盖旧正文（含人工编辑）。
             leaves, _placeholder_leaves = split_placeholder_leaves(leaves)
             if _placeholder_leaves:
+
                 async def _persist_placeholders_once():
                     await persist_placeholder_sections(db, _placeholder_leaves)
 
@@ -2925,7 +3003,12 @@ async def generate_content(scheme_id: str, request: Request, db=Depends(get_db))
             #      3) AI 配置保存/启动应用的 set_concurrency 会中途改变运行中任务闸门。
             #    全局控制器仍供 provider 层记录统计/熔断与事实提取等路径使用，
             #    只是不再充当正文生成的闸门。
-            _run_semaphore = asyncio.Semaphore(effective_concurrency)
+            # ✅ R179 U5：分阶段并发读数接线（content 阶段）。开关关 →
+            #    stage_concurrency 返回 0，走 or 分支 = 逐字现状（用户档位
+            #    effective_concurrency）；开关开 → 阶段上限（默认 2，已夹取
+            #    max_concurrency）。启动顺序仍 = 目录序（信号量 FIFO 不变）。
+            _u5_content_conc = ai_warmup.stage_concurrency("content")
+            _run_semaphore = asyncio.Semaphore(_u5_content_conc or effective_concurrency)
             # ⚠️ 实现口径（2026-09-26 澄清）：本任务用的是
             #    **「每任务独立信号量 + FIFO 放行」**，并非显式 `_WINDOW` 窗口调度器。
             #    · 协程按 leaves 目录序创建（DFS 序），
@@ -3474,19 +3557,8 @@ async def generate_content(scheme_id: str, request: Request, db=Depends(get_db))
                 #    不进修复链路、不动正文；无吞正文时零改动（向后兼容）。
                 try:
                     if _swallowed:
-                        report = dict(report or {})
-                        report.setdefault("issues", []).append(
-                            {
-                                "code": "fence_swallowed_prose",
-                                "severity": "warning",
-                                "message": (
-                                    f"未闭合围栏自动补齐后，仍有 {_swallowed} 行疑似正文"
-                                    "被困在代码块内，请人工核对本章成稿"
-                                ),
-                                "excerpt": "",
-                            }
-                        )
-                        report["warning_count"] = int(report.get("warning_count") or 0) + 1
+                        # ✅ R181：载荷由 content_standard 唯一构造，单章保存路径共用同口径。
+                        report = attach_fence_swallowed_issue(report, _swallowed)
                         report_json = json.dumps(report, ensure_ascii=False)
                 except Exception:
                     logger.warning("章节 %s 围栏吞正文留痕失败（忽略，不影响落库）: %s", section_id[:8], exc_info=True)
@@ -3956,7 +4028,11 @@ async def generate_content(scheme_id: str, request: Request, db=Depends(get_db))
                 #    事实分段注入需要读 _stable_prefix（决定走稳定段还是单条 user）。
                 _stable_prefix = bool(getattr(settings, "content_stable_prefix_enabled", True))
                 _sec_no = _section_outline_number(leaf)
-                _sub_rule = build_subheading_rule(has_db_children=str(leaf.get("id") or "") in _parent_ids)
+                _sub_rule = build_subheading_rule(
+                    has_db_children=str(leaf.get("id") or "") in _parent_ids,
+                    # ✅ R181（2026-11-06）：示例按本节实际编号生成，不再写死 1.1
+                    section_prefix=_sec_no,
+                )
                 # ✅ 逐章精选：按本章标题/描述从已加载事实行中预筛相关事实
                 #    （旧实现只在生成循环外算一次，导致所有章节共享同一份事实）
                 # ✅ P1 修复（2026-09-27 · 九大章节分类对正文零影响）：
@@ -4934,43 +5010,50 @@ async def generate_content(scheme_id: str, request: Request, db=Depends(get_db))
                         cont_failed = _continue_failed_flag(cont_failed, wc, word_budget)
                         # ✅ R66（2026-10-11）：偏差随事件下发（可追溯 + 前端实时展示）
                         _wdev_done = word_deviation_of(wc, wb, tolerance=_word_tol)
+                        _done_payload = {
+                            "event": "section_done",
+                            "section_id": leaf_id,
+                            "title": title,
+                            "word_count": wc,
+                            "word_budget": wb,
+                            "word_status": ws,
+                            # ✅ BUG-4：续写失败信号随事件下发，前端日志区据此标注
+                            #    "补写失败"，用户不必自己比对字数去猜。
+                            "continue_failed": cont_failed,
+                            # ✅ R66：目标/实际偏差、偏差率、是否落在容差带
+                            "word_deviation": _wdev_done["deviation"],
+                            "word_ratio": _wdev_done["ratio"],
+                            "word_within_band": _wdev_done["within_band"],
+                            # ✅ 增强：携带最终正文，前端可即时刷新"当前选中章节"预览，
+                            #    无需等整批生成结束后的全量 load()（旧实现预览长时间停留在旧内容）
+                            "content": content,
+                            "quality_issues": _section_issues,
+                            # ✅ R49（图表产出闭环）：配图产出/删除明细随事件**实时**下发。
+                            #    此前只有「生成结束翻报告」一条路，用户在日志区只能看到
+                            #    「少了几张图却毫无理由」。三键与 last_generation_report
+                            #    同名同值（单一来源 _std_rep），故断线重挂后与库内真相一致：
+                            #    chart_count = 最终正文里存活的图表块数；
+                            #    charts_dropped_count / charts_dropped = 被删的块及其理由。
+                            "chart_count": int(_std_rep.get("chart_count") or 0),
+                            "charts_dropped_count": int(_std_rep.get("charts_dropped_count") or 0),
+                            "charts_dropped": _std_rep.get("charts_dropped") or [],
+                            # F-CONTENT-STANDARD(2026-09-26 · B2): 本章生效标准 + 完整校验报告
+                            # （含 issues 明细供前端 Popover 展示；扁平计数保留便于告警 Tag）
+                            "generation_standard": _eff_std or "",
+                            "standard_report": _std_rep,
+                            "standard_passed": _std_rep.get("passed", True),
+                            "standard_error_count": _std_rep.get("error_count", 0),
+                            "standard_warning_count": _std_rep.get("warning_count", 0),
+                        }
+                        # ✅ R181：体积闸门（默认关闭=0，与引入前一致；配置正数后
+                        #    超出时显式降级，绝不静默截断）
+                        _done_payload = _degrade_section_done_payload(
+                            _done_payload,
+                            int(getattr(settings, "section_done_payload_max_chars", 0) or 0),
+                        )
                         yield (
                             json.dumps(
-                                {
-                                    "event": "section_done",
-                                    "section_id": leaf_id,
-                                    "title": title,
-                                    "word_count": wc,
-                                    "word_budget": wb,
-                                    "word_status": ws,
-                                    # ✅ BUG-4：续写失败信号随事件下发，前端日志区据此标注
-                                    #    "补写失败"，用户不必自己比对字数去猜。
-                                    "continue_failed": cont_failed,
-                                    # ✅ R66：目标/实际偏差、偏差率、是否落在容差带
-                                    "word_deviation": _wdev_done["deviation"],
-                                    "word_ratio": _wdev_done["ratio"],
-                                    "word_within_band": _wdev_done["within_band"],
-                                    # ✅ 增强：携带最终正文，前端可即时刷新"当前选中章节"预览，
-                                    #    无需等整批生成结束后的全量 load()（旧实现预览长时间停留在旧内容）
-                                    "content": content,
-                                    "quality_issues": _section_issues,
-                                    # ✅ R49（图表产出闭环）：配图产出/删除明细随事件**实时**下发。
-                                    #    此前只有「生成结束翻报告」一条路，用户在日志区只能看到
-                                    #    「少了几张图却毫无理由」。三键与 last_generation_report
-                                    #    同名同值（单一来源 _std_rep），故断线重挂后与库内真相一致：
-                                    #    chart_count = 最终正文里存活的图表块数；
-                                    #    charts_dropped_count / charts_dropped = 被删的块及其理由。
-                                    "chart_count": int(_std_rep.get("chart_count") or 0),
-                                    "charts_dropped_count": int(_std_rep.get("charts_dropped_count") or 0),
-                                    "charts_dropped": _std_rep.get("charts_dropped") or [],
-                                    # F-CONTENT-STANDARD(2026-09-26 · B2): 本章生效标准 + 完整校验报告
-                                    # （含 issues 明细供前端 Popover 展示；扁平计数保留便于告警 Tag）
-                                    "generation_standard": _eff_std or "",
-                                    "standard_report": _std_rep,
-                                    "standard_passed": _std_rep.get("passed", True),
-                                    "standard_error_count": _std_rep.get("error_count", 0),
-                                    "standard_warning_count": _std_rep.get("warning_count", 0),
-                                },
+                                _done_payload,
                                 ensure_ascii=False,
                             )
                             + "\n\n"
@@ -5857,6 +5940,18 @@ async def generate_content(scheme_id: str, request: Request, db=Depends(get_db))
             #    展示并支持逐章重试。上限 50 条，避免超大方案把载荷撑爆。
             if _failed_reasons:
                 completed_payload["failed_sections"] = list(_failed_reasons.values())[:50]
+            # ✅ R179 U5（§2.5 加法式诊断字段）：本次正文运行的 warmup 编排摘要。
+            #    仅做并发读数接线（无代表先行编排）→ applied=False 恒成立；
+            #    enabled=True 表示阶段并发上限已生效（equivalent=changed），
+            #    enabled=False 表示逐字现状。旧消费方忽略未知字段。
+            completed_payload["warmup"] = {
+                "stage": "content",
+                "group": "",
+                "enabled": bool(_u5_content_conc),
+                "concurrency": _u5_content_conc or effective_concurrency,
+                "applied": False,
+                "equivalent": "changed" if _u5_content_conc else "verbatim",
+            }
             if consistency_summary is not None:
                 completed_payload["consistency_summary"] = consistency_summary
             # F-CONTENT-STANDARD(2026-09-26 · B2): 生成标准校验汇总下发
@@ -6314,6 +6409,13 @@ async def generate_facts(scheme_id: str, request: Request, db=Depends(get_db)):
             save_extracted_chunks,
         )
 
+        # ✅ T-04（2026-11-06）：后台提取落库与手工写入共用项目级写锁，
+        #    避免「用户在界面确认/新增事实」与「提取结果落库」交叉覆盖。
+        from app.services.facts_write_guard import (
+            acquire_project_facts_write,
+            release_project_facts_write,
+        )
+
         # ✅ 跨类型互斥（F5 · 2026-10-05 收口第三条链路，2026-10-06 补齐）：
         #    与 generate_outline / generate_content 对称 —— 路由体的
         #    facts_generation_in_progress pre-guard 只拦**同类型**重入，
@@ -6530,7 +6632,15 @@ async def generate_facts(scheme_id: str, request: Request, db=Depends(get_db)):
 
             # 4. 保存并输出
             yield await _stage(0.96, "正在保存事实...")
-            await persist_extraction(extraction_result, db, project_id, scheme_id)
+            # ✅ T-04：先拿项目级写锁再落库（手工写入走同一把锁）；冲突时抛
+            #    FactsWriteConflict，由外层 SSE 异常处理给出任务失败终态，
+            #    不再「后写覆盖」用户刚确认/新增的事实。
+            _facts_write_lease = await acquire_project_facts_write(db, project_id, holder="ai_extraction")
+            try:
+                await persist_extraction(extraction_result, db, project_id, scheme_id)
+            finally:
+                if _facts_write_lease:
+                    await release_project_facts_write(db, project_id, _facts_write_lease)
             # ✅ 2026-11-05：事实已落库 → 同步回写来源文档的提取状态，
             #    否则 extract_status 会一直停在 pending（事实表却已有数据）。
             await _mark_docs_extract_status(db, project_id, "success")
@@ -6550,9 +6660,7 @@ async def generate_facts(scheme_id: str, request: Request, db=Depends(get_db)):
             #    R180（2026-11-05）：部分段未成功时终态降级为 degraded（此前一律
             #    completed，用户无法区分「全部成功」与「部分降级」）；判定与文案
             #    统一由 `_facts_partial_terminal_payload` 产出，_seed 与 SSE 事件同源。
-            _terminal_status, _terminal_event, done_msg = _facts_partial_terminal_payload(
-                extraction_result
-            )
+            _terminal_status, _terminal_event, done_msg = _facts_partial_terminal_payload(extraction_result)
             await update_progress(task_id, 1.0, done_msg, event=_terminal_event)
             # ✅ P0 修复（2026-09-27 · 断线重挂成果通道）：写 facts_result checkpoint，
             #    使 `GET /sse/task/{id}` 能回传 segment_stats / cross_conflicts /
@@ -6712,7 +6820,9 @@ _CHECKPOINT_KINDS = {
         #    「完整目录」与「只生成了一部分的目录」。缺这两个
         #    字段时，前端只能笼统提示"任务已结束"，用户不知道
         #    该不该保存已生成的那部分 —— 而部分成果是有效的。
-        ("event", "partial", "outline", "review", "failed_chapters", "failed_count"),
+        # ✅ R179 N1（2026-11-05）：`auto_confirm{ready,blockers}` 入白名单，
+        #    使断线/刷新重挂后的两条恢复路径与在线 completed 同构（加法式）。
+        ("event", "partial", "outline", "review", "failed_chapters", "failed_count", "auto_confirm"),
     ),
     "content_generation": (
         "content_result",

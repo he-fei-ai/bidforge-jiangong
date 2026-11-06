@@ -200,9 +200,12 @@ async def test_http_only_chart_failure_exposes_no_pil_fallback_signal(db_conn, m
             "config": {},
             "chart_images": [],
             "fe_codes": [],
+            "override_high_issues": True,
         },
         db=db_conn,
     )
+    # 覆写路径必须留响应头，证明本轮是「已知悉并继续」而非闸门失效
+    assert resp.headers.get("X-Export-Override") == "high-issues"
     assert isinstance(resp, FileResponse)
     assert resp.path and __import__("os").path.exists(resp.path)
 

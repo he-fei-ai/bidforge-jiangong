@@ -1,30 +1,22 @@
 """跨章节重复检测（骨架归一 + 双阈值 Dice，纯程序、零 AI、零成本）
 
-本模块移植参考软件（OpenBidKit 易标 `duplicateCheckService.cjs`）查重体系里
-**与本仓语义直接相关**的两条算法线，并按专项施工方案域裁剪：
+专项施工方案的查重需要同时解决两类问题：整章级雷同（由 CON-05 的 4-gram
+Jaccard 负责）与段落级搬运（由本模块负责）。本模块实现两条通用算法线：
 
-保留（本域通用、零业务耦合）：
-  1. **骨架归一**（原 `buildTenderSkeletonKey`）：把可变数字 / 日期 /
-     标准编号 / 百分比 / 页码替换成语义占位符后再比对。这是查重真正有价值的
-     一步 —— 正文里「基坑开挖深度 3m」与「基坑开挖深度 5m」是同一模板段落
-     改了数字，按原文比对必然漏报；
-  2. **字符 2-gram Dice + 双阈值分级**（原正文句级比对的双阈值口径）：
-     Dice 对短文本比 Jaccard 敏感（交集占比而非并集占比），
-     且双阈值按长度分档，避免短句子误报。
+1. **骨架归一**：把可变数字 / 日期 / 标准编号 / 百分比 / 页码替换为语义占位符
+   后再比对。正文里「基坑开挖深度 3m」与「基坑开挖深度 5m」是同一模板段落
+   改了数字，按原文比对必然漏报；
+2. **字符 2-gram Dice + 双阈值分级**：Dice 对短文本比 Jaccard 敏感（交集占比
+   而非并集占比），双阈值按长度分档，避免短句子误报。
 
-裁剪（标书域专属，本仓无对应数据源或语义）：
-  - 「字段白名单」「骨架门控关键词」—— 服务于「投标文件 vs 招标文件」的
-    投标语境判定，专项方案没有这个对立关系；
-  - 图片哈希比对 —— 本仓图表全自动生成、不接收用户上传图；
-  - 「多份投标文件之间」的分组聚合 —— 本仓以「单方案多章节」为单位。
-
-⚠️ 已知边界（刻意不修，指向另一条独立缺口）：
-  单位归一化不在本模块职责内。「6m」与「6000mm」在骨架归一后仍是不同键
-  （前者归一为 ``6m``，后者为 ``6000mm``）。全仓已存在三份互不相同的单位表
-  （`preflight_engine._UNIT_CANON` / `facts_classification._UNIT_TO_METER` /
-  `content_standard._UNIT_ALIASES`），本模块**故意不新增第四份** ——
-  单位口径收敛是独立缺口，需单独立项收敛后本模块自动受益，
-  而不是在这里再写一份悄悄分叉的表。
+判定口径：
+  - 骨架门控关键词、图片哈希、多份投标文件间的分组聚合属于投标文件互查语境，
+    专项方案没有对应的数据源与对立关系，本模块不实现；
+  - 单位归一化不在本模块职责内。「6m」与「6000mm」在骨架归一后仍是不同键。
+    全仓已存在三份互不相同的单位表（`preflight_engine._UNIT_CANON` /
+    `facts_classification._UNIT_TO_METER` / `content_standard._UNIT_ALIASES`），
+    本模块**故意不新增第四份** —— 单位口径收敛是独立缺口，需单独立项收敛后
+    本模块自动受益，而不是在这里再写一份悄悄分叉的表。
 
 ⚠️ 与 CON-05 的分工（防重复告警）：
   - ``CON-05`` = 整章级 4-gram Jaccard（两章整体雷同）；
@@ -47,6 +39,7 @@ from __future__ import annotations
 
 import re
 import unicodedata
+from collections import Counter, defaultdict
 
 __all__ = [
     "BIGRAM_SIZE",
@@ -71,7 +64,7 @@ __all__ = [
 # ---------------------------------------------------------------------------
 # 常量
 # ---------------------------------------------------------------------------
-#: 字符 n-gram 的 n（对齐参考软件 duplicateCheckService 的 2-gram 口径）
+#: 字符 n-gram 的 n（2-gram 是中文短文本比对的经验取值）
 BIGRAM_SIZE = 2
 
 #: 参与比对的句子最小**归一化后**字符数。
@@ -103,13 +96,14 @@ MAX_SENTENCES_PER_SECTION = 600
 #: 搬运组严重度升级阈值：单句归一化字数 ≥ 此值视为「大段照抄」
 COPY_GROUP_LARGE_CHARS = 60
 
-#: 双阈值分级（对齐参考实现的按长度分档口径）：
-#: ``(最小归一化长度, containment 阈值, dice 阈值)``。
-#: 对长句用较低阈值（长句偶然重合多但比例低），对短句用更严阈值（易误报）。
-_SIMILARITY_TIERS: tuple[tuple[int, float, float], ...] = (
-    (30, 0.90, 0.82),  # ≥30 字：主体段落
-    (0, 0.95, 0.88),  # <30 字：短段落从严
-)
+#: 长句档：≥30 字的主体段落，偶然重合多但比例低，阈值可稍宽
+_TIER_LONG: tuple[int, float, float] = (30, 0.90, 0.82)
+#: 短句档：<30 字，偶然重合比例高，阈值收紧
+_TIER_SHORT: tuple[int, float, float] = (0, 0.95, 0.88)
+
+#: 双阈值分级表：``(最小归一化长度, containment 阈值, dice 阈值)``。
+#: 保留表结构便于调用方遍历说明分档口径。
+_SIMILARITY_TIERS: tuple[tuple[int, float, float], ...] = (_TIER_LONG, _TIER_SHORT)
 
 # ---------------------------------------------------------------------------
 # 归一化
@@ -133,7 +127,8 @@ def _keep_only(text: str, extra: frozenset = frozenset()) -> str:
     **唯一清理实现**：normalize_comparable 与 build_skeleton_key 共用，
     避免两套清理口径再次分叉。
     """
-    return "".join(ch for ch in text if ch in extra or unicodedata.category(ch)[0] in _KEEP_CATEGORY)
+    hit = extra.__contains__
+    return "".join(ch for ch in text if hit(ch) or unicodedata.category(ch)[0] in _KEEP_CATEGORY)
 
 
 def normalize_comparable(text: str) -> str:
@@ -152,27 +147,39 @@ def normalize_comparable(text: str) -> str:
 # ---------------------------------------------------------------------------
 # 顺序敏感：先长模式（日期 / 标准编号 / 百分数）后裸数字，
 # 否则裸数字规则会先把日期里的数字吃掉、留下残缺日期。
-_SKELETON_RULES: tuple[tuple[re.Pattern, str], ...] = (
-    # 日期：2026年9月30日 / 2026年9月 / 2026-09-30 / 2026.9.30
-    (re.compile(r"\d{4}\s*年\s*\d{1,2}\s*月\s*\d{1,2}\s*日"), "{date}"),
-    (re.compile(r"\d{4}\s*年\s*\d{1,2}\s*月"), "{date}"),
-    (re.compile(r"\d{4}\s*[-/.]\s*\d{1,2}\s*[-/.]\s*\d{1,2}"), "{date}"),
-    # 标准编号：GB 50202-2018 / JGJ 120-2012 / GB/T 50502 / DBJ …（含年号）
-    (
-        re.compile(
-            r"(?:GB(?:/T)?|JGJ(?:/T)?|JTG(?:/T)?|DBJ|CECS|CJJ(?:/T)?)\s*" r"\d{2,5}(?:\.\d{1,3})?(?:[—\-－]\s*\d{4})?",
-            re.IGNORECASE,
-        ),
-        "{code}",
-    ),
-    # 百分数 / 金额 / 页码
-    (re.compile(r"\d+(?:\.\d+)?\s*%"), "{percent}"),
-    (re.compile(r"\d+(?:\.\d+)?\s*万元"), "{money}"),
-    (re.compile(r"\d+(?:\.\d+)?\s*元"), "{money}"),
-    (re.compile(r"P\s*\d+(?:\s*[-~至]\s*P?\s*\d+)?", re.IGNORECASE), "{page}"),
-    # 裸数字（含小数）—— 兜底，必须放最后
-    (re.compile(r"\d+(?:\.\d+)?"), "{num}"),
+_DATE_MASK = re.compile(
+    r"(?:\d{4}\s*年\s*\d{1,2}\s*月\s*\d{1,2}\s*日"
+    r"|\d{4}\s*年\s*\d{1,2}\s*月"
+    r"|\d{4}\s*[-/.]\s*\d{1,2}\s*[-/.]\s*\d{1,2})"
 )
+# 标准编号：GB 50202-2018 / JGJ 120-2012 / GB/T 50502 / DBJ …（含年号）
+_CODE_MASK = re.compile(
+    r"(?:GB(?:/T)?|JGJ(?:/T)?|JTG(?:/T)?|DBJ|CECS|CJJ(?:/T)?)\s*" r"\d{2,5}(?:\.\d{1,3})?(?:[—\-－]\s*\d{4})?",
+    re.IGNORECASE,
+)
+#: 金额单位按「万元 → 元」的顺序匹配，避免只吃掉"元"而留下"万"
+_AMOUNT_MASK = re.compile(r"\d+(?:\.\d+)?\s*(?:万元|元)")
+_PERCENT_MASK = re.compile(r"\d+(?:\.\d+)?\s*%")
+_PAGE_MASK = re.compile(r"P\s*\d+(?:\s*[-~至]\s*P?\s*\d+)?", re.IGNORECASE)
+# 裸数字（含小数）—— 兜底，必须放最后
+_NUMBER_MASK = re.compile(r"\d+(?:\.\d+)?")
+
+_SKELETON_RULES: tuple[tuple[re.Pattern, str], ...] = (
+    (_DATE_MASK, "{date}"),
+    (_CODE_MASK, "{code}"),
+    (_PERCENT_MASK, "{percent}"),
+    (_AMOUNT_MASK, "{money}"),
+    (_PAGE_MASK, "{page}"),
+    (_NUMBER_MASK, "{num}"),
+)
+
+
+def _mask_variable_fields(text: str) -> str:
+    """按规则顺序把可变字段替换为语义占位符。"""
+    masked = text
+    for pattern, replacement in _SKELETON_RULES:
+        masked = pattern.sub(replacement, masked)
+    return masked
 
 
 def build_skeleton_key(text: str) -> str:
@@ -186,19 +193,18 @@ def build_skeleton_key(text: str) -> str:
     字段规则依赖标点作为边界（百分数的 ``%``、日期的 ``年/月/日``、
     标准编号的 ``-`` 年号分隔），而 :func:`normalize_comparable` 会把
     标点全部剔除 —— 若先归一化再套规则，``95%`` 已变成 ``95``，
-    百分数规则必然落空、只能被裸数字规则兜底（本轮实测复现的缺陷）。
+    百分数规则必然落空、只能被裸数字规则兜底。
 
-    注意：只做**字面字段**归一，不做单位换算（见模块 docstring 的「已知边界」）。
+    注意：只做**字面字段**归一，不做单位换算（见模块 docstring 的职责边界）。
     """
     if not text:
         return ""
-    s = unicodedata.normalize("NFKC", str(text))
-    for rx, repl in _SKELETON_RULES:
-        s = rx.sub(repl, s)
-    # 注意此处不能用 normalize_comparable（它会剔除花括号）；
+    folded = unicodedata.normalize("NFKC", str(text))
+    masked = _mask_variable_fields(folded)
+    # 不用 normalize_comparable（它会剔除花括号）；
     # 同时这也让本函数**幂等** —— 传入已归一化的骨架键（内部两两比对走这条
     # 路径以省一次归一化）不会再把占位符吃掉。
-    return _keep_only(s, extra=_SKELETON_KEEP_EXTRA)
+    return _keep_only(masked, extra=_SKELETON_KEEP_EXTRA)
 
 
 # ---------------------------------------------------------------------------
@@ -211,9 +217,10 @@ def char_bigrams(text: str) -> frozenset:
     （空集的 Dice / containment 都是 0，语义上是「不可比」而非「完全不相似」）。
     """
     n = BIGRAM_SIZE
-    if len(text) < n:
+    span_count = len(text) - n + 1
+    if span_count <= 0:
         return frozenset()
-    return frozenset(text[i : i + n] for i in range(len(text) - n + 1))
+    return frozenset(text[start : start + n] for start in range(span_count))
 
 
 def dice(a: frozenset, b: frozenset) -> float:
@@ -223,12 +230,13 @@ def dice(a: frozenset, b: frozenset) -> float:
     两个短段落若有 8 个 2-gram、共享 5 个，Dice = 10/16 = 0.625 而
     Jaccard = 5/11 ≈ 0.45 —— 前者更贴近「有多少比例重合」的直觉。
     """
-    if not a or not b:
+    total = len(a) + len(b)
+    if not total:
         return 0.0
-    inter = len(a & b)
-    if not inter:
+    shared = len(a & b)
+    if not shared:
         return 0.0
-    return 2.0 * inter / (len(a) + len(b))
+    return 2.0 * shared / total
 
 
 def containment(a: frozenset, b: frozenset) -> float:
@@ -244,10 +252,9 @@ def containment(a: frozenset, b: frozenset) -> float:
 
 def _tier_for(length: int) -> tuple[int, float, float]:
     """按（较短句子的）归一化长度选阈值分档。"""
-    for min_len, cont, dice_th in _SIMILARITY_TIERS:
-        if length >= min_len:
-            return min_len, cont, dice_th
-    return _SIMILARITY_TIERS[-1]
+    if length >= _TIER_LONG[0]:
+        return _TIER_LONG
+    return _TIER_SHORT
 
 
 def sentence_similarity(a: str, b: str) -> dict:
@@ -261,34 +268,55 @@ def sentence_similarity(a: str, b: str) -> dict:
     """
     sk_a = build_skeleton_key(a)
     sk_b = build_skeleton_key(b)
-    ba = char_bigrams(sk_a)
-    bb = char_bigrams(sk_b)
-    la, lb = len(sk_a), len(sk_b)
-    _, tier_cont, tier_dice = _tier_for(min(la, lb))
-    lo, hi = (la, lb) if la <= lb else (lb, la)
+    grams_a = char_bigrams(sk_a)
+    grams_b = char_bigrams(sk_b)
+    len_a, len_b = len(sk_a), len(sk_b)
+    _, tier_cont, tier_dice = _tier_for(min(len_a, len_b))
+    short_len, long_len = (len_a, len_b) if len_a <= len_b else (len_b, len_a)
     return {
         "skeleton_a": sk_a,
         "skeleton_b": sk_b,
-        "dice": dice(ba, bb),
-        "containment": containment(ba, bb),
-        "length_ratio": (lo / hi) if hi else 0.0,
+        "dice": dice(grams_a, grams_b),
+        "containment": containment(grams_a, grams_b),
+        "length_ratio": (short_len / long_len) if long_len else 0.0,
         "tier_cont": tier_cont,
         "tier_dice": tier_dice,
+    }
+
+
+def _exact_match(sk_a: str, sk_b: str) -> dict:
+    return {"reason": "exact", "skeleton_a": sk_a, "skeleton_b": sk_b}
+
+
+def _skeleton_match(sk_a: str, sk_b: str) -> dict | None:
+    """双阈值同时满足才算近似命中（只满足一个不足以排除误报）。"""
+    metrics = sentence_similarity(sk_a, sk_b)
+    if metrics["containment"] < metrics["tier_cont"] or metrics["dice"] < metrics["tier_dice"]:
+        return None
+    return {
+        "reason": "skeleton",
+        "dice": round(metrics["dice"], 4),
+        "containment": round(metrics["containment"], 4),
+        "length_ratio": round(metrics["length_ratio"], 4),
+        # 带上分档阈值，便于调用方（预检报告 / 日志）说明
+        # 「是按长句档还是短句档判定的」，而不是只给一个裸分值。
+        "tier_cont": metrics["tier_cont"],
+        "tier_dice": metrics["tier_dice"],
+        "skeleton_a": sk_a,
+        "skeleton_b": sk_b,
     }
 
 
 def sentences_near_match(a: str, b: str) -> dict | None:
     """判定两个句子是否构成照抄。
 
-    两级判定（对齐参考实现 5 级级联中的 exact / skeleton 两级，
-    去掉标书专属的 field / near 两级）：
+    两级判定：
 
       1. **exact**：骨架键完全相同 → 直接判定，``reason="exact"``。
          零成本的索引级命中，也是精度最高的一级；
       2. **skeleton**：双阈值同时满足 → ``reason="skeleton"``。
          containment ≥ 分档阈值（较短者被覆盖的比例）**且**
-         Dice ≥ 分档阈值（整体重合比例），两者都要求 —— 只满足一个
-         不足以排除误报（长句偶然含短句，或两个同领域短句用词高度重叠）。
+         Dice ≥ 分档阈值（整体重合比例），两者都要求。
 
     不达标的返回 ``None``。
 
@@ -304,23 +332,8 @@ def sentences_near_match(a: str, b: str) -> dict | None:
     if min(len(sk_a), len(sk_b)) < MIN_SENTENCE_CHARS:
         return None
     if sk_a == sk_b:
-        return {"reason": "exact", "skeleton_a": sk_a, "skeleton_b": sk_b}
-
-    m = sentence_similarity(sk_a, sk_b)
-    if m["containment"] >= m["tier_cont"] and m["dice"] >= m["tier_dice"]:
-        return {
-            "reason": "skeleton",
-            "dice": round(m["dice"], 4),
-            "containment": round(m["containment"], 4),
-            "length_ratio": round(m["length_ratio"], 4),
-            # 带上分档阈值，便于调用方（预检报告 / 日志）说明
-            # 「是按长句档还是短句档判定的」，而不是只给一个裸分值。
-            "tier_cont": m["tier_cont"],
-            "tier_dice": m["tier_dice"],
-            "skeleton_a": sk_a,
-            "skeleton_b": sk_b,
-        }
-    return None
+        return _exact_match(sk_a, sk_b)
+    return _skeleton_match(sk_a, sk_b)
 
 
 # ---------------------------------------------------------------------------
@@ -331,7 +344,7 @@ def sentences_near_match(a: str, b: str) -> dict | None:
 #:
 #: ⚠️ **刻意不包含 ASCII 冒号 ``:``** —— 施工文本里 ``:`` 绝大多数是**比值**
 #: （坡度 ``1:0.75``、配筋比 ``1:2``、时间 ``8:30``），把它当句末符会把
-#: 「边坡坡度1:0.75放坡」切成两半，直接造出大量无意义短句（本轮实测复现）。
+#: 「边坡坡度1:0.75放坡」切成两半，直接造出大量无意义短句。
 #: 全角分号 ``；`` 是中文正常的分句符，保留。
 _SENTENCE_SPLIT_RE = re.compile(r"[。！？；!?;\n\r]+")
 
@@ -352,25 +365,42 @@ def split_sentences(
     """
     if not text:
         return []
-    out: list[str] = []
-    seen: set[str] = set()
-    for raw in _SENTENCE_SPLIT_RE.split(str(text)):
-        s = str(raw).strip()
-        if not s:
+    kept: list[str] = []
+    seen_norms: set[str] = set()
+    for fragment in _SENTENCE_SPLIT_RE.split(str(text)):
+        sentence = str(fragment).strip()
+        if not sentence:
             continue
-        norm = normalize_comparable(s)
-        if len(norm) < min_chars or norm in seen:
+        norm = normalize_comparable(sentence)
+        if len(norm) < min_chars or norm in seen_norms:
             continue
-        seen.add(norm)
-        out.append(s)
-        if len(out) >= max_sentences:
+        seen_norms.add(norm)
+        kept.append(sentence)
+        if len(kept) >= max_sentences:
             break
-    return out
+    return kept
 
 
 # ---------------------------------------------------------------------------
 # 跨章节搬运检测
 # ---------------------------------------------------------------------------
+def _iter_section_sentences(sections: list):
+    """产出 ``(section_id, title, skeleton, bigrams)``，跳过脏数据与过短句。"""
+    for section in sections or []:
+        if not isinstance(section, dict):
+            continue
+        sid = str(section.get("id") or "")
+        title = str(section.get("title") or "").strip()
+        content = str(section.get("content") or "")
+        if not sid or not content.strip():
+            continue
+        for sentence in split_sentences(content):
+            skeleton = build_skeleton_key(sentence)
+            if len(skeleton) < MIN_SENTENCE_CHARS:
+                continue
+            yield sid, title, skeleton, char_bigrams(skeleton)
+
+
 def _prepare_sections(sections: list):
     """预处理章节 → ``(骨架键索引, 扁平句子表)``。
 
@@ -380,24 +410,11 @@ def _prepare_sections(sections: list):
     """
     by_skeleton: dict[str, list[tuple[str, str]]] = {}
     flat: list[tuple[str, str, str, frozenset]] = []
-
-    for s in sections or []:
-        if not isinstance(s, dict):
-            continue
-        sid = str(s.get("id") or "")
-        title = str(s.get("title") or "").strip()
-        content = str(s.get("content") or "")
-        if not sid or not content.strip():
-            continue
-        for sent in split_sentences(content):
-            sk = build_skeleton_key(sent)
-            if len(sk) < MIN_SENTENCE_CHARS:
-                continue
-            by_skeleton.setdefault(sk, []).append((sid, title))
-            flat.append((sid, title, sk, char_bigrams(sk)))
-
+    for sid, title, skeleton, grams in _iter_section_sentences(sections):
+        by_skeleton.setdefault(skeleton, []).append((sid, title))
+        flat.append((sid, title, skeleton, grams))
     # 按骨架键长度升序：便于用「长度差 2 倍」在双层循环里直接剪枝
-    flat.sort(key=lambda x: len(x[2]))
+    flat.sort(key=lambda entry: len(entry[2]))
     return by_skeleton, flat
 
 
@@ -407,16 +424,16 @@ def _sample_sentences(sk: str, flat: list, n: int = 3) -> list[str]:
     展示的是**骨架键**而非原始句子 —— 骨架键已剔除标点空白、可读性足够，
     且省去为回查原句再建一遍索引。
     """
-    out: list[str] = []
+    samples: list[str] = []
     seen: set[str] = set()
-    for _sid, _title, s_sk, _bg in flat:
-        if s_sk != sk or s_sk in seen:
+    for _sid, _title, sentence_sk, _grams in flat:
+        if sentence_sk != sk or sentence_sk in seen:
             continue
-        seen.add(s_sk)
-        out.append(s_sk[:160])
-        if len(out) >= n:
+        seen.add(sentence_sk)
+        samples.append(sentence_sk[:160])
+        if len(samples) >= n:
             break
-    return out
+    return samples
 
 
 #: 候选生成的最小共享 bigram 数。
@@ -446,15 +463,11 @@ def _build_bigram_inverted_index(flat: list) -> dict:
 
     时间 O(总 bigram 数)，相比朴素两两的 O(n²) 是数量级改善。
     """
-    inv: dict = {}
-    for idx, item in enumerate(flat):
-        for gram in item[3]:
-            bucket = inv.get(gram)
-            if bucket is None:
-                inv[gram] = [idx]
-            else:
-                bucket.append(idx)
-    return inv
+    inverted: dict = defaultdict(list)
+    for idx, entry in enumerate(flat):
+        for gram in entry[3]:
+            inverted[gram].append(idx)
+    return dict(inverted)
 
 
 def _candidate_indices(a_bg: frozenset, inv: dict, self_idx: int, flat: list) -> list:
@@ -462,38 +475,125 @@ def _candidate_indices(a_bg: frozenset, inv: dict, self_idx: int, flat: list) ->
 
     返回**升序且去重**的下标列表（保持与朴素两两一致的遍历顺序 → 结论可复现）。
     """
-    hits: dict = {}
+    shared_counts: Counter = Counter()
     self_sid = flat[self_idx][0]
     for gram in a_bg:
         posting = inv.get(gram)
         if not posting or len(posting) > _MAX_POSTING_LEN:
             # ⚠️ 跳过「几乎每句都出现」的 gram（如「要求」「工程」「进行」）。
-            #    施工文本高度模板化，这类高文档频率 gram 的倒排表可达上万条，
-            #    全量展开会让候选生成退化成朴素两两（实测 4.8 万句跑不完）。
-            #    这是**标准 IR 剪枝**：高 DF 词本身不具判别力，跳过后由更具体
-            #    的 gram 决定候选，故不损失任何「真重复」——真照抄的段落必然
-            #    共享大量**低频** bigram。
+            #    这类高文档频率 gram 的倒排表可达上万条，全量展开会让候选生成
+            #    退化成朴素两两。这是**标准 IR 剪枝**：高 DF 词本身不具判别力，
+            #    跳过后由更具体的 gram 决定候选，故不损失任何「真重复」。
             continue
         for idx in posting:
             if idx == self_idx or flat[idx][0] == self_sid:
                 continue  # 同章节内不比（自我重复由 split 去重处理）
-            hits[idx] = hits.get(idx, 0) + 1
-    return sorted(i for i, n in hits.items() if n >= _MIN_SHARED_BIGRAMS)
+            shared_counts[idx] += 1
+    return sorted(idx for idx, count in shared_counts.items() if count >= _MIN_SHARED_BIGRAMS)
 
 
 def _to_exclude_set(exclude_pairs) -> set:
     """把章节 id 对集合归一为无序对集合（容忍列表/元组/反向序/脏数据）。"""
-    out: set = set()
+    excluded: set = set()
     for pair in exclude_pairs or []:
         try:
             if not pair or len(pair) != 2:
                 continue
-            a, b = str(pair[0]), str(pair[1])
-            if a and b and a != b:
-                out.add(frozenset((a, b)))
+            first, second = str(pair[0]), str(pair[1])
+            if first and second and first != second:
+                excluded.add(frozenset((first, second)))
         except TypeError:
             continue
-    return out
+    return excluded
+
+
+def _collect_exact_groups(by_skeleton: dict, flat: list, excluded: set, claimed: set) -> list[dict]:
+    """第一级：exact 骨架匹配（索引分组，O(n)）。"""
+    groups: list[dict] = []
+    for skeleton, occurrences in by_skeleton.items():
+        # 按章节去重（同章节多次出现只算一个章节）
+        distinct: list[tuple[str, str]] = []
+        seen_ids: set[str] = set()
+        for sid, title in occurrences:
+            if sid in seen_ids:
+                continue
+            seen_ids.add(sid)
+            distinct.append((sid, title))
+        if len(distinct) < 2:
+            continue
+
+        pairs: list[tuple[str, str, str, str]] = []
+        for i in range(len(distinct)):
+            for j in range(i + 1, len(distinct)):
+                a_id, a_title = distinct[i]
+                b_id, b_title = distinct[j]
+                key = frozenset((a_id, b_id))
+                if key in excluded or key in claimed:
+                    continue
+                pairs.append((a_id, b_id, a_title, b_title))
+        if not pairs:
+            continue
+
+        claimed |= {frozenset((pair[0], pair[1])) for pair in pairs}
+        groups.append(
+            {
+                "reason": "exact",
+                "skeleton": skeleton[:120],
+                "sentences": _sample_sentences(skeleton, flat),
+                "section_pairs": pairs,
+                "large": len(skeleton) >= COPY_GROUP_LARGE_CHARS,
+                "dice": 1.0,
+            }
+        )
+    return groups
+
+
+def _collect_near_groups(flat: list, excluded: set, claimed: set) -> tuple[list[dict], bool, int]:
+    """第二级：skeleton 近似匹配（倒排候选 + 双阈值 + 预算上限）。
+
+    ⚠️ 性能（2026-10-01 压测修复）：朴素两两在 80 章 × 600 句（48000 句）下
+    会退化到 11 亿次 bigram 集合运算，**单次预检跑几十秒**。改为**倒排索引
+    候选生成**：只有「至少共享 N 个 bigram」的句子对才进入 Dice 精判。
+    不共享任何 bigram 的两条句子 Dice 必为 0，跳过它**不改变任何结论**，
+    故这是**精确剪枝**而非近似采样（护栏 test_pairwise_pruning_is_lossless）。
+    预算仍作为硬上限：触顶即停并置 truncated=True，调用方据此判断完整性。
+    """
+    groups: list[dict] = []
+    compared = 0
+    truncated = False
+    inverted = _build_bigram_inverted_index(flat)
+    for i in range(len(flat)):
+        if compared >= MAX_PAIRWISE_COMPARISONS:
+            truncated = True
+            break
+        a_id, a_title, a_skeleton, a_grams = flat[i]
+        if not a_grams:
+            continue
+        a_len = len(a_skeleton)
+        for j in _candidate_indices(a_grams, inverted, i, flat):
+            b_id, b_title, b_skeleton, _b_grams = flat[j]
+            # flat 已按长度升序：超过 2 倍即 Dice 有上界，直接剪枝
+            if len(b_skeleton) > a_len * 2:
+                continue
+            key = frozenset((a_id, b_id))
+            if key in claimed or key in excluded:
+                continue
+            compared += 1
+            match = sentences_near_match(a_skeleton, b_skeleton)
+            if match is None:
+                continue
+            claimed.add(key)
+            groups.append(
+                {
+                    "reason": match["reason"],
+                    "skeleton": (a_skeleton or "")[:120],
+                    "sentences": [a_skeleton[:160]],
+                    "section_pairs": [(a_id, b_id, a_title, b_title)],
+                    "large": max(a_len, len(b_skeleton)) >= COPY_GROUP_LARGE_CHARS,
+                    "dice": float(match.get("dice") if match.get("dice") is not None else 1.0),
+                }
+            )
+    return groups, truncated, compared
 
 
 def find_cross_section_copies(sections: list, *, exclude_pairs=None) -> dict:
@@ -522,92 +622,16 @@ def find_cross_section_copies(sections: list, *, exclude_pairs=None) -> dict:
     ⚠️ 第一级已声明的章节对会被 ``claimed`` 记录，第二级不再重复报告，
     保证「同一搬运现象只报一次」。
     """
-    exclude = _to_exclude_set(exclude_pairs)
+    excluded = _to_exclude_set(exclude_pairs)
     by_skeleton, flat = _prepare_sections(sections)
-
-    groups: list[dict] = []
     claimed: set = set()
 
-    # ---- 第一级：exact 骨架匹配（索引分组，O(n)） ----
-    for sk, occ in by_skeleton.items():
-        # 按章节去重（同章节多次出现只算一个章节）
-        distinct: list[tuple[str, str]] = []
-        seen_ids: set[str] = set()
-        for sid, title in occ:
-            if sid in seen_ids:
-                continue
-            seen_ids.add(sid)
-            distinct.append((sid, title))
-        if len(distinct) < 2:
-            continue
-        pairs: list[tuple[str, str, str, str]] = []
-        for i in range(len(distinct)):
-            for j in range(i + 1, len(distinct)):
-                a_id, a_title = distinct[i]
-                b_id, b_title = distinct[j]
-                key = frozenset((a_id, b_id))
-                if key in exclude or key in claimed:
-                    continue
-                pairs.append((a_id, b_id, a_title, b_title))
-        if not pairs:
-            continue
-        claimed |= {frozenset((p[0], p[1])) for p in pairs}
-        groups.append(
-            {
-                "reason": "exact",
-                "skeleton": sk[:120],
-                "sentences": _sample_sentences(sk, flat),
-                "section_pairs": pairs,
-                "large": len(sk) >= COPY_GROUP_LARGE_CHARS,
-                "dice": 1.0,
-            }
-        )
-
-    # ---- 第二级：skeleton 近似匹配 ----
-    # ⚠️ 性能（2026-10-01 压测修复）：朴素两两在 80 章 × 600 句（48000 句）下
-    #   会退化到 11 亿次 bigram 集合运算，**单次预检跑几十秒**。改为**倒排索引
-    #   候选生成**：只有「至少共享 N 个 bigram」的句子对才进入 Dice 精判。
-    #   不共享任何 bigram 的两条句子 Dice 必为 0，跳过它**不改变任何结论**，
-    #   故这是**精确剪枝**而非近似采样（护栏 test_pairwise_pruning_is_lossless）。
-    #   预算仍作为硬上限：触顶即停并置 truncated=True，调用方据此判断完整性。
-    compared = 0
-    truncated = False
-    inv = _build_bigram_inverted_index(flat)
-    for i in range(len(flat)):
-        if compared >= MAX_PAIRWISE_COMPARISONS:
-            truncated = True
-            break
-        a_id, a_title, a_sk, a_bg = flat[i]
-        if not a_bg:
-            continue
-        a_len = len(a_sk)
-        cands = _candidate_indices(a_bg, inv, i, flat)
-        for j in cands:
-            b_id, b_title, b_sk, _b_bg = flat[j]
-            # flat 已按长度升序：超过 2 倍即 Dice 有上界，直接剪枝
-            if len(b_sk) > a_len * 2:
-                continue
-            key = frozenset((a_id, b_id))
-            if key in claimed or key in exclude:
-                continue
-            compared += 1
-            m = sentences_near_match(a_sk, b_sk)
-            if m is None:
-                continue
-            claimed.add(key)
-            groups.append(
-                {
-                    "reason": m["reason"],
-                    "skeleton": (a_sk or "")[:120],
-                    "sentences": [a_sk[:160]],
-                    "section_pairs": [(a_id, b_id, a_title, b_title)],
-                    "large": max(a_len, len(b_sk)) >= COPY_GROUP_LARGE_CHARS,
-                    "dice": float(m.get("dice") if m.get("dice") is not None else 1.0),
-                }
-            )
+    groups = _collect_exact_groups(by_skeleton, flat, excluded, claimed)
+    near_groups, truncated, compared = _collect_near_groups(flat, excluded, claimed)
+    groups.extend(near_groups)
 
     # 排序：大段优先 → Dice 降序 → 覆盖章节数多者优先
-    groups.sort(key=lambda g: (not g["large"], -g["dice"], -len(g["section_pairs"])))
+    groups.sort(key=lambda group: (not group["large"], -group["dice"], -len(group["section_pairs"])))
     overflow = len(groups) > MAX_COPY_GROUPS
     return {
         "groups": groups[:MAX_COPY_GROUPS],
@@ -627,11 +651,27 @@ def title_similarity(a: str, b: str) -> float:
     负责）。例：「基坑降水与支护施工」vs「基坑降水及支护施工」Dice 很高，
     属于应合并 / 明确区分的目录组织问题。
     """
-    na = normalize_comparable(a)
-    nb = normalize_comparable(b)
-    if len(na) < MIN_TITLE_CHARS or len(nb) < MIN_TITLE_CHARS:
+    norm_a = normalize_comparable(a)
+    norm_b = normalize_comparable(b)
+    if len(norm_a) < MIN_TITLE_CHARS or len(norm_b) < MIN_TITLE_CHARS:
         return 0.0
-    return round(dice(char_bigrams(na), char_bigrams(nb)), 4)
+    return round(dice(char_bigrams(norm_a), char_bigrams(norm_b)), 4)
+
+
+def _unique_title_nodes(nodes: list) -> list[tuple[str, str, str]]:
+    """过滤脏数据与过短标题，按归一化标题去重（保留首次出现）。"""
+    clean: list[tuple[str, str, str]] = []
+    seen: set[str] = set()
+    for node in nodes or []:
+        if not isinstance(node, dict):
+            continue
+        title = str(node.get("title") or "").strip()
+        norm = normalize_comparable(title)
+        if len(norm) < MIN_TITLE_CHARS or norm in seen:
+            continue
+        seen.add(norm)
+        clean.append((str(node.get("path") or ""), title, norm))
+    return clean
 
 
 def find_similar_titles(nodes: list, *, threshold: float = TITLE_DICE_THRESHOLD, max_groups: int = 20) -> list[dict]:
@@ -646,31 +686,21 @@ def find_similar_titles(nodes: list, *, threshold: float = TITLE_DICE_THRESHOLD,
 
     返回 ``[{a_path, a_title, b_path, b_title, similarity}, ...]``。
     """
-    clean: list[tuple[str, str, str]] = []
-    seen: set[str] = set()
-    for n in nodes or []:
-        if not isinstance(n, dict):
-            continue
-        title = str(n.get("title") or "").strip()
-        norm = normalize_comparable(title)
-        if len(norm) < MIN_TITLE_CHARS or norm in seen:
-            continue
-        seen.add(norm)
-        clean.append((str(n.get("path") or ""), title, norm))
-
-    out: list[dict] = []
+    clean = _unique_title_nodes(nodes)
+    result: list[dict] = []
     for i in range(len(clean)):
         for j in range(i + 1, len(clean)):
-            sim = title_similarity(clean[i][2], clean[j][2])
-            if sim >= threshold:
-                out.append(
-                    {
-                        "a_path": clean[i][0],
-                        "a_title": clean[i][1],
-                        "b_path": clean[j][0],
-                        "b_title": clean[j][1],
-                        "similarity": sim,
-                    }
-                )
-    out.sort(key=lambda x: -x["similarity"])
-    return out[:max_groups]
+            similarity = title_similarity(clean[i][2], clean[j][2])
+            if similarity < threshold:
+                continue
+            result.append(
+                {
+                    "a_path": clean[i][0],
+                    "a_title": clean[i][1],
+                    "b_path": clean[j][0],
+                    "b_title": clean[j][1],
+                    "similarity": similarity,
+                }
+            )
+    result.sort(key=lambda item: -item["similarity"])
+    return result[:max_groups]

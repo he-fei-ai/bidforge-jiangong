@@ -55,6 +55,13 @@ from app.services.outline_quality import (
     #    绝不静默改写用户已输入的标题。
     attach_generic_residual,
 )
+from app.services.outline_quality import (
+    # ✅ R179（2026-11-05）：空壳一级章闸门下沉到 services（services 不得依赖
+    #    routers，而回退路径 outline_versions 也要复用同一判据）。
+    #    保留原私有名 `_detect_empty_top_chapters` 作为本模块的再导出名，
+    #    upload_outline 与既有测试继续按原名引用。
+    detect_empty_top_chapters as _detect_empty_top_chapters,
+)
 from app.services.outline_utils import MAX_OUTLINE_DEPTH, normalize_outline
 
 # ✅ 2026-09-30 深度上限文案单一来源：create_section 与 update_section（移动路径）
@@ -758,6 +765,9 @@ async def update_section(scheme_id: str, section_id: str, data: SectionUpdate, d
     #    任何编号，兄弟章节无需重扫，避免把一次改名放大成全方案正文重写。
     #    规范化是恒等变换（幂等、只重写子标题行与去重块），无内容变更时零写库。
     _content_renorm_pending = "content" in fields or "title" in fields
+    _fence_norm = 0
+    _fence_append = 0
+    _fence_swallowed = 0
     if "content" in fields:
         # ✅ 竞态守卫：后台正文生成任务运行中，其 _persist_section 为无条件 UPDATE，
         # 用户此刻保存会与生成结果互相覆盖（丢失更新）。返回 409 提示等待任务完成。
@@ -772,6 +782,9 @@ async def update_section(scheme_id: str, section_id: str, data: SectionUpdate, d
         #    此前原样落库：预览/导出整段变代码块。auto_fix_unclosed_fences 是
         #    幂等、仅追加、不改动已闭合内容的确定性修复；失败降级不阻断保存。
         #    必须放在 word_count 计算与图表登记**之前**，后续口径基于补齐后正文。
+        #    ✅ R179（2026-11-05）：补齐计数此前只写进日志，响应体没有任何字段，
+        #    前端保存成功提示永远是「已保存」——用户看不到「有 N 行疑似正文被困
+        #    在未闭合围栏里」。此处加法式回传两类计数，语义与生成链路同源。
         try:
             fields["content"], _fence_fixes = auto_fix_unclosed_fences(fields["content"] or "")
             if _fence_fixes:
@@ -781,6 +794,7 @@ async def update_section(scheme_id: str, section_id: str, data: SectionUpdate, d
                 _n_norm = sum(1 for f in _fence_fixes if f.get("action") == "normalize_close_length")
                 _n_append = sum(1 for f in _fence_fixes if f.get("action") == "append_close")
                 _swallowed = sum(int(f.get("swallowed_prose") or 0) for f in _fence_fixes)
+                _fence_norm, _fence_append, _fence_swallowed = _n_norm, _n_append, _swallowed
                 logger.info(
                     "章节 %s 手动保存：围栏闭合标记归一 %d 处、文末追加闭合 %d 处", section_id[:8], _n_norm, _n_append
                 )
@@ -935,6 +949,17 @@ async def update_section(scheme_id: str, section_id: str, data: SectionUpdate, d
     # （此前 update 只回 {"ok": true}，连 word_count 都不带，
     #  前端 `data.word_count` 恒为 undefined → 成功提示里显示「已保存，当前 0 字」）
     _result = {"ok": True, "word_count": int(fields.get("word_count") or 0), "review_reset": _review_reset}
+    # ✅ R179（2026-11-05）：围栏补齐结果加法式回传（仅在本次真的提交了正文时）。
+    if "content" in fields:
+        _result["fence_fixed"] = int(_fence_norm + _fence_append)
+        _result["fence_swallowed_lines"] = int(_fence_swallowed)
+        # ✅ R181（2026-11-06）：与 SSE 生成路径同口径 —— 共用 content_standard 的
+        #    唯一构造点，同一载荷键 standard_report.issues[].code=fence_swallowed_prose。
+        #    无吞正文时不新增该键，响应体与引入前逐字节一致（默认行为不变）。
+        if _fence_swallowed:
+            from app.services.content_standard import attach_fence_swallowed_issue
+
+            _result["standard_report"] = attach_fence_swallowed_issue({}, _fence_swallowed)
     # ✅ R86 L5：**改名**时过占位闸门（加法式回传，不阻断、不改写）。
     #    只在本次请求真的改了标题时才判 —— 标题未变说明它在上一次写入时
     #    已被报告过，重复回传只会制造噪音（且要求多打一次库）。
@@ -1081,7 +1106,13 @@ async def reset_content(scheme_id: str, db=Depends(get_db)):
 
 
 async def _save_outline_to_db(
-    db, scheme_id: str, outline: list, source: str = "", lock_roots: bool = False, allow_empty_chapters: bool = False
+    db,
+    scheme_id: str,
+    outline: list,
+    source: str = "",
+    lock_roots: bool = False,
+    allow_empty_chapters: bool = False,
+    snapshot_before: str | None = None,
 ) -> dict:
     """核心保存逻辑：将目录树写入 sections 表（智能保留已有正文）。
 
@@ -1301,6 +1332,17 @@ async def _save_outline_to_db(
     except Exception as e:  # noqa: BLE001 — 纯统计，失败不影响保存
         logger.warning("统计已有正文章节失败（不影响保存）: %s", e)
 
+    # ✅ R179 N1（2026-11-05）：可选「变更前快照」—— 必须在同一事务内、任何删除/
+    #    重建之前创建（不单独 commit，随末尾 db.commit() 一起落库）。
+    snapshot_id = ""
+    if snapshot_before:
+        try:
+            from app.services.outline_versions import create_outline_snapshot
+
+            snapshot_id = await create_outline_snapshot(db, scheme_id, snapshot_type=str(snapshot_before), commit=False)
+        except Exception as e:  # noqa: BLE001 — 快照失败不阻断目录保存
+            logger.warning("N1 变更前快照创建失败（不影响保存）: %s", e)
+
     final_section_ids: set[str] = set()
     node_counter = {"n": 0}
     new_inserts: list[tuple] = []
@@ -1515,6 +1557,9 @@ async def _save_outline_to_db(
         logger.warning(
             "方案 %s 目录整表重建：未匹配到旧章节，%d 个章节的已生成正文被清除", scheme_id[:8], cleared_content
         )
+    # ✅ R179 N1（2026-11-05）：加法式回传变更前快照 id（供前端「一键回退」）。
+    if snapshot_id:
+        result["snapshot_id"] = snapshot_id
     return result
 
 
@@ -1554,9 +1599,87 @@ async def save_outline(scheme_id: str, body: dict, db=Depends(get_db)):
     # ✅ R175 G-3：显式允许保存「空壳一级章」的部分成果（默认 False，见
     #    _save_outline_to_db 的闸门说明；source="ai" 无需该开关，走 fail-soft 放行）。
     allow_empty_chapters = bool(body.get("allow_empty_chapters"))
+    # ✅ R179 N1（2026-11-05）：可选变更前快照（字符串 = 快照 type，如 outline_auto）。
+    _snapshot_before = body.get("snapshot_before")
+    snapshot_before = str(_snapshot_before).strip() if _snapshot_before else None
     result = await _save_outline_to_db(
-        db, scheme_id, outline, source, lock_roots=lock_roots, allow_empty_chapters=allow_empty_chapters
+        db,
+        scheme_id,
+        outline,
+        source,
+        lock_roots=lock_roots,
+        allow_empty_chapters=allow_empty_chapters,
+        snapshot_before=snapshot_before,
     )
+    return result
+
+
+# ---------------------------------------------------------------------------
+# R179 N1（2026-11-05）：目录快照（结构 + 正文全量）列表 / 回退
+# ---------------------------------------------------------------------------
+@router.get("/outline-versions")
+async def list_outline_snapshots(scheme_id: str, limit: int = 5, db=Depends(get_db)):
+    """列出该方案最近 5 条目录版本（不含正文，避免响应过大）。
+
+    ✅ R179 N1（2026-11-05）：路由名按方案 §3.5.2 统一为 ``outline-versions``，
+    返回 ``snapshot_id / created_at / node_count / has_content / type``。
+    """
+    from app.services.outline_versions import list_snapshots
+
+    return {"ok": True, "snapshots": await list_snapshots(db, scheme_id, limit=limit)}
+
+
+@router.post("/outline-versions/{snapshot_id}/restore")
+async def restore_outline_snapshot(scheme_id: str, snapshot_id: str, db=Depends(get_db)):
+    """回退到指定快照：恢复结构/正文/review_status，强制失效缓存并重挂图表。
+
+    只失效一致性扫描缓存，**不自动重跑一致性扫描**（由用户显式触发）。
+
+    ✅ R179（2026-11-05）：失效与重挂编排放在**路由层** ——
+    services（outline_versions）不得反向依赖 routers（层级倒置护栏
+    test_services_never_import_routers）。服务只做纯 DB 恢复。
+    """
+    from app.services.outline_versions import restore_outline_snapshot as _restore
+
+    try:
+        result = await _restore(db, scheme_id, snapshot_id)
+    except ValueError as e:
+        raise HTTPException(status_code=404, detail=str(e)) from e
+
+    # ---- 强制失效（代码执行，绝不留 TODO/注释）----
+    invalidated = {"export_cache": False, "consistency_cache": False}
+    try:
+        from app.services.facts_extractor import invalidate_export_cache
+
+        await invalidate_export_cache(db, scheme_id)
+        invalidated["export_cache"] = True
+    except Exception as e:  # noqa: BLE001 — 失效失败不得阻断回退
+        logger.warning("N1 回退：导出缓存失效失败（不影响回退结果）: %s", e)
+    try:
+        await invalidate_consistency_scan_cache(db, scheme_id)
+        invalidated["consistency_cache"] = True
+    except Exception as e:  # noqa: BLE001 — 失效失败不得阻断回退
+        logger.warning("N1 回退：一致性扫描缓存失效失败（不影响回退结果）: %s", e)
+
+    # ---- 重挂图表（不自动重跑一致性扫描）----
+    charts = 0
+    cur = await db.execute("SELECT id, content FROM sections WHERE scheme_id=?", (scheme_id,))
+    rows = await cur.fetchall()
+    await cur.close()
+    for r in rows:
+        sid, content = str(r["id"]), str(r["content"] or "")
+        if not content.strip():
+            continue
+        try:
+            _n, _fixed = await resync_inline_charts(db, scheme_id, sid, content)
+            charts += int(_n or 0)
+        except Exception as e:  # noqa: BLE001 — 单章重挂失败不得阻断回退
+            logger.warning("N1 回退：章节 %s 图表重挂失败（忽略）: %s", sid, e)
+    await db.commit()
+
+    result["invalidated"] = invalidated
+    result["charts"] = charts
+    result["scheme_id"] = scheme_id
     return result
 
 
@@ -1576,33 +1699,6 @@ def _collect_section_ids(nodes: list) -> set:
             ids.add(str(nid))
         ids |= _collect_section_ids(n.get("children") or [])
     return ids
-
-
-def _detect_empty_top_chapters(nodes: list) -> list[dict]:
-    """✅ R175 G-3（2026-11-03）：检出「空壳一级章」（有多级结构却无子章节的一级章）。
-
-    判据刻意保守，避免误伤合法节点：
-    - 只看**一级节点**（outline 顶层）；二级/三级无子章节是合法末级节点，不在判据内；
-    - **全平铺目录**（顶层节点全部无子章节，如短目录/精简目录）视为合法，不报；
-    - 只有「已存在带子节点的一级章，同时仍有 children=[] 的一级章」才判定为空壳
-      —— 这正是分步生成失败章（children=[] 但章位保留）与手工误留节点的形态。
-
-    返回 ``[{"index": i, "title": ...}, ...]``；空列表 = 通过。
-    """
-    tops = [n for n in (nodes or []) if isinstance(n, dict)]
-    if not tops:
-        return []
-    shells: list[dict] = []
-    has_nested = False
-    for i, n in enumerate(tops):
-        children = n.get("children")
-        if isinstance(children, list) and children:
-            has_nested = True
-        else:
-            shells.append({"index": i, "title": str(n.get("title") or "")})
-    if not has_nested:
-        return []
-    return shells
 
 
 def _slim_tree_for_adjust(nodes: list) -> list:
@@ -1739,6 +1835,7 @@ SAVE_OUTLINE_ADDITIVE_KEYS: tuple[str, ...] = (
     "generic_autofix_failed",  # 落库前自动重写未执行（异常/超时，D-09）
     "empty_top_chapters",  # 空壳一级章明细（R175 G-3，AI 部分成果放行时回传）
     "roots_locked",  # 一级章节是否已锁定
+    "snapshot_id",  # 变更前快照 id（R179 N1，供一键回退）
 )
 
 
@@ -1856,9 +1953,7 @@ async def _renormalize_all_section_contents(db, scheme_id: str) -> None:
     fallback_ids: list[str] = []
     if items:
         try:
-            results, fallback_ids = await asyncio.to_thread(
-                normalize_section_contents_from_index, items, index
-            )
+            results, fallback_ids = await asyncio.to_thread(normalize_section_contents_from_index, items, index)
         except Exception as e:  # noqa: BLE001 — 线程内异常不得让结构变更失败
             logger.warning("结构重排后批量重规范化：线程执行失败，回退逐章（%s）", e)
             fallback_ids = [sid for sid, _ in items]

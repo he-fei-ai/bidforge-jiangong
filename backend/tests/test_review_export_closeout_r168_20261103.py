@@ -541,7 +541,15 @@ class TestExportDocxOpenabilityE2E:
         await db_conn.commit()
         resp = await export_mod.export_docx(
             "s-op",
-            {"project_name": "示例项目", "bid_section": "第一标段", "config": {}, "chart_images": [], "fe_codes": []},
+            {
+                "project_name": "示例项目",
+                "bid_section": "第一标段",
+                "config": {},
+                "chart_images": [],
+                "fe_codes": [],
+                # ✅ B-15（R182）：E2E 可打开性用例不验证闸门，显式覆写高风险拦截
+                "override_high_issues": True,
+            },
             db=db_conn,
         )
         return Path(resp.path)

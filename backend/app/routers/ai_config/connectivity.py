@@ -25,6 +25,10 @@ logger = logging.getLogger("ai_config")
 
 router = APIRouter(tags=["ai_config"])
 
+#: ✅ R179（N-09）：单条预检探测的总超时（秒）。底层 DNS+TCP 各 5s 内应完成；
+#: 15s 覆盖系统解析器排队的最坏情况。模块级常量便于单测注入更小值。
+_PRECHECK_PROBE_TIMEOUT_S = 15
+
 
 @router.post("/config/test")
 async def test_config(data: AIConfigTest, db=Depends(read_db)):
@@ -306,9 +310,33 @@ async def precheck_all(db=Depends(read_db)):
             continue
         targets.append((r, url))
 
+    # ✅ R179（N-09）：**有界并发**。旧实现无界 gather —— 每条配置一个
+    #    ``asyncio.to_thread`` 线程，配置数大时线程瞬时拉满；且底层
+    #    ``socket.getaddrinfo`` 无显式超时，被墙/解析器卡死时会长期占用
+    #    线程（AWS Builders' Library：并发探测必须有界超时）。现按
+    #    ``settings.precheck_max_concurrency``（默认 8，非正数/非法值回落 8，
+    #    与 global_facts._positive_int_setting 同口径）限流；单条探测加 15s
+    #    总闸 —— DNS+TCP 各 5s 足够，15s 覆盖系统解析器排队的最坏情况，
+    #    超时按「不可达」计入统计而非拖住整个接口。
+    try:
+        _limit = int(getattr(settings, "precheck_max_concurrency", 8))
+    except (TypeError, ValueError):
+        _limit = 8
+    if _limit <= 0:
+        _limit = 8
+    sem = asyncio.Semaphore(_limit)
+
     async def _one(item):
         r, url = item
-        res = await _dns_precheck_async(url)
+        async with sem:
+            try:
+                res = await asyncio.wait_for(_dns_precheck_async(url), timeout=_PRECHECK_PROBE_TIMEOUT_S)
+            except asyncio.TimeoutError:
+                res = {
+                    "ok": False,
+                    "step": "timeout",
+                    "message": f"预检超时（{_PRECHECK_PROBE_TIMEOUT_S}s）：DNS 解析或网络连接停滞",
+                }
         # ✅ R179：回传用户停用状态，避免把「已停用」的配置当作可用备胎
         enabled_val = r.get("enabled", 1)
         enabled = True if enabled_val is None else int(enabled_val or 0) != 0
@@ -327,6 +355,10 @@ async def precheck_all(db=Depends(read_db)):
 
     results = await asyncio.gather(*[_one(t) for t in targets]) if targets else []
     ok_count = sum(1 for r in results if r["ok"])
+    # ✅ R181（遗留项「超时/限流表现为加法式诊断字段」）：既有 items[].step=timeout
+    #    保持不变；这里追加聚合字段，调用方可直接看「这次有多少条被超时闸掐断」
+    #    以及本次实际生效的并发上限（排查上游压力时不必猜配置值）。
+    timeout_count = sum(1 for r in results if r.get("step") == "timeout")
     return {
         "items": results,
         "total": len(results),
@@ -335,6 +367,8 @@ async def precheck_all(db=Depends(read_db)):
         "skipped_no_url": len(rows) - len(results),
         # ✅ R179：其中被用户停用（enabled=0）的条数——它们即使网络可达也不参与调用
         "disabled_by_user": sum(1 for r in results if not r["enabled"]),
+        "timeout_count": timeout_count,
+        "concurrency_limit": _limit,
     }
 
 

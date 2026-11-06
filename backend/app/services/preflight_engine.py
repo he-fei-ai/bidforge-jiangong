@@ -432,13 +432,10 @@ def check_completeness(ctx: PreflightContext) -> list:
     calc_sections = [
         s
         for s in ctx.sections
-        if any(k in (s.get("title") or "") for k in CALC_TITLE_KEYWORDS)
-        and not is_placeholder_section(s)
+        if any(k in (s.get("title") or "") for k in CALC_TITLE_KEYWORDS) and not is_placeholder_section(s)
     ]
     calc_titles = [s.get("title") or "" for s in calc_sections]
-    if calc_titles and not _has_calc_process(
-        "\n\n".join(effective.get(s.get("id")) or "" for s in calc_sections)
-    ):
+    if calc_titles and not _has_calc_process("\n\n".join(effective.get(s.get("id")) or "" for s in calc_sections)):
         findings.append(
             _finding(
                 "CMP-09",
@@ -951,8 +948,7 @@ def check_traceability(ctx: PreflightContext) -> list:
     calc_secs = [
         s
         for s in ctx.sections
-        if any(k in (s.get("title") or "") for k in CALC_TITLE_KEYWORDS)
-        and not is_placeholder_section(s)
+        if any(k in (s.get("title") or "") for k in CALC_TITLE_KEYWORDS) and not is_placeholder_section(s)
     ]
     if not calc_secs:
         # ⚠️ 不在此处重复报"完全缺失" —— 该情形已由 CMP-09（内容完整性维度）以
@@ -1001,7 +997,14 @@ def _l3_outline_stats(sections: list) -> dict:
     l3_nodes = [s for s in sections if int(s.get("level") or 0) == 3]
     max_level = max((int(s.get("level") or 0) for s in sections), default=0)
     if not l3_nodes and max_level <= 0:
-        return {"available": False, "l3_total": 0, "max_level": 0, "over_depth": 0, "per_section": [], "per_chapter": []}
+        return {
+            "available": False,
+            "l3_total": 0,
+            "max_level": 0,
+            "over_depth": 0,
+            "per_section": [],
+            "per_chapter": [],
+        }
 
     per_section: dict[str, dict] = {}
     per_chapter: dict[str, dict] = {}
@@ -1012,9 +1015,7 @@ def _l3_outline_stats(sections: list) -> dict:
         parent = by_id.get(pid)
         if parent is not None:
             key = pid
-            entry = per_section.setdefault(
-                key, {"title": str(parent.get("title") or ""), "count": 0}
-            )
+            entry = per_section.setdefault(key, {"title": str(parent.get("title") or ""), "count": 0})
             entry["count"] += 1
         chapter = parent
         seen = {id(node)}
@@ -1038,8 +1039,7 @@ def _l3_outline_stats(sections: list) -> dict:
         "over_depth": over_depth,
         "per_section": list(per_section.values()),
         "per_chapter": [
-            {"title": k, "count": v["count"], "sections": len(v["section_ids"])}
-            for k, v in per_chapter.items()
+            {"title": k, "count": v["count"], "sections": len(v["section_ids"])} for k, v in per_chapter.items()
         ],
     }
 
@@ -1319,9 +1319,7 @@ def check_deliverability(ctx: PreflightContext) -> list:
             for _ch in _ost["per_chapter"]:
                 _limit = max(l3_standard.max_l3_per_chapter(), _min_sec * int(_ch.get("sections") or 0))
                 if _ch["count"] > _limit:
-                    _o_issues.append(
-                        f"「{_ch['title']}」章三级条目 {_ch['count']} 个，超过单章上限 {_limit} 个"
-                    )
+                    _o_issues.append(f"「{_ch['title']}」章三级条目 {_ch['count']} 个，超过单章上限 {_limit} 个")
             if _o_issues:
                 findings.append(
                     _finding(

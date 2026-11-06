@@ -194,7 +194,12 @@ def count_body_paragraphs(content: str | None) -> int:
                 blocks.append("\n".join(current))
                 current = []
             continue
-        if _TABLE_ROW_RE.match(line) or _HEADING_RE.match(line) or _BOLD_ONLY_RE.match(stripped) or _LIST_HEAD_RE.match(line):
+        if (
+            _TABLE_ROW_RE.match(line)
+            or _HEADING_RE.match(line)
+            or _BOLD_ONLY_RE.match(stripped)
+            or _LIST_HEAD_RE.match(line)
+        ):
             if current:
                 blocks.append("\n".join(current))
                 current = []
@@ -468,9 +473,7 @@ def converge_tree(outline: list | None) -> dict:
         total_limit = max_l3_total()
         while tree_stats(outline)["l3_total"] > total_limit:
             chapter_stats = [
-                (ch, tree_stats([ch])["l3_total"])
-                for ch in outline
-                if isinstance(ch, dict) and not _protected(ch)
+                (ch, tree_stats([ch])["l3_total"]) for ch in outline if isinstance(ch, dict) and not _protected(ch)
             ]
             if not chapter_stats:
                 break

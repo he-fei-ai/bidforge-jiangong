@@ -345,8 +345,8 @@ def get_prompt(key: str, **kwargs) -> str:
     # ✅ R48（2026-10-06 · 运行时指标）：成功返回记 render_total、异常路径记
     #    render_errors。整段包 try/except —— 计数本身在 _metrics 内 fail-soft，
     #    这里的 except 只兜「渲染本身抛错」这一真实事件，记完原样 re-raise，
-    #    绝不吞异常。未知 key 的 ``return ""`` 在 try 内直接退出（不计入渲染，
-    #    因为它不是任何已注册模板的渲染）。
+    #    绝不吞异常。未知 key 仍返回空串（兼容行为不变），但会计入
+    #    render_errors —— 传错 key 属于真实的「读不到模板」错误，必须可观测（R181）。
     try:
         with _cache_lock:
             cached = _get_prompt_cache().get(key)
@@ -367,6 +367,11 @@ def get_prompt(key: str, **kwargs) -> str:
                 meta = _ALL_PROMPTS.get(key)
             if not meta:
                 logger.warning("Prompt key '%s' not found in registry or cache", key)
+                # ✅ R181（2026-11-06 · N-02 遗留）：未知 key 此前直接 return ""，
+                #    不计入任何指标 —— 调用方传错 key 时只会得到空提示词，
+                #    运维侧也看不到「谁在反复读不存在的模板」。保持返回空串
+                #    的兼容行为不变，同时计入 render_errors（可观测）。
+                record_render_error(key)
                 return ""
             if cached is not None and not cached.strip():
                 logger.warning(

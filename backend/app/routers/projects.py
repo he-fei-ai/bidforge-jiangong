@@ -96,6 +96,10 @@ _PROJECT_SCOPED_TABLES = (
     "facts_cross_conflicts",
     "knowledge_base",
     "export_presets",
+    # ✅ R179 M1（2026-11-05）：评分项提取新增两表（提取运行记录 / 评分项条目），
+    #    均以 project_id 关联且无外键 → 必须显式清理，否则删项目后残留孤儿行。
+    "scheme_scoring_extract_runs",
+    "scheme_scoring_items",
 )
 
 #: 方案级表（按 scheme_id 清理）。⚠️ consistency_scan_cache 曾长期漏删 ——

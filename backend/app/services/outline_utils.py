@@ -134,7 +134,7 @@ def _strip_prev_merge(desc: str) -> str:
     if _BARE_MERGE_RE.match(desc):
         return ""
     idx = desc.find("；（1）")
-    tail = desc if desc.startswith("（1）") else (desc[idx + 1:] if idx >= 0 else "")
+    tail = desc if desc.startswith("（1）") else (desc[idx + 1 :] if idx >= 0 else "")
     if tail:
         parts = tail.split("；")
         if all(re.match(r"^（\d+）", p) for p in parts):

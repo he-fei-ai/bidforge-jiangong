@@ -9,8 +9,10 @@
    配置导出导入 / 错误分类不再子串误判
 """
 
+import asyncio
 import contextlib
 import json
+import socket
 
 import app.services.ai.provider_factory as pf
 import pytest
@@ -81,6 +83,22 @@ def _base_payload(**over):
     return data
 
 
+@pytest.fixture(autouse=True)
+def _stub_public_dns(monkeypatch):
+    """✅ R181（2026-11-06 · 遗留项）：DNS 固定为公网地址，测试不再依赖外网。
+
+    旧实现中 ``api.x.com`` / ``api.deepseek.com`` 走**真实 DNS**：离线环境或
+    解析到被禁网段时同一份代码会随机变红。这里只把**解析入口**打桩，SSRF 判定
+    逻辑（``_host_is_forbidden``）照常执行 —— 下面的反例用例仍会证明桩没有
+    绕过守卫（域名解析到私网时必须拒绝）。
+    """
+    monkeypatch.setattr(
+        pf.socket,
+        "getaddrinfo",
+        lambda *_a, **_k: [(socket.AF_INET, socket.SOCK_STREAM, 6, "", ("93.184.216.34", 0))],
+    )
+
+
 # ===========================================================================
 # 1. normalize_base_url
 # ===========================================================================
@@ -89,7 +107,19 @@ class TestNormalizeBaseUrl:
         assert pf.normalize_base_url("api.deepseek.com/v1") == "https://api.deepseek.com/v1"
 
     def test_strips_trailing_slash(self):
-        assert pf.normalize_base_url("https://api.x.com/v1/") == "https://api.x.com/v1"
+        # ✅ R181：固定公网域名 + 上方 DNS 桩，离线环境仍能证明「公网域名被放行」。
+        assert pf.normalize_base_url("https://api.example.com/v1/") == "https://api.example.com/v1"
+
+    def test_public_domain_guard_still_rejects_private_resolution(self, monkeypatch):
+        """反例：同一公网域名若解析到私网，必须仍被拒绝（证明桩未绕过守卫）。"""
+        monkeypatch.setattr(
+            pf.socket,
+            "getaddrinfo",
+            lambda *_a, **_k: [(socket.AF_INET, socket.SOCK_STREAM, 6, "", ("10.0.0.1", 0))],
+        )
+        with pytest.raises(ValueError) as ei:
+            pf.normalize_base_url("https://api.example.com/v1")
+        assert "安全策略拒绝" in str(ei.value)
 
     def test_empty_returns_empty(self):
         assert pf.normalize_base_url("   ") == ""
@@ -598,6 +628,73 @@ class TestPrecheckAndTestRoutes:
         assert res["fail_count"] == 1
         assert res["skipped_no_url"] == 1
         assert {i["id"]: i["ok"] for i in res["items"]} == {"ok1": True, "bad1": False}
+
+    async def test_precheck_all_bounded_concurrency(self, db_conn, monkeypatch):
+        """✅ R179（N-09）：批量预检并发探测数不得超过上限（默认 8）。
+
+        变异对照：把 connectivity._one 里的 ``async with sem`` 删掉后，
+        本测试的 peak 会逼近配置数（12 > 4）而变红。
+        """
+        from types import SimpleNamespace
+
+        for i in range(12):
+            await _insert(db_conn, f"cfg{i}", base_url=f"https://h{i}.example.com/v1")
+        await db_conn.commit()
+
+        state = {"cur": 0, "peak": 0}
+
+        async def _fake(url):
+            state["cur"] += 1
+            state["peak"] = max(state["peak"], state["cur"])
+            await asyncio.sleep(0.02)
+            state["cur"] -= 1
+            return {"ok": True, "step": "ok", "ip": "1.1.1.1"}
+
+        monkeypatch.setattr(ai_router.connectivity, "_dns_precheck_async", _fake)
+        monkeypatch.setattr(ai_router.connectivity, "settings", SimpleNamespace(precheck_max_concurrency=4))
+        res = await ai_router.precheck_all(db=db_conn)
+        assert res["total"] == 12
+        assert res["ok_count"] == 12
+        assert state["peak"] <= 4
+
+    async def test_precheck_all_concurrency_default_fallback(self, db_conn, monkeypatch):
+        """✅ R179（N-09）：settings 无该字段 / 非正数时回落 8，端点不崩。"""
+        from types import SimpleNamespace
+
+        await _insert(db_conn, "cfg1", base_url="https://ok.example.com/v1")
+        await db_conn.commit()
+
+        async def _fake(url):
+            return {"ok": True, "step": "ok", "ip": "1.1.1.1"}
+
+        monkeypatch.setattr(ai_router.connectivity, "_dns_precheck_async", _fake)
+        # 无字段 → getattr 默认 8
+        monkeypatch.setattr(ai_router.connectivity, "settings", SimpleNamespace())
+        res = await ai_router.precheck_all(db=db_conn)
+        assert res["total"] == 1 and res["ok_count"] == 1
+        # 非正数 → 回落 8
+        monkeypatch.setattr(ai_router.connectivity, "settings", SimpleNamespace(precheck_max_concurrency=0))
+        res = await ai_router.precheck_all(db=db_conn)
+        assert res["total"] == 1 and res["ok_count"] == 1
+
+    async def test_precheck_all_probe_timeout_counts_as_failure(self, db_conn, monkeypatch):
+        """✅ R179（N-09）：单条探测卡死 → 15s 总闸按「超时/不可达」计入统计，
+        整个接口不被拖死（测试注入 0.05s 超时以提速）。"""
+        await _insert(db_conn, "hang", base_url="https://hang.example.com/v1")
+        await db_conn.commit()
+
+        async def _hang(url):
+            await asyncio.sleep(30)
+
+        monkeypatch.setattr(ai_router.connectivity, "_dns_precheck_async", _hang)
+        monkeypatch.setattr(ai_router.connectivity, "_PRECHECK_PROBE_TIMEOUT_S", 0.05)
+        res = await ai_router.precheck_all(db=db_conn)
+        assert res["total"] == 1
+        assert res["ok_count"] == 0 and res["fail_count"] == 1
+        item = res["items"][0]
+        assert item["ok"] is False
+        assert item["step"] == "timeout"
+        assert "超时" in item["message"]
 
     async def test_fetch_models_requires_credentials(self, db_conn):
         res = await ai_router.fetch_provider_models(

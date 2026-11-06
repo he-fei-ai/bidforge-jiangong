@@ -265,7 +265,11 @@ async def test_chart_render_failure_is_not_cached(db_conn, tmp_path, monkeypatch
         lambda *args, **kwargs: asyncio.sleep(0),
     )
 
-    response = await export_mod.export_docx(scheme_id, {"config": {"allow_pil_fallback": False}}, db=db_conn)
+    response = await export_mod.export_docx(
+        scheme_id,
+        {"config": {"allow_pil_fallback": False}, "override_high_issues": True},
+        db=db_conn,
+    )
 
     assert isinstance(response, FileResponse)
     assert response.headers["x-cache-status"] == "degraded"
@@ -413,7 +417,7 @@ async def test_docx_builds_unique_temp_then_atomically_replaces_target(db_conn, 
         return {}
 
     monkeypatch.setattr(export_mod, "_build_docx_sync", fake_build)
-    response = await export_mod.export_docx(scheme_id, {"config": {}}, db=db_conn)
+    response = await export_mod.export_docx(scheme_id, {"config": {}, "override_high_issues": True}, db=db_conn)
 
     assert Path(response.path) == observed["target"]
     assert observed["target"].read_bytes() == b"complete-docx"
@@ -439,7 +443,7 @@ async def test_docx_build_failure_removes_partial_temp_file(db_conn, tmp_path, m
 
     monkeypatch.setattr(export_mod, "_build_docx_sync", fail_build)
     with pytest.raises(RuntimeError, match="模拟 DOCX 构建失败"):
-        await export_mod.export_docx(scheme_id, {"config": {}}, db=db_conn)
+        await export_mod.export_docx(scheme_id, {"config": {}, "override_high_issues": True}, db=db_conn)
 
     assert list(tmp_path.glob("*.tmp.docx")) == []
     assert list(tmp_path.glob("*.docx")) == []

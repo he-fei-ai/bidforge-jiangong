@@ -32,6 +32,7 @@ import time
 from fastapi import APIRouter, Depends, HTTPException, Request
 
 from app.db import get_db, read_db
+from app.services.admin_auth import require_admin_access
 from app.services.ai.prompts._metrics import (
     get_snapshot as _get_metrics_snapshot,
 )
@@ -64,7 +65,15 @@ logger = logging.getLogger(__name__)
 #:   指标与 admin 同步是运维/管理面操作，路径按任务要求落在 ``/system`` 与
 #:   ``/admin/prompts``。在 ``main.py`` 的 include 循环之后单独注册。
 system_metrics_router = APIRouter(prefix="/system", tags=["prompts-metrics"])
-admin_prompts_router = APIRouter(prefix="/admin/prompts", tags=["prompts-admin"])
+# ✅ R179（2026-11-05 · 管理面鉴权）：``/admin/prompts/*`` 在本地默认配置下
+#    （ADMIN_API_TOKEN 为空）只允许回环来源，非回环 403；配置 token 后需携带
+#    X-Admin-Token / Authorization: Bearer。依赖挂在 router 级，一次覆盖该组
+#    全部端点（新增端点自动继承，无需逐个添加）。
+admin_prompts_router = APIRouter(
+    prefix="/admin/prompts",
+    tags=["prompts-admin"],
+    dependencies=[Depends(require_admin_access)],
+)
 
 
 async def _fetch_content_row(db, key: str):
@@ -416,9 +425,7 @@ async def get_prompt_metrics(db=Depends(read_db)):
     _today_stats = {"version_changes_today": 0, "render_calls_today": 0}
     if hasattr(db, "execute"):  # 直调（非 FastAPI 注入）时 db 为 Depends 占位，跳过统计
         try:
-            _cur = await db.execute(
-                "SELECT COUNT(*) FROM prompt_audit_logs WHERE created_at >= ?", (_today,)
-            )
+            _cur = await db.execute("SELECT COUNT(*) FROM prompt_audit_logs WHERE created_at >= ?", (_today,))
             _row = await _cur.fetchone() if _cur is not None else None
             if _row is not None:
                 _today_stats["version_changes_today"] = int(_row[0] or 0)

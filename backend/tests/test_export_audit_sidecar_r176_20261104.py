@@ -217,7 +217,7 @@ async def test_sidecar_without_cache_row_never_used(db_conn, tmp_path, monkeypat
     monkeypatch.setattr(E, "_persist_export_cache_row", _noop)
     monkeypatch.setattr(E, "_finalize_export_delivery", _noop)
 
-    resp = await E.export_docx("sc1", {}, db_conn)
+    resp = await E.export_docx("sc1", {"override_high_issues": True}, db_conn)
     assert resp.headers["X-Cache-Status"] == "miss"
     assert calls["n"] == 1, "无缓存行却沿用了孤立旁车"
 
@@ -250,7 +250,7 @@ async def test_hit_route_reads_sidecar_and_skips_audit(db_conn, tmp_path, monkey
     monkeypatch.setattr(E, "audit_content", _boom)
     monkeypatch.setattr(E, "_finalize_export_delivery", _noop)
 
-    resp = await E.export_docx("sc2", {}, db_conn)
+    resp = await E.export_docx("sc2", {"override_high_issues": True}, db_conn)
     assert resp.headers["X-Cache-Status"] == "hit"
     assert "X-Content-Audit" in resp.headers, "命中路径静默丢了审计头"
     assert resp.headers["X-Export-Round"] == "1"

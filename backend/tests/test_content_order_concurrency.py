@@ -192,8 +192,14 @@ class TestContentGenerationWiring:
         #    这些符号已不存在，原断言必然失败。改为锁定**现行口径**。
         #
         # ① 容量严格取用户档位，不得绕全局自适应控制器间接取值
-        assert "asyncio.Semaphore(effective_concurrency)" in src, (
-            "并发闸门必须直接用用户档位 effective_concurrency，" "不得再绕 Semaphore 间接控制"
+        # ✅ 2026-11-05（R179 U5 陈旧断言更新）：并发读数接入分阶段上限
+        #    `stage_concurrency("content") or effective_concurrency` —— 开关关时
+        #    stage_concurrency 返回 0，or 分支回落 = 逐字现状（仍严格用户档位）；
+        #    开关开时为拍板④授权的阶段上限（默认 2，已夹取 max_concurrency）。
+        #    断言意图不变：容量不绕全局自适应控制器间接取值。
+        assert "asyncio.Semaphore(_u5_content_conc or effective_concurrency)" in src, (
+            "并发闸门必须直接用用户档位 effective_concurrency（U5 关）"
+            "或阶段上限（U5 开），不得再绕 Semaphore 间接控制"
         )
         # ② 必须是每任务独立信号量（而非全局 concurrency_controller）
         assert "_run_semaphore" in src

@@ -527,6 +527,30 @@ class TestWiring:
             return f.attr
         return ""
 
+    @classmethod
+    def _value_finding_calls(cls, tree):
+        """CON-01 自检的真实调用节点：直接调用 + 经 asyncio.to_thread 间接调用。
+
+        2026-11-05（R178 下沉）：判据挪进工作线程后，调用形态变为
+        ``await asyncio.to_thread(cross_section_value_findings, ...)``；
+        只认 ``func`` 名的旧判定会漏掉真实接线点（恒判「未调用」）。
+        """
+        out = []
+        for node in ast.walk(tree):
+            if not isinstance(node, ast.Call):
+                continue
+            name = cls._name_of(node)
+            if name == "cross_section_value_findings":
+                out.append(node)
+            elif (
+                name == "to_thread"
+                and node.args
+                and isinstance(node.args[0], ast.Name)
+                and node.args[0].id == "cross_section_value_findings"
+            ):
+                out.append(node)
+        return out
+
     def _app_tree(self, rel):
         p = Path(c.__file__).resolve().parent.parent / rel
         return ast.parse(p.read_text(encoding="utf-8")), p
@@ -546,7 +570,7 @@ class TestWiring:
         """CON-01 逐章自检必须传 new_section_id —— 不传则 new_title 恒空、
         函数恒返回 []（自检静默空转，等于没接线）。"""
         tree, _ = self._app_tree(Path("routers") / "sse_handlers.py")
-        calls = self._call_names(tree, lambda n: self._name_of(n) == "cross_section_value_findings")
+        calls = self._value_finding_calls(tree)
         assert calls, "sse_handlers 未调用 cross_section_value_findings"
         ok = any(any(k.arg == "new_section_id" for k in call.keywords) for call in calls)
         assert ok, "cross_section_value_findings 调用缺 new_section_id 实参"
@@ -558,7 +582,7 @@ class TestWiring:
         `_crosscheck_dup_on` 单独作门控的节点。"""
         tree, _ = self._app_tree(Path("routers") / "sse_handlers.py")
         # 收集每个 Call 所在的最内层 If 测试源码链
-        calls = self._call_names(tree, lambda n: self._name_of(n) == "cross_section_value_findings")
+        calls = self._value_finding_calls(tree)
         assert calls
         parent = {}
         for node in ast.walk(tree):

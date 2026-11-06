@@ -102,9 +102,7 @@ class TestFinishTaskTerminalGuarantee:
         with pytest.raises(asyncio.CancelledError):
             await task
 
-        assert tid not in tr._tasks, (
-            "取消后内存态残留 → 任务永久停在 running（sections 409 守卫失效、只能重启进程）"
-        )
+        assert tid not in tr._tasks, "取消后内存态残留 → 任务永久停在 running（sections 409 守卫失效、只能重启进程）"
 
     @pytest.mark.asyncio
     async def test_cancelled_still_writes_terminal_to_db(self, db_conn, monkeypatch):
@@ -139,9 +137,9 @@ class TestFinishTaskTerminalGuarantee:
             if row and row["status"] == "stopped":
                 break
             await asyncio.sleep(0.02)
-        assert row is not None and row["status"] == "stopped", (
-            "取消后终态未落库 → 前端 pollTaskUntilTerminal 永远等不到终态（任务栏永远转圈）"
-        )
+        assert (
+            row is not None and row["status"] == "stopped"
+        ), "取消后终态未落库 → 前端 pollTaskUntilTerminal 永远等不到终态（任务栏永远转圈）"
         assert row["message"] == "客户端断开，任务已终止"
 
     @pytest.mark.asyncio
@@ -210,8 +208,7 @@ class TestSseDisconnectFallbackShielded:
         """断线兜底的 finish_task 必须被 asyncio.shield 包住（否则终态落不下来）。"""
         unshielded, _ = _sse_finish_task_calls()
         assert not unshielded, (
-            "以下断线兜底 finish_task 未被 asyncio.shield 保护，取消风暴下终态落不了库：\n  "
-            + "\n  ".join(unshielded)
+            "以下断线兜底 finish_task 未被 asyncio.shield 保护，取消风暴下终态落不了库：\n  " + "\n  ".join(unshielded)
         )
 
     def test_three_disconnect_fallbacks_present(self):
@@ -231,8 +228,15 @@ class TestSseDisconnectFallbackShielded:
         assert target is not None, "finish_task 函数不存在"
 
         # 找出所有 `_tasks.pop(...)` 调用及其所在 try 的 finally 归属
-        pops = [n for n in ast.walk(target) if isinstance(n, ast.Call) and isinstance(n.func, ast.Attribute)
-                and n.func.attr == "pop" and isinstance(n.func.value, ast.Name) and n.func.value.id == "_tasks"]
+        pops = [
+            n
+            for n in ast.walk(target)
+            if isinstance(n, ast.Call)
+            and isinstance(n.func, ast.Attribute)
+            and n.func.attr == "pop"
+            and isinstance(n.func.value, ast.Name)
+            and n.func.value.id == "_tasks"
+        ]
         assert len(pops) == 1, f"_tasks.pop 应恰好 1 处，实际 {len(pops)} 处"
 
         # pop 必须位于某个 Try 的 finalbody 中，且该 Try 的 body 覆盖了整段函数体
@@ -252,9 +256,7 @@ class TestSseDisconnectFallbackShielded:
             for n in ast.walk(stmt)
             if isinstance(n, ast.Call) and isinstance(n.func, ast.Name) and n.func.id == "retry_db_op"
         ]
-        assert body_calls, (
-            "_tasks.pop 所在的 try 未覆盖终态落库（retry_db_op）→ 落库被取消时整段清理被跳过"
-        )
+        assert body_calls, "_tasks.pop 所在的 try 未覆盖终态落库（retry_db_op）→ 落库被取消时整段清理被跳过"
 
     def test_terminal_db_write_is_shielded(self):
         """终态落库必须被 shield 保护（取消只中断等待，内层写仍在后台完成）。"""
@@ -303,9 +305,7 @@ class TestGateCandidatesLocalConfigNotCounted:
         for _ in range(5):
             with pytest.raises(RuntimeError):
                 await pf._gate_candidates([dict(cand)], "test")
-        assert not pf._is_all_circuit_fast_fail(), (
-            "本地密钥问题被计入全局熔断闸门 → 60s 内全站所有模块停摆"
-        )
+        assert not pf._is_all_circuit_fast_fail(), "本地密钥问题被计入全局熔断闸门 → 60s 内全站所有模块停摆"
 
     @pytest.mark.asyncio
     async def test_no_key_does_not_trip_global_fast_fail(self):
@@ -332,9 +332,9 @@ class TestGateCandidatesLocalConfigNotCounted:
                     await pf._gate_candidates([dict(cand)], "test")
         finally:
             pf._is_thinking_dead = monkey
-        assert pf._is_all_circuit_fast_fail(), (
-            "厂商侧不可用未计入全熔断闸门 → R110 的跨章空转防护失效（每章各自 probe 150-300s）"
-        )
+        assert (
+            pf._is_all_circuit_fast_fail()
+        ), "厂商侧不可用未计入全熔断闸门 → R110 的跨章空转防护失效（每章各自 probe 150-300s）"
 
 
 # =====================================================================

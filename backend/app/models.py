@@ -184,6 +184,16 @@ class ClearFactsRequest(BaseModel):
     scheme_id: str = ""
 
 
+class RetryFailedFactsRequest(BaseModel):
+    """POST /api/v1/global-facts/retry-failed 请求体（手动重试失败/退避段）。"""
+
+    model_config = ConfigDict(extra="allow")
+    scheme_id: str = ""
+    project_id: str = ""
+    #: 指定要解除退避的段指纹；空列表 = 该作用域下全部失败段。
+    chunk_hashes: list = Field(default_factory=list)
+
+
 class AckStaleRequest(BaseModel):
     """POST /api/v1/global-facts/ack-stale 请求体（批量解除过期标记）。"""
 

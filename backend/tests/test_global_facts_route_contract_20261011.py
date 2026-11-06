@@ -222,6 +222,8 @@ def test_B3_write_routes_count_is_stable():
         "POST /api/v1/global-facts/batch-resolve",
         "POST /api/v1/global-facts/clear",
         "POST /api/v1/global-facts/danger-check",
+        # ✅ T-05（2026-11-06）：手动重试失败段（合法新增写入口，已按 B1 口径设防）
+        "POST /api/v1/global-facts/retry-failed",
         "PATCH /api/v1/global-facts/{fact_id}",
         "PATCH /api/v1/global-facts/{fact_id}/ack-stale",
         "PATCH /api/v1/global-facts/{fact_id}/resolve",

@@ -115,11 +115,17 @@ class TestInjectedContentNeverDeleted:
         assert render_prompt("a\r\n{b}\r\n", b="B") == "a\r\nB\r\n"
 
     def test_all_registered_templates_no_arg_parity(self):
-        """全部 44 个模板：无实参渲染 == 「删掉所有整行独占占位符行」的模板。"""
+        """全部模板：无实参渲染 == 「删掉所有整行独占占位符行」的模板。
+
+        ✅ R181（2026-11-06 · N-06）：可选区块判定扩展到 ``__VAR__`` 独占行。
+        期望值仍由本用例**独立**推导（不使用生产正则），因此若生产侧漏删
+        ``__TASK_PROMPT__`` 这类独立行，本断言依旧会变红（判别力未放宽）。
+        """
         for key, meta in _ALL_PROMPTS.items():
             tpl = meta.get("default_content") or meta.get("content") or ""
-            exp = re.sub(r"^[ \t]*\{[A-Za-z_]\w*\}[ \t]*\r?\n", "", tpl, flags=re.M)
-            exp = re.sub(r"^[ \t]*\{[A-Za-z_]\w*\}[ \t]*$", "", exp, flags=re.M)
+            block = r"(\{[A-Za-z_]\w*\}|__[A-Z][A-Z0-9_]{2,}__)"
+            exp = re.sub(rf"^[ \t]*{block}[ \t]*\r?\n", "", tpl, flags=re.M)
+            exp = re.sub(rf"^[ \t]*{block}[ \t]*$", "", exp, flags=re.M)
             assert render_prompt(tpl) == exp, f"模板 {key} 无实参渲染结果异常"
 
 

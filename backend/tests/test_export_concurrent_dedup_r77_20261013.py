@@ -175,7 +175,7 @@ class TestConcurrentDedupEndToEnd:
 
     async def test_same_key_concurrent_exports_build_once(self, ctx):
         db, sid, calls, _ = ctx
-        body = {"config": {"line_spacing": 1.5}, "_tag": "same"}
+        body = {"config": {"line_spacing": 1.5}, "_tag": "same", "override_high_issues": True}
         r1, r2 = await asyncio.gather(
             export_mod.export_docx(sid, dict(body, _tag="a"), db=db),
             export_mod.export_docx(sid, dict(body, _tag="b"), db=db),
@@ -188,7 +188,7 @@ class TestConcurrentDedupEndToEnd:
 
     async def test_second_export_hits_cache_without_rebuilding(self, ctx):
         db, sid, calls, state = ctx
-        body = {"config": {}, "_tag": "solo"}
+        body = {"config": {}, "_tag": "solo", "override_high_issues": True}
         await export_mod.export_docx(sid, dict(body, _tag="a"), db=db)
         calls.clear()
         renders_before = state["renders"]
@@ -222,8 +222,16 @@ class TestConcurrentDedupEndToEnd:
 
         export_mod._prepare_export = slow_prep
         tasks = [
-            asyncio.create_task(export_mod.export_docx(sid, {"config": {"line_spacing": 1.5}, "_tag": "a"}, db=db)),
-            asyncio.create_task(export_mod.export_docx(sid, {"config": {"line_spacing": 1.15}, "_tag": "b"}, db=db)),
+            asyncio.create_task(
+                export_mod.export_docx(
+                    sid, {"config": {"line_spacing": 1.5}, "_tag": "a", "override_high_issues": True}, db=db
+                )
+            ),
+            asyncio.create_task(
+                export_mod.export_docx(
+                    sid, {"config": {"line_spacing": 1.15}, "_tag": "b", "override_high_issues": True}, db=db
+                )
+            ),
         ]
         # 两个任务都曾让出控制权；等双方都进入 slow_prep 再断言（防调度竞态）
         # ✅ 2026-10-14 加固：原实现固定 200 次 `sleep(0)` 后立即断言。编号一致性
@@ -245,7 +253,7 @@ class TestConcurrentDedupEndToEnd:
     async def test_disabled_switch_rebuilds_every_time(self, ctx, monkeypatch):
         db, sid, calls, _ = ctx
         monkeypatch.setattr(cfg.settings, "export_dedup_concurrent", False)
-        body = {"config": {}, "_tag": "off"}
+        body = {"config": {}, "_tag": "off", "override_high_issues": True}
         r1, r2 = await asyncio.gather(
             export_mod.export_docx(sid, dict(body, _tag="a"), db=db),
             export_mod.export_docx(sid, dict(body, _tag="b"), db=db),
@@ -272,11 +280,12 @@ class TestConcurrentDedupEndToEnd:
         export_mod._build_docx_sync = guarded_build
         try:
             with pytest.raises(RuntimeError):
-                await export_mod.export_docx(sid, {"config": {}, "_tag": "boom"}, db=db)
+                await export_mod.export_docx(sid, {"config": {}, "_tag": "boom", "override_high_issues": True}, db=db)
             assert state["builds"] == 1
             # 锁未释放 ⇒ 本次调用会在 await_lock() 上永久挂起
             resp = await asyncio.wait_for(
-                export_mod.export_docx(sid, {"config": {}, "_tag": "retry"}, db=db), timeout=10
+                export_mod.export_docx(sid, {"config": {}, "_tag": "retry", "override_high_issues": True}, db=db),
+                timeout=10,
             )
             assert state["builds"] == 2
             assert resp is not None

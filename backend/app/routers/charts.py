@@ -28,6 +28,20 @@ from app.services.content_blocks import chart_type_tags
 logger = logging.getLogger("charts")
 router = APIRouter(prefix="/api/v1/charts", tags=["charts"])
 
+# ✅ R179（2026-11-05）：生成链路写入 chart_predictions.purpose/title 的是
+#    流程说明而非图名（见 _chart_pipeline 内联登记），清单展示时按占位值处理。
+_PLACEHOLDER_CHART_PURPOSES = {"正文同步生成", "（正文同步生成）", "生成图表", "图表生成"}
+
+
+def _display_chart_title(purpose: str, chart_type: str, section_title: str) -> str:
+    """图表清单展示标题：真实图名优先，占位流程说明回退到「章节 · 类型」。"""
+    value = str(purpose or "").strip()
+    if value and value not in _PLACEHOLDER_CHART_PURPOSES:
+        return value
+    label = _CHART_LABELS.get(chart_type, chart_type)
+    sec = str(section_title or "").strip()
+    return f"{sec} · {label}" if sec else label
+
 
 async def _guard_chart_target(db, section_id: str, action: str, prediction_id: str = "") -> None:
     """图表正文写点的生成竞态守卫（✅ R98 · R90 遗留⑦收口）。
@@ -272,7 +286,12 @@ async def list_charts(scheme_id: str, db=Depends(get_db)):
                 "section_title": sec.get("title", ""),
                 "chart_type": ct,
                 "chart_label": _CHART_LABELS.get(ct, ct),
-                "title": p.get("purpose") or _CHART_LABELS.get(ct, ct),
+                # ✅ R179（2026-11-05）：内联图表的 purpose/title 落库值是流程
+                #    说明「正文同步生成」（占位标题，不是图名）。清单此前直接
+                #    展示该串，用户看到的"图表标题"是系统流程术语，无法据此
+                #    定位图表。改为：真实 purpose 优先；占位值回退到
+                #    「章节标题 · 图表类型」，只改展示、不改库、不改导出图题。
+                "title": _display_chart_title(p.get("purpose"), ct, sec.get("title", "")),
                 "priority": p.get("priority", 3),
                 "status": p.get("status", "generated"),
                 "placed": _is_placed(sid, content, ct),

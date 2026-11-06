@@ -241,7 +241,7 @@ async def test_parse_all_reports_parser_truncation_without_warnings(ctx, monkeyp
 def test_category_options_covers_all_categories():
     """下拉选项必须覆盖全部分类且含兜底「其他」（顺序与规则表一致）。"""
     opts = dc.category_options()
-    assert opts[:9] == list(dc.DOC_CATEGORIES)
+    assert opts[: len(dc.DOC_CATEGORIES)] == list(dc.DOC_CATEGORIES)
     assert opts[-1] == "其他"
     for cat, _ in dc.AUTO_CLASSIFY_RULES:
         assert cat in opts

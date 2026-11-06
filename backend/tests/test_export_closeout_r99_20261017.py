@@ -132,10 +132,22 @@ class TestDLV14FigureTableWiring:
             for kw in c.keywords:
                 if kw.arg != "real_nums":
                     continue
-                assert isinstance(kw.value, ast.Call), (
+                value = kw.value
+                # ✅ B-17（R182 · 2026-11-06）：real_nums 允许先绑到局部变量（同一份
+                #    调用结果还要用于「无图表集合」三态判定），但该局部变量必须由
+                #    唯一出口 collect_figure_table_number_superset 赋值 —— 语义不变：
+                #    仍禁止就地内联另一份推导。
+                if isinstance(value, ast.Name):
+                    for stmt in ast.walk(node):
+                        if isinstance(stmt, ast.Assign) and any(
+                            isinstance(t, ast.Name) and t.id == value.id for t in stmt.targets
+                        ):
+                            value = stmt.value
+                            break
+                assert isinstance(value, ast.Call), (
                     "real_nums 不得是内联字面量，必须调用 " "collect_figure_table_number_superset"
                 )
-                assert kw.value.func.id == "collect_figure_table_number_superset"
+                assert isinstance(value.func, ast.Name) and value.func.id == "collect_figure_table_number_superset"
 
     def test_real_num_guards_are_not_dead_code(self):
         """`_detect_stale_cross_references` 里 `if real_nums["fig"]:` / `["tbl"]`
@@ -579,7 +591,12 @@ class TestCacheFastPath:
 
         monkeypatch.setattr(mr._chart_cache, "get_or_render", counting)
 
-        body = {"config": {"allow_pil_fallback": True}, "chart_images": [], "fe_codes": []}
+        body = {
+            "config": {"allow_pil_fallback": True},
+            "chart_images": [],
+            "fe_codes": [],
+            "override_high_issues": True,
+        }
         r1 = await E.export_docx("fpe", body, db=db_conn)
         assert "miss" in str(r1.headers.get("X-Cache-Status", ""))
         assert calls["n"] >= 1
@@ -599,7 +616,7 @@ class TestCacheFastPath:
         )
         await db_conn.commit()
         monkeypatch.setattr(E, "EXPORTS_DIR", tmp_path)
-        body = {"config": {}, "chart_images": [], "fe_codes": []}
+        body = {"config": {}, "chart_images": [], "fe_codes": [], "override_high_issues": True}
         r1 = await E.export_docx("fph", body, db=db_conn)
         r2 = await E.export_docx("fph", body, db=db_conn)
         h1 = {k.lower() for k in (r1.headers or {})}

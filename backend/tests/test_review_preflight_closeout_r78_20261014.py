@@ -18,7 +18,9 @@ F-3 ``routers/consistency_repair.py`` 收口 R13 单一出口（此前是
     ``test_review_r13_closeout_20261006.py`` TARGET_FILES 三 router 之外的
     漏网之鱼）。C 组 = 静态禁裸 db.execute/executemany + review_db 单独行
     import 契约 + None 游标读→503 行为实证 + 「写没生效不得汇报假成功」
-    （exec_write 严格模式）与 require_rows=False 宽松模式两条行为实证。
+    （R179 三态记账：快照/章节缺失 → ``restore_skipped_sections`` 显式跳过，
+    不冒充恢复成功，也不再把「跳过」误报成 503）与 require_rows=False
+    宽松模式行为实证。
     D 组 = rollback 的冲突状态回写必须带 ``AND scheme_id=`` 约束（静态 +
     跨方案同名历史行行为实证）。
 """
@@ -285,10 +287,16 @@ class TestConsistencyRepairReviewDbSingleSource:
             await cr.get_conflicts("sch-x", scan_id="", db=_NoneCursorDB())
         assert exc.value.status_code == 503
 
-    async def test_confirm_restore_write_not_effective_is_503(self, db_conn):
-        """行为实证（假成功路径）：拒绝冲突 → 恢复正文 UPDATE 命中 0 行
-        （章节行不存在）→ 必须 503，**不得**返回 confirmed 假成功。
-        旧实现裸 db.execute 不校验 rowcount，照常返回 200。"""
+    async def test_confirm_restore_section_missing_records_skipped(self, db_conn):
+        """行为实证（R179 三态记账）：拒绝冲突但章节行已不存在 → **不返 503**，
+        也不冒充恢复成功；必须在响应里显式记账：
+          · ``restore_skipped_sections`` 精确列出被跳过的章节（S-GONE）；
+          · ``conflict_restore_results`` 对该冲突标记 scope=none /
+            restored=False / reason=section_missing；
+          · ``restored_sections`` 为空、``rescan_required`` 为 False
+            （正文没变，不得凭空触发重扫 / 重置审核）。
+        旧断言（503）锁的是 R179 之前「UPDATE 命中 0 行即写失败」的语义，
+        已随三态记账失效；本节锁新语义本身，非把 503 换成 200。"""
         _, sid = await _seed_scheme(db_conn, with_section=False)
         snap = await repair_record.create_snapshot(db_conn, sid, [{"section_id": "S-GONE", "content_before": "旧文"}])
         rep = await repair_record.save_repair(
@@ -301,11 +309,23 @@ class TestConsistencyRepairReviewDbSingleSource:
             total_conflicts=1,
             stats={"repaired": 1, "failed": 0, "skipped": 0},
         )
-        with pytest.raises(HTTPException) as exc:
-            await cr.confirm(
-                scheme_id=sid, body={"repair_id": rep["repair_id"], "accepted": [], "rejected": ["C1"]}, db=db_conn
-            )
-        assert exc.value.status_code == 503
+        out = await cr.confirm(
+            scheme_id=sid, body={"repair_id": rep["repair_id"], "accepted": [], "rejected": ["C1"]}, db=db_conn
+        )
+        assert out["status"] == "rejected"
+        assert out["restore_skipped_sections"] == ["S-GONE"]
+        assert out["restored_sections"] == []
+        assert out["conflict_restore_results"] == [
+            {
+                "conflict_id": "C1",
+                "section_id": "S-GONE",
+                "scope": "none",
+                "restored": False,
+                "reason": "section_missing",
+            }
+        ]
+        assert out["rejected_not_restored"] == []
+        assert out["rescan_required"] is False
 
     async def test_confirm_status_write_allows_zero_rows(self, db_conn):
         """宽松模式锁：accepted 的 cid 来自请求体、行可以不存在 →

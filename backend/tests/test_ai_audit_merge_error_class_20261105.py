@@ -476,9 +476,7 @@ class TestErrorClassAggregation:
         await _insert_audit_row(
             db_conn, row_id="c", success=0, error="timed out", error_class="timeout", attempt_count=1
         )
-        await _insert_audit_row(
-            db_conn, row_id="d", success=1, duration=22.0, error_class="", attempt_count=2
-        )
+        await _insert_audit_row(db_conn, row_id="d", success=1, duration=22.0, error_class="", attempt_count=2)
         # 跳过行（非 chat）不得进入任何分母
         await _insert_audit_row(
             db_conn, row_id="e", action="circuit_skipped", success=0, error_class="circuit_skipped", attempt_count=0

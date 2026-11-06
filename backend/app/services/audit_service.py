@@ -41,6 +41,7 @@ CONFIG_ACTIONS: dict[str, str] = {
     "rollback": "回滚配置版本",
     "runtime_switch": "调整运行时厂商开关",
     "key_rotation": "主密钥轮转/密文迁移",
+    "consistency_repair": "归一矛盾配置",
 }
 
 #: detail 字段最大长度（防超长内容把审计表撑大）。

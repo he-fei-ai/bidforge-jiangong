@@ -14,7 +14,7 @@ import logging
 import re
 import uuid
 
-from fastapi import APIRouter, Depends, HTTPException, Query
+from fastapi import APIRouter, Depends, HTTPException, Query, Request
 
 from app.config import FACT_UPLOADS_DIR, settings  # noqa: F401  re-export for tests
 from app.db import get_db, safe_rowcount
@@ -27,6 +27,8 @@ from app.models import (
     FactGroupIn,
     FactGroupUpdate,
     ResolveConflictRequest,
+    # ✅ T-05（2026-11-06）：失败段手动重试请求体
+    RetryFailedFactsRequest,
 )
 
 # 提取项目模块的分类与阈值判定核心（本仓「分类单一事实源」，不重复维护阈值表）
@@ -78,8 +80,17 @@ from app.services.facts_extractor import (
     normalize_key,
     # ✅ R80（2026-10-15）：value_kind 白名单归一（单一事实源，解析/落库/手工共用）
     normalize_value_kind,
+    # ✅ T-05（2026-11-06）：失败段手动重试（绕过退避，复用既有失败段表语义）
+    release_chunk_failures,
     row_field,
     strip_simulated_marker,
+)
+
+# ✅ T-04（2026-11-06）：项目级事实写保护（手工写入 / 后台提取互斥）
+from app.services.facts_write_guard import (
+    FactsWriteConflict,
+    acquire_project_facts_write,
+    release_project_facts_write,
 )
 from app.services.file_parser import (  # noqa: F401  re-export for tests monkeypatch
     SUPPORTED_EXTENSIONS,
@@ -91,7 +102,79 @@ from app.services.file_parser import (  # noqa: F401  re-export for tests monkey
 from app.utils.log_context import new_trace_id, set_context  # noqa: F401
 
 logger = logging.getLogger("global_facts")
-router = APIRouter(prefix="/api/v1/global-facts", tags=["global_facts"])
+
+
+async def _facts_write_scope_project_id(request: Request, db) -> str:
+    """解析写请求所属项目作用域；无法解析时返回 ``""``（由路由自身处理 404/400）。
+
+    覆盖三类入参来源：路径参数 ``fact_id``（单条事实）、Query ``scheme_id`` /
+    ``project_id``、请求体 ``scheme_id`` / ``project_id``（批量接口）。
+    """
+    fact_id = request.path_params.get("fact_id")
+    if fact_id:
+        # 复用既有作用域校验（单一出口）：事实不存在 / 读取异常时回 ""（无锁放行，
+        # 由路由自身给出 404/503），绝不在此另起一份 global_facts 查询副本。
+        try:
+            row = await _assert_fact_in_scheme_scope(db, str(fact_id), "")
+        except Exception:  # noqa: BLE001 - 交给路由自身处理，保持既有响应契约
+            return ""
+        return str(row.get("project_id") or "")
+    sid = (request.query_params.get("scheme_id") or "").strip()
+    if sid:
+        return (await _scheme_project_id(db, sid)) or ""
+    pid = (request.query_params.get("project_id") or "").strip()
+    if pid:
+        return pid
+    try:
+        body = await request.json()
+    except Exception:  # noqa: BLE001 - 无 body / 非 JSON：交给路由自身校验
+        return ""
+    if not isinstance(body, dict):
+        return ""
+    sid = str(body.get("scheme_id") or "").strip()
+    if sid:
+        return (await _scheme_project_id(db, sid)) or ""
+    return str(body.get("project_id") or "").strip()
+
+
+async def _facts_write_guard_dependency(request: Request, db=Depends(get_db)):
+    """T-04：写请求项目级互斥（只读请求直接放行；冲突 → 409 可见错误）。"""
+    if request.method in ("GET", "HEAD", "OPTIONS"):
+        yield
+        return
+    path = request.url.path.rstrip("/")
+    if path.endswith("/danger-check"):
+        # 危大工程判定只读（不改事实），不占用写锁
+        yield
+        return
+    project_id = ""
+    lease = ""
+    try:
+        project_id = await _facts_write_scope_project_id(request, db)
+    except Exception as e:  # noqa: BLE001 - 作用域解析失败不改变原有路由行为（无锁放行）
+        logger.warning("写保护作用域解析失败（本次按无锁执行）: %s", e)
+    if project_id:
+        try:
+            lease = await acquire_project_facts_write(db, project_id, holder=f"{request.method} {path}")
+        except FactsWriteConflict as e:
+            raise HTTPException(
+                status_code=409,
+                detail={"code": "facts_write_conflict", "message": str(e)},
+            )
+    try:
+        yield
+    finally:
+        if lease:
+            await release_project_facts_write(db, project_id, lease)
+
+
+router = APIRouter(
+    prefix="/api/v1/global-facts",
+    tags=["global_facts"],
+    # ✅ T-04（2026-11-06）：任何会改 global_facts 的请求都先拿项目级写锁，
+    #    与后台提取落库（SSE → persist_extraction）使用同一把锁。
+    dependencies=[Depends(_facts_write_guard_dependency)],
+)
 
 # ✅ 单一事实源（2026-10-04）：上传配额不再在本模块各写一份字面量，
 #    统一从 settings（可被 .env 覆盖）派生，并经
@@ -400,6 +483,62 @@ def _chapter_stats_for_items(items: list[dict]) -> dict:
     return out
 
 
+def _chapter_stats_from_completeness(rows: list[dict], comp: dict) -> dict:
+    """T-03（2026-11-06）：在已算出的字段完整性结果之上派生章节统计。
+
+    与 :func:`_chapter_stats_for_items` 输出同形，但**不重复扫描文本**：
+    字段命中结果完全复用调用方传入的 ``comp``（同一批已归一行的
+    ``chapter_field_completeness`` 产物），仅再做一次 O(n) 的属性/来源计数。
+    用途是「全量口径」兼容字段 —— 主口径已切到可注入子集，需在不触发
+    第二次章节统计（既有 ``test_stats_computed_once_only`` 锚点）的前提下
+    回传改造前的数字。
+    """
+    by_attr: dict[str, int] = {k: 0 for k in FACT_ATTR_TITLES}
+    by_kind: dict[str, int] = {k: 0 for k in SOURCE_KIND_TITLES}
+    shared_by_chapter: dict[str, int] = {}
+    for r in rows:
+        a = r.get("fact_attr") or ""
+        if a in by_attr:
+            by_attr[a] += 1
+        k = r.get("source_kind") or ""
+        if k in by_kind:
+            by_kind[k] += 1
+        if r.get("is_shared"):
+            ch_key = str(r.get("chapter") or "")
+            shared_by_chapter[ch_key] = shared_by_chapter.get(ch_key, 0) + 1
+    chapters = []
+    for key in CHAPTER_ORDER:
+        c = comp["chapters"][key]
+        chapters.append(
+            {
+                "order": c["chapter"],
+                "key": key,
+                "title": c["title"],
+                "count": c["fact_count"],
+                "coverage": c["field_coverage"],
+                "total_fields": len(c["fields"]),
+                "covered_fields": c["covered_fields"],
+                "missing_fields": c["missing_fields"],
+                "shared_count": shared_by_chapter.get(key, 0),
+            }
+        )
+    known = sum(comp["chapters"][k]["fact_count"] for k in CHAPTER_ORDER)
+    return {
+        "chapters": chapters,
+        "totals": {
+            "facts": len(rows),
+            "uncategorized": max(0, len(rows) - known),
+            "total_fields": comp["total_fields"],
+            "covered_fields": comp["covered_fields"],
+            "coverage": comp["coverage"],
+            "missing_chapters": comp["missing_chapters"],
+        },
+        "by_fact_attr": by_attr,
+        "by_source_kind": by_kind,
+        "shared_count": sum(1 for r in rows if r.get("is_shared")),
+    }
+
+
 async def _scheme_project_id(db, scheme_id: str) -> str | None:
     """读取「方案所属 project_id」的**唯一出口**（F6 续 · 2026-10-08）。
 
@@ -616,6 +755,107 @@ async def _load_fact_rows(db, scheme_id: str, project_id: str, *, injectable_onl
     return [dict(r) for r in await cur.fetchall()]
 
 
+# =========================================================================
+# ✅ R179 T-01（2026-11-05）：确认/裁决的「同名可注入事实」唯一性闸门
+#
+# 审计 T-01：`resolve_fact` 与 `resolve_conflict` 只校验**当前行**的模拟值 /
+# 矛盾 / 过期三项闸门，从不看「同作用域是否已有另一条**同名且取值不同**的
+# 可注入行」。两条同名不同值事实都确认后，二者**同时**满足注入/导出条件
+# （项目共享行与方案私有行共存是既定契约），正文与成稿会拿到两个互相矛盾的
+# 值 —— 用户点了两次「确认」、界面显示全部就绪，却没有任何信号告诉他事实集
+# 自相矛盾（静默失真）。
+#
+# 口径（最小、可解释）：
+#   · 只拦「已可注入」的同名行（is_resolved=1 / 无矛盾 / 非模拟 / 不过期）；
+#     未确认行本来就不会进正文，不构成失真；
+#   · 取值**逐字相同**不拦（重复登记只是冗余，不产生矛盾结论）；
+#   · 作用域与读路径同源：方案私有 → 本方案 + 同项目共享；项目共享 → 仅其他
+#     共享行（别的方案私有行与本方案无关，不越界拦截）；
+#   · 命中时不改库、返回 409 + 重复行 id，用户删除/合并后重试 —— 不做
+#     「自动改写用户数据」这种更大的副作用。
+# =========================================================================
+
+
+def _norm_fact_text(text: str) -> str:
+    """事实名/取值比较归一（去全部空白 + 小写）。"""
+    return re.sub(r"[\s\u3000]+", "", str(text or "")).strip().lower()
+
+
+def _normalize_page_ref(value) -> int | None:
+    """T-02：``page_ref`` 统一为 ``int | None``（类型与前端 ``number|null`` 对齐）。
+
+    历史写入路径存在两种「无页码」表示：``NULL``（新行）与 ``""``（旧数据 /
+    跨方案复制）。旧读路径用 ``r.get("page_ref") or ""`` 把两者都回落成空串，
+    与类型契约冲突（前端会把 ``""`` 当合法页码渲染）。现读取侧一并归一：
+    ``None`` / ``""`` / 非法文本 → ``None``；数字字符串 → ``int``。
+    """
+    if value is None or isinstance(value, bool):
+        return None
+    if isinstance(value, int):
+        return value
+    text = str(value).strip()
+    if not text:
+        return None
+    try:
+        return int(text)
+    except (TypeError, ValueError):
+        return None
+
+
+async def _assert_no_conflicting_injectable_duplicate(db, fact_id: str, row: dict, *, name: str, value: str) -> None:
+    """T-01 闸门：同作用域已有同名但取值不同的可注入行 ⇒ 409（不改库）。"""
+    norm_name = _norm_fact_text(name)
+    norm_value = _norm_fact_text(value)
+    if not norm_name:
+        return
+    sid = str(row.get("scheme_id") or "")
+    pid = str(row.get("project_id") or "")
+    try:
+        peers = await _load_fact_rows(db, sid, pid, injectable_only=True)
+    except HTTPException as exc:
+        # 作用域校验 404（方案/项目不存在）：该作用域没有可注入的同名行，
+        # 无从产生「双值注入」，放行并留下日志（不是静默吞掉）。
+        if exc.status_code == 404:
+            logger.info("事实唯一性闸门：作用域不存在，跳过同名校验（scheme_id=%s project_id=%s）", sid, pid)
+            return
+        raise
+    except Exception as exc:  # noqa: BLE001 - 闸门读失败必须 fail-closed
+        logger.warning("事实唯一性闸门读取失败（拒绝确认，fail-closed）: %s", exc)
+        raise HTTPException(503, "事实校验暂时不可用，请稍后重试") from exc
+    dup_ids: list[str] = []
+    for peer in peers:
+        peer_id = str(peer.get("id") or "")
+        if not peer_id or peer_id == fact_id:
+            continue
+        # 项目共享事实：仅比对其他共享行（别的方案私有行不参与本次注入）
+        if not sid and str(peer.get("scheme_id") or ""):
+            continue
+        pname, pvalue = _fact_name_value(peer)
+        if _norm_fact_text(pname) != norm_name:
+            continue
+        if _norm_fact_text(pvalue) == norm_value:
+            continue
+        dup_ids.append(peer_id)
+    if dup_ids:
+        logger.warning(
+            "global_facts 409 唯一性闸门：fact_id=%s 名称「%s」与可注入事实 %s 取值不同",
+            fact_id,
+            name,
+            dup_ids,
+        )
+        raise HTTPException(
+            409,
+            {
+                "code": "duplicate_injectable_fact",
+                "message": (
+                    f"已存在同名事实且取值不同（事实名：{name}），"
+                    "两条同时确认会让正文拿到互相矛盾的值；请删除或合并重复项后再确认"
+                ),
+                "duplicate_fact_ids": dup_ids[:20],
+            },
+        )
+
+
 @router.get("")
 async def list_facts(
     scheme_id: str = Query(""),
@@ -776,7 +1016,9 @@ async def list_facts(
             #    补齐以保证「刷新 == 流式」数据一致（不丢溯源信息）。
             "value_unit": r.get("value_unit") or "",
             "evidence_kind": r.get("evidence_kind") or "",
-            "page_ref": r.get("page_ref") or "",
+            # ✅ T-02（2026-11-06）：无页码统一为 None（旧数据的 "" 读取侧归一），
+            #    与 types/facts.ts 的 `page_ref?: number | null` 契约一致。
+            "page_ref": _normalize_page_ref(r.get("page_ref")),
             "zone_type": r.get("zone_type") or "",
             "norm_group": r.get("norm_group") or "",
             "chunk_hash": r.get("chunk_hash") or "",
@@ -1004,47 +1246,55 @@ async def list_facts_by_chapters(
                          "missing_fields","items":[...]}], "totals": {...}}``
     """
     rows = await _load_fact_rows(db, scheme_id, project_id)
-    # ✅ BUG 修复（2026-10-08 · 全局事实模块收口 F1）：旧实现把 ``title`` 同时当
-    #    「事实名」和「取值」喂给维度派生：
-    #        dims = _fact_dimension_fields(r, title, title, ...)
-    #    而 ``dimensions_for_row`` 的兜底是「value 为空才回解 content」，非空的
-    #    title 会把真正的取值挡掉 —— ``- **基坑开挖深度**: 12.5m`` 在
-    #    ``GET /global-facts`` 里 fact_attr=quantitative，在本端点里却是
-    #    qualitative（``classify_fact_attr`` 的输入正是 (name, value)，值没了就
-    #    只能判定性）。更糟的是 ``r.update(dims)`` 会把派生结果**先烘焙**进行，
-    #    后续 ``chapter_of_row`` / ``dimensions_for_row`` 一律「库值优先」，
-    #    于是错误值直接参与分章，直到下一次重新提取才可能纠正。
-    #    另两处同族缺陷：① 行内没有 ``name``/``value`` 键，而
-    #    ``chapter_field_completeness`` 正是按 ``name`` + 取值拼文本判定字段覆盖，
-    #    事实名只落在 ``title`` 列 → 只写在名称里的字段（如「基坑深度」）永远
-    #    匹配不上，``covered_fields`` 偏低、``missing_fields`` 虚高（本端点最核心
-    #    的产出）；② ``_chapter_stats_for_items(enriched)`` 被调用两次，
-    #    内部还会各自再跑一遍 ``nine_chapter_summary`` → 全量扫描 4 次。
-    #    现与 ``list_facts`` 共用 _fact_name_value 唯一出口，两个口径必然一致。
-    enriched = []
-    for r in rows:
-        r = dict(r)
-        content = r.get("content") or ""
-        _n, _v = _fact_name_value(r)
-        r["name"] = _n or r.get("title") or ""
-        r["value"] = _v or content
-        dims = _fact_dimension_fields(
-            r,
-            r["name"],
-            r["value"],
-            r.get("fact_key") or "",
-            _parse_source_ref(r.get("source_ref", "") or ""),
-            fact_type=(r.get("fact_type") or "") or CATEGORY_TO_FACT_TYPE.get(r.get("category", ""), ""),
-        )
-        r.update(dims)
-        enriched.append(r)
-    # 九大章节统计（含 by_fact_attr / by_source_kind）只算一次，
-    # 字段完整性差集复用同一批已归一的行。
-    stats = _chapter_stats_for_items(enriched)
+    # ✅ T-03（2026-11-06）：覆盖度此前按「全量事实」统计，把冲突未决、
+    #    未确认、模拟值、过期事实一并算作「已覆盖」——页面显示 100% 覆盖，
+    #    正文生成却因可注入闸门拿不到这些事实。现主口径改为「可注入事实」，
+    #    全量口径以 `*_all` / `totals_all` **加法式**保留，前端与历史报告
+    #    仍可读到旧数字，不会突然跳变。
+    rows_injectable = await _load_fact_rows(db, scheme_id, project_id, injectable_only=True)
+
+    def _enrich_chapter_rows(source_rows: list[dict]) -> list[dict]:
+        enriched_rows = []
+        for r in source_rows:
+            r = dict(r)
+            content = r.get("content") or ""
+            _n, _v = _fact_name_value(r)
+            r["name"] = _n or r.get("title") or ""
+            r["value"] = _v or content
+            dims = _fact_dimension_fields(
+                r,
+                r["name"],
+                r["value"],
+                r.get("fact_key") or "",
+                _parse_source_ref(r.get("source_ref", "") or ""),
+                fact_type=(r.get("fact_type") or "") or CATEGORY_TO_FACT_TYPE.get(r.get("category", ""), ""),
+            )
+            r.update(dims)
+            enriched_rows.append(r)
+        return enriched_rows
+
+    enriched = _enrich_chapter_rows(rows)
+    enriched_injectable = _enrich_chapter_rows(rows_injectable)
+    # 可注入口径（主口径）：九大章节统计（含 by_fact_attr / by_source_kind）
+    # 与字段完整性差集均只算一次，复用同一批已归一的行。
+    stats = _chapter_stats_for_items(enriched_injectable)
     summary = {"chapters": stats["chapters"], "totals": stats["totals"]}
-    comp = chapter_field_completeness(enriched)
+    comp = chapter_field_completeness(enriched_injectable)
+    # 全量口径（兼容口径）：加法式保留，供旧调用方 / 历史口径核对。
+    # ✅ 既有锚点 `test_stats_computed_once_only` 要求 `_chapter_stats_for_items`
+    #    在本端点只出现一次：全量口径改为复用同一个字段完整性产物派生，
+    #    不再二次执行章节统计；全部可注入时（常见路径）两者直接同源复用。
+    if len(enriched_injectable) == len(enriched):
+        comp_all = comp
+        stats_all = stats
+    else:
+        comp_all = chapter_field_completeness(enriched)
+        stats_all = _chapter_stats_from_completeness(enriched, comp_all)
+    injectable_ids = {r["id"] for r in enriched_injectable}
 
     # 把每条事实挂回它的章节（未分类的归入 __uncategorized，便于发现遗漏）
+    # items 仍返回全量（附 `is_injectable` 标记），用户可据此定位「为何没进正文」；
+    # 章条目的 count / facts / coverage 已切到可注入口径。
     by_chapter: dict[str, list[dict]] = {k: [] for k in CHAPTER_ORDER}
     uncategorized: list[dict] = []
     for r in enriched:
@@ -1061,6 +1311,8 @@ async def list_facts_by_chapters(
             "is_simulated": bool(r.get("is_simulated", 0)),
             "is_resolved": bool(r.get("is_resolved", 1)),
             "is_stale": bool(r.get("is_stale", 0)),
+            # ✅ T-03：该条事实是否满足注入闸门（与正文生成同一口径）。
+            "is_injectable": r["id"] in injectable_ids,
         }
         ch = r.get("chapter") or ""
         if ch in by_chapter:
@@ -1072,7 +1324,10 @@ async def list_facts_by_chapters(
     for ch_info in summary["chapters"]:
         key = ch_info["key"]
         cp = comp["chapters"][key]
+        cp_all = comp_all["chapters"][key]
+        row_all = next((ch for ch in stats_all["chapters"] if ch["key"] == key), {})
         _items = by_chapter.get(key, [])
+        _items_injectable = [it for it in _items if it.get("is_injectable")]
         chapters_out.append(
             {
                 **ch_info,
@@ -1089,10 +1344,21 @@ async def list_facts_by_chapters(
                 #      清单形态仍由 covered_fields 提供）；
                 #    · uncategorized：本章内未落到 22 类 category 的事实数
                 #      （category 为空或 "other"），用于识别「已分章但未细分」的残留。
-                "facts": len(_items),
+                # ✅ T-03：facts/covered/uncategorized 随主口径切到可注入子集；
+                #    items 保持全量（含 is_injectable），并加法式回传全量口径。
+                "facts": len(_items_injectable),
                 "covered": len(cp["covered_fields"]),
-                "uncategorized": sum(1 for it in _items if (it.get("category") or "") in ("", "other")),
+                "uncategorized": sum(1 for it in _items_injectable if (it.get("category") or "") in ("", "other")),
                 "items": _items,
+                # ---- 全量口径（兼容字段，默认值语义与改造前一致）----
+                "count_all": row_all.get("count", len(_items)),
+                "coverage_all": row_all.get("coverage", 0.0),
+                "facts_all": len(_items),
+                "covered_all": len(cp_all["covered_fields"]),
+                "covered_fields_all": cp_all["covered_fields"],
+                "missing_fields_all": cp_all["missing_fields"],
+                "shared_count_all": row_all.get("shared_count", 0),
+                "uncategorized_all": sum(1 for it in _items if (it.get("category") or "") in ("", "other")),
             }
         )
 
@@ -1101,16 +1367,30 @@ async def list_facts_by_chapters(
     #    旧实现只回 total_fields / covered_fields（前端读 fields/covered 恒 undefined）。
     #    采用**加法式**兼容：新增 fields / covered 别名，旧键原样保留。
     _totals = summary["totals"]
+    _totals_all = stats_all["totals"]
     return {
         "chapters": chapters_out,
         "uncategorized": uncategorized,
+        # ✅ T-03：顶层未分类清单保持全量；新增可注入未分类计数（加法式）。
+        "uncategorized_injectable": sum(1 for it in uncategorized if it.get("is_injectable")),
         "totals": {
             **_totals,
             "fields": _totals.get("total_fields", 0),
             "covered": _totals.get("covered_fields", 0),
+            # ---- 全量口径（兼容字段）----
+            "facts_all": _totals_all.get("facts", 0),
+            "uncategorized_all": _totals_all.get("uncategorized", 0),
+            "total_fields_all": _totals_all.get("total_fields", 0),
+            "covered_fields_all": _totals_all.get("covered_fields", 0),
+            "coverage_all": _totals_all.get("coverage", 0.0),
+            "missing_chapters_all": _totals_all.get("missing_chapters", []),
+            "totals_all": _totals_all,
         },
         "by_fact_attr": stats["by_fact_attr"],
         "by_source_kind": stats["by_source_kind"],
+        # ---- 全量口径（兼容字段）----
+        "by_fact_attr_all": stats_all["by_fact_attr"],
+        "by_source_kind_all": stats_all["by_source_kind"],
     }
 
 
@@ -1246,9 +1526,15 @@ def _normalize_fact_category(raw) -> str:
 
 
 def _norm_dup_value(name: str, content: str) -> str:
-    """同名事实的取值归一：剥离模拟值标记后去掉空白，并统一全/半角冒号。"""
+    """同名事实的取值归一：剥离模拟值标记后去掉空白，并统一全/半角冒号。
+
+    ✅ T-01（2026-11-06）：与确认/裁决闸门共用 ``_norm_fact_text``（去空白 +
+    小写），保证「新增去重」与「确认拦截」对同值的判定口径完全一致；
+    此前新增用大小写敏感比较，``C30`` 与 ``c30`` 会被当成两个取值，
+    而确认闸门按小写视为同值 —— 同一条数据两条写入口径不同。
+    """
     _, val = _fact_name_value({"title": name or "", "content": content or ""})
-    return re.sub(r"\s+", "", str(val or "").replace("：", ":"))
+    return _norm_fact_text(str(val or "").replace("：", ":"))
 
 
 async def _filter_create_fact_duplicates(
@@ -2053,7 +2339,7 @@ async def update_fact(
             old.get("value_unit") or "",
             old.get("fact_type") or "",
             old.get("evidence_kind") or "",
-            old.get("page_ref"),
+            _normalize_page_ref(old.get("page_ref")),
             old.get("zone_type") or "",
             int(old.get("is_safety_critical") or 0),
             old.get("norm_group") or "",
@@ -2246,7 +2532,9 @@ async def resolve_fact(
     scheme_scope = scheme_id.strip() if isinstance(scheme_id, str) else ""
     await _guard_fact_write_scope(db, fact_id, scheme_scope)
     cur = await db.execute(
-        "SELECT scheme_id, project_id, is_simulated, has_conflict, is_stale FROM global_facts WHERE id=?", (fact_id,)
+        "SELECT scheme_id, project_id, title, content, fact_key, is_simulated, has_conflict, is_stale"
+        " FROM global_facts WHERE id=?",
+        (fact_id,),
     )
     _require_fact_cursor(cur, "事实确认·闸门预检")
     row = await cur.fetchone()
@@ -2263,6 +2551,10 @@ async def resolve_fact(
     if bool(row["is_stale"]):
         logger.warning("global_facts 409 闸门：fact_id=%s 来源已变化", fact_id)
         raise HTTPException(409, "事实来源资料已变化，请重新提取或先编辑核对")
+
+    # ✅ R179 T-01：确认前校验「同名且取值不同」的可注入事实，避免两条同时注入
+    _name, _value = _fact_name_value(dict(row))
+    await _assert_no_conflicting_injectable_duplicate(db, fact_id, dict(row), name=_name, value=_value)
 
     cur = await db.execute(
         "UPDATE global_facts SET is_resolved=1, is_stale=0, " "updated_at=datetime('now','localtime') WHERE id=?",
@@ -2528,6 +2820,11 @@ async def resolve_conflict(
     # 前端仍显示"低置信度"标签，与"已人工确认"的语义冲突。
     # 人工选择模拟候选只完成「冲突裁决」，不等于确认了真实值；保持未审核闸门。
     resolved_flag = 0 if is_sim else 1
+    # ✅ R179 T-01：裁决为「可注入」时，同样校验同名不同值的可注入事实
+    #    （候选为模拟值时 resolved_flag=0、仍不进正文，无需拦截）。
+    if resolved_flag == 1:
+        _dup_name = str(row["title"] or "").strip() or _fact_name_value(dict(row))[0]
+        await _assert_no_conflicting_injectable_duplicate(db, fact_id, dict(row), name=_dup_name, value=new_value)
     # ✅ BUG 修复（2026-10-08 · 全局事实模块收口）：**裁决换值必须重派生九大章节维度**。
     #    本端点是全仓第 4 条「改事实值」的写路径，R45 把「改值后重算
     #    chapter / fact_attr」补到了条目级更新与分组重建两条路径上，却漏了这里
@@ -2640,6 +2937,37 @@ async def clear_all_facts(data: ClearFactsRequest, db=Depends(get_db)):
     await _invalidate_fact_scope_cache(db, scheme_id, project_id)
     logger.info("已清除方案 %s 可见范围的全局事实（统计 %d 条 · 实删 %d 条）并重置提取进度", scheme_id, total, deleted)
     return {"ok": True, "deleted": deleted}
+
+
+@router.post("/retry-failed")
+async def retry_failed_segments(data: RetryFailedFactsRequest, db=Depends(get_db)):
+    """T-05（2026-11-06）：立即重试处于失败 / 退避窗口内的提取段。
+
+    语义说明：
+    - 只把 ``facts_chunk_failures.next_retry_at`` 置空（立即可重试），**不**
+      伪造 ``facts_extracted_chunks`` 完成记录，也**不**删除失败历史；
+    - 下一轮增量提取会重新进入这些段；再次失败时按既有指数退避续算；
+    - 响应中的 ``skipped_source`` / ``diagnostics`` 为诊断字段（加法式），
+      前端可据此提示「释放了几段 / 其中几段绕过了退避」。
+    """
+    sid = (data.scheme_id or "").strip()
+    pid = (data.project_id or "").strip()
+    if not sid and not pid:
+        raise HTTPException(400, "需要 scheme_id 或 project_id")
+    if sid and not pid:
+        # ✅ F6 续：反查走 _scheme_project_id 单一出口（None=方案不存在；""=未绑定项目）
+        _rp = await _scheme_project_id(db, sid)
+        if _rp is None:
+            raise HTTPException(404, "方案不存在")
+        pid = _rp
+    if not pid:
+        raise HTTPException(400, "该方案未绑定项目，无法按项目作用域重试失败段")
+    hashes = [str(h).strip() for h in (data.chunk_hashes or []) if str(h).strip()]
+    result = await release_chunk_failures(db, pid, sid, chunk_hashes=hashes)
+    result["ok"] = True
+    result["scheme_id"] = sid
+    result["project_id"] = pid
+    return result
 
 
 @router.post("/batch-resolve")

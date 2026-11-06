@@ -204,12 +204,17 @@ class TestChapterAliasTable:
 # C4 · 分步生成并发窗口：窗口宽度 == 实际并发数
 # ===========================================================================
 _WINDOW_SRC_RE = {
-    "window_derived": re.compile(r"_window\s*=\s*max\(1,\s*OUTLINE_CHAPTER_CONCURRENCY\)"),
+    # ✅ R179 U5（2026-11-05）：并发读数唯一出口改为 ai_warmup.stage_concurrency("outline")，
+    #    开关关（返回 0）时由 `or` 回落 OUTLINE_CHAPTER_CONCURRENCY = 逐字现状。
+    "stage_concurrency_single_exit": re.compile(
+        r'_u5_outline_conc\s*=\s*ai_warmup\.stage_concurrency\(\s*"outline"\s*\)\s*or\s*OUTLINE_CHAPTER_CONCURRENCY'
+    ),
+    "window_derived": re.compile(r"_window\s*=\s*max\(1,\s*_u5_outline_conc\)"),
     "step_is_window_times_merge_k": re.compile(r"_round_step\s*=\s*max\(1,\s*_window\)\s*\*\s*_merge_k"),
     "loop_steps_by_round": re.compile(r"for\s+batch_start\s+in\s+range\(0,\s*_total,\s*_round_step\)"),
     "window_bounded_fill": re.compile(r"while\s+_u\s*<\s*_total\s+and\s+len\(_window_units\)\s*<\s*_window"),
     "order_preserving_gather": re.compile(r"results\s*=\s*await\s+asyncio\.gather\(\s*\*\["),
-    "semaphore_licensed_by_concurrency": re.compile(r"asyncio\.Semaphore\(OUTLINE_CHAPTER_CONCURRENCY\)"),
+    "semaphore_licensed_by_concurrency": re.compile(r"asyncio\.Semaphore\(_u5_outline_conc\)"),
 }
 
 
@@ -225,7 +230,7 @@ class TestConcurrencyWindowInvariant:
         """_window 从派生到窗口填充之间不得被重新赋值（改了宽度但没改步进取整
         是最阴的回归形态：步进取整和实际填充量会脱钩）。"""
         src = inspect.getsource(sh.generate_outline)
-        reassigns = re.findall(r"(?m)^\s*_window\s*=\s*(?!\s*max\(1,\s*OUTLINE_CHAPTER_CONCURRENCY\))", src)
+        reassigns = re.findall(r"(?m)^\s*_window\s*=\s*(?!\s*max\(1,\s*_u5_outline_conc\))", src)
         assert not reassigns, f"_window 被重复赋值: {reassigns}"
 
     @pytest.mark.parametrize(
@@ -309,5 +314,10 @@ class TestConcurrencyWindowInvariant:
         src = inspect.getsource(sh.generate_outline)
         m = re.search(r"asyncio\.Semaphore\(([^)]+)\)", src)
         assert (
-            m and m.group(1).strip() == "OUTLINE_CHAPTER_CONCURRENCY"
-        ), f"信号量许可必须直接由配置并发度派生，实测: {m.group(1) if m else None}"
+            m and m.group(1).strip() == "_u5_outline_conc"
+        ), f"信号量许可必须与 _window 同源，实测: {m.group(1) if m else None}"
+        # 同源：_u5_outline_conc 必须由阶段读数派生，开关关时回落到配置并发度
+        assert re.search(
+            r'_u5_outline_conc\s*=\s*ai_warmup\.stage_concurrency\(\s*"outline"\s*\)\s*or\s*OUTLINE_CHAPTER_CONCURRENCY',
+            src,
+        ), "信号量许可来源必须经 stage_concurrency 单一出口并回落配置并发度"

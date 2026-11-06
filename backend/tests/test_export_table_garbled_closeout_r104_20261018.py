@@ -327,6 +327,8 @@ async def test_export_docx_no_pipe_garbling(db_conn):
             "config": {"allow_pil_fallback": True},
             "chart_images": [],
             "fe_codes": [],
+            # ✅ B-15（R182）：机制用例显式覆写高风险拦截
+            "override_high_issues": True,
         },
         db=db_conn,
     )
@@ -379,6 +381,8 @@ async def test_export_docx_separator_first_with_caption(db_conn):
             "config": {"allow_pil_fallback": True},
             "chart_images": [],
             "fe_codes": [],
+            # ✅ B-15（R182）：机制用例显式覆写高风险拦截
+            "override_high_issues": True,
         },
         db=db_conn,
     )

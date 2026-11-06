@@ -1,0 +1,155 @@
+"""项目级事实写保护（T-04 · 2026-11-06）。
+
+背景：全局事实有两条写入来源——
+1) 用户界面手工新增 / 编辑 / 确认 / 裁决 / 清空（REST → routers/global_facts.py）；
+2) 后台 AI 提取结果落库（SSE → facts_extractor.persist_extraction）。
+
+两条链路都遵循「读取现有事实 → 计算保留/删除/插入 → 提交」，升级前没有
+任何互斥：手工保存与提取落库并发时，后提交者会覆盖先提交者的结果（典型
+症状是用户刚确认的事实被重新提取打回、或手工新增的行被 DELETE 清掉）。
+
+本模块提供**项目级**写保护（同一项目下不同方案也互斥，因为项目共享层
+``scheme_id=''`` 是双方都会写的作用域）：
+
+- 进程内：按「事件循环 + 项目」隔离的 ``asyncio.Lock``，避免同进程协程重入；
+  （按 loop 隔离是为了让每个事件循环（含测试）拥有独立锁，不触发
+  "Lock bound to a different event loop"）。
+- 数据库层：``facts_write_leases`` 租约表（``INSERT ... ON CONFLICT`` 原子抢占，
+  租约超时后可被后来者抢占），覆盖多 worker 场景；进程崩溃不会永久锁死。
+
+冲突时抛 ``FactsWriteConflict``，由调用方转成可见的 409，而不是静默后写覆盖。
+"""
+
+from __future__ import annotations
+
+import asyncio
+import logging
+import threading
+import uuid
+from contextlib import asynccontextmanager
+from datetime import datetime, timedelta
+from typing import AsyncIterator
+
+logger = logging.getLogger(__name__)
+
+#: 进程内等待上限（秒）。超时即判定冲突，避免请求无限挂起。
+LOCK_WAIT_SECONDS = 20.0
+#: 数据库租约有效期（秒）。进程崩溃/连接中断后，过期租约可被抢占。
+LEASE_TTL_SECONDS = 300
+
+_LOCKS: dict[tuple[int, str], asyncio.Lock] = {}
+_LOCKS_GUARD = threading.Lock()
+
+
+class FactsWriteConflict(RuntimeError):
+    """事实写入冲突：同一项目已有其它写入方持有锁。"""
+
+    def __init__(self, project_id: str, holder: str, reason: str = "locked"):
+        self.project_id = str(project_id or "")
+        self.holder = str(holder or "")
+        self.reason = reason
+        super().__init__(
+            f"项目事实正在被「{self.holder or '其它写入'}」写入，请稍后重试" f"（project_id={self.project_id or '-'}）"
+        )
+
+
+def _lock_for(project_id: str) -> asyncio.Lock:
+    loop = asyncio.get_running_loop()
+    key = (id(loop), str(project_id or ""))
+    with _LOCKS_GUARD:
+        lock = _LOCKS.get(key)
+        if lock is None:
+            lock = asyncio.Lock()
+            _LOCKS[key] = lock
+        return lock
+
+
+def _now() -> str:
+    return datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+
+
+async def _acquire_lease(db, project_id: str, token: str, holder: str) -> str:
+    """原子抢占数据库租约；成功返回当前持有者描述，失败抛 FactsWriteConflict。"""
+    cutoff = (datetime.now() - timedelta(seconds=LEASE_TTL_SECONDS)).strftime("%Y-%m-%d %H:%M:%S")
+    now = _now()
+    # 一条语句完成「空闲→插入 / 过期→抢占 / 未过期→不动」，避免 TOCTOU。
+    await db.execute(
+        "INSERT INTO facts_write_leases (project_id, token, holder, acquired_at) "
+        "VALUES (?, ?, ?, ?) "
+        "ON CONFLICT(project_id) DO UPDATE SET "
+        "token=excluded.token, holder=excluded.holder, acquired_at=excluded.acquired_at "
+        "WHERE facts_write_leases.acquired_at < ?",
+        (project_id, token, holder, now, cutoff),
+    )
+    # 租约必须是**已提交**状态，其它连接才看得见（这是 DB 层互斥生效的前提）。
+    await db.commit()
+    cur = await db.execute("SELECT token, holder FROM facts_write_leases WHERE project_id=?", (project_id,))
+    row = await cur.fetchone()
+    if not row or str(row["token"] if isinstance(row, dict) else row[0]) != token:
+        current_holder = ""
+        if row:
+            current_holder = str(row["holder"] if isinstance(row, dict) else row[1])
+        raise FactsWriteConflict(project_id, current_holder, "lease_held")
+    return holder
+
+
+async def _release_lease(db, project_id: str, token: str) -> None:
+    try:
+        await db.execute("DELETE FROM facts_write_leases WHERE project_id=? AND token=?", (project_id, token))
+        await db.commit()
+    except Exception as e:  # noqa: BLE001 - 释放失败不能掩盖业务结果，租约到点自动失效
+        logger.warning("释放事实写租约失败（将依赖 TTL 自动失效）: %s", e)
+
+
+async def acquire_project_facts_write(db, project_id: str, *, holder: str = "") -> str:
+    """获取项目级事实写入权，返回租约 token（配合 ``release_project_facts_write``）。
+
+    Args:
+        db: 当前请求/提取链路使用的数据库连接。
+        project_id: 项目作用域；空值表示未绑定项目（此时跳过保护，保持旧行为）。
+        holder: 便于排查的写入方描述（如 ``POST /global-facts`` / ``ai_extraction``）。
+
+    Raises:
+        FactsWriteConflict: 进程内等待超时，或数据库租约已被其它进程持有。
+    """
+    pid = str(project_id or "")
+    if not pid:
+        return ""
+    lock = _lock_for(pid)
+    try:
+        await asyncio.wait_for(lock.acquire(), timeout=LOCK_WAIT_SECONDS)
+    except asyncio.TimeoutError as e:
+        raise FactsWriteConflict(pid, holder, "lock_wait_timeout") from e
+    token = uuid.uuid4().hex
+    try:
+        await _acquire_lease(db, pid, token, holder)
+    except Exception:
+        lock.release()
+        raise
+    return token
+
+
+async def release_project_facts_write(db, project_id: str, token: str) -> None:
+    """释放项目级事实写入权（幂等；token 为空时只释放进程内锁）。"""
+    pid = str(project_id or "")
+    if not pid:
+        return
+    if token:
+        await _release_lease(db, pid, token)
+    lock = _lock_for(pid)
+    if lock.locked():
+        try:
+            lock.release()
+        except RuntimeError:
+            # 锁不属于当前任务或已释放 —— 不影响业务结果
+            pass
+
+
+@asynccontextmanager
+async def project_facts_write_guard(db, project_id: str, *, holder: str = "") -> AsyncIterator[str]:
+    """``async with`` 形式：进入即抢锁，退出必释放（含异常路径）。"""
+    token = await acquire_project_facts_write(db, project_id, holder=holder)
+    try:
+        yield token
+    finally:
+        await release_project_facts_write(db, project_id, token)

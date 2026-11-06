@@ -399,7 +399,8 @@ async def duplicate_scheme(project_id: str, scheme_id: str, db=Depends(get_db)):
                 s.get("value_unit", ""),
                 s.get("fact_type", ""),
                 s.get("evidence_kind", ""),
-                s.get("page_ref", ""),
+                # ✅ T-02（2026-11-06）：无页码写 None，不再把旧数据的 "" 复制成新脏值
+                s.get("page_ref") or None,
                 s.get("zone_type", ""),
                 s.get("is_safety_critical", 0),
                 s.get("norm_group", ""),

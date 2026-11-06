@@ -27,6 +27,7 @@ from app.routers import (
     review_autofix,
     scheme_catalog,
     schemes,
+    scoring,
     sections,
     sse_handlers,
     system,
@@ -349,6 +350,16 @@ async def lifespan(app: FastAPI):
     except Exception as e:
         logger.warning("启动死配置报告失败（不影响服务）: %s", e)
 
+    # ✅ R179 U5（2026-11-05）：分组预热编排配置自检 —— 只读配置、不发起 AI 调用。
+    #    开关关闭 → status=disabled/equivalent=verbatim（逐字现状）；
+    #    开关打开但阶段上限=1 → WARNING「等于未开启」（enabled_but_no_gain）。
+    try:
+        from app.services.ai.warmup import log_config_selfcheck
+
+        log_config_selfcheck()
+    except Exception as e:
+        logger.warning("U5 预热配置自检失败（不影响服务）: %s", e)
+
     # ✅ 2026-10-05：Provider 运行时状态预热（配额冷却 / 熔断）——
     #    补齐「重启即遗忘」缺口：cool_until 与 circuit breaker state 是
     #    进程内 dict，重启发生在冷却/熔断窗口内时会「蒸发」；启动时
@@ -496,6 +507,7 @@ for r in (
     bid_analysis,
     doc_pipeline,
     prompts,
+    scoring,
 ):
     app.include_router(r.router)
 
@@ -516,11 +528,14 @@ async def health():
     # ✅ B1-4（R176 · 2026-11-04）：`_migrate` 的非致命失败不再只停留在日志里 ——
     #    迁移降级状态在此显式暴露（status=degraded + 明细）。无失败时返回体
     #    与引入前**逐字一致**（status=ok），既有探活/网关零影响。
-    from app.db import migration_status
+    from app.db import migration_status, schema_status
 
     mig = migration_status()
-    if mig["degraded"]:
-        return {"status": "degraded", "version": APP_VERSION, "migrations": mig}
+    sch = schema_status()
+    if mig["degraded"] or not sch["ok"]:
+        # ✅ R181（N-10）：结构不一致（缺表/缺列/版本不匹配）与迁移降级同口径暴露，
+        #    旧前端只读 status/version，新增字段为加法式扩展，不影响既有探活。
+        return {"status": "degraded", "version": APP_VERSION, "migrations": mig, "schema": sch}
     return {"status": "ok", "version": APP_VERSION}
 
 

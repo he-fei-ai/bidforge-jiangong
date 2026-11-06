@@ -32,6 +32,7 @@ from app.config import settings
 from app.db import get_db, safe_rowcount, settle_global_conn
 from app.routers.schemes import require_project_id  # ✅ G3 根因加固（R45）
 from app.services import scheme_classification as sc
+from app.services.ai import warmup as ai_warmup  # ✅ R179 U5：分组预热编排（默认关=逐字现状）
 
 # ✅ R58（2026-10-10）：统一 JSON 通道（见下方 _collect_json_str）。
 from app.services.ai.json_response import (
@@ -39,6 +40,7 @@ from app.services.ai.json_response import (
     collect_json_response_with_chat,
 )
 from app.services.ai.provider_factory import (
+    _error_class,
     chat_with_fallback,
     is_non_retryable_error,
 )
@@ -75,8 +77,7 @@ from app.services.bid_analysis_service import (
     split_for_analysis,
 )
 
-# ✅ 2026-09-22 新增（对齐 OpenBidKit bidSectionContext.cjs）：
-#    多标段项目「当前投标范围」上下文注入 + 下游缓存失效。
+# ✅ 2026-09-22 新增：多标段项目的「当前投标范围」上下文注入 + 下游缓存失效。
 from app.services.bid_section_context import (
     build_bid_section_context_hint,
     load_bid_section_row,
@@ -86,7 +87,7 @@ from app.services.bid_section_context import (
 from app.services.bid_section_detector import detect_bid_sections
 
 # ✅ 2026-09-25：文档分类唯一事实源（提取合并优先级口径与 global_facts 对齐）
-from app.services.doc_categories import extract_priority
+from app.services.doc_categories import ADDENDUM_CATEGORIES, ADDENDUM_OVERRIDE_MARK, extract_priority
 from app.services.facts_extractor import (
     FACT_SCOPE_SHARED_FRAGMENT,
     SCHEME_PROJECT_ID_SQL,
@@ -134,13 +135,13 @@ async def _execute(db, sql: str, params=()):
     return cur
 
 
-# 提示词缓存预热等待（OpenBidKit 设为 5000ms）
+# 提示词缓存预热等待（毫秒）：给上游缓存留出预热时间，5000ms 为实测稳态值
 PROMPT_CACHE_WARMUP_DELAY_MS = 5000
 
 
 # ---------------------------------------------------------------------------
 # ✅ 2026-09-30（第十一轮）：分段策略单一出口
-# 均分模式（对齐 userTextSplitter.cjs）与滑动窗口模式的选择只在这一处判定，
+# 均分模式与滑动窗口模式的选择只在这一处判定，
 # 避免两处各自判定「是否均分」的分叉（本仓 §4.3/§4.14 的同构教训）。
 # 默认（bid_analysis_segment_even=False 或 context_length_limit<=0）走旧滑动
 # 窗口，行为与引入前逐字一致。
@@ -180,6 +181,11 @@ def _item_concurrency() -> int:
     return max(1, _cfg_int("bid_analysis_item_concurrency", 1))
 
 
+# ✅ R179 U5（2026-11-05）：预热编排接线见 _run_bid_analysis_sync /
+#    _run_bid_analysis_with_progress；项级并发取值唯一来源为
+#    warmup.stage_concurrency("facts")，不改 bid_analysis_item_concurrency 默认值（拍板 #4）。
+
+
 def _segment_concurrency() -> int:
     """单解析项内分段并发上限（兜底 2，与 `settings.bid_analysis_segment_concurrency`
     默认一致；下限 1）。兜底语义同上：显式配置优先。
@@ -210,10 +216,9 @@ def _is_provider_unavailable_error(err) -> bool:
 
 
 # 分段结果合并 Prompt
-# ✅ 2026-09-22 增强（对齐 OpenBidKit utils/segmentedAiResultMerger.cjs）：
-#    合并调用必须同时携带【原始任务要求】（含 JSON 字段结构）。旧实现只给
-#    「请输出形态一致」的口头约束、不给字段清单，实测 JSON 项（projectBasicInfo
-#    有 37 个字段）在合并阶段会丢字段 —— 模型无从知道该保留哪些 key。
+# ✅ 2026-09-22 增强：合并调用必须同时携带【原始任务要求】（含 JSON 字段结构）。
+#   旧实现只给「请输出形态一致」的口头约束、不给字段清单，实测 JSON 项
+#   （projectBasicInfo 有 37 个字段）在合并阶段会丢字段 —— 模型无从知道该保留哪些 key。
 # ✅ R175（2026-11-03 · BUG-3 收编）：正文已迁至提示词注册表
 #    （key=``bid_segment_merge_system``），本处不再保留副本字面量，
 #    消除「注册 + 硬编码」双源；编辑器可改、变更可审计。
@@ -231,7 +236,7 @@ def segment_merge_prompt() -> str:
 # =========================================================================
 #: ⚠️ 2026-10-01 定位切换（招投标 → 专项施工方案）：招标响应域已**整域下线**。
 #:
-#: 它是 2026-09-30 对齐 OpenBidKit 易标时以「加法引入」的方式接入的，当时用
+#: 它是 2026-09-30 以「加法引入」的方式接入的，当时用
 #: ``settings.bid_response_domain_enabled``（默认 False）做软开关。但软开关存在
 #: 一个真实风险：一旦有人为了调试把它显式设为 True（或环境变量写错），招投标
 #: 域就会**静默复活** —— 前端拿到 18 项招标响应清单、/start 真的能跑完评标
@@ -387,7 +392,7 @@ async def check_bid_sections(
 ):
     """检测该项目下的招标文件是否疑似多标段。
 
-    规则检测（纯 Python，秒级），复用 bidSectionDetector.detect_bid_sections。
+    规则检测（纯 Python，秒级），复用 bid_section_detector.detect_bid_sections。
     若检测到多标段，返回检测结果 + 提示。
     """
     real_pid = await _resolve_pid(db, scheme_id, project_id)
@@ -472,7 +477,7 @@ async def check_bid_sections(
 
 
 # =========================================================================
-# 2.5 投标范围（标段）选择 —— 对齐 OpenBidKit bidSectionDetector/Context
+# 2.5 投标范围（标段）选择
 # =========================================================================
 @router.get("/bid-sections")
 async def get_bid_sections(
@@ -515,7 +520,7 @@ async def get_bid_sections(
 async def select_bid_section(body: dict, scheme_id: str = Query(""), project_id: str = Query(""), db=Depends(get_db)):
     """选择 / 清除本次投标范围（多标段项目的必需前置步骤）。
 
-    ✅ 新增（2026-09-22，对齐 OpenBidKit `technicalPlanStore.tenderFile.selectedSectionId`）：
+    ✅ 新增（2026-09-22）：
     选定后，后续「提取项目」的每一次 AI 调用都会带上「当前只处理 X 标段」的
     system 提示（见 `services/bid_section_context.build_bid_section_context_hint`），
     避免把其它标段的参数抽进本次方案。
@@ -531,7 +536,7 @@ async def select_bid_section(body: dict, scheme_id: str = Query(""), project_id:
     契约：
       - 未做过多标段检测（无 bid_sections 行）时也允许写入（前端可直接选）；
       - 选择变更只影响**后续** AI 调用，不自动重跑已完成的解析项
-        （与 OpenBidKit 一致：避免用户在不知情的情况下被批量重解析烧额度）。
+        （避免用户在不知情的情况下被批量重解析烧额度）。
 
     ✅ BUG 修复（2026-09-23，前后端契约断裂）：前端 `bidAnalysisApi.selectSection`
        把 scheme_id / project_id 放在 **URL query**（与本模块 check-sections /
@@ -620,7 +625,7 @@ async def extract_bid_sections_api(
 ):
     """AI 识别招标文件标段清单（供「选择投标范围」使用）。
 
-    ✅ 新增（2026-09-22，对齐 OpenBidKit `bidSectionExtractionTask.cjs`）：
+    ✅ 新增（2026-09-22）：
 
     与 `POST /check-sections` 的分工：
       - check-sections   ：纯规则、零成本，只回答「是否**疑似**多标段」（秒级）；
@@ -1406,6 +1411,16 @@ async def _run_bid_analysis_sync(
     results = {}
     completed = 0
 
+    # ✅ R179 U5（2026-11-05）：预热编排接线（方案 §2.4）。
+    #    判据唯一来源 stage_concurrency()：关闭恒返回 0。
+    #    · 关（默认）= 逐字现状：代表项单独先行 + 固定 PROMPT_CACHE_WARMUP_DELAY_MS
+    #      等待 + 项级并发 _item_concurrency()（默认 1）；
+    #    · 开 = 整组交给 warmup.run_grouped（代表先行 → 成功后放开发等待 → 并发；
+    #      限流/超时/网络/5xx/解析失败退化串行，认证类整组放弃）。
+    _u5_conc = ai_warmup.stage_concurrency("facts")
+    _u5_on = _u5_conc > 0
+    _warmup_delay_ms = ai_warmup.stage_delay_ms("facts") if _u5_on else PROMPT_CACHE_WARMUP_DELAY_MS
+
     # 预热：先单独跑第一个必选项（projectBasicInfo）
     first_item = None
     for it in task_items:
@@ -1415,47 +1430,6 @@ async def _run_bid_analysis_sync(
 
     # 并发跑其余项
     remaining = [it for it in task_items if it["item_id"] != (first_item or {}).get("item_id")]
-
-    if first_item:
-        try:
-            res = await _run_single_item(
-                db, project_id, scheme_id, first_item, tender_text, segments, section_hint=section_hint
-            )
-            results[first_item["item_id"]] = res
-            completed += 1
-            await _update_item_status(
-                db,
-                project_id,
-                first_item["item_id"],
-                "success",
-                res.get("content", ""),
-                "",
-                evidence=_safe_evidence(res.get("content", ""), first_item.get("output_type", "markdown"), tender_text),
-            )
-            if task_id:
-                await update_progress(task_id, completed / total, message=f"已完成 {completed}/{total}（预热项）")
-        except Exception as e:
-            logger.exception("预热项执行失败")
-            # ✅ BUG 修复（2026-09-23，假成功）：必须同步回写 results —— 当
-            #    _run_single_item 已成功、但 _update_item_status 落库失败时，
-            #    results 里仍留着「status=success」条目，_get_missing_required
-            #    命中 `rid in results` 分支就判为「已完成」，任务最终返回
-            #    ok=True；而数据库里该项实际是 error，目录/正文下游读到的是
-            #    「缺失」。与下方 _run_item 的异常分支同口径，保证
-            #    results 与 DB 状态一致。先写 results 再写 DB：即便这次 DB
-            #    写入再次失败，本批结果也已如实反映失败，不会假成功。
-            results[first_item["item_id"]] = {"status": "error", "error": str(e)}
-            await _update_item_status(db, project_id, first_item["item_id"], "error", "", str(e))
-            completed += 1
-            if task_id:
-                await update_progress(task_id, completed / total)
-
-        # 等 PROMPT_CACHE_WARMUP_DELAY_MS 让后续并发命中缓存
-        # （仅在还有并发项时才有意义；单项重跑不再白等 5 秒）
-        if remaining:
-            await asyncio.sleep(PROMPT_CACHE_WARMUP_DELAY_MS / 1000)
-
-    semaphore = asyncio.Semaphore(_item_concurrency())  # 外层项并发（可配，默认 1）
 
     async def _run_item(item: dict):
         """执行单个解析项（暂停闸门与并发许可由 run_with_pause_gate 负责）。"""
@@ -1491,9 +1465,98 @@ async def _run_bid_analysis_sync(
             if task_id:
                 await update_progress(task_id, completed / total)
 
-    await asyncio.gather(
-        *[run_with_pause_gate(task_id, semaphore, functools.partial(_run_item, it)) for it in remaining]
-    )
+    if _u5_on:
+        # U5 开启：整组（含代表）交给编排器，调用点不再自行判定失败语义。
+        _u5_sem = asyncio.Semaphore(max(1, _u5_conc))
+        _u5_rep_idx = next(
+            (i for i, it in enumerate(task_items) if it["item_id"] == (first_item or {}).get("item_id")), 0
+        )
+
+        async def _u5_runner(item: dict):
+            await run_with_pause_gate(task_id, _u5_sem, functools.partial(_run_item, item))
+            _res = results.get(item["item_id"]) or {"status": "error", "error": "stopped_or_skipped"}
+            if str(_res.get("status") or "") == "error" and not _res.get("error_class"):
+                _err = str(_res.get("error") or "")
+                if _err:
+                    # 补 error_class：_run_item 已吞异常，编排器据此识别认证类整组放弃。
+                    _res = {**_res, "error_class": _error_class(_err)}
+            return _res
+
+        _u5_spec = ai_warmup.WarmupPlan(
+            key="facts",
+            items=list(task_items),
+            concurrency=max(1, _u5_conc),
+            representative_index=_u5_rep_idx,
+            delay_ms=_warmup_delay_ms,
+        )
+        _u5_out = await ai_warmup.run_grouped(
+            [_u5_spec],
+            _u5_runner,
+            enabled=True,
+            default_delay_ms=_warmup_delay_ms,
+            fallback_serial=bool(getattr(settings, "ai_warmup_fallback_serial", True)),
+            rep_retry_on_parse=bool(getattr(settings, "ai_warmup_rep_retry_on_parse", True)),
+            stop_check=(lambda: is_stopped(task_id)) if task_id else None,
+        )
+        _warmup_diag = dict(_u5_out[0]["warmup"]) if _u5_out else {"applied": False, "degraded_reason": "empty_plan"}
+        _warmup_diag["enabled"] = True
+        _warmup_diag["equivalent"] = "changed" if _warmup_diag.get("applied") else "verbatim"
+    else:
+        # ---------------- 现状分支（逐字等价：不得新增调用、等待或并发步骤） ----------------
+        _warmup_diag = {
+            "stage": "facts",
+            "group": "",
+            "enabled": False,
+            "concurrency": _item_concurrency(),
+            "applied": False,
+            "equivalent": "verbatim",
+            "degraded_reason": "disabled",
+        }
+        if first_item:
+            try:
+                res = await _run_single_item(
+                    db, project_id, scheme_id, first_item, tender_text, segments, section_hint=section_hint
+                )
+                results[first_item["item_id"]] = res
+                completed += 1
+                await _update_item_status(
+                    db,
+                    project_id,
+                    first_item["item_id"],
+                    "success",
+                    res.get("content", ""),
+                    "",
+                    evidence=_safe_evidence(
+                        res.get("content", ""), first_item.get("output_type", "markdown"), tender_text
+                    ),
+                )
+                if task_id:
+                    await update_progress(task_id, completed / total, message=f"已完成 {completed}/{total}（预热项）")
+            except Exception as e:
+                logger.exception("预热项执行失败")
+                # ✅ BUG 修复（2026-09-23，假成功）：必须同步回写 results —— 当
+                #    _run_single_item 已成功、但 _update_item_status 落库失败时，
+                #    results 里仍留着「status=success」条目，_get_missing_required
+                #    命中 `rid in results` 分支就判为「已完成」，任务最终返回
+                #    ok=True；而数据库里该项实际是 error，目录/正文下游读到的是
+                #    「缺失」。与下方 _run_item 的异常分支同口径，保证
+                #    results 与 DB 状态一致。先写 results 再写 DB：即便这次 DB
+                #    写入再次失败，本批结果也已如实反映失败，不会假成功。
+                results[first_item["item_id"]] = {"status": "error", "error": str(e)}
+                await _update_item_status(db, project_id, first_item["item_id"], "error", "", str(e))
+                completed += 1
+                if task_id:
+                    await update_progress(task_id, completed / total)
+
+            # 等 PROMPT_CACHE_WARMUP_DELAY_MS 让后续并发命中缓存
+            # （仅在还有并发项时才有意义；单项重跑不再白等 5 秒）
+            if remaining:
+                await asyncio.sleep(_warmup_delay_ms / 1000)
+
+        semaphore = asyncio.Semaphore(_item_concurrency())  # 外层项并发（可配，默认 1）
+        await asyncio.gather(
+            *[run_with_pause_gate(task_id, semaphore, functools.partial(_run_item, it)) for it in remaining]
+        )
 
     # 必选项校验
     missing = await _get_missing_required(db, project_id, results)
@@ -1533,6 +1596,8 @@ async def _run_bid_analysis_sync(
         "completed": completed,
         "total": total,
         "missing_required": missing,
+        # ✅ R179 U5：加法式回传预热诊断对象（关闭时 equivalent=verbatim）
+        "warmup": _warmup_diag,
     }
 
 
@@ -1586,6 +1651,12 @@ async def _run_bid_analysis_with_progress(
 
     results = {}
     completed = 0
+
+    # ✅ R179 U5（2026-11-05）：预热编排接线（方案 §2.4），语义与同步入口一致。
+    #    关闭（stage_concurrency 返回 0）= 逐字现状；开启 = 整组交给 run_grouped。
+    _u5_conc = ai_warmup.stage_concurrency("facts")
+    _u5_on = _u5_conc > 0
+    _warmup_delay_ms = ai_warmup.stage_delay_ms("facts") if _u5_on else PROMPT_CACHE_WARMUP_DELAY_MS
 
     first_item = None
     for it in task_items:
@@ -1665,16 +1736,63 @@ async def _run_bid_analysis_with_progress(
 
     remaining = [it for it in task_items if it["item_id"] != (first_item or {}).get("item_id")]
 
-    if first_item:
-        await run_with_pause_gate(task_id, None, functools.partial(_do_item, first_item))
-        # 预热等待只在「后面还有并发项」时才有意义（单项重跑白等 5 秒）
-        if remaining:
-            await asyncio.sleep(PROMPT_CACHE_WARMUP_DELAY_MS / 1000)
+    if _u5_on:
+        # U5 开启：整组（含代表）交给编排器（同步入口同口径）。
+        _u5_sem = asyncio.Semaphore(max(1, _u5_conc))
+        _u5_rep_idx = next(
+            (i for i, it in enumerate(task_items) if it["item_id"] == (first_item or {}).get("item_id")), 0
+        )
 
-    semaphore = asyncio.Semaphore(_item_concurrency())  # SSE 版项并发（可配，默认 1）
-    await asyncio.gather(
-        *[run_with_pause_gate(task_id, semaphore, functools.partial(_do_item, it)) for it in remaining]
-    )
+        async def _u5_runner(item: dict):
+            await run_with_pause_gate(task_id, _u5_sem, functools.partial(_do_item, item))
+            _res = results.get(item["item_id"]) or {"status": "error", "error": "stopped_or_skipped"}
+            if str(_res.get("status") or "") == "error" and not _res.get("error_class"):
+                _err = str(_res.get("error") or "")
+                if _err:
+                    # 补 error_class：_do_item 已吞异常，编排器据此识别认证类整组放弃。
+                    _res = {**_res, "error_class": _error_class(_err)}
+            return _res
+
+        _u5_spec = ai_warmup.WarmupPlan(
+            key="facts",
+            items=list(task_items),
+            concurrency=max(1, _u5_conc),
+            representative_index=_u5_rep_idx,
+            delay_ms=_warmup_delay_ms,
+        )
+        _u5_out = await ai_warmup.run_grouped(
+            [_u5_spec],
+            _u5_runner,
+            enabled=True,
+            default_delay_ms=_warmup_delay_ms,
+            fallback_serial=bool(getattr(settings, "ai_warmup_fallback_serial", True)),
+            rep_retry_on_parse=bool(getattr(settings, "ai_warmup_rep_retry_on_parse", True)),
+            stop_check=(lambda: is_stopped(task_id)) if task_id else None,
+        )
+        _warmup_diag = dict(_u5_out[0]["warmup"]) if _u5_out else {"applied": False, "degraded_reason": "empty_plan"}
+        _warmup_diag["enabled"] = True
+        _warmup_diag["equivalent"] = "changed" if _warmup_diag.get("applied") else "verbatim"
+    else:
+        # ---------------- 现状分支（逐字等价：不得新增调用、等待或并发步骤） ----------------
+        _warmup_diag = {
+            "stage": "facts",
+            "group": "",
+            "enabled": False,
+            "concurrency": _item_concurrency(),
+            "applied": False,
+            "equivalent": "verbatim",
+            "degraded_reason": "disabled",
+        }
+        if first_item:
+            await run_with_pause_gate(task_id, None, functools.partial(_do_item, first_item))
+            # 预热等待只在「后面还有并发项」时才有意义（单项重跑白等 5 秒）
+            if remaining:
+                await asyncio.sleep(_warmup_delay_ms / 1000)
+
+        semaphore = asyncio.Semaphore(_item_concurrency())  # SSE 版项并发（可配，默认 1）
+        await asyncio.gather(
+            *[run_with_pause_gate(task_id, semaphore, functools.partial(_do_item, it)) for it in remaining]
+        )
 
     missing = await _get_missing_required(db, project_id, results)
 
@@ -1715,6 +1833,8 @@ async def _run_bid_analysis_with_progress(
         "completed": completed,
         "total": total,
         "missing_required": missing,
+        # ✅ R179 U5：加法式回传预热诊断对象（关闭时 equivalent=verbatim）
+        "warmup": _warmup_diag,
     }
 
 
@@ -1763,7 +1883,7 @@ async def _run_single_item(
       - JSON 项直接返回（collect_json_response 自带修复重试）
 
     section_hint（多标段投标范围）会同时注入「单项调用」与「分段合并调用」，
-    与 OpenBidKit `bidAnalysisTask` 的注入点一一对应（合并阶段同样必须知道
+    与单项提取的注入点一一对应（合并阶段同样必须知道
     当前只处理哪个标段，否则会把各标段的片段性表述合并成矛盾结论）。
     """
     item_id = item["item_id"]
@@ -1931,8 +2051,8 @@ async def _run_single_call(
     生成（多标段投标范围）；classification_hint 由本模块 classify 能力生成
     （危大工程分类结论，提取重点参考）。两者均为空串时 system 消息与旧版逐字一致。
 
-    ✅ 标段上下文按易标口径作为**独立的第二条 system 消息**下发
-    （``buildTenderContextMessages``），不再与通用纪律拼在同一条。
+    ✅ 标段上下文作为**独立的第二条 system 消息**下发
+    （不再与通用纪律拼在同一条）。
 
     raise_on_error（2026-11-04）：仅 `_run_single_item` 传 True —— 让 JSON 通道
     的失败显式上抛，由上层把该项写成 error（原因写库、可单项重试），而不是
@@ -2307,7 +2427,14 @@ def _combine_doc_texts(docs: list[dict], report_truncation: bool = False):
             }
         )
 
-    joined = "\n\n---\n\n".join(f"# 文档：{p['name']}（分类：{p['category']}）\n\n{p['text']}" for p in parts)
+    def _segment(p: dict) -> str:
+        # ✅ 2026-11-05（W-01）：补遗/澄清/答疑文件段追加「同名条款覆盖」标记，
+        #    与 bid_analysis_service.STABLE_SYSTEM_PROMPT 的规则 5 同口径——
+        #    工期/资质/技术要求等被补遗改写时，提取结果必须以补遗为准。
+        mark = f"\n{ADDENDUM_OVERRIDE_MARK}" if p["category"] in ADDENDUM_CATEGORIES else ""
+        return f"# 文档：{p['name']}（分类：{p['category']}）{mark}\n\n{p['text']}"
+
+    joined = "\n\n---\n\n".join(_segment(p) for p in parts)
     if not report_truncation:
         return joined
     return {
@@ -2481,9 +2608,8 @@ async def _update_item_status(
 async def _invalidate_downstream_cache(db, project_id: str, scheme_id: str = "") -> int:
     """提取结果变化后失效下游缓存（导出缓存）。
 
-    ✅ 新增（2026-09-22，对齐 OpenBidKit `bidAnalysisTask` 重跑时把
-    outlineData / globalFacts / contentGeneration* 一并作废的下游失效语义；
-    本软件按既有「缓存失效」机制落地，只清缓存、不删用户数据）：
+    ✅ 新增（2026-09-22：重跑时把目录 / 全局事实 / 正文生成相关的下游产物
+    一并作废；本软件按既有「缓存失效」机制落地，只清缓存、不删用户数据）：
 
     提取项（项目级基本信息 / 工程概况 / 施工工艺 …）是目录与正文的输入。
     结果变化后若 `export_cache` 仍命中，导出的 docx 会与最新提取结果不一致
@@ -2521,7 +2647,7 @@ async def _invalidate_downstream_cache(db, project_id: str, scheme_id: str = "")
     #    旧实现把它们关在 `if done:` 里，等于第十五轮的级联失效在这两条路径上
     #    完全不生效 → 「已重跑提取，但一致性面板/完整性报告/事实时间戳仍是旧值」
     #    的静默不一致。级联本身幂等且 fail-soft，移出门禁不改变成功路径行为。
-    # ✅ 级联补齐（2026-09-30 第十五轮 · 对齐易标重跑时作废下游的语义）：
+    # ✅ 级联补齐（2026-09-30 第十五轮 · 重跑时作废下游的语义）：
     #    旧实现**只**清 export_cache，漏掉三处同样以「提取结果」为输入的产物：
     #      ① consistency_scan_cache —— 全文一致性扫描的结论基于旧提取结果，
     #         不清则「刚重跑完提取、一致性面板仍显示旧的冲突清单」；

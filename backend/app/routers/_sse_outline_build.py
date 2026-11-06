@@ -620,7 +620,7 @@ def _snapshot_outline_stats(st: dict) -> dict:
         total = st.get("sub_total") or 0
         done = st.get("sub_done", 0)
         progress = _sh._monotonic_progress(st.get("last_p", 0.0), _sh._outline_progress(st))
-        return {
+        snap = {
             "elapsed_ms": elapsed_ms,
             "eta_ms": _sh._outline_eta_ms(st, now, progress),
             "done": done,
@@ -635,6 +635,23 @@ def _snapshot_outline_stats(st: dict) -> dict:
             "stepwise": bool(st.get("stepwise")),
             "nodes": st.get("nodes", 0),
         }
+        # ✅ R181（2026-11-06）：空章定向重试状态（仅在发生重试时挂键，默认路径零新增）
+        _retry = st.get("chapter_retry") or {}
+        if _retry:
+            snap["chapter_retry"] = {
+                "attempted": len(_retry),
+                "recovered": sum(1 for v in _retry.values() if (v or {}).get("status") == "recovered"),
+                "exhausted": sum(1 for v in _retry.values() if (v or {}).get("status") == "exhausted"),
+                "chapters": [
+                    {
+                        "chapter": k,
+                        "attempts": int((v or {}).get("attempts") or 0),
+                        "status": (v or {}).get("status", ""),
+                    }
+                    for k, v in sorted(_retry.items(), key=lambda kv: int(kv[0]) if str(kv[0]).isdigit() else 0)
+                ],
+            }
+        return snap
     except Exception:
         # 统计只服务于展示，任何异常都不允许影响生成主流程
         _sh.logger.debug("目录生成运行统计快照构建失败（返回空，不影响生成）", exc_info=True)

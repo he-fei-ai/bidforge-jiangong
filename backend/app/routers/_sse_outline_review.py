@@ -316,6 +316,79 @@ async def _fetch_unit_children(
     return unit_status, per
 
 
+#: ✅ R181（2026-11-06）：分步生成里单个空章/失败章的最大补充尝试次数。
+#: 只对「本单元内结果为空」的章做定向重试，**不重跑整轮**；每次尝试与终态
+#: 写入 retry_state，随 progress 快照的 chapter_retry 字段对外可追踪。
+_EMPTY_CHAPTER_RETRY_ATTEMPTS = 1
+
+
+async def _retry_empty_chapters(
+    unit_chapters,
+    per,
+    single_prompts,
+    task_id,
+    sem,
+    timeout,
+    push_stats,
+    retry_state: dict,
+) -> list:
+    """✅ R181：对单元内「空章 / 失败章」做有限次定向重试。
+
+    - 入参/返回与 ``_fetch_unit_children`` 的 ``per`` 同构：[(状态, children)]；
+    - 只重试 ``failed`` 或 ``ok 但 children 为空`` 的章，成功则原位替换；
+    - 停止信号立即中断（不把用户停止误判为失败重试）；
+    - ``retry_state`` 按章号记录 attempts / status / children / last_error，
+      供 progress 事件消费（前端可显示「第 N 章重试 1 次后补齐 / 仍为空」）。
+    """
+    out = list(per or [])
+    for idx, (i, ch) in enumerate(unit_chapters or []):
+        if idx >= len(out):
+            break
+        st, children = out[idx]
+        if st == "stopped":
+            break
+        if st == "ok" and children:
+            continue
+        key = str(i + 1)
+        rec = retry_state.setdefault(key, {"attempts": 0, "status": "pending"})
+        for attempt in range(1, _EMPTY_CHAPTER_RETRY_ATTEMPTS + 1):
+            if _sh.is_stopped(task_id):
+                rec["status"] = "stopped"
+                break
+            rec["attempts"] = attempt
+            try:
+                st2, children2 = await _sh._fetch_chapter_children(
+                    i,
+                    ch,
+                    sub_prompt=(single_prompts[idx] if single_prompts else []),
+                    task_id=task_id,
+                    sem=sem,
+                    validate_fn=_sh._sublevel_validate_fn,
+                    timeout=timeout,
+                    push_stats=push_stats,
+                )
+            except asyncio.CancelledError:
+                raise
+            except Exception as e:  # noqa: BLE001 - 单章重试失败不得拖垮整轮
+                rec["last_error"] = f"{type(e).__name__}"
+                _sh.logger.warning("空章定向重试异常（第%s章，第%d次）: %s", key, attempt, e)
+                continue
+            if st2 == "stopped":
+                out[idx] = ("stopped", [])
+                rec["status"] = "stopped"
+                break
+            if st2 == "ok" and children2:
+                out[idx] = ("ok", children2)
+                rec["status"] = "recovered"
+                rec["children"] = len(children2)
+                _sh.logger.info("空章定向重试成功（第%s章，第%d次，%d 个节点）", key, attempt, len(children2))
+                break
+        else:
+            if rec.get("status") not in ("stopped", "recovered"):
+                rec["status"] = "exhausted"
+    return out
+
+
 def _attach_quality_report(outline: list, basis, review_obj: dict) -> dict:
     """生成后自动校验（要求三/四）：连续性 + 全面性 + 冗余，写日志与 review 载荷。
 

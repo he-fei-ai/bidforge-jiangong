@@ -201,9 +201,7 @@ def test_apply_operations_normalized_ambiguity_still_rejected():
     """规范化后出现多次 → 仍按「不唯一」拒绝（不因回退而放松唯一性）。"""
     content = "同一句话。\n\n同一句话。"
     with pytest.raises(ValueError, match="不唯一"):
-        apply_shrink_operations(
-            content, [{"operation": "replace", "target_text": "同一句话。", "content": "替换。"}]
-        )
+        apply_shrink_operations(content, [{"operation": "replace", "target_text": "同一句话。", "content": "替换。"}])
 
 
 def test_apply_operations_normalized_protected_still_rejected():

@@ -12,7 +12,7 @@ class TestParseDiagnostics:
     def test_unrenderable_chart_json_is_counted(self):
         diag: dict = {}
         # JSON 顶层是数组（非对象、无法推断图表类型）→ 解析期丢弃
-        blocks = _parse_content_blocks('```chart-json\n[1, 2, 3]\n```\n', diagnostics=diag)
+        blocks = _parse_content_blocks("```chart-json\n[1, 2, 3]\n```\n", diagnostics=diag)
         assert [b["type"] for b in blocks] == []
         assert diag["chart_json_skipped"] == 1
         assert diag["chart_json_skipped_unrenderable"] == 1
@@ -33,15 +33,16 @@ class TestParseDiagnostics:
 
     def test_diagnostics_optional_keeps_old_behavior(self):
         # 不传 diagnostics 时函数返回值与旧实现一致（不会被改成抛错）
-        content = '```chart-json\n[1, 2, 3]\n```\n'
+        content = "```chart-json\n[1, 2, 3]\n```\n"
         assert _parse_content_blocks(content) == []
 
 
 class TestMergeSkipStats:
     def test_skipped_counts_into_failed(self):
         stats = {"total": 3, "failed": 0, "ok": 3}
-        _merge_chart_json_skip_stats(stats, {"chart_json_skipped": 2, "chart_json_skipped_unrenderable": 1,
-                                             "chart_json_skipped_unclosed": 1})
+        _merge_chart_json_skip_stats(
+            stats, {"chart_json_skipped": 2, "chart_json_skipped_unrenderable": 1, "chart_json_skipped_unclosed": 1}
+        )
         assert stats["chart_json_skipped"] == 2
         assert stats["failed"] == 2
         assert stats["chart_json_skipped_unclosed"] == 1

@@ -748,6 +748,125 @@ def _decode_text(content: bytes) -> str:
 
 _W_NS = "http://schemas.openxmlformats.org/wordprocessingml/2006/main"
 
+#: W-02 表格结构保真开关（2026-11-05，默认开）：
+#:   - DOCX：按网格展开 gridSpan / vMerge（被合并列重复值填充，列不再错位）；
+#:   - PDF：引擎 B 重建的表格块回写正文（旧实现只收集、从未输出），并按
+#:     「列数相同 + 首行相似/无表头」把跨页续表拼回一张、保留首段表头。
+#: 置 PARSE_TABLE_MERGE_EXPAND=0 可整体回退到旧行为。不走 settings 是有意的：
+#: config.py 属高频改动区，本开关为纯解析层逃生门，直接读环境变量避免耦合。
+_TABLE_MERGE_EXPAND = os.environ.get("PARSE_TABLE_MERGE_EXPAND", "1").strip().lower() not in ("0", "false", "no")
+
+
+def _docx_table_grid(tbl, para_text) -> list[list[str]]:
+    """DOCX 表格 → 网格展开的二维行（处理 gridSpan / vMerge）。
+
+    旧实现逐 ``w:tc`` 平铺：横向合并（gridSpan）会让该行少列，纵向合并
+    （vMerge）会在续行留下空单元格——下游看到的是「错位的空列」（评分表、
+    机械统计表直接串列）。现按 OOXML 语义展开成规则网格：
+
+    - ``gridSpan=N``：单元格文本在其占据的 N 个网格列上**重复填充**；
+    - ``vMerge restart``：记录文本到后续行同列；``vMerge``（continue，val 缺省
+      即 continue）：取最近 restart 文本填充（Word 里续行 ``w:tc`` 通常为空）；
+    - 普通单元格落到的列会清除该列的 vMerge 记录（新合并段的正确起点）。
+
+    返回的行已按全表最大列数右端补空串，保证每行列数一致。
+    """
+    w = _W_NS
+
+    def _tc_props(tc) -> tuple[int, str | None]:
+        tcpr = tc.find(f"{{{w}}}tcPr")
+        span, vmerge = 1, None
+        if tcpr is not None:
+            gs = tcpr.find(f"{{{w}}}gridSpan")
+            if gs is not None:
+                try:
+                    span = max(1, int(gs.get(f"{{{w}}}val") or "1"))
+                except ValueError:
+                    span = 1
+            vm = tcpr.find(f"{{{w}}}vMerge")
+            if vm is not None:
+                vmerge = vm.get(f"{{{w}}}val") or "continue"
+        return span, vmerge
+
+    grid: list[list[str]] = []
+    active_vmerge: dict[int, str] = {}  # 网格列 → 最近 restart 文本
+    for tr in tbl.findall(f"{{{w}}}tr"):
+        row: list[str] = []
+        col = 0
+        for tc in tr.findall(f"{{{w}}}tc"):
+            span, vmerge = _tc_props(tc)
+            txt = " ".join(t for t in (para_text(p) for p in tc.iter(f"{{{w}}}p")) if t)
+            if vmerge == "continue":
+                fill = txt or active_vmerge.get(col, "")
+                row.extend([fill] * span)
+            else:
+                row.extend([txt] * span)
+                if vmerge == "restart":
+                    for i in range(col, col + span):
+                        active_vmerge[i] = txt
+                else:
+                    for i in range(col, col + span):
+                        active_vmerge.pop(i, None)
+            col += span
+        grid.append(row)
+    width = max((len(r) for r in grid), default=0)
+    return [r + [""] * (width - len(r)) for r in grid]
+
+
+def _rows_similar(a: list[str], b: list[str], threshold: float = 0.7) -> bool:
+    """两行表格文本相似度（续页重复表头判定）：逐列拼接后 difflib 比率。"""
+    import difflib
+
+    sa = "␟".join(str(v).strip() for v in a)
+    sb = "␟".join(str(v).strip() for v in b)
+    if not sa or not sb:
+        return False
+    return difflib.SequenceMatcher(None, sa, sb).ratio() >= threshold
+
+
+def _render_table_block(rows: list[list[str]]) -> str:
+    """二维行 → 「【表格】+ Markdown」块（PDF 引擎 B / 跨页拼接统一出口）。
+
+    行宽不齐时右端补空串（PyMuPDF 对缺边线的单元格会少列），保持
+    「首行表头 + 对齐分隔行」的既有输出格式，下游零改动。
+    """
+    width = max((len(r) for r in rows), default=0)
+    norm = [list(r) + [""] * (width - len(r)) for r in rows]
+    md_rows = [_md_cells(r) for r in norm]
+    md_rows.insert(1, _md_separator(norm[0]))
+    return "【表格】\n" + "\n".join(md_rows)
+
+
+def _stitch_pdf_tables(per_page: list[tuple[int, list[list[list[str]]]]]) -> list[tuple[int, list[list[str]]]]:
+    """跨页续表拼接：输入 ``[(page_idx, [table_rows, ...]), ...]``（页序），
+    输出 ``[(page_idx, rows), ...]``——续页表并入上一页的表，页码归属首页。
+
+    判定（刻意保守，只拼高置信续表）：
+      1. 仅「上一页的最后一张表」与「本页的第一张表」之间尝试拼接；
+      2. 列数必须相同；
+      3. 本页首行与上表首行（表头）相似（续页重复表头 → 丢弃该表头行），
+         或本页首行不像表头（直接是数据行 → 整表追加）。
+    """
+    out: list[list] = []  # [page_idx, rows]
+    last_page: int | None = None
+    for pidx, tables in per_page:
+        for ti, rows in enumerate(tables):
+            if (
+                out
+                and ti == 0
+                and last_page is not None
+                and pidx == last_page + 1
+                and out[-1][0] == last_page
+                and len(out[-1][1][0]) == len(rows[0])
+                and (_rows_similar(out[-1][1][0], rows[0]) or not _is_header_like(rows[0]))
+            ):
+                prev_rows = out[-1][1]
+                prev_rows.extend(rows[1:] if _rows_similar(prev_rows[0], rows[0]) else rows)
+            else:
+                out.append([pidx, [list(r) for r in rows]])
+        last_page = pidx
+    return [(p, r) for p, r in out]
+
 
 def _docx_heading_level(
     p_el,
@@ -838,13 +957,17 @@ def _parse_docx(content: bytes) -> str:
             level = _docx_heading_level(child) or _docx_bold_heading_level(child)
             parts.append(f"{'#' * level} {txt}" if level else txt)
         elif tag == "tbl":
-            row_cells: list[list[str]] = []
-            for tr in child.findall(f"{{{_W_NS}}}tr"):
-                cells = []
-                for tc in tr.findall(f"{{{_W_NS}}}tc"):
-                    cell_txt = " ".join(t for t in (para_text(p) for p in tc.iter(f"{{{_W_NS}}}p")) if t)
-                    cells.append(cell_txt)
-                row_cells.append(cells)
+            if _TABLE_MERGE_EXPAND:
+                # ✅ W-02（2026-11-05）：按网格展开 gridSpan/vMerge，列不错位
+                row_cells = _docx_table_grid(child, para_text)
+            else:
+                row_cells: list[list[str]] = []
+                for tr in child.findall(f"{{{_W_NS}}}tr"):
+                    cells = []
+                    for tc in tr.findall(f"{{{_W_NS}}}tc"):
+                        cell_txt = " ".join(t for t in (para_text(p) for p in tc.iter(f"{{{_W_NS}}}p")) if t)
+                        cells.append(cell_txt)
+                    row_cells.append(cells)
             if row_cells:
                 # ✅ BUG 修复（表格结构完整性）：旧实现用自己的拼接逻辑，
                 #    单元格内的竖线未做转义 → 内容里的「|」被下游当作列分隔符，
@@ -1007,15 +1130,18 @@ def remove_lines_covered_by_tables(text: str, table_blocks: list[str]) -> str:
     return "\n".join(kept)
 
 
-def _extract_pdf_page_tables(page) -> list[str]:
-    """PDF 双引擎·引擎 B：PyMuPDF 内建表格识别 → Markdown 表格块。
+def _extract_pdf_page_tables(page) -> list[list[list[str]]]:
+    """PDF 双引擎·引擎 B：PyMuPDF 内建表格识别 → 二维行列表 ``[table_rows, ...]``。
 
     引擎 A 是 get_text 的原生文本流（表格被拍平成普通行）；引擎 B 用
     find_tables 按几何线条重建表格结构。两者结果合并前，先由
     remove_lines_covered_by_tables 把被表格覆盖的正文行剔除，避免同内容双份。
     单页/单表失败一律安全跳过（不影响整体解析，同 safePdfCall 语义）。
+
+    返回值口径（2026-11-05 W-02）：由「渲染好的 Markdown 块」改为「二维行」，
+    渲染统一走 _render_table_block——跨页续表必须先拿到结构化行才能拼接。
     """
-    out: list[str] = []
+    out: list[list[list[str]]] = []
     try:
         finder = getattr(page, "find_tables", None)
         if finder is None:  # 旧版 PyMuPDF 无此能力 → 引擎 B 静默缺席
@@ -1033,9 +1159,7 @@ def _extract_pdf_page_tables(page) -> list[str]:
                     norm_rows.append(cells)
             if len(norm_rows) < 2:
                 continue
-            md_rows = [_md_cells(r) for r in norm_rows]
-            md_rows.insert(1, _md_separator(norm_rows[0]))
-            out.append("【表格】\n" + "\n".join(md_rows))
+            out.append(norm_rows)
     except Exception as e:
         logger.debug("PDF 表格引擎 B 提取失败（跳过）: %s", e)
     return out
@@ -1187,6 +1311,7 @@ def _parse_pdf(content: bytes, diag: dict | None = None, fname: str = "document.
                         _note_info(diag, "PDF 已加密且无密码，文本提取可能不完整（建议解除限制后重新上传）")
                 n_pages = doc.page_count
                 page_items: list[tuple[int, str]] = []
+                per_page_tables: list[tuple[int, list[list[list[str]]]]] = []  # (page_items 下标, [table_rows])
                 for page in doc.pages(0, MAX_PDF_PAGES):
                     try:
                         page_text = normalize_pdf_text(page.get_text("text") or "")
@@ -1196,9 +1321,23 @@ def _parse_pdf(content: bytes, diag: dict | None = None, fname: str = "document.
                     # ✅ 引擎 B：几何表格重建 + 正文去重（单页失败安全跳过）
                     page_tables = _extract_pdf_page_tables(page)
                     if page_tables:
-                        page_text = remove_lines_covered_by_tables(page_text, page_tables)
-                        table_blocks.extend(page_tables)
+                        blocks = [_render_table_block(r) for r in page_tables]
+                        page_text = remove_lines_covered_by_tables(page_text, blocks)
+                        table_blocks.extend(blocks)
+                        per_page_tables.append((len(page_items), page_tables))
                     page_items.append((page.number + 1, page_text))
+                if _TABLE_MERGE_EXPAND and per_page_tables:
+                    # ✅ W-02（2026-11-05）：引擎 B 表格块回写正文 + 跨页续表拼接。
+                    #    ⚠️ 旧实现只把表格块用于正文去重与计数，**从未写回 text**——
+                    #    被 find_tables 识别的表格内容整体丢失（实测复现）。现按页
+                    #     locality 把（拼接后的）表格附到起始页文本末尾，页码标记不变；
+                    #    跨页续表按「列数相同 + 首行相似/无表头」保守拼接、保留首段表头。
+                    table_blocks = []
+                    for pidx, rows in _stitch_pdf_tables(per_page_tables):
+                        block = _render_table_block(rows)
+                        table_blocks.append(block)
+                        pno, ptext = page_items[pidx]
+                        page_items[pidx] = (pno, f"{ptext}\n{block}" if ptext else block)
                 text = _add_page_markers(page_items)
         except Exception as e:
             fitz_open_failed = True

@@ -1,8 +1,8 @@
-"""正文生成后 · 本章事实冲突自动定点修复（R77 · 2026-10-14 引入易标机制）
+"""正文生成后 · 本章事实冲突自动定点修复
 
-引入背景（对齐参考软件 OpenBidKit 易标 ``contentGenerationTask.cjs``）
---------------------------------------------------------------
-参考软件的正文一致性保障是「生成后审计 + 定点替换」闭环：
+机制说明
+--------
+正文一致性保障采用「生成后审计 + 定点替换」闭环：
 
   ① 把正文与全局事实一起交给 AI，**只检查已经明确写出**的事实冲突；
   ② AI 返回冲突章节 / 冲突原文 / 违反了哪条事实；
@@ -26,7 +26,7 @@ old_text/new_text 定点编辑 → 唯一命中才替换 → 失败回灌重试�
 → 只回写发生变化的小节。纯逻辑（冲突筛选 / 结果结构）与 IO（AI 调用）
 分离，便于单测与 A/B 反向验证。
 
-安全边界（刻意与参考软件对齐）：
+安全边界：
   * 只修 standard_report 已明确检出的 error 级事实冲突，不扩大审计面；
   * AI 可返回空 ``edits``（判定并非真实矛盾时宁可不改，见提示词纪律 7）；
   * ``old_text`` 不唯一 / 找不到一律拒绝，绝不猜（复用
@@ -51,7 +51,7 @@ FACT_CONFLICT_ISSUE_TYPES: tuple[str, ...] = (
     "model_conflict",  # 两模式：同系列不同型号且与事实标题语境同现
 )
 
-#: 定点修复尝试上限（对齐参考软件 ``CONSISTENCY_REPAIR_MAX_ATTEMPTS = 2``）：
+#: 定点修复尝试上限：
 #: 首次 + 一次「带具体失败原因的定向修复」。JSON 层面的格式修复由
 #: ``collect_json_response_with_chat`` 自带的有界重试负责，两个层次不混算。
 FACT_AUTOFIX_MAX_ATTEMPTS = 2
@@ -103,9 +103,9 @@ def select_fact_conflicts(report) -> list[dict]:
     """从 ``standard_report`` 报告中筛出 **error 级事实冲突** issue（纯函数）。
 
     只认 ``FACT_CONFLICT_ISSUE_TYPES`` 三类（正文数值/型号与本章事实矛盾），
-    且 severity 必须为 ``error`` —— 与易标「只找已经明确写出、且与事实相违背
-    的内容」同口径；``fact_value_missing``（事实未被引用）是 warning，不在此列
-    （缺项≠冲突，报缺失会诱导 AI 补写，违背易标审计纪律第 3 条）。
+    且 severity 必须为 ``error`` —— 只认「已经明确写出、且与事实相违背
+    的内容」；``fact_value_missing``（事实未被引用）是 warning，不在此列
+    （缺项≠冲突，报缺失会诱导 AI 补写，违背审计纪律第 3 条）。
 
     Args:
         report: ``standard_report`` 返回的 dict（或任何值；非 dict 返回空表）。
@@ -169,7 +169,7 @@ async def autofix_section_fact_conflicts(
 ) -> tuple[str, dict]:
     """对一章已生成正文执行「事实冲突 → 定点替换」自动修复。
 
-    完整链路（对齐易标普通修复）：
+    完整链路：
 
     1. 渲染本章事实文本（复用 ``facts_builder._render_facts_text`` 同一出口，
        不复制渲染逻辑）；
@@ -178,7 +178,7 @@ async def autofix_section_fact_conflicts(
        找不到 / 过短一律拒绝；
     4. 有拒绝 → 把失败原因回灌给 AI 定向重试（上限
        ``FACT_AUTOFIX_MAX_ATTEMPTS`` 次）；仍失败 → 保留已应用的部分，
-       结果里记 ``rejected`` 供人工核对（易标同款「转人工」兜底）；
+       结果里记 ``rejected`` 供人工核对（转人工兜底）；
     5. AI 返回空 edits（判定并非真实矛盾）→ 原文返回，一个字节都不改。
 
     Args:
@@ -247,8 +247,7 @@ async def autofix_section_fact_conflicts(
         result["attempts"] = attempt
         req = list(messages)
         if failures:
-            # 失败原因回灌（对齐易标 buildConsistencyRepairMessages 的
-            # 「上次修复应用失败原因」块）：让下一轮带着具体问题定向重试。
+            # 失败原因回灌（「上次修复应用失败原因」块）：让下一轮带着具体问题定向重试。
             req.append(
                 {
                     "role": "user",
@@ -278,7 +277,7 @@ async def autofix_section_fact_conflicts(
             continue
         edits = obj.get("edits") or []
         if not edits:
-            # AI 判定并非真实矛盾 → 宁可不改（安全阀，易标提示词同款纪律）
+            # AI 判定并非真实矛盾 → 宁可不改（安全阀，遵循审计纪律）
             logger.info(
                 "[事实冲突定点修复] 第 %s 章节 AI 判定无需修改" "（冲突 %d 条）", section_id[:8], len(conflicts)
             )

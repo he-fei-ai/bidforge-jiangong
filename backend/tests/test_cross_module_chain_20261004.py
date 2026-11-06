@@ -48,7 +48,14 @@ class TestConflictIdSchemeScoped:
         assert a1 != b1, "不同方案的前缀必须不同（否则仍会撞主键）"
         assert len(a1) == 7 and a1.endswith("-"), f"前缀形态异常: {a1!r}"
 
-    def test_empty_scheme_id_keeps_legacy_format(self):
+    def test_empty_scheme_id_uses_content_hash_without_prefix(self):
+        """R181（N-08/L1）：不传 scheme_id → 无方案前缀，但仍是内容哈希 ID。
+
+        原断言锁定「C001 顺序号」。顺序号本身是本次要修掉的缺陷（同一处冲突
+        跨轮换号、旧结论被别处顶替），故改为锁定**新语义**：ID 形态为
+        ``C{10 位哈希}``、且同一内容身份跨调用恒得同一 ID。
+        """
+        from app.services.conflict_id import conflict_id, is_content_hash_id
         from app.services.consistency_scanner import _conflict_id_prefix, merge_conflicts
 
         assert _conflict_id_prefix("") == ""
@@ -66,9 +73,14 @@ class TestConflictIdSchemeScoped:
             }
         ]
         out = merge_conflicts(rows, [])
-        assert out[0]["id"] == "C001", f"不传 scheme_id 时必须仍是 C001，实际 {out[0]['id']}"
+        assert is_content_hash_id(out[0]["id"]), f"不传 scheme_id 时必须是内容哈希 ID，实际 {out[0]['id']}"
+        expected = conflict_id("", "numeric", "项目总工期", [{"section_id": "S1", "value": "120 日历天"}])
+        assert out[0]["id"] == expected
+        # 跨轮稳定：同一身份再合并一次必须同 ID（改回顺序号/加 random 会变红）
+        assert merge_conflicts(rows, [])[0]["id"] == out[0]["id"]
 
     def test_merge_conflicts_with_scheme_id_is_scoped(self):
+        from app.services.conflict_id import conflict_id, is_content_hash_id
         from app.services.consistency_scanner import _conflict_id_prefix, merge_conflicts
 
         def _row(sid):
@@ -88,9 +100,14 @@ class TestConflictIdSchemeScoped:
 
         out_a = merge_conflicts(_row("S1"), [], scheme_id="scheme-A")
         out_b = merge_conflicts(_row("S1"), [], scheme_id="scheme-B")
-        assert out_a[0]["id"] != out_b[0]["id"], "不同方案的同序号冲突不得同 ID"
-        assert out_a[0]["id"] == f"{_conflict_id_prefix('scheme-A')}C001"
-        assert out_a[0]["id"].endswith("C001")
+        assert out_a[0]["id"] != out_b[0]["id"], "不同方案的同内容冲突不得同 ID"
+        assert is_content_hash_id(out_a[0]["id"])
+        assert out_a[0]["id"].startswith(f"{_conflict_id_prefix('scheme-A')}C")
+        assert out_a[0]["id"] == conflict_id(
+            "scheme-A", "numeric", "项目总工期", [{"section_id": "S1", "value": "120 日历天"}]
+        )
+        # 前缀相同、身份相同 → 哈希尾段必须一致（方案作用域只体现在前缀）
+        assert out_a[0]["id"].split("-", 1)[-1] == out_b[0]["id"].split("-", 1)[-1]
 
     async def test_persist_two_schemes_keeps_both(self, db_conn):
         from app.services.consistency_scanner import merge_conflicts, persist_conflicts

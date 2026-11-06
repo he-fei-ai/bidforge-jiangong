@@ -982,3 +982,41 @@ def paragraph_structure_report(content: str) -> dict:
             "long_paragraphs": 0,
             "warnings": [],
         }
+
+
+# ✅ R181（2026-11-06）：未闭合围栏「吞正文」告警载荷的唯一构造点。
+#    SSE 的 section_done.standard_report 与单章保存（PUT .../sections/{id}）的
+#    standard_report 必须同口径：同一判定入参（swallowed 行数）、同一载荷键
+#    （issues[].code=fence_swallowed_prose + warning_count 计数）。此前两条路径
+#    各写一份字面量，单章保存路径干脆没有，导致用户手动保存后看不到该告警。
+FENCE_SWALLOWED_CODE = "fence_swallowed_prose"
+
+
+def fence_swallowed_issue(swallowed_lines: int) -> dict | None:
+    """构造「围栏补齐后仍吞正文」的 warning 载荷；无吞正文时返回 None。"""
+    try:
+        count = int(swallowed_lines or 0)
+    except (TypeError, ValueError):
+        count = 0
+    if count <= 0:
+        return None
+    return {
+        "code": FENCE_SWALLOWED_CODE,
+        "severity": "warning",
+        "message": (f"未闭合围栏自动补齐后，仍有 {count} 行疑似正文被困在代码块内，请人工核对本章成稿"),
+        "excerpt": "",
+    }
+
+
+def attach_fence_swallowed_issue(report: dict | None, swallowed_lines: int) -> dict:
+    """把围栏吞正文告警追加进标准报告（只增 warning 计数，不改 passed）。
+
+    无吞正文时原样返回入参对象，保证「零改动」路径与引入前逐字节一致。
+    """
+    issue = fence_swallowed_issue(swallowed_lines)
+    if issue is None:
+        return report or {}
+    out = dict(report or {})
+    out.setdefault("issues", []).append(issue)
+    out["warning_count"] = int(out.get("warning_count") or 0) + 1
+    return out

@@ -23,7 +23,11 @@ from datetime import datetime
 from app.config import settings
 
 # ✅ 2026-10-07（陈旧结论排除）：本批扫描的正文指纹与总检聚合侧同一算法
+from app.services import conflict_id as conflict_id_mod
 from app.services import scheme_fingerprint
+
+# ✅ R179 U5：分阶段并发读数（consistency_scan 阶段；开关关=逐字现状）
+from app.services.ai import warmup as ai_warmup
 from app.services.ai.json_response import collect_json_response
 from app.services.ai.prompts._registry import render
 from app.services.ai.provider_factory import effective_batch_size
@@ -746,13 +750,12 @@ def _conflict_id_prefix(scheme_id: str) -> str:
     从此不可能互撞。``scheme_id`` 为空时返回空前缀 → **ID 格式与历史完全一致**，
     既有的纯函数单测（不传 scheme_id）与任何不感知方案作用域的调用方零影响。
 
-    ⚠️ 历史落库行（无前缀的 C001…）不做迁移：``get_conflicts`` 按 **最新
-    scan_id** 取数（见 consistency_repair.py:124），新扫描必然带新 scan_id，
-    旧行自然被隔离，不会出现在结果里；真正需要的是「不再新增碰撞」。
+    ⚠️ 历史落库行（无前缀的 C001…）由 :func:`migrate_conflict_ids` 就地迁移为
+    内容哈希 ID（可重入、幂等，见该函数 docstring）。
     """
-    if not scheme_id:
-        return ""
-    return f"{hashlib.md5(str(scheme_id).encode('utf-8')).hexdigest()[:6]}-"
+    # ✅ R181（N-08/L1）：前缀算法下沉到 services/conflict_id.py（单一事实源），
+    #    与内容哈希 ID 共用；本函数保留为既有调用点/测试的兼容入口。
+    return conflict_id_mod.conflict_id_prefix(scheme_id)
 
 
 def merge_conflicts(ai_rows: list[dict], prescan_rows: list[dict], scheme_id: str = "") -> list[dict]:
@@ -764,9 +767,9 @@ def merge_conflicts(ai_rows: list[dict], prescan_rows: list[dict], scheme_id: st
     3. 结构/安全类参数（强度/型号/基坑深度…）至少按 high 定级。
 
     ``scheme_id`` 用于给冲突 ID 加方案作用域前缀（见 :func:`_conflict_id_prefix`），
-    **默认空串 = 不加前缀**（向后兼容，ID 形态与改造前逐字一致）。
+    并参与内容哈希（前缀之后的哈希只由身份决定）。
+    **默认空串 = 不加前缀**，ID 为 ``C{10 位哈希}``（R181 起不再按顺序编号）。
     """
-    _cid_prefix = _conflict_id_prefix(scheme_id)
     merged: dict[str, dict] = {}
     order: list[str] = []
 
@@ -824,11 +827,13 @@ def merge_conflicts(ai_rows: list[dict], prescan_rows: list[dict], scheme_id: st
             deduped.append(item)
 
     conflicts = []
-    for idx, item in enumerate(deduped, start=1):
+    for item in deduped:
         occs = item["occurrences"]
         if not occs:
             continue
-        cid = f"{_cid_prefix}C{idx:03d}"
+        # ✅ R181（N-08/L1）：ID 由内容身份哈希生成（不再按扫描顺序编号）。
+        #    同一处冲突跨轮、跨调用方稳定，旧「已确认」结论不会被另一处顶替。
+        cid = conflict_id_mod.conflict_id(scheme_id, item["conflict_type"], item["topic"], occs)
         for o in occs:
             o["conflict_id"] = cid
         values = sorted({o.get("value") for o in occs if o.get("value")})
@@ -852,15 +857,13 @@ def merge_conflicts(ai_rows: list[dict], prescan_rows: list[dict], scheme_id: st
 def _conflict_identity(conflict_type, topic, occurrences) -> tuple:
     """冲突身份签名：类型 + 主题 + 章节/取值集合（忽略出现位置与顺序）。
 
-    ✅ R179（B-03 残项）：跨轮扫描时冲突 id 仍是按顺序重编的 C001/C002…，
+    ✅ R179（B-03 残项）：跨轮扫描时冲突 id 曾是按顺序重编的 C001/C002…，
     若只用 id 做 upsert 键，上一轮「已确认」的 C001 会被本轮**另一处**
     冲突继承 —— 用户看到的新问题直接挂着旧的 accepted 状态，自动仲裁
     也会跳过它。以身份签名判断是否同一问题，身份变化则重置为 pending。
+    ✅ R181（N-08/L1）：ID 已改为身份哈希，本签名仍是迁移/upsert 的身份判据。
     """
-    occ = sorted(
-        (str(o.get("section_id") or ""), str(o.get("value") or "")) for o in (occurrences or []) if isinstance(o, dict)
-    )
-    return (str(conflict_type or ""), str(topic or "").strip(), tuple(occ))
+    return conflict_id_mod.conflict_identity_tuple(conflict_type, topic, occurrences)
 
 
 async def persist_conflicts(
@@ -929,6 +932,188 @@ async def persist_conflicts(
     await db.commit()
 
 
+_STATUS_PRECEDENCE = {"pending": 0, "skipped": 1, "failed": 2, "repaired": 3, "accepted": 4}
+
+
+def _status_rank(status) -> int:
+    return _STATUS_PRECEDENCE.get(str(status or ""), 0)
+
+
+def _rewrite_conflict_ids(obj, mapping: dict[str, str]) -> bool:
+    """把 JSON 结构里所有 ``conflict_id`` 旧值替换为迁移后的新值（原地）。"""
+    changed = False
+    if isinstance(obj, dict):
+        cid = obj.get("conflict_id")
+        if isinstance(cid, str) and cid in mapping and mapping[cid] != cid:
+            obj["conflict_id"] = mapping[cid]
+            changed = True
+        for value in obj.values():
+            changed = _rewrite_conflict_ids(value, mapping) or changed
+    elif isinstance(obj, list):
+        for value in obj:
+            changed = _rewrite_conflict_ids(value, mapping) or changed
+    return changed
+
+
+async def migrate_conflict_ids(db, scheme_id: str) -> dict:
+    """把历史顺序号冲突 ID 就地迁移为内容哈希 ID（R181 · N-08/L1）。
+
+    **可重入、幂等**：第二次运行看到的行都已符合哈希形态，不再产生任何写入。
+
+    状态继承策略（本次明确选择「身份可证相同时继承」，理由如下）：
+      · 身份判据与 :func:`merge_conflicts` 完全一致（类型 + 主题 + 章节/取值
+        集合），旧行**自身的字段**即可重算哈希 —— 若目标 ID 相同，说明就是
+        同一处冲突，用户的「已确认 / 已驳回」应当继续有效，否则迁移会让所有
+        历史结论无声失效，用户被迫逐条重审；
+      · 多条旧行落在同一身份（并发扫描/重复写）→ 保留状态等级最高的一条
+        （accepted > repaired > failed > skipped > pending），其余删除并记日志；
+      · 身份无法解析（坏 JSON / 空字段）无法证明同一 → 保持 ``pending``（重置），
+        由 :func:`persist_conflicts` 的 R179 身份检查兜底，并记日志说明原因。
+
+    同时改写 ``consistency_repairs.items`` 中的 ``conflict_id``，让历史修复批次
+    引用随迁移指向新 ID（否则旧批次确认时会命中不存在的冲突）。
+
+    失败策略：整体 try/rollback，失败仅记 warning 并返回统计 —— 迁移不能阻断
+    一致性扫描（fail-soft），下一轮扫描会再次尝试（幂等）。
+    """
+    stats = {
+        "scanned": 0,
+        "migrated": 0,
+        "merged": 0,
+        "reset": 0,
+        "repairs_updated": 0,
+        "error": "",
+    }
+    if not scheme_id:
+        return stats
+    wrote = False
+    try:
+
+        async def _reset_unprovable(row: dict, reason: str) -> None:
+            """身份无法证明时按迁移口径重置为 pending，并保留可追溯日志。"""
+            nonlocal wrote
+            row_id = str(row.get("id") or "")
+            old_status = str(row.get("status") or "pending")
+            if old_status != "pending":
+                await db.execute(
+                    "UPDATE consistency_conflicts SET status='pending'" " WHERE id=? AND scheme_id=?",
+                    (row_id, scheme_id),
+                )
+                wrote = True
+                stats["reset"] += 1
+            logger.warning(
+                "冲突 ID 迁移：%s，id=%s 状态 %s→pending（不迁移 ID，下一轮扫描重新生成）",
+                reason,
+                row_id,
+                old_status,
+            )
+
+        cur = await db.execute(
+            "SELECT id, conflict_type, topic, occurrences, status" " FROM consistency_conflicts WHERE scheme_id=?",
+            (scheme_id,),
+        )
+        rows = [dict(r) for r in await cur.fetchall()]
+        stats["scanned"] = len(rows)
+        groups: dict[str, list[dict]] = {}
+        mapping: dict[str, str] = {}
+        for row in rows:
+            try:
+                occs = json.loads(row.get("occurrences") or "[]")
+            except (TypeError, ValueError):
+                # 坏 JSON 无法证明身份 → 重置 pending 并记录原因（不迁移 ID）
+                await _reset_unprovable(row, "occurrences 不是合法 JSON")
+                continue
+            if not isinstance(occs, list):
+                await _reset_unprovable(row, "occurrences 不是列表")
+                continue
+            if not str(row.get("conflict_type") or "").strip():
+                await _reset_unprovable(row, "conflict_type 为空")
+                continue
+            canon = conflict_id_mod.conflict_id(scheme_id, row.get("conflict_type"), row.get("topic"), occs)
+            mapping[str(row.get("id") or "")] = canon
+            groups.setdefault(canon, []).append(row)
+
+        for canon, group in groups.items():
+            keeper = next((r for r in group if str(r.get("id")) == canon), None)
+            if keeper is None:
+                keeper = max(group, key=lambda r: (_status_rank(r.get("status")), str(r.get("id") or "")))
+            best = max(group, key=lambda r: (_status_rank(r.get("status")), str(r.get("id") or "")))
+            best_rank = _status_rank(best.get("status"))
+            if best is not keeper and best_rank > _status_rank(keeper.get("status")):
+                await db.execute(
+                    "UPDATE consistency_conflicts SET status=? WHERE id=?",
+                    (best.get("status") or "pending", keeper.get("id")),
+                )
+                keeper["status"] = best.get("status") or "pending"
+                wrote = True
+                logger.info(
+                    "冲突 ID 迁移：身份相同，继承更高状态 %s→%s（%s → %s）",
+                    keeper.get("status"),
+                    best.get("status"),
+                    best.get("id"),
+                    keeper.get("id"),
+                )
+            if str(keeper.get("id")) != canon:
+                await db.execute(
+                    "UPDATE consistency_conflicts SET id=? WHERE id=?",
+                    (canon, keeper.get("id")),
+                )
+                wrote = True
+                stats["migrated"] += 1
+                logger.info(
+                    "冲突 ID 迁移：%s → %s（身份可证相同，继承状态 %s）",
+                    keeper.get("id"),
+                    canon,
+                    keeper.get("status"),
+                )
+            for dup in group:
+                dup_id = str(dup.get("id") or "")
+                if dup_id in (str(keeper.get("id")), canon):
+                    continue
+                await db.execute(
+                    "DELETE FROM consistency_conflicts WHERE id=? AND scheme_id=?",
+                    (dup_id, scheme_id),
+                )
+                wrote = True
+                stats["merged"] += 1
+                logger.info(
+                    "冲突 ID 迁移：重复身份合并 %s → %s（状态 %s，保留 %s）",
+                    dup_id,
+                    canon,
+                    dup.get("status"),
+                    keeper.get("status"),
+                )
+
+        # 历史修复批次里的 conflict_id 同步指向新 ID（仅在确有迁移时执行）
+        if any(old != new for old, new in mapping.items()):
+            cur = await db.execute(
+                "SELECT id, items FROM consistency_repairs WHERE scheme_id=?",
+                (scheme_id,),
+            )
+            for rep in await cur.fetchall():
+                try:
+                    items = json.loads(rep["items"] or "[]")
+                except (TypeError, ValueError):
+                    continue
+                if _rewrite_conflict_ids(items, mapping):
+                    await db.execute(
+                        "UPDATE consistency_repairs SET items=? WHERE id=?",
+                        (json.dumps(items, ensure_ascii=False), rep["id"]),
+                    )
+                    wrote = True
+                    stats["repairs_updated"] += 1
+        if wrote:
+            await db.commit()
+    except Exception as e:  # noqa: BLE001 —— fail-soft：迁移失败不能阻断扫描
+        logger.warning("冲突 ID 迁移失败（已回滚，本轮扫描继续）: %s", e, exc_info=True)
+        stats["error"] = str(e)
+        try:
+            await db.rollback()
+        except Exception as _re:
+            logger.warning("冲突 ID 迁移 rollback 也失败: %s", _re)
+    return stats
+
+
 async def run_scan(
     db,
     *,
@@ -952,6 +1137,9 @@ async def run_scan(
       · use_cache=False 可强制全量重扫（排查缓存问题用）。
     """
     sections = await load_leaf_sections(db, scheme_id)
+    # ✅ R181（N-08/L1）：扫描前先做一次幂等的 ID 迁移（历史顺序号 → 内容哈希）。
+    #    失败仅记录并继续（fail-soft）；统计随响应加法式回传，便于运维核对。
+    _id_migration = await migrate_conflict_ids(db, scheme_id)
     if not sections:
         return {
             "scan_id": "",
@@ -962,6 +1150,7 @@ async def run_scan(
             "failed_sections": [],
             "unscanned_sections": [],
             "partial": False,
+            "id_migration": _id_migration,
         }
 
     facts = await build_global_facts_text(db, scheme_id) if include_global_facts else ""
@@ -1003,7 +1192,9 @@ async def run_scan(
     failed_ids: set[str] = set()  # ✅ B-02：AI 扫描失败、未产生结论的章节
     batches = chunk_sections_for_scan(pending, batch_size=_scan_batch_size)
     if batches:
-        sem = asyncio.Semaphore(CONSISTENCY_SCAN_CONCURRENCY)
+        # ✅ R179 U5：阶段并发读数接线。开关关 → stage_concurrency 返回 0，
+        #    走 or 分支 = 逐字现状（CONSISTENCY_SCAN_CONCURRENCY）。
+        sem = asyncio.Semaphore(ai_warmup.stage_concurrency("consistency_scan") or CONSISTENCY_SCAN_CONCURRENCY)
         done = 0
 
         async def _scan_batch(batch: list[dict]) -> tuple[dict[str, list], set[str]]:
@@ -1115,6 +1306,8 @@ async def run_scan(
         #    的章节，消费方无需再猜 failed 的语义；缓存里绝不会出现它们的 0 冲突。
         "unscanned_sections": failed_sections,
         "partial": bool(failed_sections),
+        # ✅ R181（N-08/L1，加法式）：本次扫描前的冲突 ID 迁移统计
+        "id_migration": _id_migration,
         "contexts": {
             "global_facts": facts,
             "project_docs": project_docs,

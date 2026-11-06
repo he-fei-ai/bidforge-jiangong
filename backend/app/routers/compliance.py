@@ -1198,6 +1198,10 @@ async def run_consistency_audit(scheme_id: str, db=Depends(get_db)):
             logger.warning("一致性审计评分非数值，按 0 处理: %r", _obj.get("score"))
             _scores.append(0.0)
     # 多批取最小分：整体一致性不高于最差批次（保守口径，避免分批后分数虚高）
+    # ✅ R181（遗留问题 6）：确认这是**有意**口径而非副作用 —— 分批是内部实现
+    #    细节（受单次 token 预算约束），若取平均或最大分，用户会看到「同一份
+    #    正文，只是批次变了，分数就升高」的假改善。故固定取最小，并在响应与
+    #    前端文案中显式披露（score_rule / score_note，加法式）。
     score_float = min(_scores) if _scores else 0.0
     audit_id = str(uuid.uuid4())
     # ✅ R180（2026-11-05 · 可观测性）：把本次审计的覆盖范围一并落库，
@@ -1249,6 +1253,10 @@ async def run_consistency_audit(scheme_id: str, db=Depends(get_db)):
         "checked_chars": _sent_chars,
         "total_chars": len(content),
         "counts": _counts,
+        # ✅ R181（遗留问题 6，加法式）：显式披露评分口径，避免用户以为
+        #    「分数比单批时低」是正文变差了。
+        "score_rule": "min_across_batches",
+        "score_note": _consistency_score_note(len(_batches)),
     }
 
 
@@ -1275,6 +1283,14 @@ async def latest_consistency_audit(scheme_id: str, db=Depends(get_db)):
         item["counts"] = {}
     item.pop("counts_json", None)
     item["exists"] = True
+    # ✅ R181（遗留问题 6，加法式）：读取端同样披露评分口径（口径恒定，
+    #    多批与否只影响文案里的批次说明）。
+    item["score_rule"] = "min_across_batches"
+    try:
+        _batches_n = int(item["counts"].get("batches") or 0)
+    except (TypeError, ValueError, AttributeError):
+        _batches_n = 0
+    item["score_note"] = _consistency_score_note(_batches_n)
     return item
 
 
@@ -1491,8 +1507,37 @@ async def _content_fingerprint(db, scheme_id: str) -> str:
     return await _fp(db, scheme_id)
 
 
-async def _run_is_stale(db, scheme_id: str, row, current_fingerprint: str | None = None) -> bool:
-    """判定一条预检运行记录是否已过期（G3）。
+def _consistency_score_note(batch_count: int) -> str:
+    """一致性审计评分口径的用户可读说明（R181 · 遗留问题 6，加法式文案）。"""
+    try:
+        n = int(batch_count or 0)
+    except (TypeError, ValueError):
+        n = 0
+    if n > 1:
+        return f"评分口径：本次分 {n} 批审计，取各批最低分（保守口径，整体一致性不高于最差批次）"
+    return "评分口径：本次 1 批完成（多批时取各批最低分，保守口径）"
+
+
+async def _review_state_hash(db, scheme_id: str) -> str:
+    """章节审核状态指纹（R181 · B-14）。
+
+    与 :func:`_content_fingerprint` 分开（见 services/scheme_fingerprint.py
+    ``review_state_hash`` docstring）：审核通过/驳回不改正文，却会让总检缓存
+    与「结论是否仍对应当前审核进度」失真。计算失败返回空串（fail-open）。
+    """
+    from app.services.scheme_fingerprint import review_state_hash as _rs
+
+    return await _rs(db, scheme_id)
+
+
+async def _run_is_stale(
+    db,
+    scheme_id: str,
+    row,
+    current_fingerprint: str | None = None,
+    current_review_hash: str | None = None,
+) -> bool:
+    """判定一条预检运行记录是否已过期（G3 正文 + R181/B-14 审核状态）。
 
     历史行没有指纹（本功能上线前的数据）→ 视为**不过期**：无法判定就不打扰用户，
     避免把库里所有旧记录全标成「已过期」的红条。
@@ -1502,17 +1547,30 @@ async def _run_is_stale(db, scheme_id: str, row, current_fingerprint: str | None
        ⚠️ 同时发现调用方（/runs、/report、导出页摘要）的 SELECT 均未取
        content_fingerprint 列 → stored 永远取空 → stale 恒为 False，G3 时效
        判定在三处全部失效。已随本次修复在各调用方补齐取列。
+
+    ✅ R181（B-14）：审核状态单独比较。历史行 ``review_state_hash`` 为空
+       （或当前值算不出来）→ 不做审核状态失效判定（fail-open），与正文指纹
+       的历史行约定一致。**注意**：/submit 的放行门控不调用本函数的新审核
+       维分支（通过动作本身就会改审核状态，纳入会让门控永远过期）。
     """
     try:
         keys = set(row.keys()) if hasattr(row, "keys") else set(row)
         stored = row["content_fingerprint"] if "content_fingerprint" in keys else ""
+        stored_review = row["review_state_hash"] if "review_state_hash" in keys else ""
     except (IndexError, KeyError, TypeError):
         stored = ""
+        stored_review = ""
     if not stored:
         return False
     if current_fingerprint is None:
         current_fingerprint = await _content_fingerprint(db, scheme_id)
-    return bool(current_fingerprint) and stored != current_fingerprint
+    if bool(current_fingerprint) and stored != current_fingerprint:
+        return True
+    if not stored_review:
+        return False
+    if current_review_hash is None:
+        current_review_hash = await _review_state_hash(db, scheme_id)
+    return bool(current_review_hash) and stored_review != current_review_hash
 
 
 # @deprecated 孤儿 API：本前端走 /overview（内部已含同一预检引擎且带落库+缓存）；
@@ -1535,9 +1593,11 @@ async def run_preflight_check(scheme_id: str, db=Depends(get_db), force: bool = 
     )
     async with _overview_lock(scheme_id):
         fingerprint = await _content_fingerprint(db, scheme_id)
+        # ✅ R181（B-14）：缓存键并入审核状态指纹 —— 只改 review_status 也必须失效。
+        review_hash = await _review_state_hash(db, scheme_id)
         # ✅ 2026-10-03：进程内缓存键并入「已确认事实签名」，事实确认后
         #    TTL 内不再返回旧结论（SAF-08 能及时出现）；落库指纹语义不变。
-        cache_key = (fingerprint, await _facts_signature(db, scheme_id))
+        cache_key = (fingerprint, await _facts_signature(db, scheme_id), review_hash)
         hit = _PREFLIGHT_RECENT.get(scheme_id)
         if not force and hit and hit[0] == cache_key and time.monotonic() - hit[1] < OVERVIEW_CACHE_TTL:
             cached = dict(hit[2])
@@ -1561,6 +1621,8 @@ async def run_preflight_check(scheme_id: str, db=Depends(get_db), force: bool = 
                 "created_at": datetime.now().isoformat(timespec="seconds"),
                 # ✅ G3：本次结论对应的内容指纹（落库后供 /runs /report 判定是否过期）
                 "content_fingerprint": fingerprint,
+                # ✅ R181（B-14，加法式）：本次结论对应的审核状态指纹
+                "review_state_hash": review_hash,
                 "stale": False,
                 "cached": False,
             }
@@ -1593,9 +1655,11 @@ async def readiness_overview(scheme_id: str, db=Depends(get_db), force: bool = F
     """
     async with _overview_lock(scheme_id):
         fingerprint = await _content_fingerprint(db, scheme_id)
+        # ✅ R181（B-14）：审核状态指纹并入缓存键 —— 只改 review_status 也必须失效。
+        review_hash = await _review_state_hash(db, scheme_id)
         # ✅ 2026-10-03：进程内缓存键并入「已确认事实签名」（同 /preflight）；
         #    落库 content_fingerprint（G3 时效语义）保持不变。
-        cache_key = (fingerprint, await _facts_signature(db, scheme_id))
+        cache_key = (fingerprint, await _facts_signature(db, scheme_id), review_hash)
         hit = _OVERVIEW_RECENT.get(scheme_id)
         if not force and hit and hit[0] == cache_key:
             if time.monotonic() - hit[1] < OVERVIEW_CACHE_TTL:
@@ -1604,7 +1668,7 @@ async def readiness_overview(scheme_id: str, db=Depends(get_db), force: bool = F
                 cached["stale"] = False
                 return cached
         # ✅ P1-4：复用本函数已算好的指纹，避免同一次请求第二次全表扫描
-        payload = await _readiness_overview_compute(db, scheme_id, fingerprint=fingerprint)
+        payload = await _readiness_overview_compute(db, scheme_id, fingerprint=fingerprint, review_hash=review_hash)
         payload["cached"] = False
         payload["stale"] = False
         if not payload.get("content_fingerprint"):
@@ -1627,7 +1691,12 @@ def _ai_row_is_stale(row: dict, current_fingerprint: str) -> bool:
 
 
 async def _readiness_overview_compute(
-    db, scheme_id: str, *, persist: bool = True, fingerprint: str | None = None
+    db,
+    scheme_id: str,
+    *,
+    persist: bool = True,
+    fingerprint: str | None = None,
+    review_hash: str | None = None,
 ) -> dict:
     """总检的实际计算（由 readiness_overview 的并发锁与幂等缓存包着）。
 
@@ -2009,6 +2078,9 @@ async def _readiness_overview_compute(
             "content_fingerprint": (
                 fingerprint if fingerprint is not None else await _content_fingerprint(db, scheme_id)
             ),
+            # ✅ R181（B-14，加法式）：审核状态指纹。调用方已算好则复用（同一次
+            #    请求不重复扫库）；既有调用方（review_autofix）不传 → 自行计算。
+            "review_state_hash": (review_hash if review_hash is not None else await _review_state_hash(db, scheme_id)),
         }
     )
     if persist:
@@ -2038,14 +2110,16 @@ async def _persist_run(db, scheme_id: str, payload: dict, stats: dict):
         await review_db.exec_write(
             db,
             "INSERT INTO preflight_runs (id, scheme_id, project_id, content_fingerprint,"
-            " rule_version, total, grade, verdict, released, blocked,"
+            " review_state_hash, rule_version, total, grade, verdict, released, blocked,"
             " counts, dimensions, findings, stats)"
-            " VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?)",
+            " VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)",
             (
                 str(uuid.uuid4()),
                 scheme_id,
                 await _scheme_project_id(db, scheme_id),
                 payload.get("content_fingerprint") or "",
+                # ✅ R181（B-14）：审核状态指纹随运行落库
+                payload.get("review_state_hash") or "",
                 RULE_VERSION,
                 payload.get("total", 0),
                 payload.get("grade", ""),
@@ -2088,12 +2162,13 @@ async def list_preflight_runs(scheme_id: str, limit: int = 10, db=Depends(get_db
     rows = await review_db.fetch_all(
         db,
         "SELECT id, total, grade, verdict, released, blocked, counts, rule_version,"
-        " content_fingerprint, created_at FROM preflight_runs WHERE scheme_id=?"
+        " content_fingerprint, review_state_hash, created_at FROM preflight_runs WHERE scheme_id=?"
         " ORDER BY created_at DESC, rowid DESC LIMIT ?",
         (scheme_id, limit),
         what="预检历史：读取运行记录",
     )
     current_fp: str | None = None
+    current_review: str | None = None
     items = []
     for r in rows:
         item = r
@@ -2103,7 +2178,16 @@ async def list_preflight_runs(scheme_id: str, limit: int = 10, db=Depends(get_db
             item["counts"] = {}
         if current_fp is None and (item.get("content_fingerprint") or ""):
             current_fp = await _content_fingerprint(db, scheme_id)
-        item["stale"] = await _run_is_stale(db, scheme_id, item, current_fingerprint=current_fp)
+        # ✅ R181（B-14）：当前审核状态指纹一次算好，逐行复用
+        if current_review is None and (item.get("review_state_hash") or ""):
+            current_review = await _review_state_hash(db, scheme_id)
+        item["stale"] = await _run_is_stale(
+            db,
+            scheme_id,
+            item,
+            current_fingerprint=current_fp,
+            current_review_hash=current_review,
+        )
         items.append(item)
     return {"items": items}
 
@@ -2117,7 +2201,7 @@ async def readiness_report(scheme_id: str, fmt: str = "markdown", db=Depends(get
     row = await review_db.fetch_one(
         db,
         "SELECT total, grade, verdict, released, blocked, dimensions, findings,"
-        " stats, content_fingerprint, created_at FROM preflight_runs WHERE scheme_id=?"
+        " stats, content_fingerprint, review_state_hash, created_at FROM preflight_runs WHERE scheme_id=?"
         " ORDER BY created_at DESC, rowid DESC LIMIT 1",
         (scheme_id,),
         what="整改清单报告：读取最近一次预检记录",
@@ -2173,9 +2257,10 @@ async def readiness_report(scheme_id: str, fmt: str = "markdown", db=Depends(get
     # 若正文已改过，按旧结论整改就是白干。报告头部显式标注时效状态。
     stale = await _run_is_stale(db, scheme_id, row)
     stale_line = (
-        "- ⚠️ 时效状态：**已过期**（本次预检之后正文 / 图表已发生变更，" "结论可能失效，请先重新执行「一键总检」）"
+        "- ⚠️ 时效状态：**已过期**（本次预检之后正文 / 图表 / 审核状态已发生变更，"
+        "结论可能失效，请先重新执行「一键总检」）"
         if stale
-        else "- 时效状态：有效（正文 / 图表与本次预检一致）"
+        else "- 时效状态：有效（正文 / 图表 / 审核状态与本次预检一致）"
     )
 
     lines = [

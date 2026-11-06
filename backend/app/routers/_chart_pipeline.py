@@ -45,6 +45,7 @@ from app.services.content_blocks import (  # noqa: E402
     #    消除本模块此前的本地副本（`_ORPHAN_LEAD_IN_RE` 8 备选 vs content_blocks 5 备选、
     #    `_LEAD_IN_MAX_CHARS` vs 3 处裸 60）——详见 content_blocks 该常量的分叉说明。
     ORPHAN_LEAD_IN_RE,
+    _is_orphan_lead_in_text,
     parse_fence_line,
     read_fenced_block,
 )
@@ -515,7 +516,14 @@ def _drop_dangling_lead_in(out: list[str]) -> bool:
         return False
     if _LEAD_IN_NOT_PARA_RE.match(line):
         return False
-    if not _ORPHAN_LEAD_IN_RE.search(line):
+    # ✅ R179（2026-11-05 · 引导语口径统一）：原先此处用本模块私有的窄词表
+    #    `_ORPHAN_LEAD_IN_RE`（只认「如下图/见下图/如图所示」），而导出侧
+    #    `export._pop_orphan_lead_in` 已切到 content_blocks 的宽判据
+    #    `_is_orphan_lead_in_text`（并集「流程图如下：/示意图如下：」等词序变体）。
+    #    结果是「施工流程图如下：」这类变体在生成期删图后仍留在正文，导出期
+    #    才被回收 —— 两个阶段口径不一致，同一句在不同链路得到不同结论。
+    #    现改为调用**唯一实现**，两侧判定同源。
+    if not _is_orphan_lead_in_text(line):
         return False
     del out[idx:]
     return True

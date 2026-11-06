@@ -301,7 +301,7 @@ async def test_export_docx_caption_uses_real_chart_title(db_conn):
     )
     await db_conn.commit()
 
-    resp = await export_docx("sq", {"config": {"allow_pil_fallback": True}}, db=db_conn)
+    resp = await export_docx("sq", {"config": {"allow_pil_fallback": True}, "override_high_issues": True}, db=db_conn)
 
     from docx import Document
 
@@ -342,7 +342,7 @@ async def test_export_docx_failed_chart_skipped_without_consuming_fig_num(db_con
     )
     await db_conn.commit()
 
-    resp = await export_docx("sf", {"config": {"allow_pil_fallback": True}}, db=db_conn)
+    resp = await export_docx("sf", {"config": {"allow_pil_fallback": True}, "override_high_issues": True}, db=db_conn)
 
     from docx import Document
 
@@ -374,7 +374,11 @@ async def test_export_docx_failed_chart_placeholder_optin(db_conn):
     )
     await db_conn.commit()
 
-    resp = await export_docx("sp", {"config": {"allow_pil_fallback": True, "chart_fail_placeholder": True}}, db=db_conn)
+    resp = await export_docx(
+        "sp",
+        {"config": {"allow_pil_fallback": True, "chart_fail_placeholder": True}, "override_high_issues": True},
+        db=db_conn,
+    )
 
     from docx import Document
 
@@ -451,7 +455,7 @@ async def test_export_docx_clipboard_table_not_printed_as_garbage(db_conn):
     )
     await db_conn.commit()
 
-    resp = await export_docx("sc", {"config": {}}, db=db_conn)
+    resp = await export_docx("sc", {"config": {}, "override_high_issues": True}, db=db_conn)
 
     from docx import Document
 
@@ -488,7 +492,11 @@ async def test_export_docx_auto_rewrite_html_table_becomes_native(db_conn):
 
     await _seed_html_table_scheme(db_conn, "sca", "sca1", _HTML_TABLE_CONTENT)
 
-    resp = await export_docx("sca", {"config": {"auto_rewrite_content": True}}, db=db_conn)
+    resp = await export_docx(
+        "sca",
+        {"config": {"auto_rewrite_content": True}, "override_high_issues": True},
+        db=db_conn,
+    )
 
     from docx import Document
 
@@ -507,7 +515,7 @@ async def test_export_docx_auto_rewrite_off_keeps_v14_behavior(db_conn):
 
     await _seed_html_table_scheme(db_conn, "scb", "scb1", _HTML_TABLE_CONTENT)
 
-    resp = await export_docx("scb", {"config": {}}, db=db_conn)
+    resp = await export_docx("scb", {"config": {}, "override_high_issues": True}, db=db_conn)
 
     from docx import Document
 

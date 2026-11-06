@@ -131,6 +131,13 @@ class Settings(BaseSettings):
     image_default_size: str = "2K"  # 1K/2K/3K/4K
     image_quality: str = "standard"
     image_max_concurrency: int = 2
+    # ---------- 配置连通性预检并发上限（R179 N-09 · 2026-11-05） ----------
+    # POST /ai/config/precheck-all 对全部已填地址的配置并发做 DNS/TCP 预检
+    # （每条探测是一个 to_thread 线程）。旧实现无界 gather：配置数大时线程
+    # 瞬时拉满、且 getaddrinfo 无显式超时可能长期占用。现按该值限流并发。
+    #   默认 8：配置数 <=8 时与旧行为逐字一致（单轮并发、同序同果）；
+    #   非正数/非法值在端点侧回落 8（与 global_facts._positive_int_setting 同口径）。
+    precheck_max_concurrency: int = 8
     # ---------- 导出远程图片下载安全配置 ----------
     # 仅允许 HTTP(S)；下载有明确超时、响应体大小和重定向次数上限。
     # localhost 默认允许以兼容本地开发/自建图片服务；RFC1918、链路本地和元数据地址仍拒绝。
@@ -207,6 +214,15 @@ class Settings(BaseSettings):
     # 可信反向代理直连 IP 白名单（逗号分隔）。默认空 = 不信任 X-Forwarded-For，
     # 配置审计只记录 ASGI 直连对端，避免客户端伪造来源 IP。
     trusted_proxy_ips: str = ""
+
+    # ---------- 管理面接口鉴权（/admin/*） ----------
+    # ✅ R179（2026-11-05 · fail-closed）：为空（默认）时只允许**回环来源**
+    #    （127.0.0.1 / ::1）访问管理接口，非回环一律 403 —— 本机单机使用零变化，
+    #    服务暴露到局域网/公网时默认关闭。
+    #    非空 = 必须携带 X-Admin-Token 或 Authorization: Bearer <token>，
+    #    放行后不再限制来源（显式配置即表示允许远程管理）。
+    #    与 API_AUTH_TOKEN 独立：后者是全局 API 闸门，本项只管管理面。
+    admin_api_token: str = ""
 
     # SSE / 超时
     sse_total_timeout_default: int = 1800
@@ -712,6 +728,15 @@ class Settings(BaseSettings):
     # 关闭（False）：messages 与本项引入前**逐字一致**（可瞬时回退，不删代码）。
     content_stable_prefix_enabled: bool = True
 
+    # ✅ R181（2026-11-06）：section_done 事件体积上限（按 ensure_ascii=False 的
+    #   JSON 字符数估算）。0/负数 = 不截断。
+    #   默认 0（与引入前完全一致，满足「新增配置默认值等于现状」）；实测单章
+    #   事件通常 2~40KB，如需启用防护可设为 262144（256KB），超限时只截断
+    #   content，并附 truncated/truncated_chars/kept_chars/content_ref/
+    #   truncation_note 显式降级字段，绝不静默截断。正文在本事件之前已落库，
+    #   断线重挂与检查点续跑都读库，不依赖本次事件载荷。
+    section_done_payload_max_chars: int = 0
+
     # ✅ R58（2026-10-10）：正文生成时是否把「本章图表配额（程序实时核算的
     #   剩余配额）」告诉 AI。关闭 → AI 完全不知道配额，超出上限的图会被
     #   build_inline_chart_plan 自动删除（生成成本白花、用户看到图消失）。
@@ -1165,14 +1190,50 @@ class Settings(BaseSettings):
     # 关键 L3 标题关键词（逗号分隔；标题命中即按关键下限要求）。
     # 2026-11-05 口径补充：加入“吊装/脚手架/深基坑”，覆盖“起重吊装”“落地脚手架”
     # “深基坑支护”等变体（子串命中）。
-    content_l3_key_title_keywords: str = (
-        "加固,拆除,危大,危险性较大,消防,调试,质量,安全,监测,监控,吊装,脚手架,深基坑"
-    )
+    content_l3_key_title_keywords: str = "加固,拆除,危大,危险性较大,消防,调试,质量,安全,监测,监控,吊装,脚手架,深基坑"
     content_l3_min_paragraphs: int = 3
     content_l3_max_paragraphs: int = 5
     # 连续短段判定：连续 ≥2 段且每段 < 80 字视为“短段簇”（仅提示词约束，
     # 校验侧以正文总字数 + 自然段数为主判据，避免短句/工序步骤被误报）。
     content_l3_short_para_chars: int = 80
+
+    # ---------- ✅ R179 M1（2026-11-05）：评分项 → 目录映射校验 ----------
+    # 全部为新增项，默认值即「只读校验链路」的既有行为范围：不参与目录/正文生成，
+    # 不改变任何既有开关语义。关闭方式：不调用对应接口即可（无生成链路副作用）。
+    scoring_extract_max_docs: int = 4
+    scoring_extract_max_chars: int = 60000
+    # 单批 AI 抽取超时（秒）：方案 §1.3 定稿 120s
+    scoring_extract_timeout: int = 120
+    scoring_threshold_exact: float = 0.95
+    scoring_threshold_contains: float = 0.85
+    scoring_threshold_keyword_high: float = 0.65
+    scoring_threshold_keyword_mid: float = 0.55
+    scoring_threshold_keyword_low: float = 0.45
+    # extra 结构白名单（逗号分隔，归一后比对）：父章节/附图附表类不应被误报为多余章节
+    scoring_extra_whitelist: str = "附图,附表,附件,封面,目录,编制说明"
+
+    # ---------- ✅ R179 U5（2026-11-05）：分组预热编排 ----------
+    # 默认关闭：关闭时 run_grouped 直接走原有并发路径，行为与引入前逐字等价。
+    ai_warmup_enabled: bool = False
+    ai_warmup_delay_ms: int = 5000
+    # 分阶段并发上限（**默认 2**）。注意：不改变
+    # bid_analysis_item_concurrency（保持 1）。
+    ai_warmup_stage_concurrency: int = 2
+    # 分阶段并发覆盖表（JSON，如 {"content":2,"facts":2}）；空 = 全部用上面的默认值
+    ai_warmup_stage_concurrency_map: str = ""
+    # 启用阶段（逗号分隔）；仅 ai_warmup_enabled=True 时读取
+    ai_warmup_stages: str = "outline,content,facts,consistency_scan"
+    # 代表失败后整组退化串行（默认 True）
+    ai_warmup_fallback_serial: bool = True
+    # 代表「解析失败」时允许换下一个代表重试一次（默认 True）
+    ai_warmup_rep_retry_on_parse: bool = True
+    # 分阶段等待覆盖表（JSON，毫秒）；空 = 用 ai_warmup_delay_ms
+    ai_warmup_stage_delay_ms: str = ""
+
+    # ---------- ✅ R179 N1（2026-11-05）：目录自动确认倒计时 ----------
+    # 固定 8 秒；**仅面向运维**，不建议终端用户修改。开关本身存 governance_settings
+    # kv（默认关），不在此处。
+    outline_auto_confirm_delay_ms: int = 8000
 
     @field_validator("content_temperature", mode="before")
     @classmethod

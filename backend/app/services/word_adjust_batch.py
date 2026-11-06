@@ -1,7 +1,5 @@
-"""R122-G3：成稿后跨章节字数批量调度 —— 纯函数计划层（引入自易标思路）。
+"""R122-G3：成稿后跨章节字数批量调度 —— 纯函数计划层。
 
-对齐易标（OpenBidKit）contentGenerationTask.cjs:28-45 的
-``TOTAL_WORD_ADJUSTMENT_BATCH_SIZE=10`` / ``MAX_WORD_ADJUSTMENT_ROUNDS=3``：
 成稿后收集 under/over 章节，按目录顺序每 10 章一批做全局调度，
 **批间串行、批内并发**，单节扩/缩轮次仍由其既有执行链封顶。
 
@@ -17,7 +15,7 @@ over 复用 ``content_shrink.shrink_content_rounds``（≤SHRINK_MAX_ROUNDS 轮�
 ``word_adjust_batch_enabled`` 门控 —— **默认关闭时调用方整段不执行，
 本模块甚至不会被 import**。
 
-引入原则（用户铁律）：复用思路不照搬代码、保持架构兼容、新增配置默认关闭。
+引入原则：复用思路不照搬代码、保持架构兼容、新增配置默认关闭。
 """
 
 from __future__ import annotations
@@ -30,11 +28,11 @@ from app.services.content_utils import (
 )
 
 # ---------- 调度常量（单点定义，护栏测试锁口径） ----------
-# 易标 TOTAL_WORD_ADJUSTMENT_BATCH_SIZE=10（批大小对齐，非照搬实现）
+# 批大小：10 章一批，控制单批上下文规模与调用耗时。
 WORD_ADJUST_BATCH_SIZE = 10
-# 易标 MAX_WORD_ADJUSTMENT_ROUNDS=3：单节扩/缩轮次封顶语义。本仓执行链
-# 已有各自封顶（CONTENT_CONTINUE_MAX_ROUNDS / SHRINK_MAX_ROUNDS），此常量
-# 仅作计划层文档口径与护栏断言锚点，执行侧不重复计数。
+# 单节扩/缩轮次上限的**文档口径**：本仓执行链已有各自封顶
+# （CONTENT_CONTINUE_MAX_ROUNDS / SHRINK_MAX_ROUNDS），此常量
+# 仅作计划层说明与护栏断言锚点，执行侧不重复计数。
 WORD_ADJUST_MAX_ROUNDS_PER_SECTION = 3
 # 批内并发度：与修复域 REPAIR_CONCURRENCY=3 同族信号量档位（保守并发，
 # 避免成稿收尾把 provider 限流打穿）。
@@ -94,7 +92,7 @@ def build_adjust_plan(entries: list[dict], *, batch_size: int = WORD_ADJUST_BATC
         entries: ``[{"section_id","title","word_count","word_budget"}, ...]``
             脏值宽容：缺字段按 0/空处理，绝不抛异常；同一 section_id
             重复出现时**只保留第一条**（目录序在前者优先）。
-        batch_size: 每批章数（钳制 ≥1；易标口径默认 10）。
+        batch_size: 每批章数（钳制 ≥1；默认 10）。
 
     Returns:
         ``{"items": [带 direction 的调整项（仅 under/over，目录序）],

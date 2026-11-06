@@ -79,7 +79,9 @@ def test_split_placeholder_leaves_excludes_from_generation():
 
 
 async def _seed_scheme_sections(db):
-    await db.execute("INSERT INTO schemes (id, project_id, name) VALUES (?,?,?)", ("s1", "p1", "深基坑支护专项施工方案"))
+    await db.execute(
+        "INSERT INTO schemes (id, project_id, name) VALUES (?,?,?)", ("s1", "p1", "深基坑支护专项施工方案")
+    )
     await db.execute(
         "INSERT INTO sections (id, scheme_id, parent_id, sort_order, level, title, status, content, word_count, word_budget) "
         "VALUES (?,?,?,?,?,?,?,?,?,?)",
@@ -151,11 +153,7 @@ def test_preflight_does_not_report_placeholder_as_empty_or_low_word():
         ],
     )
     findings = run_preflight(ctx)
-    bad = [
-        f
-        for f in findings
-        if f.get("rule_id") in ("DLV-01", "DLV-02", "DLV-08", "DLV-16", "CMP-09", "TRC-01")
-    ]
+    bad = [f for f in findings if f.get("rule_id") in ("DLV-01", "DLV-02", "DLV-08", "DLV-16", "CMP-09", "TRC-01")]
     assert not bad, f"占位章节被误报：{[f.get('rule_id') + ':' + f.get('detail', '') for f in bad]}"
     assert not any("计算过程" in (f.get("detail") or "") for f in findings)
 
@@ -186,8 +184,11 @@ async def test_docx_contains_placeholder_text(db_conn):
         "config": {},
         "chart_images": [],
         "fe_codes": [],
+        "override_high_issues": True,
     }
     resp = await export_docx("s1", body, db=db_conn)
+    # 覆写路径必须留响应头，证明本轮是「已知悉并继续」而非闸门失效
+    assert resp.headers.get("X-Export-Override") == "high-issues"
     path = resp.path
     assert path and os.path.exists(path)
 

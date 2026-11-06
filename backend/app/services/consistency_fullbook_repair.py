@@ -1,12 +1,11 @@
-"""✅ R122-G2（2026-10-21 · 引入易标「持久 Agent 整卷修复」的程序级等价物）
+"""✅ R122-G2（2026-10-21）· 整卷一致性修复 —— 程序级小节闸门
 
-易标（OpenBidKit_Yibiao）用**持久 Agent 会话**在整卷工作区
-（`global-facts.md` + `technical-plan.md`）里多轮搜索 / 分段读取 / 修改，最后由
-程序校验章节完整性 / ID 标记 / 修改范围、只回写变化小节
-（参考 client/electron/services/contentGenerationTask.cjs:5490/5507/5579）。
+整卷修复的通用做法是在整卷工作区（`global-facts.md` + `technical-plan.md`）里
+多轮搜索 / 分段读取 / 修改，最后由程序校验章节完整性 / ID 标记 / 修改范围，
+只回写变化小节。
 
-本软件**刻意不移植持久会话基建**（同 ``routers/sections.py:1665`` 既有裁定：
-「参考软件的持久 Agent 会话基建本软件无此设施，照搬成本/风险过高」），改用
+本软件**不引入持久会话基建**（同 ``routers/sections.py:1665`` 既有裁定：
+「持久 Agent 会话基建本软件无此设施，照搬成本/风险过高」），改用
 **少轮整卷往返 + 程序级小节闸门**实现同等安全语义：
 
 1. 把「全局事实 + 冲突清单 + 全部末级章节」装配成带 ``<!-- §:id -->`` 小节标记的
@@ -45,8 +44,8 @@ logger = logging.getLogger("consistency_fullbook_repair")
 # 整卷工作区单轮上限（字符）：超限直接放弃整卷模式（交回调用方按逐章修），
 # 避免「为省轮次把十万字塞一次」导致模型必然截短 → 闸门全拒 → 白烧大调用。
 FULLBOOK_MAX_CHARS = 200000
-# 整包被闸门 A/B 拒时的重试上限（对齐易标 maxRetries=2 ⇒ 1 生成 + 2 修复 = 3 次，
-# 与 json_response.MAX_REPAIR_RETRIES 同值；这里只做「结构级」重问，不做逐章兜底）。
+# 整包被闸门 A/B 拒时的重试上限：1 生成 + 2 修复 = 3 次，
+# 与 json_response.MAX_REPAIR_RETRIES 同值；这里只做「结构级」重问，不做逐章兜底。
 FULLBOOK_MAX_RETRIES = 2
 # 小节标记：独占一行，`<!-- §:{section_id} -->`。用 HTML 注释确保正文渲染不可见。
 _MARKER_RE = re.compile(r"^<!--\s*§:([^\s>]+)\s*-->\s*$", flags=re.M)

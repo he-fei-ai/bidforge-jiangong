@@ -671,11 +671,13 @@ def test_skeleton_applies_field_rules_before_stripping_punctuation():
     百分数规则必然落空、只能被裸数字规则兜底。"""
     fn = _fn(DD_PATH, "build_skeleton_key")
     i_norm = fn.find("normalize")
-    i_rules = fn.find("_SKELETON_RULES")
+    i_rules = fn.find("_mask_variable_fields")
     i_keep = fn.find("_keep_only")
     assert i_rules > 0 and i_keep > 0, "骨架键实现结构变化，需同步更新护栏"
     # 字段规则必须夹在 NFKC 折叠之后、标点清理之前
     assert i_norm < i_rules < i_keep, "处理顺序必须是「NFKC 折叠 → 套字段规则 → 剔除标点」"
+    # 字段规则的实际执行点不得被空壳化（顺序断言必须真能观察到规则应用）
+    assert "_SKELETON_RULES" in _fn(DD_PATH, "_mask_variable_fields")
 
 
 def test_skeleton_placeholder_braces_are_whitelisted_not_global():

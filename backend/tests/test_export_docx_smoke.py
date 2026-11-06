@@ -78,6 +78,8 @@ async def _run_export(db_conn, config: dict):
         "config": config,
         "chart_images": [],
         "fe_codes": [],
+        # ✅ B-15（R182）：本域用例验证导出机制，不验证闸门；显式覆写高风险拦截。
+        "override_high_issues": True,
     }
     return await export_docx("s1", body, db=db_conn)
 
@@ -593,7 +595,12 @@ async def test_export_filename_rule_with_round(db_conn):
     from urllib.parse import unquote
 
     await _seed_export_fixture(db_conn)
-    body = {"config": {"allow_pil_fallback": True}, "chart_images": [], "fe_codes": []}
+    body = {
+        "config": {"allow_pil_fallback": True},
+        "chart_images": [],
+        "fe_codes": [],
+        "override_high_issues": True,
+    }
     day = datetime.now().strftime("%Y%m%d")
 
     for expected in (1, 2):

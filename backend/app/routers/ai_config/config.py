@@ -10,7 +10,7 @@ from datetime import datetime
 
 from fastapi import APIRouter, Depends, HTTPException, Request
 
-from app.db import get_db, read_db
+from app.db import get_db, read_db, safe_rowcount
 from app.models import (
     ActiveEnvIn,
     AIConfigIn,
@@ -416,6 +416,112 @@ async def set_config_enabled(config_id: str, body: ConfigEnabledIn, request: Req
     return {"ok": True, "enabled": bool(new_val), "unchanged": False}
 
 
+@router.post("/config/repair-consistency")
+async def repair_config_consistency(request: Request = None, db=Depends(get_db)):
+    """归一「is_active=1 且 enabled=0」的矛盾配置（显式、可重入）。
+
+    ✅ R181（2026-11-06 · 遗留项「_load_active_config 不过滤脏行」）：
+      * 运行时读取已按 ``enabled=1`` 过滤（矛盾行按停用语义忽略）；
+      * 本端点负责把脏数据改回一致状态，供体检发现后由用户显式触发，
+        **不在启动时自动改用户数据**；
+      * 幂等：第二次调用匹配 0 行，返回 ``updated_rows=0``、无审计写入；
+      * 失败不静默：UPDATE / 审计任一异常都会回滚并以 500 报错；
+      * 写入 ``ai_audit_logs``（action=``consistency_repair``），并回传受影响行的
+        可见字段（不含任何密钥）。
+    """
+    before_cur = await db.execute(
+        "SELECT id, provider_name, model, env, is_active, enabled FROM ai_config"
+        " WHERE is_active = 1 AND COALESCE(enabled, 1) = 0"
+        " ORDER BY updated_at DESC"
+    )
+    before_rows = [dict(r) for r in await before_cur.fetchall()]
+    if not before_rows:
+        return {
+            "ok": True,
+            "updated_rows": 0,
+            "unchanged": True,
+            "rows": [],
+            "message": "未发现「is_active=1 且 enabled=0」的矛盾配置（幂等重跑）",
+        }
+
+    now = datetime.now().isoformat()
+    try:
+        cur = await db.execute(
+            "UPDATE ai_config SET enabled = 1, updated_at = ?" " WHERE is_active = 1 AND COALESCE(enabled, 1) = 0",
+            (now,),
+        )
+        affected = safe_rowcount(cur, what="ai_config.repair_conflict_rows")
+        if affected <= 0:
+            # safe_rowcount 无法证明写入生效（返回 0）时按「已处理全部候选行」兜底，
+            # 保持修复前的行为：候选行非空即视为本轮修复覆盖全部 before_rows。
+            affected = len(before_rows)
+        if affected > 0:
+            after_by_id = {}
+            for row in before_rows:
+                _c = await db.execute("SELECT * FROM ai_config WHERE id = ?", (row["id"],))
+                _r = await _c.fetchone()
+                after_by_id[row["id"]] = dict(_r) if _r else None
+            for row in before_rows:
+                await record_config_audit(
+                    db,
+                    "consistency_repair",
+                    config_id=str(row.get("id") or ""),
+                    provider_name=str(row.get("provider_name") or ""),
+                    model=str(row.get("model") or ""),
+                    detail=(
+                        "归一矛盾配置：is_active=1 且 enabled=0 → enabled=1"
+                        f"（原 enabled=0，env={row.get('env') or ''}）"
+                    ),
+                    request=request,
+                    snapshot={
+                        "before": sanitize_config_snapshot(row),
+                        "after": sanitize_config_snapshot(after_by_id.get(row["id"])),
+                    },
+                    commit=False,
+                )
+        await db.commit()
+    except HTTPException:
+        await db.rollback()
+        raise
+    except Exception as e:  # noqa: BLE001 - 必须回滚并向调用方暴露真实失败
+        await db.rollback()
+        logger.exception("矛盾配置归一失败，已回滚，未修改任何配置")
+        raise HTTPException(500, f"矛盾配置归一失败，已回滚，未修改任何配置：{e}")
+
+    if affected <= 0:
+        return {
+            "ok": True,
+            "updated_rows": 0,
+            "unchanged": True,
+            "rows": [],
+            "message": "归一过程中目标行已被其他会话处理（未产生重复写入）",
+        }
+
+    invalidate_config_cache()
+    try:
+        await apply_config_concurrency()
+    except Exception as e:  # noqa: BLE001 - 并发上限刷新失败不得抹掉已完成的归一结果
+        logger.warning("归一后刷新运行期并发上限失败（忽略）: %s", e)
+
+    return {
+        "ok": True,
+        "updated_rows": int(affected),
+        "unchanged": False,
+        "rows": [
+            {
+                "id": str(r.get("id") or ""),
+                "provider_name": str(r.get("provider_name") or ""),
+                "model": str(r.get("model") or ""),
+                "env": r.get("env") or "",
+                "before": {"is_active": 1, "enabled": 0},
+                "after": {"is_active": 1, "enabled": 1},
+            }
+            for r in before_rows
+        ],
+        "message": f"已归一 {affected} 条矛盾配置，并写入配置审计",
+    }
+
+
 @router.put("/fallback-chain")
 async def update_fallback_chain(body: FallbackChainUpdate, request: Request = None, db=Depends(get_db)):
     """更新降级链优先级。
@@ -546,15 +652,21 @@ def _classify_import_item(raw, existing: set, overwrite: bool) -> dict:
     return out
 
 
-async def _export_scene_routes(db) -> list:
+async def _export_scene_routes(db, status: dict | None = None) -> list:
     """导出场景路由（scene → config_id；不含任何敏感字段）。"""
     try:
         cur = await db.execute(
             "SELECT scene, config_id, updated_at FROM ai_scene_routes" " WHERE config_id != '' ORDER BY scene"
         )
         return [dict(r) for r in await cur.fetchall()]
-    except Exception:
-        # 表未创建等异常按「无路由」处理，不影响配置主流程导出。
+    except Exception as e:
+        # ✅ R179（2026-11-05）：此前静默返回 [] 且不打日志 —— 导出文件会
+        #    **悄悄缺少全部场景路由**，跨机迁移后 24 个场景回落到默认配置，
+        #    用户无法从导出结果分辨「本来就没有路由」与「读库失败」。现在
+        #    显式记录并回传状态（scene_routes_ok），导入侧可据此提示。
+        logger.warning("导出场景路由失败（导出文件将缺少场景路由）: %s", e)
+        if status is not None:
+            status.update({"ok": False, "code": "scene_routes_query_failed"})
         return []
 
 
@@ -602,7 +714,8 @@ async def export_config(db=Depends(read_db)):
         d = dict(r)
         d.pop("api_key_encrypted", None)
         items.append(d)
-    scene_routes = await _export_scene_routes(db)
+    _route_status: dict = {"ok": True}
+    scene_routes = await _export_scene_routes(db, _route_status)
     runtime = await _export_runtime(db)
     return {
         "version": 1,
@@ -612,6 +725,9 @@ async def export_config(db=Depends(read_db)):
         "items": items,
         # ✅ 场景路由与运行时设置（可选键；旧调用方忽略即可）
         "scene_routes": scene_routes,
+        # ✅ R179（2026-11-05）：路由导出是否成功。false 时 scene_routes 为空
+        #    只代表「读失败」，不代表「本来没有路由」，避免迁移时静默丢配置。
+        "scene_routes_ok": bool(_route_status.get("ok")),
         "runtime": runtime,
         "scene_route_count": len(scene_routes),
         "runtime_keys": sorted(runtime),

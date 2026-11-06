@@ -46,7 +46,7 @@ from app.services.facts_classification import (
 )
 from app.services.facts_cross_validators import run_cross_validations
 
-# ✅ 2026-09-30 第十三轮：缺值模式值域的单一出口（对齐参考软件 globalFactsMode）
+# ✅ 2026-09-30 第十三轮：缺值模式值域的单一出口
 from app.services.facts_patches import normalize_missing_value_mode
 
 logger = logging.getLogger("facts_extractor")
@@ -90,7 +90,7 @@ FACTS_REQUEST_TIMEOUT = 240
 
 #: 固定提示词骨架的**估算**长度（字符）：system 提示词里与资料正文**无关**的部分
 #: = 核心纪律 + 类型规则块 P7~P20 + JSON Schema 说明 + 归一化字典块。
-#: 用于「上下文预算分段」时扣除固定开销（对齐易标 getMessagesContentLength 口径）。
+#: 用于「上下文预算分段」时扣除固定开销（按「每条消息额外计固定开销」的通用口径）。
 #: ⚠️ 这是**估算常量**而非实时测量：system 提示词随 zone_type 变化，若改为实时
 #:   render 会引入 lru_cache 依赖与额外的 IO。估算偏大是安全方向（宁可少切一段，
 #:   也不可让请求超窗口）。仅在 ``settings.facts_context_budget_split=True`` 时生效。
@@ -1160,7 +1160,7 @@ def _split_table_rows(
 #: ✅ 2026-10-06：事实链路的**自动**上下文窗口（字符）。
 #:
 #: 为什么不再沿用 ``facts_patches.DEFAULT_CONTEXT_LENGTH_LIMIT``（400_000）：
-#: 那个常量是**乐观**默认（对齐参考软件），而本仓 ``ai_config`` 表**不持久化**
+#: 那个常量是**乐观**默认，而本仓 ``ai_config`` 表**不持久化**
 #: 每个模型的上下文窗口（``context_tokens`` 只在 ``GET /models`` 拉取瞬间存在于
 #: ``routers/ai_config/models.py`` 的响应里，不落库）。于是「自动」= 假设用户
 #: 配的是 128k-token 级长文模型。对 32k 窗口的模型，单段 30 万字会直接
@@ -1217,7 +1217,7 @@ def resolve_chunk_size(chunk_size: int = CHUNK_SIZE) -> int:
     开启后的意义：本仓 8000 字是**固定值**，对上下文窗口 128k 的模型过于保守
     （资料被切成大量小段 → AI 调用次数与 429 限流风险成倍上升）；而对
     上下文只有 32k 的模型，8000 字 + 归一化字典 + 规则块又可能撑爆。
-    按易标口径动态计算可同时解决两端。
+    按模型实际上下文窗口动态计算可同时解决两端。
 
     ✅ 2026-10-06 修复「函数实为 no-op」：旧实现调
     ``get_segment_limit(None, fixed)`` —— 第一个参数恒为 ``None``，
@@ -1243,7 +1243,7 @@ def resolve_chunk_size(chunk_size: int = CHUNK_SIZE) -> int:
         from app.services.facts_patches import get_segment_limit
 
         # 固定消息 = system 提示词骨架 + 归一化字典块（两者都与资料长度无关），
-        # 与易标 getMessagesContentLength 的口径一致（每条额外计 64 字符开销）。
+        # 按「每条消息额外计 64 字符开销」的口径统一估算。
         fixed = [{"role": "system", "content": _FIXED_PROMPT_SKELETON}]
         limit = get_segment_limit(resolve_fact_context_chars(), fixed)
         # 动态值不得小于历史基线的下限保护：过小的窗口配上过小的段会让长资料
@@ -1504,7 +1504,7 @@ async def extract_from_single_chunk(
             error_out["error"] = f"提示词渲染失败: {e}"
         return []
 
-    # ✅ 缺值模式（对齐 OpenBidKit 全局事实三模式 fabricate/omit/placeholder）：
+    # ✅ 缺值模式（全局事实三模式 fabricate/omit/placeholder）：
     #  - fabricate（默认）：资料未给出的值允许 AI 合理补全（is_simulated 标记，前端可见）
     #  - omit：严禁编造，无法给出就跳过该条
     #  - placeholder：资料未给出的值逐字写「【待填写】」
@@ -2240,14 +2240,13 @@ async def run_extraction_pipeline(
     - should_stop()：返回 True 时抛出 CancelledError，中止并保留已提取结果
     - wait_resume_cb()：暂停点，await 该回调实现分段间暂停
     - missing_value_mode：缺值模式 fabricate（默认，合理补全）/ omit（不杜撰）/
-      placeholder（留【待填写】），对齐 OpenBidKit 全局事实三模式
+      placeholder（留【待填写】），即全局事实三模式
     - completed_chunks：已完成段的指纹集合（增量提取）。二次提取时指纹命中的
       段直接跳过、不再发起 AI 调用（其事实已在上次提取落库），只提取
       新增/变更/上次失败的段，显著降低重复调用与限流失败
     - knowledge_text：项目知识库文本块（``build_knowledge_text`` 产物）。
       **仅当** ``settings.facts_knowledge_patch_enabled=True`` 时才消费
-      （默认关闭 → 零新增 AI 调用）；开启后走易标 ``runKnowledgeGlobalFactPatches``
-      的「只产补丁」补充阶段。
+      （默认关闭 → 零新增 AI 调用）；开启后走「只产补丁」的补充阶段。
     """
     import time
 
@@ -2355,6 +2354,9 @@ async def run_extraction_pipeline(
         )
         return result
 
+    # ✅ R179 U5：分阶段并发读数接线。开关关 → stage_concurrency 返回 0，
+    #    走 or 分支 = 逐字现状；开关开 → 阶段上限（默认 2）夹取 max_concurrency。
+    from app.services.ai import warmup as ai_warmup
     from app.services.ai.workflows_base import concurrency_controller
 
     _run_total = len(chunks) - len(skipped_idx)
@@ -2366,6 +2368,9 @@ async def run_extraction_pipeline(
             FACTS_MAX_CONCURRENCY,
         ),
     )
+    _u5_facts_conc = ai_warmup.stage_concurrency("facts")
+    if _u5_facts_conc:
+        effective_concurrency = max(1, min(_run_total, _u5_facts_conc))
     logger.info(
         "分段提取并发: %d (chunks=%d, skipped=%d, global=%d)",
         effective_concurrency,
@@ -2581,10 +2586,10 @@ async def run_extraction_pipeline(
     await _emit(_P_END + 0.06, f"正在合并去重与矛盾检测（原始 {len(all_items)} 条）...")
     merged = merge_and_deduplicate(all_items)
 
-    # ✅ 移植增强：后处理（category 自动分类 → 启发式兜底 → 必须有工期规则）
+    # ✅ 后处理增强：category 自动分类 → 启发式兜底 → 必须有工期规则
     merged = run_post_extract_normalize(merged, fallback_text=full_text[:3000])
 
-    # ✅ 缺值模式后处理（对齐 OpenBidKit 全局事实三模式，程序级保障 ——
+    # ✅ 缺值模式后处理（全局事实三模式，程序级保障 ——
     #    Prompt 约束可能被弱模型忽略，这里按模式做确定性兜底）：
     #    值域走 facts_patches 单一出口（2026-09-30 第十三轮），与 SSE 入口同源。
     _mode = normalize_missing_value_mode(missing_value_mode)
@@ -2607,7 +2612,7 @@ async def run_extraction_pipeline(
                 f"缺值模式「留待填写」：{_ph} 条资料未给出的值已置为【待填写】" f"（请人工补齐后再生成正文）"
             )
 
-    # 5.5 知识库补充（对齐易标 runKnowledgeGlobalFactPatches，:876-891）
+    # 5.5 知识库补充
     #    位置在缺值模式后处理**之后**：知识库给的是已确定的具体值，不该被
     #    omit/placeholder 模式当成「模拟值」剔除或改写成【待填写】。
     #    默认关闭（settings.facts_knowledge_patch_enabled=False）→ 零新增 AI 调用。
@@ -2623,7 +2628,7 @@ async def run_extraction_pipeline(
             logger.warning("知识库补充阶段异常（已跳过）: %s", e, exc_info=True)
             result.warnings.append("知识库补充阶段异常，本次未应用知识库补丁")
 
-    # 5.6 最终整理（对齐易标 finalizeGlobalFacts，:909-920）
+    # 5.6 最终整理
     #    必须在缺值模式与知识库补充**之后** —— 整理要改写「要求句 → 事实句」，
     #    若先整理再走缺值模式，整理产出的新表述会被误判为「资料未给出」。
     #    默认关闭（settings.facts_finalize_enabled=False）→ 零新增 AI 调用。
@@ -2701,7 +2706,7 @@ async def run_extraction_pipeline(
 
 
 # =========================================================================
-# ✅ 从招投标方案平台移植：值规范化后处理 + 启发式兜底 + category 分类器
+# ✅ 值规范化后处理 + 启发式兜底 + category 分类器
 # =========================================================================
 
 # 时间类事实的 category 集合（用于"必须有工期"规则校验）
@@ -2797,7 +2802,7 @@ def apply_category_auto_classify(items: list[FactItem]) -> None:
 
 
 def _extract_schedule_value(text: str) -> str:
-    """从文本中启发式提取工期/运维期/交货时间值（来自招投标平台 facts.py L287-L299）"""
+    """从文本中启发式提取工期 / 运维期 / 交货时间值（按中文工期表述惯例解析「N 天 / N 年」）"""
     if not text:
         return ""
     m = re.search(r"(?:工期|建设工期|总工期|计划工期)[^，。；\n]{0,10}?([\d.]+)\s*(日历)?天", text)
@@ -2810,9 +2815,9 @@ def _extract_schedule_value(text: str) -> str:
 
 
 def ensure_schedule_fact(items: list[FactItem], fallback_text: str = "") -> None:
-    """✅ 移植增强：必须有工期规则。
+    """✅ 必须有工期规则。
 
-    招投标平台 facts.py L258-L282 的核心规则：全局事实中必须存在至少一个
+    核心规则：全局事实中必须存在至少一个
     时间类变量（工期/运维期/交货时间），否则从文本启发式提取或降级默认值。
     这保证了正文生成中始终有工期可用，避免 AI 随机编造。
     """
@@ -2860,7 +2865,7 @@ def apply_heuristic_fallback(
     all_items: list[FactItem],
     fallback_text: str = "",
 ) -> list[FactItem]:
-    """✅ 移植增强：启发式规则兜底（AI 完全空时）。
+    """✅ 启发式规则兜底（AI 完全空时）。
 
     当 AI 分段提取全部返回空（模型故障/资料过短）时，用正则规则从文本
     中提取最关键的基本事实（项目名称、地点、工期、质量要求）。
@@ -2943,9 +2948,9 @@ def run_post_extract_normalize(
     merged_items: list[FactItem],
     fallback_text: str = "",
 ) -> list[FactItem]:
-    """✅ 移植增强：统一后处理入口（值规范化→工期强制→category 自动分类→启发式兜底）。
+    """✅ 统一后处理入口（值规范化→工期强制→category 自动分类→启发式兜底）。
 
-    对应招投标平台 _normalize_facts() 的完整能力。
+    覆盖本仓事实后处理的完整能力。
     """
     # 1. category 自动分类
     apply_category_auto_classify(merged_items)
@@ -3711,6 +3716,93 @@ async def record_chunk_failures(db, project_id: str, scheme_id: str = "", *, fai
             await db.rollback()
         except Exception:
             logger.debug("失败段退避状态回滚失败", exc_info=True)
+
+
+async def release_chunk_failures(db, project_id: str, scheme_id: str = "", *, chunk_hashes=()) -> dict:
+    """T-05（2026-11-06）：手动重试失败段 —— 清空退避窗口并记录诊断。
+
+    只改 ``facts_chunk_failures`` 的 ``next_retry_at``（置空 = 立即可重试），
+    不伪造完成记录、不删除失败历史（``fail_count`` 保留供下次退避续算）。
+    ``load_completed_chunks`` 的延迟查询只看非空且到期的时间戳，因此置空后
+    下一轮提取会重新进入队列；若再次失败，``record_chunk_failures`` 会
+    fail_count+1 并按既有指数退避继续生效。
+
+    Returns:
+        ``{"released": int, "segments": [...], "skipped_source": str,
+           "diagnostics": {...}}`` —— 字段全部为加法式诊断信息。
+    """
+    if not project_id:
+        return {
+            "released": 0,
+            "segments": [],
+            "skipped_source": "manual_retry_no_project_scope",
+            "diagnostics": {"scoped_failed_segments": 0, "bypassed_backoff": 0, "already_immediate": 0},
+        }
+    wanted = {str(h) for h in (chunk_hashes or ()) if str(h)}
+    try:
+        cur = await db.execute(
+            "SELECT chunk_hash, fail_count, last_failed_at, next_retry_at "
+            "FROM facts_chunk_failures WHERE project_id=? AND scheme_id=?",
+            (project_id, scheme_id or ""),
+        )
+        rows = [dict(r) for r in await cur.fetchall()]
+    except Exception as e:
+        logger.warning("读取失败段状态失败（手动重试未执行）: %s", e)
+        raise
+    if wanted:
+        rows = [r for r in rows if str(r.get("chunk_hash") or "") in wanted]
+    if not rows:
+        return {
+            "released": 0,
+            "segments": [],
+            "skipped_source": "manual_retry_no_failed_segments",
+            "diagnostics": {"scoped_failed_segments": 0, "bypassed_backoff": 0, "already_immediate": 0},
+        }
+
+    now = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+    hashes = [str(r.get("chunk_hash") or "") for r in rows if r.get("chunk_hash")]
+    placeholders = ",".join("?" * len(hashes))
+    await db.execute(
+        f"UPDATE facts_chunk_failures SET next_retry_at='', last_manual_retry_at=? "
+        f"WHERE project_id=? AND scheme_id=? AND chunk_hash IN ({placeholders})",
+        (now, project_id, scheme_id or "", *hashes),
+    )
+    await db.commit()
+
+    segments = []
+    bypassed = 0
+    for r in rows:
+        prev = str(r.get("next_retry_at") or "")
+        if prev:
+            bypassed += 1
+        segments.append(
+            {
+                "chunk_hash": str(r.get("chunk_hash") or ""),
+                "fail_count": int(r.get("fail_count") or 0),
+                "last_failed_at": str(r.get("last_failed_at") or ""),
+                "previous_next_retry_at": prev,
+                "bypassed_backoff": bool(prev),
+            }
+        )
+    logger.info(
+        "手动重试失败段：项目=%s 方案=%s 释放 %d 段（其中绕过退避 %d 段）",
+        project_id,
+        scheme_id,
+        len(segments),
+        bypassed,
+    )
+    return {
+        "released": len(segments),
+        "segments": segments,
+        "skipped_source": "manual_retry_bypass",
+        "diagnostics": {
+            "scoped_failed_segments": len(segments),
+            "bypassed_backoff": bypassed,
+            "already_immediate": len(segments) - bypassed,
+            "requested_filter": len(wanted),
+            "last_manual_retry_at": now,
+        },
+    }
 
 
 # ---------------------------------------------------------------------------

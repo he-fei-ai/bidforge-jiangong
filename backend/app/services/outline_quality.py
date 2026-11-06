@@ -930,6 +930,38 @@ def render_structure_notice(report: dict) -> str:
     return "目录结构规范建议：" + "；".join(str(w.get("message") or "") for w in report["warnings"][:6])
 
 
+def detect_empty_top_chapters(nodes: list) -> list[dict]:
+    """✅ R175 G-3（2026-11-03）：检出「空壳一级章」（有多级结构却无子章节的一级章）。
+
+    ✅ R179（2026-11-05）：实现从 routers.sections 下沉到 services ——
+    整树写库闸门需要在 services 层（outline_versions 回退）复用，而
+    services 不得反向依赖 routers（test_services_never_import_routers）。
+    判据逐字保留，routers.sections 以别名 `_detect_empty_top_chapters` 再导出。
+
+    判据刻意保守，避免误伤合法节点：
+    - 只看**一级节点**（outline 顶层）；二级/三级无子章节是合法末级节点，不在判据内；
+    - **全平铺目录**（顶层节点全部无子章节，如短目录/精简目录）视为合法，不报；
+    - 只有「已存在带子节点的一级章，同时仍有 children=[] 的一级章」才判定为空壳
+      —— 这正是分步生成失败章（children=[] 但章位保留）与手工误留节点的形态。
+
+    返回 ``[{"index": i, "title": ...}, ...]``；空列表 = 通过。
+    """
+    tops = [n for n in (nodes or []) if isinstance(n, dict)]
+    if not tops:
+        return []
+    shells: list[dict] = []
+    has_nested = False
+    for i, n in enumerate(tops):
+        children = n.get("children")
+        if isinstance(children, list) and children:
+            has_nested = True
+        else:
+            shells.append({"index": i, "title": str(n.get("title") or "")})
+    if not has_nested:
+        return []
+    return shells
+
+
 # ============================================================================
 # R86（L5）· 写路径共用占位闸门 —— **单一出口**
 # ============================================================================

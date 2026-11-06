@@ -1046,9 +1046,7 @@ def _note_provider_latency(key: str, duration: float) -> None:
         dq.append(float(duration))
 
 
-def _provider_latency_percentiles(
-    key: str, pct: float = 90.0
-) -> tuple[int, float | None, float | None]:
+def _provider_latency_percentiles(key: str, pct: float = 90.0) -> tuple[int, float | None, float | None]:
     """返回 (样本数, P50, 指定分位)；无样本时后两项为 None。"""
     with _provider_latency_lock:
         dq = _provider_latency.get(key)
@@ -1400,16 +1398,40 @@ async def _load_active_config() -> dict | None:
     # ✅ 2026-09-23（多环境）：env 为空时 SQL 与引入该功能前**完全一致**（零过滤）；
     #    非空时只允许「该环境专用」或「通用」主配置，绝不最终回落到其它环境。
     #    否则 prod 模式可能拿到 dev 的地址和密钥，造成跨环境串用与数据外发。
-    _sql = "SELECT * FROM ai_config WHERE is_active = 1{extra} ORDER BY updated_at DESC LIMIT 1"
+    # ✅ R181（2026-11-06 · 遗留项「_load_active_config 不过滤脏行」）：
+    #    外部改库 / 旧版本可能留下「is_active=1 且 enabled=0」的矛盾行。
+    #    运行时必须按 enabled=0 的真实语义忽略它，否则「已停用」配置仍被当成
+    #    主配置调用（与 enabled 开关承诺相反）。归一入口见
+    #    POST /api/v1/ai/config/repair-consistency（显式、可重入、写审计）。
+    _sql = (
+        "SELECT * FROM ai_config WHERE is_active = 1"
+        " AND COALESCE(enabled, 1) = 1{extra} ORDER BY updated_at DESC LIMIT 1"
+    )
     row = None
     if env:
         row = await (await conn.execute(_sql.format(extra=" AND env = ?"), (env,))).fetchone()
         if not row:
-            row = await (await conn.execute(_sql.format(extra=" AND env = ''"))).fetchone()
+            row = await (await conn.execute(_sql.format(extra=" AND env = ''"), ())).fetchone()
             if row:
                 logger.debug("环境 %s 无专用主配置，回落通用主配置", env)
     else:
-        row = await (await conn.execute(_sql.format(extra=""))).fetchone()
+        row = await (await conn.execute(_sql.format(extra=""), ())).fetchone()
+    if row is None:
+        # 不再静默：若被忽略的唯一原因是「当前使用但已停用」，给出可执行的修复入口。
+        try:
+            _dirty_sql = "SELECT COUNT(*) FROM ai_config WHERE is_active = 1" " AND COALESCE(enabled, 1) = 0{extra}"
+            if env:
+                _dirty = await (await conn.execute(_dirty_sql.format(extra=" AND env = ?"), (env,))).fetchone()
+            else:
+                _dirty = await (await conn.execute(_dirty_sql.format(extra=""), ())).fetchone()
+            if _dirty and int(_dirty[0] or 0) > 0:
+                logger.warning(
+                    "检测到 %d 条「is_active=1 且 enabled=0」的矛盾配置，已按停用忽略；"
+                    "请调用 POST /api/v1/ai/config/repair-consistency 归一（会记录审计）",
+                    int(_dirty[0]),
+                )
+        except Exception as e:  # noqa: BLE001 - 诊断查询失败不得影响主配置读取
+            logger.debug("矛盾配置诊断查询失败（忽略）: %s", e)
     cfg = dict(row) if row else None
     if gen != _cache_generation:
         # 读库期间配置被改动并失效了缓存：本次结果已过期，直接返回但不写缓存
@@ -1477,9 +1499,12 @@ async def _fallback_chain() -> list[dict]:
         _env_params: tuple = (_env,) if _env else ()
 
         # 主配置口径与 _load_active_config() 保持一致
+        # ✅ R181：同步加上 enabled 过滤，避免「脏行」被识别为主配置后，
+        #    真正干净的主配置又被当成降级候选重复调用。
         primary_id = ""
         prim_cur = await conn.execute(
-            "SELECT id FROM ai_config WHERE is_active = 1" + _env_filter + " ORDER BY updated_at DESC LIMIT 1",
+            "SELECT id FROM ai_config WHERE is_active = 1"
+            " AND COALESCE(enabled, 1) = 1" + _env_filter + " ORDER BY updated_at DESC LIMIT 1",
             _env_params,
         )
         prim_row = await prim_cur.fetchone()
@@ -1658,6 +1683,10 @@ KNOWN_SCENES: dict[str, str] = {
     "bid_analysis_merge": "项目信息合并",
     "bid_section_extract": "项目信息分片提取",
     "bid_section_merge": "项目信息分片合并",
+    # ✅ R179 M1（2026-11-05）：评分项提取（app/services/scoring_items.py 调用点）。
+    #    必须登记，否则「场景模型路由」里配了它也不生效（静默失效），
+    #    且 TestKnownScenesDrift / known_scenes 双向漂移护栏会失败。
+    "scoring_items_extract": "评分项提取",
     # —— 一致性 ——
     "consistency_scan": "全文一致性扫描",
     # ✅ R57（2026-10-09）：原 "consistency_repair" 同时承载「定点编辑」与
@@ -2153,9 +2182,7 @@ def is_non_retryable_error(err) -> bool:
 # 配额恢复后（探测成功）自动接回。
 QUOTA_FAIL_COOLDOWN = max(0.0, float(getattr(settings, "ai_fail_cooldown_seconds", 120) or 0))
 QUOTA_PROBE_EVERY = max(1.0, float(getattr(settings, "ai_fail_probe_every_seconds", 10) or 10))
-QUOTA_COOLDOWN_MAX = max(
-    0.0, float(getattr(settings, "ai_fail_cooldown_max_seconds", 600.0) or 0.0)
-)
+QUOTA_COOLDOWN_MAX = max(0.0, float(getattr(settings, "ai_fail_cooldown_max_seconds", 600.0) or 0.0))
 _quota_cool_until: dict[str, float] = {}
 _quota_last_probe: dict[str, float] = {}
 _quota_lock = threading.Lock()
@@ -2695,7 +2722,10 @@ async def _append_audit_row(row: tuple) -> None:
         # 审计是「尽力而为」，写入失败绝不能中断 AI 调用主流程（保持原语义）；
         # 但必须留痕 —— 否则「用量统计/审计日志」整块功能静默为空而无人知晓。
         logger.warning(
-            "写入 AI 调用审计缓冲失败（%s/%s，本次审计记录丢失）: %s", row[1] if len(row) > 1 else "?", row[3] if len(row) > 3 else "?", e
+            "写入 AI 调用审计缓冲失败（%s/%s，本次审计记录丢失）: %s",
+            row[1] if len(row) > 1 else "?",
+            row[3] if len(row) > 3 else "?",
+            e,
         )
 
 
@@ -4356,9 +4386,7 @@ async def _chat_with_fallback_inner(
     )
     _hedge_min_samples = max(1, int(getattr(settings, "ai_hedge_min_samples", 12) or 1))
     _hedge_max_copies = max(0, int(getattr(settings, "ai_hedge_max_copies", 1) or 0))
-    hedge_enabled = (
-        bool(getattr(settings, "ai_hedge_enabled", True)) and len(usable) > 1 and _hedge_max_copies > 0
-    )
+    hedge_enabled = bool(getattr(settings, "ai_hedge_enabled", True)) and len(usable) > 1 and _hedge_max_copies > 0
     hedges_launched = 0
 
     def _hedge_delay_for(c: dict) -> float:
@@ -4439,9 +4467,7 @@ async def _chat_with_fallback_inner(
             wait_timeout = None
             if hedge_enabled and hedges_launched < _hedge_max_copies and next_idx < len(usable):
                 if _promote_next_candidate():
-                    oldest = min(
-                        pending.values(), key=lambda x: float(x.get("_launched_at", 0.0))
-                    )
+                    oldest = min(pending.values(), key=lambda x: float(x.get("_launched_at", 0.0)))
                     delay = _hedge_delay_for(oldest)
                     elapsed = time.monotonic() - float(oldest.get("_launched_at", 0.0))
                     wait_timeout = max(0.0, delay - elapsed)

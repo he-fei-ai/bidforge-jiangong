@@ -416,4 +416,3 @@ class TestExportNumberingGuardReporting:
         msgs = [r.getMessage() for r in caplog.records]
         assert any("读取失败" in m and "db locked" in m for m in msgs), msgs
         assert not any("发现 0 章" in m for m in msgs), msgs
-

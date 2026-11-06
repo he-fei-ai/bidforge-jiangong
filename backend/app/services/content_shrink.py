@@ -1,13 +1,12 @@
-"""正文字数压缩（shrink）纯函数 —— 对齐 OpenBidKit 的 buildWordAdjustmentMessages / applyWordAdjustmentOperations
+"""正文字数压缩（shrink）纯函数。
 
-背景：本软件正文生成只有"扩写"（_continue_if_needed），超字数仅标记 word_status='over'，
-无任何缩减机制。OpenBidKit 有独立的缩写修复器，核心设计（本模块逐条对齐）：
+背景：本软件正文生成只有"扩写"（_continue_if_needed），超字数仅标记
+word_status='over'，无任何缩减机制。本模块提供可复用的缩写修复能力：
 
 1. 操作模型：AI 只返回 ``replace`` / ``delete`` 两种局部操作（target_text 逐字唯一），
    严禁整篇重写 —— 避免压缩时破坏图表/结构/事实数据；
 2. 确定性保护区间：代码围栏（```mermaid / ```chart-json / 代码块）、GFM 表格、
-   图片（``![]()`` / ``<img>``）的字符区间不允许任何操作触碰（OpenBidKit 的
-   collectProtectedContentRanges + rangeOverlaps 双保险中的代码级一环）；
+   图片（``![]()`` / ``<img>``）、Markdown 列表块不允许任何操作触碰；
 3. 校验即拒绝：target_text 不存在 / 出现多次 / 命中保护区间 → 整轮拒绝（ValueError），
    不做部分应用，保证正文不会被半途修改；
 4. 轮次封顶与无进展退出由调用方（路由）控制，本模块只负责单轮解析与应用。
@@ -46,12 +45,16 @@ _LIST_LINE_RE = re.compile(
 )
 
 
-def _collect_list_ranges(content: str) -> list[tuple[int, int]]:
-    """收集 Markdown 列表块的字符区间（连续列表项 + 其缩进续行合并为一块）。
+# ---------------------------------------------------------------------------
+# 保护区间
+# ---------------------------------------------------------------------------
 
-    ✅ R179：列表是不可压缩的**结构**证据 —— 沿用表格的处理方式（连续行合并
-    为一个区间），保证跨多行的 target_text 无法以碎片方式绕过保护。列表项之间
-    的空行不并入区间，但任何跨块的操作仍会与区间重叠而被拒绝。
+
+def _merge_line_blocks(content: str, is_block_line, is_continuation) -> list[tuple[int, int]]:
+    """把满足条件的连续行合并为块区间（行尾换行并入区间）。
+
+    ``is_block_line`` 判定块起始行，``is_continuation`` 判定缩进续行；
+    块区间收尾时统一 ``+1`` 吞掉行尾换行，避免跨行 target 从换行处绕过。
     """
     if not content:
         return []
@@ -60,72 +63,114 @@ def _collect_list_ranges(content: str) -> list[tuple[int, int]]:
     start = -1
     end = -1
     for line in content.split("\n"):
-        line_len = len(line) + 1  # +1 为换行符
-        if _LIST_LINE_RE.match(line):
+        if is_block_line(line):
             if start < 0:
                 start = offset
             end = offset + len(line)
-        elif start >= 0 and line.strip() and (line.startswith(" ") or line.startswith("\t")):
-            # 列表项的缩进续行（换行折行）：同样属于列表块，不能被单独改写
+        elif start >= 0 and is_continuation(line):
             end = offset + len(line)
-        else:
-            if start >= 0:
-                ranges.append((start, end + 1))
-                start = -1
-        offset += line_len
+        elif start >= 0:
+            ranges.append((start, end + 1))
+            start = -1
+        offset += len(line) + 1  # +1 为换行符
     if start >= 0:
         ranges.append((start, end + 1))
     return ranges
 
 
+def _collect_list_ranges(content: str) -> list[tuple[int, int]]:
+    """收集 Markdown 列表块的字符区间（连续列表项 + 其缩进续行合并为一块）。
+
+    ✅ R179：列表是不可压缩的**结构**证据 —— 沿用表格的处理方式（连续行合并
+    为一个区间），保证跨多行的 target_text 无法以碎片方式绕过保护。列表项之间
+    的空行不并入区间，但任何跨块的操作仍会与区间重叠而被拒绝。
+    """
+
+    def _is_continuation(line: str) -> bool:
+        # 列表项的缩进续行（换行折行）：同样属于列表块，不能被单独改写
+        return bool(line.strip()) and (line.startswith(" ") or line.startswith("\t"))
+
+    return _merge_line_blocks(content, lambda line: bool(_LIST_LINE_RE.match(line)), _is_continuation)
+
+
+def _collect_table_ranges(content: str) -> list[tuple[int, int]]:
+    """收集 GFM 表格块区间（连续表格行合并，含表头分隔行）。"""
+    return _merge_line_blocks(content, lambda line: bool(_TABLE_LINE_RE.match(line)), lambda line: False)
+
+
+def _pattern_spans(content: str, pattern) -> list[tuple[int, int]]:
+    return [(m.start(), m.end()) for m in pattern.finditer(content)]
+
+
 def collect_protected_ranges(content: str) -> list[tuple[int, int]]:
     """收集正文中的"压缩禁区"字符区间（代码围栏 / 图片 / GFM 表格 / 列表）。
 
-    对齐 OpenBidKit ``collectProtectedContentRanges``：代码围栏 + 表格 + 图片。
     表格按"连续表格行"合并为一个区间（含表头分隔行），避免逐行区间被
     跨行 target_text 的碎片命中绕过。列表块按同一方式合并（R179）——
     列表被压成段落是"结构损坏"，比超字数更需要防范。
 
     ✅ 2026-09-28（围栏口径收敛）：代码围栏改用 ``content_utils.fence_spans``
       （与 ``strip_fenced_code_blocks`` / ``find_unclosed_fences`` 同一套
-       CommonMark 语义）—— 旧实现用正则 ``` ```[\\s\\S]*?``` ``` 只认反引号，
-       波浪线围栏不保护、4 反引号围栏保护区间残缺。
+       CommonMark 语义）—— 旧实现用正则只认反引号，波浪线围栏不保护、
+      4 反引号围栏保护区间残缺。
     """
     if not content:
         return []
     ranges: list[tuple[int, int]] = []
     # 代码围栏：CommonMark 语义的已闭合围栏区间
     ranges.extend(fence_spans(content))
-    for pattern in (_IMAGE_MD_RE, _IMG_TAG_RE):
-        for m in pattern.finditer(content):
-            ranges.append((m.start(), m.end()))
-
-    # ✅ R179：Markdown 列表块（连续列表项 + 缩进续行）—— 与表格同属结构区
+    ranges.extend(_pattern_spans(content, _IMAGE_MD_RE))
+    ranges.extend(_pattern_spans(content, _IMG_TAG_RE))
     ranges.extend(_collect_list_ranges(content))
-
-    # GFM 表格：连续表格行合并成块区间
-    lines = content.split("\n")
-    offset = 0
-    table_start = -1
-    table_end = -1
-    for line in lines:
-        line_len = len(line) + 1  # +1 为换行符
-        if _TABLE_LINE_RE.match(line):
-            if table_start < 0:
-                table_start = offset
-            table_end = offset + len(line)
-        else:
-            if table_start >= 0:
-                ranges.append((table_start, table_end + 1))
-                table_start = -1
-        offset += line_len
-    if table_start >= 0:
-        ranges.append((table_start, table_end + 1))
+    ranges.extend(_collect_table_ranges(content))
     return ranges
 
 
 def _overlaps_protected(start: int, end: int, ranges: list[tuple[int, int]]) -> bool:
     return any(start < r_end and end > r_start for r_start, r_end in ranges)
+
+
+# ---------------------------------------------------------------------------
+# 操作解析
+# ---------------------------------------------------------------------------
+
+
+def _strip_json_fence(text: str) -> str:
+    """剥离 ```json / ``` 围栏包裹。"""
+    if not text.startswith("```"):
+        return text
+    body = re.sub(r"^```[a-zA-Z]*\s*", "", text)
+    return re.sub(r"\s*```$", "", body).strip()
+
+
+def _load_json_object(text: str):
+    """解析 JSON 对象；失败时截取首个 { 到末个 } 再试一次。"""
+    try:
+        return json.loads(text)
+    except (json.JSONDecodeError, TypeError):
+        pass
+    first = text.find("{")
+    last = text.rfind("}")
+    if first == -1 or last <= first:
+        return None
+    try:
+        return json.loads(text[first : last + 1])
+    except (json.JSONDecodeError, TypeError):
+        return None
+
+
+def _coerce_operation(item) -> dict | None:
+    """把单个 JSON 操作收敛为 replace/delete；非法项返回 None。"""
+    if not isinstance(item, dict):
+        return None
+    operation = str(item.get("operation", "")).strip().lower()
+    target = str(item.get("target_text", ""))
+    # 严禁 rewrite_full / insert 等越权操作（白名单之外一律丢弃）
+    if operation not in ("replace", "delete") or not target.strip():
+        return None
+    if operation == "replace":
+        return {"operation": "replace", "target_text": target, "content": str(item.get("content", ""))}
+    return {"operation": "delete", "target_text": target, "content": ""}
 
 
 def parse_shrink_operations(raw: str) -> list[dict]:
@@ -136,47 +181,23 @@ def parse_shrink_operations(raw: str) -> list[dict]:
     """
     if not raw or not raw.strip():
         raise ValueError("压缩返回为空")
-    text = raw.strip()
-    # 剥离 ```json 围栏
-    if text.startswith("```"):
-        text = re.sub(r"^```[a-zA-Z]*\s*", "", text)
-        text = re.sub(r"\s*```$", "", text).strip()
-    obj = None
-    try:
-        obj = json.loads(text)
-    except (json.JSONDecodeError, TypeError):
-        # 兜底：截取第一个 { 到最后一个 } 之间的内容
-        first = text.find("{")
-        last = text.rfind("}")
-        if first != -1 and last > first:
-            try:
-                obj = json.loads(text[first : last + 1])
-            except (json.JSONDecodeError, TypeError):
-                obj = None
+
+    obj = _load_json_object(_strip_json_fence(raw.strip()))
     if not isinstance(obj, dict):
         raise ValueError("压缩返回不是合法 JSON 对象")
     ops_raw = obj.get("operations")
     if not isinstance(ops_raw, list) or not ops_raw:
         raise ValueError("压缩返回缺少 operations")
-    ops: list[dict] = []
-    for item in ops_raw:
-        if not isinstance(item, dict):
-            continue
-        operation = str(item.get("operation", "")).strip().lower()
-        target = str(item.get("target_text", ""))
-        if operation not in ("replace", "delete"):
-            # ✅ 严禁 rewrite_full / insert 等越权操作（对齐 OpenBidKit 白名单）
-            continue
-        if not target.strip():
-            continue
-        if operation == "replace":
-            content = str(item.get("content", ""))
-            ops.append({"operation": "replace", "target_text": target, "content": content})
-        else:
-            ops.append({"operation": "delete", "target_text": target, "content": ""})
+
+    ops = [op for op in (_coerce_operation(item) for item in ops_raw) if op is not None]
     if not ops:
         raise ValueError("压缩返回无有效操作（仅允许 replace/delete）")
     return ops
+
+
+# ---------------------------------------------------------------------------
+# 目标定位
+# ---------------------------------------------------------------------------
 
 
 def _normalize_for_match(text: str) -> tuple[str, list[int]]:
@@ -188,25 +209,43 @@ def _normalize_for_match(text: str) -> tuple[str, list[int]]:
     本函数只用于**首次逐字查找失败后的回退**：逐字命中优先，因此成功路径行为
     逐字不变；回退仍要求规范化后**唯一命中**，并照常做保护区重叠校验（偏移已
     映射回原文），不放松任何红线。
+
+    实现上先展开每个原字符的 NFKC 结果（可能一拆多），再把连续空白压成
+    单个半角空格；首尾空白不占位，与"折叠空白"的常规口径一致。
     """
+    expanded: list[tuple[str, int]] = [
+        (normalized, i) for i, ch in enumerate(text) for normalized in unicodedata.normalize("NFKC", ch)
+    ]
     chars: list[str] = []
     pos: list[int] = []
-    pending_space_at: int | None = None
-    for i, ch in enumerate(text):
-        # NFKC 把全角标点/数字/空格折叠为半角；单个原字符可能展开为多字符，
-        # 每个展开字符都映射回同一原文下标，保证区间端点可逆。
-        for c in unicodedata.normalize("NFKC", ch):
-            if c.isspace():
-                if chars and pending_space_at is None:
-                    pending_space_at = i
-                continue
-            if pending_space_at is not None:
+    idx = 0
+    size = len(expanded)
+    while idx < size:
+        ch, source_index = expanded[idx]
+        if ch.isspace():
+            run_end = idx
+            while run_end < size and expanded[run_end][0].isspace():
+                run_end += 1
+            # 中间空白折叠为一个空格（锚在空白段首字符），尾部空白直接丢弃
+            if chars and run_end < size:
                 chars.append(" ")
-                pos.append(pending_space_at)
-                pending_space_at = None
-            chars.append(c)
-            pos.append(i)
+                pos.append(source_index)
+            idx = run_end
+            continue
+        chars.append(ch)
+        pos.append(source_index)
+        idx += 1
     return "".join(chars), pos
+
+
+def _unique_span(text: str, needle: str, duplicate_msg: str) -> tuple[int, int] | None:
+    """在 text 中查找 needle 的唯一区间；缺失返回 None，多次出现抛错。"""
+    first = text.find(needle)
+    if first < 0:
+        return None
+    if text.find(needle, first + 1) >= 0:
+        raise ValueError(duplicate_msg)
+    return first, first + len(needle)
 
 
 def _locate_target(content: str, target: str) -> tuple[int, int]:
@@ -214,53 +253,74 @@ def _locate_target(content: str, target: str) -> tuple[int, int]:
 
     不存在 / 出现多次 → 抛 ValueError（错误文案与历史逐字一致，调用方口径不变）。
     """
-    first = content.find(target)
-    if first != -1:
-        second = content.find(target, first + 1)
-        if second != -1:
-            raise ValueError("操作目标在正文中出现多次（target_text 不唯一）")
-        return first, first + len(target)
+    exact = _unique_span(content, target, "操作目标在正文中出现多次（target_text 不唯一）")
+    if exact is not None:
+        return exact
 
-    n_content, n_map = _normalize_for_match(content)
-    n_target, _ = _normalize_for_match(target)
-    n_target = n_target.strip()
-    if not n_target:
+    normalized_content, source_map = _normalize_for_match(content)
+    normalized_target, _ = _normalize_for_match(target)
+    normalized_target = normalized_target.strip()
+    if not normalized_target:
         raise ValueError("操作目标在正文中不存在（target_text 未逐字匹配）")
-    f = n_content.find(n_target)
-    if f == -1:
+
+    first = normalized_content.find(normalized_target)
+    if first < 0:
         raise ValueError("操作目标在正文中不存在（target_text 未逐字匹配）")
-    if n_content.find(n_target, f + 1) != -1:
+    if normalized_content.find(normalized_target, first + 1) >= 0:
         raise ValueError("操作目标在正文中出现多次（target_text 不唯一）")
-    return n_map[f], n_map[f + len(n_target) - 1] + 1
+    return source_map[first], source_map[first + len(normalized_target) - 1] + 1
+
+
+# ---------------------------------------------------------------------------
+# 操作应用
+# ---------------------------------------------------------------------------
+
+
+def _apply_edits(content: str, edits: list[tuple[int, int, str]]) -> str:
+    """按区间起点倒序写入，保证前面的替换不影响后面操作的偏移量。"""
+    result = content
+    for start, end, replacement in sorted(edits, key=lambda edit: edit[0], reverse=True):
+        result = result[:start] + replacement + result[end:]
+    return result
 
 
 def apply_shrink_operations(content: str, ops: list[dict]) -> str:
     """把压缩操作应用到正文（全有或全无：任一操作非法即抛 ValueError）。
 
-    校验规则（对齐 OpenBidKit applyWordAdjustmentOperations）：
+    校验规则：
     - target_text 必须在当前正文中**逐字出现且仅出现一次**；
-    - 操作区间不得与保护区间（代码围栏/表格/图片/列表）重叠 —— 命中即拒绝，
-      错误信息与 OpenBidKit 同口径："字数调整不能修改图片、Mermaid、代码块或表格、列表"。
+    - 操作区间不得与保护区间（代码围栏/表格/图片/列表）重叠 —— 命中即拒绝。
     """
     if not ops:
         raise ValueError("无操作可应用")
     ranges = collect_protected_ranges(content)
-    # 先全部定位校验（对原始 content 的偏移），再按区间起点倒序应用，
-    # 保证前面的替换不影响后面操作的偏移量。
-    located: list[tuple[int, int, dict]] = []
+    edits: list[tuple[int, int, str]] = []
     for op in ops:
-        target = op["target_text"]
-        # ✅ R180：逐字唯一命中优先；失败时回退「空白折叠 + NFKC 标点归一」，
-        #    仍要求唯一命中（多义/不存在照旧拒绝），错误文案不变。
-        start, end = _locate_target(content, target)
+        start, end = _locate_target(content, op["target_text"])
         if _overlaps_protected(start, end, ranges):
             raise ValueError("字数调整不能修改图片、Mermaid、代码块或表格、列表")
-        located.append((start, end, op))
-    located.sort(key=lambda x: x[0], reverse=True)
-    result = content
-    for start, end, op in located:
-        result = result[:start] + op.get("content", "") + result[end:]
-    return result
+        edits.append((start, end, op.get("content", "")))
+    return _apply_edits(content, edits)
+
+
+# ---------------------------------------------------------------------------
+# 轮次主循环
+# ---------------------------------------------------------------------------
+
+
+def _empty_outcome(content: str, before: int) -> dict:
+    return {
+        "content": content,
+        "before": before,
+        "word_count": before,
+        "rounds_used": 0,
+        "stop_reason": "章节正文为空",
+        "applied": False,
+    }
+
+
+def _request_payload(current: str, current_wc: int, word_budget: int) -> str:
+    return f"当前字数 {current_wc}，目标 {word_budget} 字。" "请输出压缩操作 JSON（不要输出正文本身）：\n\n" + current
 
 
 async def shrink_content_rounds(
@@ -276,8 +336,8 @@ async def shrink_content_rounds(
     """多轮字数压缩主循环（手动「压缩本章」端点与正文生成后的自动压缩共用）。
 
     ✅ 设计（2026-09-16）：把「提示词渲染」与「AI 调用」作为参数注入，本模块因此
-    不依赖 provider / prompts 层 —— 既可被两个调用方复用（避免把 50 行轮次逻辑
-    抄两遍），也能用假实现做纯单元测试。
+    不依赖 provider / prompts 层 —— 既可被两个调用方复用，也便于用假实现做
+    纯单元测试。
 
     Args:
         content: 待压缩正文。
@@ -295,41 +355,42 @@ async def shrink_content_rounds(
     """
     current = content
     before = text_word_count(current)
+    if before <= 0 or not (content or "").strip():
+        # ✅ 纯空白内容同样视为无可压缩（text_word_count 按字符计数，会把空格算进去）
+        return _empty_outcome(current, before)
+
     out = {
         "content": current,
         "before": before,
         "word_count": before,
         "rounds_used": 0,
-        "stop_reason": "已达轮次上限",
+        "stop_reason": f"已达 {max_rounds} 轮上限",
         "applied": False,
     }
-    if before <= 0 or not (content or "").strip():
-        # ✅ 纯空白内容同样视为无可压缩（text_word_count 按字符计数，会把空格算进去）
-        out["stop_reason"] = "章节正文为空"
-        return out
-
     current_wc = before
-    for round_no in range(1, max_rounds + 1):
+    round_no = 0
+    while round_no < max_rounds:
+        round_no += 1
         if on_round is not None:
             try:
                 await on_round(round_no, current_wc)
             except Exception:  # 进度上报失败绝不影响压缩
                 logger.debug("压缩进度回调异常（已忽略）", exc_info=True)
+
         try:
             sys_prompt = prompt_factory(round_no, current_wc)
         except Exception as e:
             logger.warning("压缩提示词渲染失败: %s", e)
             out["stop_reason"] = f"提示词渲染失败: {e}"
             break
-        user_payload = (
-            f"当前字数 {current_wc}，目标 {word_budget} 字。" "请输出压缩操作 JSON（不要输出正文本身）：\n\n" + current
-        )
+
         try:
-            raw = await call_ai(sys_prompt, user_payload)
+            raw = await call_ai(sys_prompt, _request_payload(current, current_wc, word_budget))
         except Exception as e:
             logger.warning("压缩第 %d 轮 AI 调用失败: %s", round_no, e)
             out["stop_reason"] = f"AI 调用失败: {e}"
             break
+
         out["rounds_used"] = round_no
         try:
             ops = parse_shrink_operations(raw)
@@ -338,18 +399,18 @@ async def shrink_content_rounds(
             logger.warning("压缩第 %d 轮操作被拒绝: %s", round_no, e)
             out["stop_reason"] = f"第 {round_no} 轮操作校验未通过：{e}"
             break
+
         new_wc = text_word_count(new_content)
         if new_wc >= current_wc:
             out["stop_reason"] = "无进展（压缩未减字）"
             break
+
         current, current_wc = new_content, new_wc
         out["content"] = current
         out["word_count"] = current_wc
         if current_wc <= word_budget * settle_ratio:
             out["stop_reason"] = "已收敛至目标区间"
             break
-    else:
-        out["stop_reason"] = f"已达 {max_rounds} 轮上限"
 
     out["applied"] = current != content and out["word_count"] < before
     return out

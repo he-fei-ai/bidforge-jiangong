@@ -533,15 +533,27 @@ class TestStd03BaseNumberExemption:
 
     def test_called_after_checkpoint_selfcheck(self):
         """顺序锁：CON-06 必须在 checkpoint_selfcheck 之后执行
-        （结果 append 到同一份 _ck_findings，顺序错会导致覆盖或漏合并）。"""
+        （结果 append 到同一份 _ck_findings，顺序错会导致覆盖或漏合并）。
+
+        2026-11-05（R178 下沉）：调用改为 ``asyncio.to_thread(cross_section_copy_findings, ...)``，
+        函数名不再跟左括号，故用「函数名 + 逗号 + _dup_secs」定位真实调用点。
+        """
         i_sc = self.sse.find("checkpoint_selfcheck(")
-        i_dx = self.sse.find("cross_section_copy_findings(")
-        assert i_sc > 0 and i_dx > 0
-        assert i_dx > i_sc, "CON-06 检测必须排在 checkpoint_selfcheck 之后"
+        m_dx = re.search(r"cross_section_copy_findings\s*,\s*_dup_secs", self.sse)
+        assert i_sc > 0 and m_dx, "未找到 checkpoint_selfcheck/cross_section_copy_findings 调用点"
+        assert m_dx.start() > i_sc, "CON-06 检测必须排在 checkpoint_selfcheck 之后"
 
     def test_result_merged_into_selfcheck_findings(self):
-        """必须并入 _ck_findings（而不是丢弃或另开通道）。"""
-        assert "_ck_findings.extend(cross_section_copy_findings(" in self.sse
+        """必须并入 _ck_findings（而不是丢弃或另开通道）。
+
+        2026-11-05（R178 下沉）：调用点包在 ``await asyncio.to_thread(...)`` 内，
+        断言同时锁定「并入 _ck_findings」与「确实经 to_thread 执行」，比旧写法更强。
+        """
+        assert re.search(
+            r"_ck_findings\.extend\(\s*await asyncio\.to_thread\(\s*cross_section_copy_findings",
+            self.sse,
+            re.S,
+        ), "CON-06 结果必须 extend 进 _ck_findings（且经 asyncio.to_thread 执行）"
 
     def test_db_read_has_none_guard(self):
         """R13：``db.execute()`` 可能返回 None，必须判空后再 fetchall。"""
@@ -578,10 +590,16 @@ class TestStd03BaseNumberExemption:
         assert '"id": section_id' in _snap_block
 
     def test_run_outside_write_lock(self):
-        """必须在锁**外**做（锁外只读）—— 置于 ``async with _db_write_lock`` 之前。"""
-        i_dup = self.sse.find("cross_section_copy_findings(")
+        """必须在锁**外**做（锁外只读）—— 置于 ``async with _db_write_lock`` 之前。
+
+        2026-11-05（R178 下沉）：改用「函数名 + 逗号 + _dup_secs」定位调用点。
+        """
+        m_dup = re.search(r"cross_section_copy_findings\s*,\s*_dup_secs", self.sse)
+        assert m_dup, "未找到 cross_section_copy_findings 调用点"
+        i_dup = m_dup.start()
         i_lock = self.sse.find("async with _db_write_lock", i_dup)
-        assert 0 < i_dup < i_lock
+        assert i_lock > 0, "调用点之后必须有 _db_write_lock 块（结构变更需复核）"
+        assert i_dup < i_lock, "CON-06 检测必须落在写锁之外"
 
     def test_config_switch_declared(self):
         """配置项必须声明且默认 True（自检家族默认开）。"""

@@ -29,6 +29,7 @@ from app.models import REVIEW_STATUSES, SchemeReviewIn, SectionReviewIn
 #    读失败 503 / 写没生效 503，绝不 AttributeError 500、更绝不汇报假成功。
 #    静态护栏 tests/test_review_r13_closeout_20261006.py 禁止退回裸调用。
 from app.services import review_db
+from app.services.content_utils import validate_section_tree
 from app.services.facts_extractor import SCHEME_PROJECT_ID_SQL
 
 router = APIRouter(prefix="/api/v1/schemes/{scheme_id}/review", tags=["review"])
@@ -324,7 +325,21 @@ async def review_checklist(scheme_id: str, db=Depends(get_db)):
         what="审核清单：读取章节",
     )
     if not sections:
-        return {"items": []}
+        return {"items": [], "tree_ok": True, "tree_issues": []}
+
+    # ✅ R181（G10 / 遗留问题 4）：显式节点校验 + 前序 DFS。
+    #    旧实现用 SQL `ORDER BY sort_order`（同级序号，非全局序号）隐式拼树：
+    #    重复 id 会让同一子节点渲染两遍、悬空 parent 被静默降级、环上节点
+    #    排序结果不确定，且没有任何错误反馈。现逐节点独立判定，把重复 ID /
+    #    缺父节点 / 自引用 / 环全部作为可定位的 ``tree_issues`` 回传（加法式，
+    #    既有 ``items`` 字段与条目结构完全不变）。
+    ordered, tree_issues = validate_section_tree([dict(s) for s in sections])
+    if tree_issues:
+        logger.warning(
+            "审核清单章节树异常（scheme=%s）：%s",
+            scheme_id,
+            "; ".join(str(i.get("message") or i.get("code")) for i in tree_issues),
+        )
 
     # ✅ 确定性排序（2026-09-30）：review_records.created_at 精度只到秒（DB 默认
     #    datetime('now','localtime')），批量审核 / 正文重生成重置会在同一秒内写入
@@ -343,7 +358,7 @@ async def review_checklist(scheme_id: str, db=Depends(get_db)):
         latest.setdefault(r["section_id"], r)
 
     items = []
-    for s in sections:
+    for s in ordered:
         rec = latest.get(s["id"], {})
         items.append(
             {
@@ -359,7 +374,7 @@ async def review_checklist(scheme_id: str, db=Depends(get_db)):
                 "last_reviewed_at": rec.get("created_at") or "",
             }
         )
-    return {"items": items}
+    return {"items": items, "tree_ok": not tree_issues, "tree_issues": tree_issues}
 
 
 # ⚠️ 路由顺序敏感：/sections/batch 必须声明在 /sections/{section_id} **之前**。

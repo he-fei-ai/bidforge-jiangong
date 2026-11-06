@@ -587,7 +587,9 @@ async def placeholder_history(scheme_id: str, limit: int = 20, db=Depends(get_db
     return {"scheme_id": scheme_id, "history": rows, "keep": _PLACEHOLDER_BASELINE_KEEP}
 
 
-async def collect_export_issues(scheme_id: str, db, *, strict_read: bool = False) -> dict:
+async def collect_export_issues(
+    scheme_id: str, db, *, strict_read: bool = False, include_content_audit: bool = True
+) -> dict:
     """导出预检的核心计算（**不写库**，可被多处复用）。
 
     ✅ G1：此前本计算内联在 ``export_check`` 路由里，就绪度总检无法复用，
@@ -604,6 +606,14 @@ async def collect_export_issues(scheme_id: str, db, *, strict_read: bool = False
             ✅ B1-1（R176 · 2026-11-04）：导出页 ``export_check`` 也已改为传
             ``True`` 并捕获 ``DBReadError`` 返回 503（``read_degraded=true``）——
             旧行为「导出页逐字不变」会把读失败渲染成「预检通过」，属假绿。
+        include_content_audit: **加法式**开关，缺省 ``True``（既有调用方逐字不变）。
+            导出闸门（``_export_high_issue_gate``）传 ``False``：闸门只关心 high 级
+            阻断项，内容体检项固定 info 且不在规则表，跳过可避免每次导出都多跑一遍
+            全文正则扫描（导出路径自身还会再算一次）。
+
+    ✅ B-17（R182 · 2026-11-06）：返回体新增 ``crossref_check``（``undetermined``
+    + ``reason``）。方案无任何图表时图/表分支无从比对 → 必须如实标注「无法判定」，
+    不得让前端把「跳过」显示成「通过」。不产生 finding、不扣分。
 
     ✅ BUG 修复（2026-10-17 · 正文/审核联合审计）：四路查询此前一律
     ``_db_fetch_all(strict=False)`` —— DB 瞬时故障时**静默返回空结果集**，
@@ -863,13 +873,22 @@ async def collect_export_issues(scheme_id: str, db, *, strict_read: bool = False
     #    真实分配更小，故本集合是真实分配的**超集** —— 检测为纯增量、零新增误报。
     #    节号集合仍留空，由被调函数内部照旧从 outline_json 自行推导。
     #    目录树异常时该函数返回空集合 = 逐字回退修复前行为。
+    # ✅ B-17（R182 · 2026-11-06）：方案没有任何图表时，real_figs/real_tbls 是空集，
+    #    交叉引用检查会「跳过」→ 引用了「图 9-9」也报 0 问题并被当成「通过」。
+    #    现新增「无法判定」态（undetermined + reason=no_chart_set）：不产生 finding、
+    #    不扣分，但必须回传前端明确展示，禁止伪装成通过。
+    crossref_check: dict = {"undetermined": False, "reason": "", "fig_count": 0, "tbl_count": 0}
     try:
         from app.config import settings as _s
 
         if _s.crossref_stale_detect_enabled:
-            issues.extend(
-                _detect_stale_cross_references(sections, real_nums=collect_figure_table_number_superset(sections))
-            )
+            _real_nums = collect_figure_table_number_superset(sections)
+            _fig_n = len(_real_nums.get("fig") or ())
+            _tbl_n = len(_real_nums.get("tbl") or ())
+            crossref_check.update({"fig_count": _fig_n, "tbl_count": _tbl_n})
+            if _fig_n == 0 and _tbl_n == 0:
+                crossref_check.update({"undetermined": True, "reason": "no_chart_set"})
+            issues.extend(_detect_stale_cross_references(sections, real_nums=_real_nums))
     except Exception:
         # 配置缺失 / 函数签名变更等异常 → 静默降级（不阻断预检主流程）
         logger.debug("失效交叉引用预检降级跳过（配置读取异常，不阻断预检）", exc_info=True)
@@ -884,9 +903,32 @@ async def collect_export_issues(scheme_id: str, db, *, strict_read: bool = False
 
     empty_ratio = _cov["empty_ratio"]  # ✅ R98：与总检共用口径（见上方 _cov）
     # ✅ 新增（2026-09-19）：内容体检（占位符 / HTML 残留 / LaTeX 空参数 /
-    #    投标用语 / 未闭合图表围栏）—— 独立字段，不进 issues（避免改变既有
-    #    前端"问题计数"语义），供导出前弹窗与"待补充清单"定位使用。
-    content_audit = audit_content(sections)
+    #    投标用语 / 未闭合图表围栏）—— 仍是独立字段 ``content_audit``（供导出前
+    #    弹窗与"待补充清单"定位）；✅ B-16（R182）起**同时**并入 issues 供前端可见。
+    if include_content_audit:
+        content_audit = audit_content(sections)
+        # ✅ B-16（R182 · 2026-11-06）：内容体检结果**并入 issues**（可见性），
+        #    但评分与阻断口径保持不变 —— 这些 type 不在 _EXPORT_ISSUE_RULE_MAP：
+        #    export_issues_to_findings 与 high 级闸门都会跳过；severity 固定 info
+        #    以免改变前端 deriveExportGate 的 highIssueCount 统计。
+        for _item in content_audit.get("items") or []:
+            _cnt = int(_item.get("count") or 0)
+            _secs = [str(t) for t in (_item.get("sections") or []) if t]
+            issues.append(
+                {
+                    "type": str(_item.get("key") or ""),
+                    "source": "content_audit",
+                    "severity": "info",
+                    "audit_level": str(_item.get("level") or ""),
+                    "title": str(_item.get("label") or ""),
+                    "count": _cnt,
+                    "sections": _secs,
+                    "detail": (f"体检命中 {_cnt} 处" + (f"；涉及章节：{'、'.join(_secs[:3])}" if _secs else "")),
+                }
+            )
+    else:
+        # 导出闸门路径：不跑全文体检（见 docstring），返回与体检空态同形状。
+        content_audit = {"total": 0, "items": []}
     # ✅ 新增（2026-09-24）：《待补充清单》精简版（additive 键，不改变既有字段）。
     #    只有聚合计数与按字段/章节聚合，不带逐条 occurrences（响应体控制），
     #    逐条清单走 GET /export/placeholder-report 专用端点。
@@ -918,6 +960,7 @@ async def collect_export_issues(scheme_id: str, db, *, strict_read: bool = False
         "chart_done": chart_done,
         "chart_pending": len(chart_pending),
         "content_audit": content_audit,
+        "crossref_check": crossref_check,
         "placeholder_report": placeholder_report,
         "review_summary": {
             "pending": review_pending,
@@ -961,6 +1004,112 @@ _EXPORT_ISSUE_RULE_MAP: dict[str, tuple[str, str]] = {
 }
 #: 单个 finding 最多回带的章节 ID（避免响应体膨胀）
 _EXPORT_FINDING_SECTION_CAP = 20
+
+
+# ---------------------------------------------------------------------------
+# ✅ B-15（R182 · 2026-11-06）：high 级问题「阻断导出」承诺兑现（可显式覆写）
+# ---------------------------------------------------------------------------
+#: 覆写请求体键：前端「已知悉并继续」显式携带；缺省（含旧前端）一律按阻断处理。
+_EXPORT_OVERRIDE_BODY_KEY = "override_high_issues"
+#: 覆写响应头：只在本轮**确实带着覆写继续导出**时出现。
+#: 不复用 X-Export-Degraded —— 后者语义是「后端降级」，覆写是用户显式选择，不得混用。
+_EXPORT_OVERRIDE_HEADER = "X-Export-Override"
+
+
+def _export_override_requested(body: dict | None) -> bool:
+    """仅接受显式布尔 True；缺省 / 旧前端 / 字符串一律视为未覆写。"""
+    return (body or {}).get(_EXPORT_OVERRIDE_BODY_KEY) is True
+
+
+def _export_high_issue_blockers(issues: list) -> list[dict]:
+    """筛出 high 级阻断项并按 issue 类型聚合。
+
+    只认 :data:`_EXPORT_ISSUE_RULE_MAP` 中的类型 —— B-16 并入的内容体检项
+    （``source=content_audit``）不在规则表，天然不参与阻断，口径保持不变。
+    """
+    from app.services.audit_rules import get_rule
+
+    blocked: dict[str, dict] = {}
+    for it in issues or []:
+        if not isinstance(it, dict):
+            continue
+        itype = str(it.get("type") or "")
+        meta = _EXPORT_ISSUE_RULE_MAP.get(itype)
+        if not meta or meta[1] != "high":
+            continue
+        entry = blocked.setdefault(
+            itype,
+            {"type": itype, "rule_id": meta[0], "severity": "high", "count": 0, "title": ""},
+        )
+        cnt = it.get("count")
+        entry["count"] += int(cnt) if isinstance(cnt, int) and cnt > 0 else 1
+        if not entry["title"]:
+            rule = get_rule(meta[0])
+            entry["title"] = str(getattr(rule, "title", "") or "") if rule is not None else ""
+    return list(blocked.values())
+
+
+async def _export_high_issue_gate(scheme_id: str, db, body: dict) -> tuple[list[dict], dict]:
+    """导出前 high 级问题闸门。
+
+    Returns:
+        ``(blockers, meta)``。``meta["override"]`` 为 True 表示本轮带覆写放行；
+        ``meta["checked"]`` 为 False 表示预检读取失败 —— **fail-open 不阻断**：
+        「无法判定」不得被伪装成阻断结论（与 B-17 同一口径）。
+    """
+    try:
+        result = await collect_export_issues(scheme_id, db, strict_read=False, include_content_audit=False)
+    except Exception as e:  # noqa: BLE001 —— 预检不可用时不阻断导出
+        logger.warning("导出前高风险问题检查失败（跳过阻断，允许继续导出）: %s", e)
+        return [], {"checked": False, "override": False}
+    blockers = _export_high_issue_blockers(result.get("issues") or [])
+    if not blockers:
+        return [], {"checked": True, "override": False}
+    if not _export_override_requested(body):
+        return blockers, {"checked": True, "override": False}
+    total = sum(int(b["count"]) for b in blockers)
+    logger.warning(
+        "导出覆写：用户在已知悉 %d 类高风险问题（共 %d 处）后继续导出（scheme=%s）",
+        len(blockers),
+        total,
+        str(scheme_id)[:8],
+    )
+    return blockers, {"checked": True, "override": True, "total": total}
+
+
+def _export_blocked_response(blockers: list[dict]) -> JSONResponse:
+    """409 + 可执行 detail：明确告诉用户拦了什么、怎么继续。"""
+    total = sum(int(b["count"]) for b in blockers)
+    names = "、".join(f"{b['title'] or b['type']}（{b['rule_id']}）{b['count']} 处" for b in blockers)
+    detail = (
+        f"导出已被阻断：存在 {len(blockers)} 类高风险问题（共 {total} 处）——{names}。"
+        "请先修复后重试；如确认已知悉，可勾选「已知悉并继续」再次导出（本次覆写会写入导出留痕）。"
+    )
+    return JSONResponse(
+        status_code=409,
+        content={
+            "detail": detail,
+            "error": "export_blocked_high_issues",
+            "blocked": True,
+            "high_issue_count": len(blockers),
+            "high_issue_total": total,
+            "high_issues": blockers,
+            "override_hint": "如确认已知悉，请在请求体传入 override_high_issues=true（会写入导出留痕）",
+        },
+    )
+
+
+def _export_override_headers(meta: dict) -> dict:
+    return {_EXPORT_OVERRIDE_HEADER: "high-issues"} if meta.get("override") else {}
+
+
+def _export_override_note(blockers: list[dict], meta: dict) -> str | None:
+    """覆写留痕文案；未覆写返回 None（留痕 comment 逐字保持旧行为）。"""
+    if not meta.get("override"):
+        return None
+
+    total = meta.get("total", sum(int(b["count"]) for b in blockers))
+    return f"已知悉并覆写导出：high 级问题 {len(blockers)} 类 / {total} 处未修复"
 
 
 def export_issues_to_findings(issues: list) -> list:
@@ -1078,7 +1227,7 @@ async def _readiness_preflight_summary(scheme_id: str, db) -> dict:
 
 
 async def _record_export_review_trace(
-    db, scheme_id: str, fmt: str, round_no: int, filename: str, *, commit: bool = True
+    db, scheme_id: str, fmt: str, round_no: int, filename: str, *, note: str | None = None, commit: bool = True
 ) -> None:
     """✅ G12：导出成稿写回审核留痕（工程可追溯性硬要求）。
 
@@ -1097,7 +1246,7 @@ async def _record_export_review_trace(
     :func:`_bump_export_round_and_trace` 复用同一写入主体做单事务。
     """
     try:
-        await _write_export_review_trace(db, scheme_id, fmt, round_no, filename)
+        await _write_export_review_trace(db, scheme_id, fmt, round_no, filename, note=note)
         if commit:
             await db.commit()
     except Exception as e:
@@ -1108,7 +1257,9 @@ async def _record_export_review_trace(
             logger.debug("导出留痕写入失败后的回滚也失败（放弃清理）", exc_info=True)
 
 
-async def _write_export_review_trace(db, scheme_id: str, fmt: str, round_no: int, filename: str) -> None:
+async def _write_export_review_trace(
+    db, scheme_id: str, fmt: str, round_no: int, filename: str, *, note: str | None = None
+) -> None:
     """写入**未提交**的评审留痕记录（异常一律上抛，commit/rollback 由调用方决定）。
 
     ✅ R176 · D2-3：从 :func:`_record_export_review_trace` 抽出的纯写入段 ——
@@ -1121,6 +1272,10 @@ async def _write_export_review_trace(db, scheme_id: str, fmt: str, round_no: int
     row = await _db_fetch_one(cur, what="_record_export_review_trace:schemes")
     status = (row["review_status"] or "") if row else ""
     name = (row["name"] or "") if row else scheme_id
+    comment = f"已导出 {fmt.upper()}（第 {round_no} 轮）：{filename}"
+    # ✅ B-15（R182 · 2026-11-06）：覆写导出必须在留痕里可追溯（note 缺省时逐字不变）。
+    if note:
+        comment = f"{comment}；{note}"
     await _write_record(
         db,
         scheme_id,
@@ -1129,7 +1284,7 @@ async def _write_export_review_trace(db, scheme_id: str, fmt: str, round_no: int
         status,
         status,
         "系统",
-        f"已导出 {fmt.upper()}（第 {round_no} 轮）：{filename}",
+        comment,
         await _scheme_project_id(db, scheme_id),
     )
 
@@ -2396,7 +2551,9 @@ async def _bump_export_round(db, scheme_id: str) -> int:
     return 1
 
 
-async def _bump_export_round_and_trace(db, scheme_id: str, fmt: str, display_name: str) -> tuple[int, str] | None:
+async def _bump_export_round_and_trace(
+    db, scheme_id: str, fmt: str, display_name: str, *, note: str | None = None
+) -> tuple[int, str] | None:
     """缓存命中路径：轮次自增 + 审核留痕 **合并为一个事务**（R176 · D2-3）。
 
     旧实现是两次独立 commit：先 ``_bump_export_round`` 提交轮次，命中分支再
@@ -2426,7 +2583,7 @@ async def _bump_export_round_and_trace(db, scheme_id: str, fmt: str, display_nam
         row = await _db_fetch_one(cur, what="_bump_export_round_and_trace 回读")
         round_no = int(row[0]) if (row and row[0]) else 1
         export_filename = _build_export_filename(display_name, fmt, round_no)
-        await _write_export_review_trace(db, scheme_id, fmt, round_no, export_filename)
+        await _write_export_review_trace(db, scheme_id, fmt, round_no, export_filename, note=note)
         await db.commit()
         return round_no, export_filename
     except Exception as e:  # noqa: BLE001 —— 事务失败统一回滚，语义见 docstring
@@ -2734,10 +2891,9 @@ _RE_PIPE_ROW = re.compile(r"^\s*\|.*\|\s*$")
 _RE_PIPE_WITH_CAPTION = re.compile(r"^(?P<cap>[^|\n]{1,80}?)\s*\|(?P<rest>.+)\|\s*$")
 _RE_TABLE_CAPTION_LINE = re.compile(r"^\s*表\s*(?:[0-9０-９一二三四五六七八九十]+[0-9.\-–—]*|[：:])")
 _RE_ADHERED_TITLE = re.compile(r"^([\u4e00-\u9fffA-Za-z0-9]{2,14})\1")
-#: 列表项自带的字母序前缀（`a、` / `a.` / `a)`）。渲染层会重新分配编号，
-#: 因此源文里的前缀必须全部剥离 —— 否则出现报告中的 `a、a、` 双写。
-#: 只匹配**字母**前缀，数字前缀交给解析层（避免把「1.5 倍」误判为序号）。
-_RE_LETTER_ORDINAL = re.compile(r"^[a-zA-Z]{1,2}[、.．)）]\s*")
+#: ✅ R181（2026-11-06）：列表项字母序前缀的唯一实现在
+#: ``content_blocks.strip_subitem_ordinal_prefix``，本模块已删除本地副本，
+#: 避免落库侧与导出侧两套正则漂移。
 
 
 def _split_pipe_cells(raw: str) -> list[str]:
@@ -2787,12 +2943,9 @@ def _normalize_render_blocks(blocks: list[dict]) -> list[dict]:
         if bt == "list_item":
             txt = str(b.get("text") or "").strip()
             # ⓪ `a、a、正文` 双写：循环剥离字母序前缀（渲染层会重新编号）。
-            stripped = txt
-            while _RE_LETTER_ORDINAL.match(stripped):
-                _rest = _RE_LETTER_ORDINAL.sub("", stripped, count=1).strip()
-                if not _rest:
-                    break
-                stripped = _rest
+            #    ✅ R181（2026-11-06）：下沉到 content_blocks 的唯一实现，
+            #    本模块不再保留第二套正则/循环（两侧同语料输出一致）。
+            stripped = strip_subitem_ordinal_prefix(txt)
             if stripped != txt:
                 b = dict(b, text=stripped)
                 txt = stripped
@@ -4041,8 +4194,7 @@ def _merge_chart_json_skip_stats(render_stats: dict, parse_diag: dict) -> None:
     if unrenderable:
         render_stats["chart_json_skipped_unrenderable"] = unrenderable
     logger.warning(
-        "导出：%d 处 chart-json 块在解析期被跳过（未闭合 %d / 不可渲染 %d），"
-        "已计入图表失败数（成稿缺图且不写缓存）",
+        "导出：%d 处 chart-json 块在解析期被跳过（未闭合 %d / 不可渲染 %d），" "已计入图表失败数（成稿缺图且不写缓存）",
         skipped,
         unclosed,
         unrenderable,
@@ -4516,6 +4668,26 @@ async def _prepare_export_render(plan: dict) -> dict:
                 sorted(PIL_RENDERABLE_CHART_TYPES),
             )
 
+    def _note_no_http_fallback(ct: str, code: str) -> None:
+        """✅ R181（2026-11-06）：记录「仅本地 PIL、无 HTTP 出口」的甘特 JSON 失败。
+
+        甘特 chart-json 与 mermaid 甘特轨出口不同：JSON 载荷只在本地 PIL 渲染，
+        不经过 Mermaid HTTP 服务。旧实现失败时只累加 ``failed``，前端无法区分
+        「HTTP 服务/语法问题」与「该载荷形态本来就没有 HTTP 兜底」。新增计数与
+        类型明细为**加法式字段**（0 时不挂键），复用 no_pil_fallback 同款机制，
+        旧消费端零回归。
+        """
+        if ct != "gantt" or not str(code or "").lstrip().startswith("{"):
+            return
+        render_stats["no_http_fallback"] = render_stats.get("no_http_fallback", 0) + 1
+        _types = render_stats.setdefault("no_http_fallback_types", [])
+        if ct not in _types:
+            _types.append(ct)
+            logger.warning(
+                "图表 %s 的 chart-json 载荷仅支持本地 PIL 渲染（无 HTTP 出口），本次渲染失败且无云端兜底",
+                ct,
+            )
+
     def _note_render_failure(ct: str, code: str, reason: str) -> None:
         """✅ R180（2026-11-05 · 可观测性）：结构化记录单张图渲染失败。
 
@@ -4580,12 +4752,14 @@ async def _prepare_export_render(plan: dict) -> dict:
                 render_stats["failed"] += 1
                 _note_render_failure(ct, code, "render_returned_none")
                 _note_no_pil_fallback(ct)
+                _note_no_http_fallback(ct, code)
         except Exception as e:
             logger.warning("图表预渲染失败 (%s): %s", ct, e)
             rendered_bytes[(ct, code)] = None
             render_stats["failed"] += 1
             _note_render_failure(ct, code, f"exception:{type(e).__name__}")
             _note_no_pil_fallback(ct)
+            _note_no_http_fallback(ct, code)
 
     # ✅ 2026-11-05（第二轮日志驱动分析 · 图表缓存可观测）：后端渲染轨的
     #    进程内/磁盘缓存命中计数此前只在 get_stats() 里自用、没有任何出口。
@@ -5125,6 +5299,7 @@ async def _finalize_export_delivery(
     export_filename: str,
     gc_protect: set[Path] | None = None,
     inflight_path: Path | None = None,
+    note: str | None = None,
 ) -> None:
     """导出交付前的统一收尾：审核留痕 → 孤儿回收 → 解除在飞保护。
 
@@ -5136,7 +5311,7 @@ async def _finalize_export_delivery(
     （PDF degraded 分支的 out_path 未绑定场景，旧实现靠 `if not degraded:`
     守卫，现由 None 判定承担）。
     """
-    await _record_export_review_trace(db, scheme_id, kind, round_no, export_filename)
+    await _record_export_review_trace(db, scheme_id, kind, round_no, export_filename, note=note)
     await _gc_orphan_exports(db, scheme_id, protect=gc_protect)
     if inflight_path is not None:
         _export_inflight_unregister(inflight_path)
@@ -5313,6 +5488,16 @@ async def export_docx(scheme_id: str, body: dict, db=Depends(get_db)):
     _lk = None
     try:
         _lk = await _export_dedup_acquire(("docx", scheme_id, _export_config_hash(body)))
+        # ✅ B-15（R182 · 2026-11-06）：DLV-13「high 级问题阻断导出」承诺落地。
+        #    默认阻断并返回可执行 409；前端「已知悉并继续」显式携带 override 放行，
+        #    放行时写 X-Export-Override 响应头 + 审核留痕（见 _export_override_note）。
+        #    位置：守卫/去重锁之后、_prepare_export（计费渲染）之前 —— 既不白烧成本，
+        #    又保持「守卫在锁外 → 去重锁 → prepare 在 try 内」的既有并发结构。
+        _blockers, _gate = await _export_high_issue_gate(scheme_id, db, body)
+        if _blockers and not _gate["override"]:
+            return _export_blocked_response(_blockers)
+        _override_note = _export_override_note(_blockers, _gate)
+        _override_headers = _export_override_headers(_gate)
         # ✅ R99（2026-10-17 · 缓存命中快速路径）：取数段与渲染段之间插入缓存查询。
         #    `_prepare_export` 在快速路径开启时**只做取数段**（DB 读 + 块解析 +
         #    指纹材料），渲染段延后到「确认未命中」之后才执行 —— 命中即零渲染。
@@ -5348,7 +5533,7 @@ async def export_docx(scheme_id: str, body: dict, db=Depends(get_db)):
             # ✅ R176 · D2-3（2026-11-04）：命中路径只有**一次写库事务** ——
             #    「轮次自增 + 审核留痕」同一 commit；失败整体回滚且不交付缓存
             #    产物（转 503），杜绝"round 涨了 trace 丢了"的审计断裂。
-            committed = await _bump_export_round_and_trace(db, scheme_id, "docx", display_name)
+            committed = await _bump_export_round_and_trace(db, scheme_id, "docx", display_name, note=_override_note)
             if committed is None:
                 raise HTTPException(503, "导出审计留痕写入失败：本次缓存命中已整体回滚、未交付文件，" "请稍后重试")
             round_no, export_filename = committed
@@ -5356,6 +5541,7 @@ async def export_docx(scheme_id: str, body: dict, db=Depends(get_db)):
                 **_export_name_headers(export_filename, round_no),
                 **_export_audit_headers(prep.get("content_audit") or {}),
                 **_global_facts_status_headers(prep.get("global_facts_status")),
+                **_override_headers,
             }
             # ✅ BUG-6（R175）：登记读租约 —— FileResponse 懒打开，文件在本响应
             #    流式读取期间不得被并发 prune 删除。
@@ -5377,6 +5563,7 @@ async def export_docx(scheme_id: str, body: dict, db=Depends(get_db)):
             **_export_name_headers(export_filename, round_no),
             **_export_audit_headers(prep.get("content_audit") or {}),
             **_global_facts_status_headers(prep.get("global_facts_status")),
+            **_override_headers,
         }
 
         # ✅ R99：未命中 → 此时才执行渲染段（图表预渲染 / AI 配图 / 位图下载）。
@@ -5510,6 +5697,7 @@ async def export_docx(scheme_id: str, body: dict, db=Depends(get_db)):
                 export_filename=export_filename,
                 gc_protect={out_path},
                 inflight_path=_inflight_final,
+                note=_override_note,
             )
             # ✅ BUG-6（R175）：交付前登记读租约（防并发 prune 删除正在下载的文件）
             _export_read_lease_register(out_path)
@@ -5569,6 +5757,7 @@ async def export_docx(scheme_id: str, body: dict, db=Depends(get_db)):
             export_filename=export_filename,
             gc_protect={out_path},
             inflight_path=_inflight_final,
+            note=_override_note,
         )
         # ✅ BUG-6（R175）：交付前登记读租约（防并发 prune 删除正在下载的文件）
         _export_read_lease_register(out_path)
@@ -5797,6 +5986,13 @@ async def export_pdf(scheme_id: str, body: dict, db=Depends(get_db)):
     _lk = None
     try:
         _lk = await _export_dedup_acquire(("pdf", scheme_id, _export_config_hash(body)))
+        # ✅ B-15（R182 · 2026-11-06）：与 DOCX 同一 high 级问题闸门（同位置：
+        #    守卫/去重锁之后、_prepare_export 之前）。
+        _blockers, _gate = await _export_high_issue_gate(scheme_id, db, body)
+        if _blockers and not _gate["override"]:
+            return _export_blocked_response(_blockers)
+        _override_note = _export_override_note(_blockers, _gate)
+        _override_headers = _export_override_headers(_gate)
         import tempfile
 
         prep = await _prepare_export(scheme_id, body, db, cancel_event=cancel_ev, defer_audit=True)
@@ -5832,7 +6028,7 @@ async def export_pdf(scheme_id: str, body: dict, db=Depends(get_db)):
             )
             # ✅ R176 · D2-3（2026-11-04）：与 DOCX 同口径 —— 轮次+留痕单事务；
             #    失败整体回滚并转 503，不交付未留痕的产物。
-            committed = await _bump_export_round_and_trace(db, scheme_id, "pdf", display_name)
+            committed = await _bump_export_round_and_trace(db, scheme_id, "pdf", display_name, note=_override_note)
             if committed is None:
                 raise HTTPException(503, "导出审计留痕写入失败：本次缓存命中已整体回滚、未交付文件，" "请稍后重试")
             round_no, export_filename = committed
@@ -5840,6 +6036,7 @@ async def export_pdf(scheme_id: str, body: dict, db=Depends(get_db)):
                 **_export_name_headers(export_filename, round_no),
                 **_export_audit_headers(prep.get("content_audit") or {}),
                 **_global_facts_status_headers(prep.get("global_facts_status")),
+                **_override_headers,
             }
             # ✅ BUG-6（R175）：PDF 缓存命中同样登记读租约
             _export_read_lease_register(cached[0])
@@ -5859,6 +6056,7 @@ async def export_pdf(scheme_id: str, body: dict, db=Depends(get_db)):
             **_export_name_headers(export_filename, round_no),
             **_export_audit_headers(prep.get("content_audit") or {}),
             **_global_facts_status_headers(prep.get("global_facts_status")),
+            **_override_headers,
         }
 
         # ✅ R99（2026-10-17 · 缓存命中快速路径）：与 DOCX 同序 —— 未命中才渲染。
@@ -6027,6 +6225,7 @@ async def export_pdf(scheme_id: str, body: dict, db=Depends(get_db)):
             round_no=round_no,
             export_filename=export_filename,
             inflight_path=(out_path if not degraded else None),
+            note=_override_note,
         )
         return Response(
             content=pdf_bytes,

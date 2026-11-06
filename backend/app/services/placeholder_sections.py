@@ -96,9 +96,7 @@ def is_placeholder_title(
     if keywords is None:
         candidates = _configured_keywords()
     else:
-        candidates = tuple(
-            normalize_section_title(k) for k in keywords if normalize_section_title(k)
-        )
+        candidates = tuple(normalize_section_title(k) for k in keywords if normalize_section_title(k))
     return any(keyword in normalized_title for keyword in candidates)
 
 

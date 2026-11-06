@@ -188,9 +188,7 @@ class RequestLogMiddleware:
             logger.info("%s %s -> %s (%.0fms) [trace=%s]", method, path, status_code, cost, trace_id)
             # ✅ R178（F-13）：失败原因补记（加法式，不改既有访问日志格式）。
             if err_detail:
-                logger.warning(
-                    "%s %s -> %s 失败原因：%s [trace=%s]", method, path, status_code, err_detail, trace_id
-                )
+                logger.warning("%s %s -> %s 失败原因：%s [trace=%s]", method, path, status_code, err_detail, trace_id)
 
 
 _loop_lag_logger = logging.getLogger("loop")

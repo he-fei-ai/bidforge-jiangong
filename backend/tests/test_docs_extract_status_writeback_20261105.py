@@ -11,7 +11,7 @@ async def _seed_docs(db):
     await db.execute("INSERT OR IGNORE INTO projects (id, name) VALUES ('p1','P')")
     rows = [
         ("d1", "a.docx", "已解析正文", "pending"),
-        ("d2", "b.pdf", "", "pending"),          # 未解析：不应被标 success
+        ("d2", "b.pdf", "", "pending"),  # 未解析：不应被标 success
         ("d3", "c.md", "另一份正文", "pending"),
         ("d4", "other.docx", "别的项目", "pending"),
     ]
@@ -33,9 +33,7 @@ class TestMarkDocsExtractStatus:
         n = await _mark_docs_extract_status(db_conn, "p1", "success")
         assert n == 2  # d1 / d3；d2 无正文、d4 属于别的项目
 
-        cur = await db_conn.execute(
-            "SELECT id, extract_status, extract_time FROM project_documents ORDER BY id"
-        )
+        cur = await db_conn.execute("SELECT id, extract_status, extract_time FROM project_documents ORDER BY id")
         rows = {r["id"]: dict(r) for r in await cur.fetchall()}
         assert rows["d1"]["extract_status"] == "success"
         assert rows["d3"]["extract_status"] == "success"

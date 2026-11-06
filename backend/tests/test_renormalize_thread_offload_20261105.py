@@ -87,9 +87,7 @@ class TestThreadOffloadParity:
             legacy[r["id"]] = (new_content, changed)
 
         # 新路径：一次性批量纯计算
-        batch, fallback = normalize_section_contents_from_index(
-            [(r["id"], r["content"] or "") for r in rows], index
-        )
+        batch, fallback = normalize_section_contents_from_index([(r["id"], r["content"] or "") for r in rows], index)
         # 脏编号（空编号 / 坏 JSON）在预取索引里没有 meta → 必须回退逐章路径
         assert sorted(fallback) == ["dirty_json", "dirty_noid"]
         by_id = {sid: (content, changed) for sid, content, changed in batch}
@@ -147,9 +145,9 @@ class TestThreadOffloadDoesNotBlockLoop:
         monkeypatch.setattr(num, "normalize_section_contents_from_index", spy)
         await _renormalize_all_section_contents(db_conn, "s1")
         assert calls["thread"], "批量计算未被执行"
-        assert calls["thread"] != threading.main_thread().name, (
-            "批量重编号仍在主线程（事件循环）执行 —— to_thread 未生效"
-        )
+        assert (
+            calls["thread"] != threading.main_thread().name
+        ), "批量重编号仍在主线程（事件循环）执行 —— to_thread 未生效"
 
     async def test_event_loop_keeps_ticking_during_slow_batch(self, db_conn, monkeypatch):
         """批量计算阻塞 0.2s 期间，心跳协程仍在推进（旧实现会被完全卡住）。"""

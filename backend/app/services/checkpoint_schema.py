@@ -52,6 +52,9 @@ CHECKPOINT_KINDS: dict[str, tuple[str, tuple[str, ...]]] = {
             "review",
             "failed_chapters",
             "failed_count",
+            # ✅ R179 N1（2026-11-05）：自动确认前置判定（{ready, blockers}），
+            #    断线重挂/刷新接管与在线 completed 同构；旧数据缺此键不受影响。
+            "auto_confirm",
         ),
     ),
     "content_generation": (
@@ -93,6 +96,8 @@ CHECKPOINT_FIELD_TYPES: dict[str, dict[str, str]] = {
         #    生成，声明错误会传导到生成的 TS 类型与所有消费方读法。
         "failed_chapters": "list[str]",
         "failed_count": "int",
+        # ✅ R179 N1：{ready: bool, blockers: list[dict], counts: dict}
+        "auto_confirm": "dict",
     },
     "content_result": {
         "event": "str",

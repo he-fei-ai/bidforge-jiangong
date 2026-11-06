@@ -196,7 +196,6 @@ def _infer_cancel_reason(status: str, message: str) -> str:
     return status or "unknown"
 
 
-
 async def _update_task_progress_db(task_id: str, progress: float, message: str):
     """任务进度落库（幂等单语句，供 retry_db_op 安全重放）。
 

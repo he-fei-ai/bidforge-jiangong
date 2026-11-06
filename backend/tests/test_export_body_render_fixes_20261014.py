@@ -344,8 +344,8 @@ class TestFinalizeExportDeliveryBehavior:
     async def test_order_and_passthrough(self, monkeypatch):
         calls = []
 
-        async def _trace(db, sid, kind, round_no, fname):
-            calls.append(("trace", sid, kind, round_no, fname))
+        async def _trace(db, sid, kind, round_no, fname, note=None):
+            calls.append(("trace", sid, kind, round_no, fname, note))
 
         async def _gc(db, sid, protect=None):
             calls.append(("gc", sid, protect))
@@ -368,7 +368,8 @@ class TestFinalizeExportDeliveryBehavior:
         assert [c[0] for c in calls] == ["trace", "gc"], (
             "顺序契约：留痕必须先于 GC（GC 判定依赖已提交行），" "注销必须在 GC 之后（GC 期间产物仍需受保护）"
         )
-        assert calls[0][1:] == ("s1", "docx", 3, "方案_2026-10-14_第3轮.docx")
+        # ✅ B-15（R182）：未覆写导出时 note 必须为 None —— 留痕 comment 逐字不变。
+        assert calls[0][1:] == ("s1", "docx", 3, "方案_2026-10-14_第3轮.docx", None)
         assert calls[1][2] == {p}, "protect 集合必须原样透传给 GC"
         # 注销在 GC 返回之后生效：集合里该键已被移除
         assert E._export_inflight_key(p) not in E._export_inflight_snapshot()

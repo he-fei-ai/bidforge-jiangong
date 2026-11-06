@@ -16,7 +16,7 @@ from pathlib import Path
 import aiosqlite
 
 from app.config import DATA_DIR, settings
-from app.schema_sql import SCHEMA_SQL
+from app.schema_sql import SCHEMA_SQL, SCORING_DDL
 
 logger = logging.getLogger("db")
 
@@ -302,6 +302,96 @@ def migration_status() -> dict:
     """迁移降级状态（`/api/v1/health` 消费；无失败时 ``degraded=False``）。"""
     items = list(_MIGRATION_DEGRADED)
     return {"degraded": bool(items), "count": len(items), "items": items}
+
+
+# ---------------------------------------------------------------------------
+# ✅ R181（2026-11-06 · N-10 遗留）：启动期数据库结构自检
+# ---------------------------------------------------------------------------
+# 背景：多 worker 同时启动、或外部工具/人工改库后，进程可能连到「结构不完整」
+#   的库（缺表 / 缺必需列 / schema 版本不一致）。旧实现在这种场景下「看起来
+#   正常」，相关功能却长期降级，且没有可查询的诊断出口。
+# 约定：
+#   * fail-soft —— 自检失败绝不阻断启动（与现有可用性优先策略一致）；
+#   * 不静默 —— 问题写入 ``_SCHEMA_ISSUES`` 并由 ``/api/v1/health`` 以
+#     ``status=degraded`` + ``schema`` 明细暴露；
+#   * 只读 —— 自检不修改任何表结构或 ``PRAGMA user_version``，避免「悄悄改库」。
+_SCHEMA_VERSION = 1
+_SCHEMA_ISSUES: list[dict] = []
+
+#: 关键表与运行时必需的列（缺一即视为结构不一致）。
+_CRITICAL_SCHEMA: tuple[tuple[str, tuple[str, ...]], ...] = (
+    ("ai_config", ("id", "provider_name", "model", "base_url", "is_active", "enabled", "api_key_encrypted")),
+    ("schemes", ("id",)),
+    ("sections", ("id", "scheme_id")),
+    ("ai_scene_routes", ("scene", "config_id")),
+    ("ai_runtime_settings", ("key", "value")),
+    ("prompt_templates", ("key", "content")),
+)
+
+
+def schema_status() -> dict:
+    """最近一次结构自检结果（`/api/v1/health` 消费）。"""
+    issues = list(_SCHEMA_ISSUES)
+    return {
+        "ok": not issues,
+        "expected_version": _SCHEMA_VERSION,
+        "count": len(issues),
+        "issues": issues,
+    }
+
+
+def _record_schema_issue(scope: str, detail: str) -> None:
+    _SCHEMA_ISSUES.append(
+        {
+            "scope": scope,
+            "detail": detail,
+            "at": time.strftime("%Y-%m-%dT%H:%M:%S"),
+        }
+    )
+
+
+async def check_schema_integrity() -> dict:
+    """校验 schema 版本、关键表与必需列（只读、fail-soft、可诊断）。
+
+    ``PRAGMA user_version`` 的兼容口径：
+      * ``0`` = 尚未写入版本号的历史库 —— 视为 legacy，不判不一致；
+      * ``> _SCHEMA_VERSION`` = 库来自更高版本的进程/外部工具 —— 判不一致
+        （当前进程可能读不懂新增结构，必须显式告警）；
+      * 相等 = 正常。
+    """
+    _SCHEMA_ISSUES.clear()
+    try:
+        conn = await get_conn()
+        cur = await conn.execute("PRAGMA user_version")
+        row = await cur.fetchone()
+        user_version = int(row[0] or 0) if row else 0
+        if user_version and user_version > _SCHEMA_VERSION:
+            _record_schema_issue(
+                "schema_version",
+                f"库 user_version={user_version} 高于当前进程支持版本 {_SCHEMA_VERSION}，"
+                "可能由更高版本进程或外部工具写入",
+            )
+        for table, required_cols in _CRITICAL_SCHEMA:
+            tcur = await conn.execute("SELECT name FROM sqlite_master WHERE type='table' AND name=?", (table,))
+            if not await tcur.fetchone():
+                _record_schema_issue(f"table:{table}", "关键表不存在")
+                continue
+            info_cur = await conn.execute(f'PRAGMA table_info("{table}")')
+            existing = {str(r[1]) for r in await info_cur.fetchall()}
+            missing = [c for c in required_cols if c not in existing]
+            if missing:
+                _record_schema_issue(f"table:{table}", f"缺少必需列: {', '.join(missing)}")
+    except Exception as e:  # noqa: BLE001 - 自检本身失败也必须 fail-soft 且可见
+        _record_schema_issue("schema_check", f"{type(e).__name__}: {e}")
+    status = schema_status()
+    if not status["ok"]:
+        logger.warning(
+            "数据库结构自检发现 %d 个问题（进程继续以降级模式运行，详见 /api/v1/health 的 schema 字段）",
+            status["count"],
+        )
+        for issue in status["issues"]:
+            logger.warning("数据库结构问题 [%s] %s", issue["scope"], issue["detail"])
+    return status
 
 
 def _thread_alive() -> bool:
@@ -791,6 +881,12 @@ async def init_db():
     await conn.executescript(SCHEMA_SQL)
     await _migrate(conn)
     await conn.commit()
+    # ✅ R181（N-10）：结构自检（只读、fail-soft）。放在迁移之后，确保自检看到的是
+    #    本次启动最终结构；问题由 /api/v1/health 的 schema 字段暴露。
+    try:
+        await check_schema_integrity()
+    except Exception as e:  # noqa: BLE001 - 自检异常不得阻断启动
+        logger.warning("数据库结构自检异常（fail-soft，已忽略）: %s", e)
     logger.info("数据库初始化完成: %s", DB_PATH)
     # ✅ R165b（2026-11-03）：运行期完整性巡检 —— J: USB 盘持续丢页（事件日志
     #    实证 11-01/11-02 每日数百条寻页错误），启动闸门只覆盖进程启动时刻。
@@ -948,6 +1044,12 @@ async def _migrate(conn: aiosqlite.Connection):
         #     用户不再把"上次的旧结论"当成"现在能不能交付"。
         #     历史行无指纹 → 视为不过期（无法判定就不打扰用户）。
         ("preflight_runs", "content_fingerprint", "TEXT DEFAULT ''"),
+        # --- ✅ R181（2026-11-06 · B-14）：审核状态指纹。
+        #     正文不变但章节审核状态（待审核/通过/驳回）变化时，总检缓存与
+        #     「预检结论是否仍对应当前审核进度」必须失效。与 content_fingerprint
+        #     刻意分开：审核动作不让全库正文指纹一起失效。
+        #     历史行空串 = 无法判定 = 不做审核状态失效判定（fail-open）。
+        ("preflight_runs", "review_state_hash", "TEXT DEFAULT ''"),
         # --- ✅ 根治批次截头（2026-09-23）：一次 /check 调用一个 batch_id，
         #     取代 rowid 连续段锚定（created_at 仅秒级精度，跨秒交错会错切批次）。
         #     历史行空串 → 读取端回退 rowid 锚定，向后兼容。
@@ -986,6 +1088,10 @@ async def _migrate(conn: aiosqlite.Connection):
         #    历史行默认 '{}' = 旧记录无摘要，读侧解析为空对象（零迁移、不报错）。
         ("consistency_audit", "counts_json", "TEXT DEFAULT '{}'"),
         ("consistency_conflicts", "content_fingerprint", "TEXT DEFAULT ''"),
+        # ✅ T-05（2026-11-06）：失败段「手动重试」诊断时间戳。
+        #     历史行空串 = 从未手动重试；读侧/退避判定完全不看该列，
+        #     旧库补列后行为与升级前完全一致（零迁移、零语义变化）。
+        ("facts_chunk_failures", "last_manual_retry_at", "TEXT DEFAULT ''"),
     ]
     for table, column, definition in migrations:
         try:
@@ -1151,6 +1257,8 @@ async def _migrate(conn: aiosqlite.Connection):
             "fail_count INTEGER NOT NULL DEFAULT 0, "
             "last_failed_at TEXT NOT NULL DEFAULT '', "
             "next_retry_at TEXT NOT NULL DEFAULT '', "
+            # ✅ T-05（2026-11-06）：手动重试时间戳（纯诊断，不参与退避判定）。
+            "last_manual_retry_at TEXT NOT NULL DEFAULT '', "
             "PRIMARY KEY (project_id, scheme_id, chunk_hash))"
         )
         await conn.execute(
@@ -1170,10 +1278,20 @@ async def _migrate(conn: aiosqlite.Connection):
             "updated_at TEXT DEFAULT (datetime('now','localtime')), "
             "UNIQUE (project_id, scheme_id, rule_id, fact_name, conflict_type))"
         )
-        logger.info("迁移：创建 facts_chunk_failures / facts_cross_conflicts（R175）")
+        # ✅ T-04（2026-11-06）：项目级事实写租约（手工写入 / 后台提取互斥）。
+        #    · 纯新增空表，旧代码不读；删除该表即回滚为「无锁」旧行为；
+        #    · acquired_at 超过 LEASE_TTL_SECONDS 视为过期，可被抢占（崩溃不锁死）。
+        await conn.execute(
+            "CREATE TABLE IF NOT EXISTS facts_write_leases ("
+            "project_id TEXT PRIMARY KEY, "
+            "token TEXT NOT NULL DEFAULT '', "
+            "holder TEXT NOT NULL DEFAULT '', "
+            "acquired_at TEXT NOT NULL DEFAULT '')"
+        )
+        logger.info("迁移：创建 facts_chunk_failures / facts_cross_conflicts / facts_write_leases（R175/T-04）")
     except Exception as e:
         # ✅ B1-4（R176）：事实模块新表缺失 → 失败段退避/跨来源冲突诊断降级（可见）
-        _record_migration_degraded("facts_chunk_failures / facts_cross_conflicts 建表", e)
+        _record_migration_degraded("facts_chunk_failures / facts_cross_conflicts / facts_write_leases 建表", e)
 
     # --- 一次性数据迁移：修复被审核状态污染的 schemes.status（2026-09-17） ---
     # 旧版 review.py /submit 直接把英文审核状态写进 schemes.status，覆盖了编译状态。
@@ -1199,6 +1317,15 @@ async def _migrate(conn: aiosqlite.Connection):
     except Exception as e:
         # ✅ B1-4（R176）：审核状态污染修复失败 → 已污染数据继续固化（降级可见）
         _record_migration_degraded("schemes 审核状态数据迁移", e)
+
+    # --- ✅ R179 M1（2026-11-05）：评分项新表兜底 ---
+    #    全为新表且语句全部 IF NOT EXISTS，重复执行零副作用，不改动既有表结构。
+    #    正常库由 init_db 的 executescript(SCHEMA_SQL) 建好；此处兜底只跑 _migrate 的
+    #    老库/测试路径。失败走既有降级登记，不阻断启动。
+    try:
+        await conn.executescript(SCORING_DDL)
+    except Exception as e:
+        _record_migration_degraded("M1 评分项新表迁移", e)
 
     # --- 迁移索引（CREATE INDEX IF NOT EXISTS 自带幂等性，无需先探存） ---
     index_migrations = [

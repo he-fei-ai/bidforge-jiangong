@@ -372,8 +372,29 @@ _SUBHEADING_RULE_NORMAL = """\
 四级及更深**一律不设标题**，改用“（1）（2）”段首序号或加粗提示语在同一段内
 展开；被折叠的层级原文字内容必须保留，不得只写标题或一句话）"""
 
+#: ✅ R181（2026-11-06）：示例按「本节实际编号」泛化。
+#    旧版无论本节是第几节都写死 1.1/1.1.1，模型容易照抄示例生成与本节
+#    不合的前缀（如本节 3.2 却产出 1.1），虽导出前会重排编号，但正文
+#    与提示词口径不一致。现按本节前缀举例；无前缀时仍回退旧文案，
+#    保证既有调用方/断言零回归。
+_SUBHEADING_RULE_NORMAL_PREFIXED = """\
+- 二级小标题：{prefix}.1 标题
+- 三级小标题：{prefix}.1.1 标题
+（按本节编号顺延编号，小标题从 {prefix}.1、{prefix}.1.1 起，不得跳号或重复；
+四级及更深**一律不设标题**，改用“（1）（2）”段首序号或加粗提示语在同一段内
+展开；被折叠的层级原文字内容必须保留，不得只写标题或一句话）"""
 
-def build_subheading_rule(has_db_children: bool = False) -> str:
+
+def _normalize_section_prefix(section_prefix: str) -> str:
+    """从本节编号中取出纯数字点分前缀（如 "3.2 节" → "3.2"）；失败返回空。"""
+    try:
+        m = re.match(r"^\s*([0-9]+(?:\.[0-9]+)*)", str(section_prefix or ""))
+        return m.group(1) if m else ""
+    except Exception:  # pragma: no cover - 纯防御
+        return ""
+
+
+def build_subheading_rule(has_db_children: bool = False, section_prefix: str = "") -> str:
     """生成正文子标题编号规则片段（注入 content_generation_system 的
     ``{subheading_rule}``）。
 
@@ -382,6 +403,9 @@ def build_subheading_rule(has_db_children: bool = False) -> str:
             命名空间（1）/ a、），与 export._compute_subheading 的
             ``has_children=True`` 分支严格同口径，避免正文小标题与
             子章节的 X.X 编号撞号。
+        section_prefix: 本节的实际编号（如 "3.2"）。传入时示例按本节前缀
+            生成（3.2.1 / 3.2.1.1）；为空或无法解析时保持旧文案，默认
+            行为与引入前逐字一致。
     """
     try:
         from app.config import settings
@@ -389,4 +413,9 @@ def build_subheading_rule(has_db_children: bool = False) -> str:
         demote = bool(has_db_children) and bool(settings.body_subheading_demote_with_children)
     except Exception:  # pragma: no cover - 配置不可用时按默认开启
         demote = bool(has_db_children)
-    return _SUBHEADING_RULE_DEMOTED if demote else _SUBHEADING_RULE_NORMAL
+    if demote:
+        return _SUBHEADING_RULE_DEMOTED
+    prefix = _normalize_section_prefix(section_prefix)
+    if prefix:
+        return _SUBHEADING_RULE_NORMAL_PREFIXED.format(prefix=prefix)
+    return _SUBHEADING_RULE_NORMAL

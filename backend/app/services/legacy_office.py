@@ -1,22 +1,22 @@
-"""旧版 Word（.doc / .wps）转换模块 —— 移植自 OpenBidKit。
+"""旧版 Word（.doc / .wps）转换模块。
 
-参考实现：`client/electron/services/doc2markdown/convert.mjs`
-  - `withLegacyWordDocxFile()`          ：多后端依次尝试，全部失败才报错
-  - `buildLegacyWordConversionBackends()`：LibreOffice 优先；.wps 时 WPS COM 优先
-  - `runLibreOfficeDocxConversion()`     ：`soffice --headless --convert-to docx`
-  - `runWindowsComOfficeConvert()`       ：PowerShell 调 Word/WPS COM 另存为 docx
-  - `documentParseErrors.cjs`            ：缺组件时给「可操作」提示（含下载地址）
-
-本模块只做一件事：把旧版 Word 二进制转成 **DOCX 字节**，随后交给
+职责：把旧版 Word 二进制转成 **DOCX 字节**，随后交给
 `file_parser._parse_docx` 走既有 OOXML 解析通道 —— 这样旧版 Word 与 .docx
 共用同一套标题/表格结构化逻辑，不产生第二套解析实现。
+
+转换策略：
+  - 多后端依次尝试，全部失败才报错；
+  - LibreOffice 优先；`.wps` 时 WPS COM 优先；
+  - LibreOffice：``soffice --headless --convert-to docx``；
+  - Windows COM：PowerShell 调 Word/WPS 另存为 docx；
+  - 缺组件时给「可操作」提示（明确装什么 / 或怎么绕过）。
 
 设计约束：
 - 纯同步实现（调用方 `file_parser.parse_file_content_ex` 本身跑在线程池里，
   避免在事件循环里做阻塞子进程 IO）。
 - 失败一律抛 `ParseError`（用户可读消息），绝不返回错误文本当作正文。
-- 多后端「依次尝试、逐个记录失败原因」，与参考实现一致：LibreOffice 装了但
-  转换失败时，仍会继续尝试 Windows 上的 Word / WPS COM。
+- 多后端「依次尝试、逐个记录失败原因」：LibreOffice 装了但转换失败时，
+  仍会继续尝试 Windows 上的 Word / WPS COM。
 """
 
 from __future__ import annotations
@@ -34,8 +34,7 @@ from app.services.file_parser import OLE_COMPOUND_HEADERS, ParseError
 
 logger = logging.getLogger(__name__)
 
-#: 缺转换组件时的提示（对齐 OpenBidKit documentParseErrors.cjs 的文案口径：
-#: 明确「装什么 / 或者怎么绕过」，而不是只报一句「解析失败」）
+#: 缺转换组件时的提示：明确「装什么 / 或者怎么绕过」，而不是只报一句「解析失败」
 LIBREOFFICE_DOWNLOAD_URL = "https://zh-cn.libreoffice.org/download/libreoffice/"
 LEGACY_OFFICE_REQUIRED_MESSAGE = (
     ".doc和.wps识别，需要安装 LibreOffice、WPS Office 或 Microsoft Word "
@@ -56,12 +55,15 @@ _SOFFICE_CANDIDATES = (
     "/Applications/LibreOffice.app/Contents/MacOS/soffice",
 )
 
-#: COM ProgID（对齐参考实现：WPS 的 ProgID 大小写在不同版本间不一致，全部探一遍）
+#: COM ProgID。WPS 的 ProgID 大小写在不同版本间不一致，全部探一遍。
 _WPS_PROG_IDS = ("Kwps.Application", "KWPS.Application", "wps.Application")
 _WORD_PROG_IDS = ("Word.Application",)
 
-#: PowerShell COM 转换脚本（逐行拼接，避免缩进差异；与参考实现等价：
-#: 优先 SaveAs2(16=wdFormatDocumentDefault)，失败回退 SaveAs(12=wdFormatXMLDocument)）
+#: LibreOffice 转换参数（无头模式，避免弹窗与锁文件干扰）
+_SOFFICE_CONVERT_ARGS = ("--headless", "--norestore", "--nolockcheck", "--convert-to", "docx")
+
+#: PowerShell COM 转换脚本：优先 SaveAs2(16=wdFormatDocumentDefault)，
+#: 失败回退 SaveAs(12=wdFormatXMLDocument)。逐行拼接避免缩进差异。
 _POWERSHELL_OFFICE_CONVERT_SCRIPT = "\n".join(
     [
         "param(",
@@ -70,40 +72,43 @@ _POWERSHELL_OFFICE_CONVERT_SCRIPT = "\n".join(
         "  [Parameter(Mandatory=$true)][string]$OutputPath",
         ")",
         '$ErrorActionPreference = "Stop"',
-        "function Release-ComObject([object]$ComObject) {",
-        "  if ($null -ne $ComObject) {",
-        "    try { [void][System.Runtime.InteropServices.Marshal]::ReleaseComObject($ComObject) } catch {}",
+        "function Clear-ComObject([object]$Target) {",
+        "  if ($null -ne $Target) {",
+        "    try { [void][System.Runtime.InteropServices.Marshal]::ReleaseComObject($Target) } catch {}",
         "  }",
         "}",
-        "function Save-AsDocx([object]$Document, [string]$TargetPath) {",
-        "  $lastError = $null",
-        "  foreach ($format in @(16, 12)) {",
+        "function Invoke-Quietly([scriptblock]$Action) {",
+        "  try { & $Action } catch {}",
+        "}",
+        "function Export-Docx([object]$Document, [string]$TargetPath) {",
+        "  $failure = $null",
+        "  foreach ($format in 16, 12) {",
         "    try {",
         "      if (Test-Path -LiteralPath $TargetPath) { Remove-Item -LiteralPath $TargetPath -Force }",
         "      try { $Document.SaveAs2($TargetPath, $format) } catch { $Document.SaveAs($TargetPath, $format) }",
         "      if (Test-Path -LiteralPath $TargetPath) { return }",
         "    } catch {",
-        "      $lastError = $_",
+        "      $failure = $_",
         "    }",
         "  }",
-        "  if ($null -ne $lastError) { throw $lastError }",
+        "  if ($null -ne $failure) { throw $failure }",
         '  throw "save failed"',
         "}",
-        "$app = $null",
-        "$doc = $null",
+        "$application = $null",
+        "$document = $null",
         "try {",
-        "  $app = New-Object -ComObject $ProgId",
-        "  try { $app.Visible = $false } catch {}",
-        "  try { $app.DisplayAlerts = 0 } catch {}",
-        "  try { $app.AutomationSecurity = 3 } catch {}",
-        "  $doc = $app.Documents.Open($InputPath, $false, $true, $false)",
-        "  Save-AsDocx $doc $OutputPath",
+        "  $application = New-Object -ComObject $ProgId",
+        "  Invoke-Quietly { $application.Visible = $false }",
+        "  Invoke-Quietly { $application.DisplayAlerts = 0 }",
+        "  Invoke-Quietly { $application.AutomationSecurity = 3 }",
+        "  $document = $application.Documents.Open($InputPath, $false, $true, $false)",
+        "  Export-Docx $document $OutputPath",
         '  if (!(Test-Path -LiteralPath $OutputPath)) { throw "output missing" }',
         "} finally {",
-        "  if ($null -ne $doc) { try { $doc.Close($false) } catch {} }",
-        "  if ($null -ne $app) { try { $app.Quit() } catch {} }",
-        "  Release-ComObject $doc",
-        "  Release-ComObject $app",
+        "  if ($null -ne $document) { try { $document.Close($false) } catch {} }",
+        "  if ($null -ne $application) { try { $application.Quit() } catch {} }",
+        "  Clear-ComObject $document",
+        "  Clear-ComObject $application",
         "  [GC]::Collect()",
         "  [GC]::WaitForPendingFinalizers()",
         "}",
@@ -216,8 +221,8 @@ def ole_preflight_reason(content: bytes) -> str | None:
 def find_libreoffice_command() -> str:
     """探测 soffice 可执行文件：显式配置 > PATH > 常见安装路径。
 
-    ✅ 对齐参考实现 `findLibreOfficeCommand()`：只做「找得到 / 找不到」的判定，
-    找不到返回空串（由调用方决定报错文案），不抛异常。
+    只做「找得到 / 找不到」的判定，找不到返回空串（由调用方决定报错文案），
+    不抛异常。
     """
     configured = (getattr(settings, "legacy_office_path", "") or "").strip()
     if configured:
@@ -260,40 +265,55 @@ def _is_com_progid_registered(prog_id: str) -> bool:
     return proc.returncode == 0
 
 
+def _libreoffice_backend() -> list[dict]:
+    soffice = find_libreoffice_command()
+    if not soffice:
+        return []
+    return [{"type": "libreoffice", "label": "LibreOffice", "command": soffice}]
+
+
+def _first_registered_progid(prog_ids: tuple[str, ...]) -> str:
+    for prog_id in prog_ids:
+        if _is_com_progid_registered(prog_id):
+            return prog_id
+    return ""
+
+
+def _com_backends() -> tuple[list[dict], list[dict]]:
+    """探测 Word / WPS COM 后端，返回 ``(word_backends, wps_backends)``。
+
+    COM 仅在 Windows 且配置开启时探测；每个产品只取第一个注册成功的 ProgID。
+    """
+    if os.name != "nt" or not getattr(settings, "legacy_office_com_enabled", True):
+        return [], []
+    powershell = _find_powershell()
+    if not powershell:
+        return [], []
+
+    word_id = _first_registered_progid(_WORD_PROG_IDS)
+    wps_id = _first_registered_progid(_WPS_PROG_IDS)
+    word = (
+        [{"type": "word", "label": f"Microsoft Word ({word_id})", "command": powershell, "prog_id": word_id}]
+        if word_id
+        else []
+    )
+    wps = (
+        [{"type": "wps", "label": f"WPS Office ({wps_id})", "command": powershell, "prog_id": wps_id}] if wps_id else []
+    )
+    return word, wps
+
+
 def detect_office_backends(ext: str = "doc") -> list[dict]:
-    """按优先级返回可用的转换后端列表（与参考实现同顺序）。
+    """按优先级返回可用的转换后端列表。
 
     - `.wps`：WPS COM → LibreOffice → Word COM（WPS 生成的文件优先让 WPS 转）
     - 其它  ：LibreOffice → Word COM → WPS COM
     """
-    soffice = find_libreoffice_command()
-    libreoffice = [{"type": "libreoffice", "label": "LibreOffice", "command": soffice}] if soffice else []
-
-    word, wps = [], []
-    if os.name == "nt" and getattr(settings, "legacy_office_com_enabled", True):
-        powershell = _find_powershell()
-        if powershell:
-            for prog_id in _WORD_PROG_IDS:
-                if _is_com_progid_registered(prog_id):
-                    word.append(
-                        {
-                            "type": "word",
-                            "label": f"Microsoft Word ({prog_id})",
-                            "command": powershell,
-                            "prog_id": prog_id,
-                        }
-                    )
-                    break
-            for prog_id in _WPS_PROG_IDS:
-                if _is_com_progid_registered(prog_id):
-                    wps.append(
-                        {"type": "wps", "label": f"WPS Office ({prog_id})", "command": powershell, "prog_id": prog_id}
-                    )
-                    break
-
-    if (ext or "").lower() == "wps":
-        return [*wps, *libreoffice, *word]
-    return [*libreoffice, *word, *wps]
+    libreoffice = _libreoffice_backend()
+    word, wps = _com_backends()
+    available = {"libreoffice": libreoffice, "word": word, "wps": wps}
+    order = ("wps", "libreoffice", "word") if (ext or "").lower() == "wps" else ("libreoffice", "word", "wps")
+    return [backend for kind in order for backend in available[kind]]
 
 
 def _run_process(cmd: list[str], timeout_s: int) -> subprocess.CompletedProcess:
@@ -306,28 +326,38 @@ def _run_process(cmd: list[str], timeout_s: int) -> subprocess.CompletedProcess:
     )
 
 
-def _run_libreoffice_convert(soffice: str, src: Path, out_dir: Path, timeout_s: int) -> Path:
-    """`soffice --headless --convert-to docx --outdir <dir> <src>` 并返回产物路径。"""
-    _run_process(
-        [
-            soffice,
-            "--headless",
-            "--norestore",
-            "--nolockcheck",
-            "--convert-to",
-            "docx",
-            "--outdir",
-            str(out_dir),
-            str(src),
-        ],
-        timeout_s,
-    )
+def _libreoffice_argv(soffice: str, src: Path, out_dir: Path) -> list[str]:
+    return [soffice, *_SOFFICE_CONVERT_ARGS, "--outdir", str(out_dir), str(src)]
+
+
+def _pick_produced_docx(out_dir: Path, src_stem: str) -> Path:
+    """从转换输出目录中选产物：优先与源文件同名的，否则取排序后第一个。"""
     produced = sorted(out_dir.glob("*.docx"))
     if not produced:
         raise ParseError("LibreOffice 未生成 DOCX 文件")
-    # 多产物时优先取与源文件同名的
-    same_stem = [p for p in produced if p.stem == src.stem]
+    same_stem = [path for path in produced if path.stem == src_stem]
     return (same_stem or produced)[0]
+
+
+def _run_libreoffice_convert(soffice: str, src: Path, out_dir: Path, timeout_s: int) -> Path:
+    """`soffice --headless --convert-to docx --outdir <dir> <src>` 并返回产物路径。"""
+    _run_process(_libreoffice_argv(soffice, src, out_dir), timeout_s)
+    return _pick_produced_docx(out_dir, src.stem)
+
+
+def _com_convert_argv(powershell: str, script: Path, prog_id: str, src: Path, dst: Path) -> list[str]:
+    return [
+        powershell,
+        "-NoProfile",
+        "-NonInteractive",
+        "-ExecutionPolicy",
+        "Bypass",
+        "-File",
+        str(script),
+        prog_id,
+        str(src),
+        str(dst),
+    ]
 
 
 def _run_com_convert(powershell: str, prog_id: str, src: Path, dst: Path, timeout_s: int) -> None:
@@ -335,26 +365,22 @@ def _run_com_convert(powershell: str, prog_id: str, src: Path, dst: Path, timeou
     script = src.parent / f"office-convert-{prog_id.split('.')[0]}.ps1"
     script.write_text(_POWERSHELL_OFFICE_CONVERT_SCRIPT, encoding="utf-8")
     try:
-        proc = _run_process(
-            [
-                powershell,
-                "-NoProfile",
-                "-NonInteractive",
-                "-ExecutionPolicy",
-                "Bypass",
-                "-File",
-                str(script),
-                prog_id,
-                str(src),
-                str(dst),
-            ],
-            timeout_s,
-        )
+        proc = _run_process(_com_convert_argv(powershell, script, prog_id, src, dst), timeout_s)
     except subprocess.TimeoutExpired as e:
         raise ParseError(f"{prog_id} 转换超时（{timeout_s}s）") from e
     if not dst.exists() or dst.stat().st_size == 0:
         detail = (proc.stderr or b"").decode("utf-8", errors="replace")[:200].strip()
         raise ParseError(f"{prog_id} 未生成 DOCX 文件{('：' + detail) if detail else ''}")
+
+
+def _convert_with_backend(backend: dict, src: Path, tmp_dir: Path, timeout_s: int) -> bytes:
+    """用指定后端转换，返回 DOCX 字节（空字节表示后端运行但无产物）。"""
+    if backend["type"] == "libreoffice":
+        produced = _run_libreoffice_convert(backend["command"], src, tmp_dir, timeout_s)
+        return produced.read_bytes()
+    dst = tmp_dir / f"{src.stem}-{backend['type']}.docx"
+    _run_com_convert(backend["command"], backend["prog_id"], src, dst, timeout_s)
+    return dst.read_bytes()
 
 
 def convert_legacy_word_to_docx(content: bytes, file_name: str) -> tuple[bytes, str]:
@@ -388,7 +414,7 @@ def convert_legacy_word_to_docx(content: bytes, file_name: str) -> tuple[bytes, 
 
     backends = detect_office_backends(ext)
     if not backends:
-        # ✅ 对齐参考实现的「可操作提示」：明确告知装什么 / 或者怎么绕过
+        # 可操作提示：明确告知装什么 / 或者怎么绕过
         raise ParseError(LEGACY_OFFICE_REQUIRED_MESSAGE)
 
     timeout_s = int(getattr(settings, "legacy_office_timeout", 120) or 120)
@@ -402,13 +428,7 @@ def convert_legacy_word_to_docx(content: bytes, file_name: str) -> tuple[bytes, 
         attempts: list[str] = []
         for backend in backends:
             try:
-                if backend["type"] == "libreoffice":
-                    produced = _run_libreoffice_convert(backend["command"], src, tmp_dir, timeout_s)
-                    docx_bytes = produced.read_bytes()
-                else:
-                    dst = tmp_dir / f"{stem}-{backend['type']}.docx"
-                    _run_com_convert(backend["command"], backend["prog_id"], src, dst, timeout_s)
-                    docx_bytes = dst.read_bytes()
+                docx_bytes = _convert_with_backend(backend, src, tmp_dir, timeout_s)
             except subprocess.TimeoutExpired:
                 attempts.append(f"{backend['label']}：转换超时（{timeout_s}s）")
                 continue

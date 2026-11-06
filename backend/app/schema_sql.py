@@ -740,6 +740,10 @@ CREATE TABLE IF NOT EXISTS preflight_runs (
     -- ✅ G3（2026-09-21）：正文/图表/字数指纹。判定"这份结论是否已过期"的唯一
     -- 依据（此前只有 /submit 的门控会 422，看板与报告里看到的永远是旧结论）。
     content_fingerprint TEXT DEFAULT '',
+    -- ✅ R181（2026-11-06 · B-14）：审核状态指纹（章节 review_status 的有序哈希）。
+    --    与正文指纹分开：审核通过/驳回不改正文，却会让「章节未审核」类结论与
+    --    总检缓存失真。历史行由 db.py::_migrate 补列，空串 = fail-open。
+    review_state_hash TEXT DEFAULT '',
     rule_version TEXT DEFAULT '',
     total REAL DEFAULT 0,
     grade TEXT DEFAULT '',
@@ -799,3 +803,45 @@ CREATE TABLE IF NOT EXISTS placeholder_baselines (
 CREATE INDEX IF NOT EXISTS idx_placeholder_baselines_scheme
     ON placeholder_baselines(scheme_id, created_at);
 """
+
+# ✅ R179 M1（2026-11-05）：评分项 → 目录映射校验。
+#    全为新表，纯 CREATE TABLE/INDEX IF NOT EXISTS（幂等、可重复执行），
+#    不改动任何既有表结构。独立常量供 db._migrate 兜底重放（老库/测试路径）。
+SCORING_DDL = """
+CREATE TABLE IF NOT EXISTS scheme_scoring_items (
+    id TEXT PRIMARY KEY,
+    project_id TEXT NOT NULL,
+    source_doc_id TEXT DEFAULT '',
+    source_name TEXT DEFAULT '',
+    item_no TEXT DEFAULT '',
+    item_name TEXT NOT NULL,
+    score REAL,
+    score_raw TEXT DEFAULT '',
+    criteria TEXT DEFAULT '',
+    is_primary INTEGER DEFAULT 0,
+    page_ref TEXT DEFAULT '',
+    page_num INTEGER,
+    source_quote TEXT DEFAULT '',
+    status TEXT DEFAULT 'active',
+    created_at TEXT DEFAULT (datetime('now','localtime')),
+    updated_at TEXT DEFAULT (datetime('now','localtime'))
+);
+CREATE INDEX IF NOT EXISTS idx_scoring_items_project ON scheme_scoring_items(project_id);
+CREATE INDEX IF NOT EXISTS idx_scoring_items_doc ON scheme_scoring_items(project_id, source_doc_id);
+
+CREATE TABLE IF NOT EXISTS scheme_scoring_extract_runs (
+    id TEXT PRIMARY KEY,
+    project_id TEXT NOT NULL,
+    status TEXT DEFAULT 'running',
+    docs_total INTEGER DEFAULT 0,
+    docs_ok INTEGER DEFAULT 0,
+    failed_sources TEXT DEFAULT '[]',
+    items_count INTEGER DEFAULT 0,
+    error TEXT DEFAULT '',
+    created_at TEXT DEFAULT (datetime('now','localtime')),
+    finished_at TEXT DEFAULT ''
+);
+CREATE INDEX IF NOT EXISTS idx_scoring_runs_project ON scheme_scoring_extract_runs(project_id);
+"""
+
+SCHEMA_SQL = SCHEMA_SQL + SCORING_DDL

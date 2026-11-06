@@ -283,7 +283,9 @@ class TestE2PartialPreviewMatchesFinal:
         c1 = final[0]
         node = (c1.get("children") or [])[0]
         node = (node.get("children") or [])[0]
-        assert "含：" in str(node.get("description") or ""), "第四级标题未并入三级节点 description"
+        desc = str(node.get("description") or "")
+        # 2026-11-05 折叠口径：深层标题并入「（1）A；（2）B」段首引导（不再用「含：」）。
+        assert desc == "（1）C1.1.1.1；（2）C1.1.1.1.1：L5", f"第四级/五级标题未完整并入三级节点 description：{desc}"
 
     def test_preview_does_not_mutate_source(self):
         """预览构造必须深拷贝（不得就地裁剪污染 full_outline 主数据）。"""

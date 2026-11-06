@@ -212,7 +212,7 @@ class TestRenderIdempotentF2:
         db, sid = db_ctx
         monkeypatch.setattr(cfg.settings, "export_cache_fast_path", False)
         calls = _spy_render(monkeypatch)
-        resp = await export_mod.export_docx(sid, {"config": {}}, db)
+        resp = await export_mod.export_docx(sid, {"config": {}, "override_high_issues": True}, db)
         assert resp is not None
         assert len(calls) == 1, (
             "禁用快速路径时 _prepare_export 内部已渲染，"
@@ -224,10 +224,10 @@ class TestRenderIdempotentF2:
         db, sid = db_ctx
         monkeypatch.setattr(cfg.settings, "export_cache_fast_path", True)
         calls = _spy_render(monkeypatch)
-        r1 = await export_mod.export_docx(sid, {"config": {}}, db)
+        r1 = await export_mod.export_docx(sid, {"config": {}, "override_high_issues": True}, db)
         assert len(calls) == 1
         assert r1.headers.get("X-Cache-Status") == "miss"
-        r2 = await export_mod.export_docx(sid, {"config": {}}, db)
+        r2 = await export_mod.export_docx(sid, {"config": {}, "override_high_issues": True}, db)
         assert r2.headers.get("X-Cache-Status") == "hit"
         assert len(calls) == 1, "缓存命中路径不得触碰渲染段"
 

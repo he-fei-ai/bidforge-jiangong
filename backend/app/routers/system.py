@@ -247,9 +247,7 @@ async def _build_activity_snapshot(limit: int = 8) -> dict:
         "failed_today": int(ai_today.get("failed_today") or 0),
         # 尝试级失败 = 尝试数 - 成功次数（每次成功逻辑调用恰好 1 次成功尝试；
         # 旧行 attempt_count=1 时退化为原「失败尝试数」口径）。
-        "attempt_failed_today": max(
-            0, int(ai_today.get("attempts_today") or 0) - int(ai_today.get("ok_calls") or 0)
-        ),
+        "attempt_failed_today": max(0, int(ai_today.get("attempts_today") or 0) - int(ai_today.get("ok_calls") or 0)),
         "skipped_today": int(ai_today.get("skipped_today") or 0),
         "tokens_today": int(ai_today.get("tokens_today") or 0),
         "avg_duration": round(float(ai_today.get("avg_duration") or 0), 2),
@@ -446,6 +444,46 @@ class RedactionSettings(BaseModel):
     """``PUT /system/governance/redaction`` 请求体：敏感信息脱敏开关。"""
 
     enabled: bool = False
+
+
+class OutlineAutoConfirmSettings(BaseModel):
+    """``PUT /system/outline-auto-confirm`` 请求体：目录生成自动确认开关。"""
+
+    enabled: bool | None = None
+
+
+# ✅ R179 N1（2026-11-05）：目录生成自动确认开关（默认关，存 governance_settings kv，
+#    零迁移）。**不复用 /governance** —— 该接口的响应键集被既有用例逐字锁定
+#    （test_governance_get_returns_two_expected_fields），新增键会破坏既有契约。
+_OUTLINE_AUTO_CONFIRM_KEY = "outline_auto_confirm"
+
+
+@router.get("/outline-auto-confirm")
+async def outline_auto_confirm_get():
+    """读取自动确认开关（持久化优先；无记录 = 关闭）。
+
+    ``delay_ms`` 为后端有效倒计时（运维经 ``OUTLINE_AUTO_CONFIRM_DELAY_MS`` 配置），
+    前端只读展示、不提供修改入口（加法式键，旧前端忽略）。
+    """
+    from app.config import settings
+
+    kv = await _governance_kv_load()
+    return {
+        "enabled": kv.get(_OUTLINE_AUTO_CONFIRM_KEY, "false") == "true",
+        "delay_ms": int(getattr(settings, "outline_auto_confirm_delay_ms", 8000) or 8000),
+    }
+
+
+@router.put("/outline-auto-confirm")
+async def outline_auto_confirm_put(body: OutlineAutoConfirmSettings):
+    """写回自动确认开关（PATCH 语义：``None`` = 不改动）。"""
+    kv = await _governance_kv_load()
+    current = kv.get(_OUTLINE_AUTO_CONFIRM_KEY, "false") == "true"
+    enabled = current if body.enabled is None else bool(body.enabled)
+    kv[_OUTLINE_AUTO_CONFIRM_KEY] = "true" if enabled else "false"
+    await _governance_kv_save(kv)
+    logger.info("目录自动确认开关已更新并持久化: outline_auto_confirm=%s", enabled)
+    return {"enabled": enabled}
 
 
 # ✅ 2026-11-05（R175 收口）：治理开关持久化 —— 旧实现只写进程内存态

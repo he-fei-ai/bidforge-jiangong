@@ -81,6 +81,10 @@ def _scene_items(rows: list[dict], known: dict[str, str], active_env: str = "") 
             "missing": missing,
             "config_env": config_env if r.get("config_id") else "",
             "env_mismatch": (not missing) and _env_mismatch(active_env, config_env),
+            # ✅ R179（2026-11-05）：此前列表不回传配置启停态，用户看到一条
+            # 「已路由」的场景，实际运行时因 c.enabled=0 被 _apply_scene_route
+            # 静默跳过（承诺落空）。加法式回传，旧字段语义不变。
+            "enabled": bool(r.get("config_enabled")) if r.get("config_id") else False,
         }
 
     for scene, label in known.items():
@@ -99,6 +103,7 @@ async def list_scene_routes(db=Depends(read_db)):
         "SELECT r.scene AS scene, r.config_id AS config_id,"
         " c.provider_name AS provider_name, c.model AS model,"
         " c.env AS config_env,"
+        " CASE WHEN c.id IS NULL THEN 0 ELSE c.enabled END AS config_enabled,"
         " CASE WHEN c.id IS NULL THEN 0 ELSE 1 END AS exists_ok"
         " FROM ai_scene_routes r LEFT JOIN ai_config c ON c.id = r.config_id"
     )

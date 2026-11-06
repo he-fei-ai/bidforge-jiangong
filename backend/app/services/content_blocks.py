@@ -1275,7 +1275,9 @@ def _norm_heading_text(text: str) -> str:
 #    "a、a、吊顶与内装接口"。strip_outline_numbering 只认数字与中文数字
 #    分支，字母序（a、 / b. / c））不在其列，此处补齐为独立 helper
 #    （不改全局 _STRIP_NUMBER_RE，避免影响目录树等其他消费方）。
-_RE_SUBITEM_ORD_PREFIX = re.compile(r"^\s*[a-zA-Z]\s*[、.．)）]\s*")
+# ✅ R181（2026-11-06）：正则由单字母放宽到 1~2 个字母，并循环剥离重复前缀，
+#    与导出侧原有循环行为对齐后**下沉为唯一实现**（导出不再保留第二套正则）。
+_RE_SUBITEM_ORD_PREFIX = re.compile(r"^\s*[a-zA-Z]{1,2}\s*[、.．)）]\s*")
 
 
 def strip_subitem_ordinal_prefix(text: str) -> str:
@@ -1283,13 +1285,18 @@ def strip_subitem_ordinal_prefix(text: str) -> str:
 
     仅供「编号将被程序重新分配」的路径使用（正文子标题重编号 / 列表项
     连续重编号）；剥后为空则原样返回（标题本身就是编号时绝不吞正文）。
-    幂等。
+    幂等。重复前缀（``a、a、正文``）循环剥离，语义与导出侧旧循环一致。
     """
     s = str(text or "").strip()
     if not s:
         return s
-    new = _RE_SUBITEM_ORD_PREFIX.sub("", s, count=1).strip()
-    return new or s
+    stripped = s
+    while _RE_SUBITEM_ORD_PREFIX.match(stripped):
+        rest = _RE_SUBITEM_ORD_PREFIX.sub("", stripped, count=1).strip()
+        if not rest:
+            break
+        stripped = rest
+    return stripped
 
 
 def _strip_duplicate_leading_title(blocks: list[dict], *titles: str) -> list[dict]:

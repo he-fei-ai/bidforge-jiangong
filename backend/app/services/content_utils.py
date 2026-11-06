@@ -827,6 +827,136 @@ def order_sections_dfs(sections: list[dict]) -> list[dict]:
     return out
 
 
+def validate_section_tree(sections: list[dict]) -> tuple[list[dict], list[dict]]:
+    """显式校验章节树并返回前序 DFS 顺序（R181 · G10 / 遗留问题 4）。
+
+    与 :func:`order_sections_dfs` 的分工：
+      · ``order_sections_dfs`` 是「尽量不丢行」的排序器（孤儿/环补挂尾部），
+        不报告问题，适合正文生成这类必须继续跑的链路；
+      · 本函数是 ``/checklist`` 这类「逐章核对」场景的**显式校验器**：
+        每个节点独立判定，重复 ID、缺失父节点、自引用/环、空 ID 一律输出
+        可定位的 issue（含节点 id / 标题 / 缺失的 parent_id / 环路径），
+        而不是静默跳过。
+
+    返回 ``(ordered, issues)``：
+      · ``ordered`` 为前序 DFS 顺序，每个唯一 id 只出现一次（重复 ID 取
+        首次出现的行并报 ``duplicate_id``），因此不会把同一子节点渲染两遍；
+      · ``issues`` 每项含 ``code`` 与可直接展示的中文 ``message``，并附
+        机器可读定位字段（``id`` / ``parent_id`` / ``ids`` / ``count``）。
+    所有节点都会出现在 ``ordered`` 中（缺父/环节点降级为根），绝不丢行。
+    """
+    if not sections:
+        return [], []
+    issues: list[dict] = []
+    first_by_id: dict[str, dict] = {}
+    occurrences: dict[str, list[int]] = {}
+    for idx, s in enumerate(sections):
+        sid = str(s.get("id") or "")
+        if not sid:
+            issues.append(
+                {
+                    "code": "empty_id",
+                    "message": f"第 {idx + 1} 个章节节点缺少 id，无法建立树关系",
+                    "row_index": idx,
+                }
+            )
+            continue
+        occurrences.setdefault(sid, []).append(idx)
+        if sid not in first_by_id:
+            first_by_id[sid] = s
+    for sid, rows in occurrences.items():
+        if len(rows) > 1:
+            issues.append(
+                {
+                    "code": "duplicate_id",
+                    "message": f"章节 id 重复：{sid}（出现 {len(rows)} 次），已按首次出现展示",
+                    "id": sid,
+                    "count": len(rows),
+                    "section_title": str(first_by_id[sid].get("title") or ""),
+                }
+            )
+
+    # 父边：缺失父节点 → 降级为根并报错；自引用直接断边并报错。
+    parent_of: dict[str, str] = {}
+    for sid, s in first_by_id.items():
+        pid = str(s.get("parent_id") or "")
+        if pid and pid == sid:
+            issues.append(
+                {
+                    "code": "self_parent",
+                    "message": f"章节自引用：{sid} 的 parent_id 指向自身，已按根节点处理",
+                    "id": sid,
+                    "parent_id": pid,
+                }
+            )
+            parent_of[sid] = ""
+            continue
+        if pid and pid not in first_by_id:
+            issues.append(
+                {
+                    "code": "missing_parent",
+                    "message": f"章节 {sid} 的父节点 {pid} 不存在（缺节点），已按根节点处理",
+                    "id": sid,
+                    "parent_id": pid,
+                    "section_title": str(s.get("title") or ""),
+                }
+            )
+            parent_of[sid] = ""
+            continue
+        parent_of[sid] = pid
+
+    # 环检测：父边是函数图（每个节点至多一个父），沿 parent 链走即可。
+    state: dict[str, int] = {sid: 0 for sid in first_by_id}
+    for sid in first_by_id:
+        if state[sid]:
+            continue
+        path: list[str] = []
+        pos: dict[str, int] = {}
+        cur = sid
+        while cur and state.get(cur, 0) == 0:
+            state[cur] = 1
+            pos[cur] = len(path)
+            path.append(cur)
+            cur = parent_of.get(cur, "")
+        if cur and state.get(cur) == 1 and cur in pos:
+            cycle = path[pos[cur] :]
+            issues.append(
+                {
+                    "code": "cycle",
+                    "message": "章节父子关系成环：" + " → ".join(cycle + [cycle[0]]) + "（已断开环边并降级为根节点）",
+                    "ids": list(cycle),
+                }
+            )
+            for node in cycle:
+                parent_of[node] = ""
+        for node in path:
+            state[node] = 2
+
+    # 重建子边并做确定性排序（同级按 sort_order，脏值由统一键归一）。
+    children: dict[str, list[str]] = {sid: [] for sid in first_by_id}
+    roots: list[str] = []
+    for sid in first_by_id:
+        pid = parent_of.get(sid, "")
+        if pid:
+            children[pid].append(sid)
+        else:
+            roots.append(sid)
+    key = lambda sid: section_sort_order_key(first_by_id[sid].get("sort_order"), sid)
+    roots.sort(key=key)
+    for kids in children.values():
+        kids.sort(key=key)
+
+    ordered: list[dict] = []
+    stack = list(reversed(roots))
+    while stack:
+        sid = stack.pop()
+        ordered.append(first_by_id[sid])
+        kids = children.get(sid) or []
+        if kids:
+            stack.extend(reversed(kids))
+    return ordered, issues
+
+
 def section_sort_order_key(sort_order, section_id) -> tuple[int, str]:
     """章节**同级**排序键的权威实现：``(sort_order 安全取整, id)``。
 

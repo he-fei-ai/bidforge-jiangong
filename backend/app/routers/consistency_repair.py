@@ -25,6 +25,7 @@ from app.routers.review import reset_review_on_content_change  # ✅ G9：修复
 from app.services import conflict_arbiter as arbiter
 from app.services import consistency_scanner as scanner
 from app.services import repair_agent, repair_record
+from app.services.conflict_revert import revert_conflict_changes
 
 # ✅ R13 判空单一出口（2026-10-14 · R78 F-3）：本模块与 compliance/review/
 #    review_autofix 同属「审核与预检」的两条修复闭环，此前是 R13 收口的漏网之鱼
@@ -305,7 +306,10 @@ async def confirm(scheme_id: str, body: dict | None = None, db=Depends(get_db)):
     """逐条确认修复结果。
 
     accepted[]：保留修复（冲突状态 accepted）。
-    rejected[]：拒绝该冲突 —— 其所在章节整体恢复修复前快照原文，冲突回退 pending。
+    rejected[]：拒绝该冲突 —— **只回滚该冲突取值所在的最小变更片段**（R181/B-06），
+                冲突回退 pending；同章其它已接受的修复与格式整理保持不变。
+                仅当历史批次缺少 ``current_value`` / ``authoritative_value``
+                （无法定位到片段）时，才降级为整章恢复快照原文并显式记账。
     未在两个列表中的冲突维持原状。
     """
     body = body or {}
@@ -325,65 +329,135 @@ async def confirm(scheme_id: str, body: dict | None = None, db=Depends(get_db)):
     # ✅ R179（E4 残项）：恢复结果三态记账（恢复成功 / 快照缺失跳过 / 未涉及）。
     restored_sections: set[str] = set()
     restore_skipped_sections: set[str] = set()
+    # ✅ R181（B-06）：冲突级回滚明细（加法式）。旧实现「拒绝 = 整章回退」会把
+    #    同章其它已接受修复与格式整理一起抹掉；现按 conflict_revert 的字符级
+    #    diff 只撤销该冲突取值所在的变更片段，并逐条记账 scope/reason。
+    conflict_restore_results: list[dict] = []
+    rejected_not_restored: set[str] = set()
     if rejected:
-        # ✅ R98（R90 遗留⑦收口）：拒绝会把整章正文恢复为修复前快照 —— 与
-        #    生成中正文互相覆盖，仅在真有拒绝项（写正文）时拦；纯 accepted
-        #    只写冲突状态、不触碰 content，不拦。
+        # ✅ R98（R90 遗留⑦收口）：拒绝会改写正文 —— 与生成中正文互相覆盖，
+        #    仅在真有拒绝项（写正文）时拦；纯 accepted 只写冲突状态、不触碰
+        #    content，不拦。
         from app.routers.sections import ensure_no_generation_write
 
         ensure_no_generation_write(scheme_id, "一致性修复拒绝恢复")
         snap = await repair_record.get_snapshot(db, rep.get("snapshot_id") or "")
         if snap:
             snap_map = {s.get("section_id"): s.get("content_before", "") for s in snap.get("sections", [])}
-        # ✅ 修复（2026-09-17）：rejected_sections 收集与恢复循环移到 if snap 之外，
-        #    避免快照缺失（snapshot_id 为空/已被删）时 snap_map 未定义触发 NameError；
-        #    此时 snap_map 为空，恢复分支自然跳过，仅回写冲突状态（降级为不恢复正文）。
-        for item in rep.get("items", []):
-            if item.get("conflict_id") in rejected and item.get("section_id"):
-                rejected_sections.add(item["section_id"])
-        # ✅ R179（E4 残项）：区分「真的恢复了」与「因快照缺失只回写了冲突状态」。
-        #    旧实现把 rejected_sections 全量当 restored_sections 返回，快照丢失时
-        #    前端会提示“已恢复原文”而正文其实没动，用户据此误判可放心导出。
-        for sid in rejected_sections:
-            if sid in snap_map:
-                # ✅ BUG 修复（2026-09-17 · 与 repair_agent / rollback_snapshot
-                #    同类字数口径缺陷）：拒绝某冲突 → 该章整体恢复快照原文
-                #    时，旧实现仅写 content，word_count / word_status 停留在
-                #    **修复后** 的值 —— 例如修复把 1200 字改为 1500 字（记
-                #    over），用户拒绝后正文回到 1200 字但库里仍显示 1500 字
-                #    判 over，触发误导性压缩建议。这里按全项目唯一口径
-                #    （content_utils.text_word_count，剔除 ``` 图表代码块）
-                #    重算，并同步 word_status。
-                restored_content = snap_map[sid]
-                brow = await review_db.fetch_one(
-                    db,
-                    "SELECT word_budget FROM sections WHERE id=?",
-                    (sid,),
-                    what=f"一致性修复确认：读取章节字数预算（section={sid[:8]}）",
+
+        items_all = rep.get("items", []) or []
+        rejected_items = [it for it in items_all if it.get("conflict_id") in rejected and it.get("section_id")]
+        by_section: dict[str, list[dict]] = {}
+        for it in rejected_items:
+            by_section.setdefault(it["section_id"], []).append(it)
+            rejected_sections.add(it["section_id"])
+
+        for sid, sec_items in sorted(by_section.items()):
+            if sid not in snap_map:
+                # 快照缺失：无法证明原文 → 保持「未恢复」记账，绝不冒充成功。
+                restore_skipped_sections.add(sid)
+                for it in sec_items:
+                    conflict_restore_results.append(
+                        {
+                            "conflict_id": it.get("conflict_id") or "",
+                            "section_id": sid,
+                            "scope": "none",
+                            "restored": False,
+                            "reason": "snapshot_missing",
+                        }
+                    )
+                continue
+            crow = await review_db.fetch_one(
+                db,
+                "SELECT content, word_budget FROM sections WHERE id=?",
+                (sid,),
+                what=f"一致性修复确认：读取章节正文/字数预算（section={sid[:8]}）",
+            )
+            if crow is None:
+                restore_skipped_sections.add(sid)
+                for it in sec_items:
+                    conflict_restore_results.append(
+                        {
+                            "conflict_id": it.get("conflict_id") or "",
+                            "section_id": sid,
+                            "scope": "none",
+                            "restored": False,
+                            "reason": "section_missing",
+                        }
+                    )
+                continue
+            before = snap_map[sid] or ""
+            current = (crow["content"] if crow["content"] is not None else "") or ""
+            # 同章「其它未拒绝冲突」的取值必须保留：diff 片段一旦与它们共享，
+            # 本冲突就让路（宁可报 not_located，也不越权撤回别人已接受的修复）。
+            preserve: list[str] = []
+            for other in items_all:
+                if other.get("section_id") != sid:
+                    continue
+                if other.get("conflict_id") in rejected:
+                    continue
+                for k in ("current_value", "authoritative_value"):
+                    v = str(other.get(k) or "")
+                    if v:
+                        preserve.append(v)
+
+            text = current
+            for it in sorted(sec_items, key=lambda x: str(x.get("conflict_id") or "")):
+                cid = str(it.get("conflict_id") or "")
+                wrong = str(it.get("current_value") or "")
+                auth = str(it.get("authoritative_value") or "")
+                if not wrong and not auth:
+                    # 历史批次缺取值元数据 → 唯一可证安全的降级：整章恢复快照原文。
+                    # 这是**显式**降级（scope=section_fallback + reason），不是默认路径。
+                    text = before
+                    conflict_restore_results.append(
+                        {
+                            "conflict_id": cid,
+                            "section_id": sid,
+                            "scope": "section_fallback",
+                            "restored": True,
+                            "reason": "missing_value_metadata",
+                        }
+                    )
+                    continue
+                text, reason = revert_conflict_changes(
+                    before,
+                    text,
+                    wrong_values=[wrong],
+                    authoritative_value=auth,
+                    preserve_values=preserve,
                 )
-                wb = (brow["word_budget"] if brow and brow["word_budget"] else None) or DEFAULT_WORD_BUDGET
-                _wc = text_word_count(restored_content)
-                # ✅ R13（R78 F-3）：正文恢复写经 exec_write（严格模式）——
-                #    rejected_sections 均来自本批次 items 且章节刚被修复写过，
-                #    行必然存在，0 行只可能是「本次写没生效」，绝不汇报假成功。
+                if reason == "not_located":
+                    rejected_not_restored.add(cid)
+                conflict_restore_results.append(
+                    {
+                        "conflict_id": cid,
+                        "section_id": sid,
+                        "scope": "conflict",
+                        "restored": reason in ("reverted", "unchanged"),
+                        "reason": reason,
+                    }
+                )
+
+            if text != current:
+                # ✅ BUG 修复（2026-09-17 · 与 repair_agent 同口径）：恢复正文时
+                #    word_count / word_status 必须按唯一口径重算，避免正文回到
+                #    1200 字而库里仍显示修复后 1500 字判 over。
+                _wc = text_word_count(text)
+                wb = (crow["word_budget"] if crow["word_budget"] else None) or DEFAULT_WORD_BUDGET
                 await review_db.exec_write(
                     db,
-                    "UPDATE sections SET content=?, word_count=?, " "word_status=?, updated_at=? WHERE id=?",
-                    (restored_content, _wc, word_status_for(_wc, wb), datetime.now().isoformat(), sid),
-                    what=f"一致性修复确认：恢复章节快照原文（section={sid[:8]}）",
+                    "UPDATE sections SET content=?, word_count=?, word_status=?, updated_at=? WHERE id=?",
+                    (text, _wc, word_status_for(_wc, wb), datetime.now().isoformat(), sid),
+                    what=f"一致性修复确认：冲突级回滚章节片段（section={sid[:8]}）",
                 )
-                # ✅ R92（2026-10-17 · 正文写点同步补链）：拒绝 = 该章整体回退到
-                #    修复前快照原文，正文里的内联图表随之复原；须在**同一事务**内
-                #    （commit 在函数末尾）按恢复后正文全量重登记，否则 chart_predictions
-                #    仍是修复时那一份（run_repair 已重登记过）→ 与恢复后正文再度漂移。
+                # ✅ R92（2026-10-17 · 正文写点同步补链）：正文变化后必须在同一
+                #    事务内按新正文重登记内联图表，否则 chart_predictions 与正文漂移。
                 try:
-                    await resync_inline_charts(db, scheme_id, sid, restored_content, enforce_limits=False)
+                    await resync_inline_charts(db, scheme_id, sid, text, enforce_limits=False)
                 except Exception as _re:  # noqa: BLE001 - 登记失败不阻断恢复
                     logger.warning("一致性修复确认：章节 %s 图表重登记失败（保留恢复正文）: %s", sid[:8], _re)
                 restored_sections.add(sid)
-            else:
-                # 快照缺失：只回写了冲突状态，正文未变 —— 单独记账，不再冒充已恢复。
-                restore_skipped_sections.add(sid)
 
     # 接受/拒绝的冲突项状态回写
     # ✅ R13（R78 F-3）：cid 来自请求体，未预先校验行存在（历史批次/外部调用
@@ -416,7 +490,7 @@ async def confirm(scheme_id: str, body: dict | None = None, db=Depends(get_db)):
             scheme_id,
             sid,
             actor="一致性修复·拒绝回滚",
-            comment="已拒绝该章节的一致性修复并恢复原文，原审核结论失效，请重新送审",
+            comment="已按最小范围回滚被拒绝冲突的取值，章节原审核结论失效，请重新送审",
         )
     repaired_ids = {i.get("conflict_id") for i in rep.get("items", []) if i.get("status") == "repaired"}
     new_status = "confirmed"
@@ -427,10 +501,11 @@ async def confirm(scheme_id: str, body: dict | None = None, db=Depends(get_db)):
     await repair_record.mark_repair_status(db, repair_id, new_status)
     await db.commit()
 
-    # ✅ E1（R175，闭环·低风险版）：拒绝会把整章正文恢复为快照原文 —— 正文已变，
-    #    旧的扫描缓存必须失效，否则下一轮扫描可能拿回基于修复后正文的旧结论。
+    # ✅ E1（R175，闭环·低风险版）：拒绝会改写正文 —— 正文已变，旧的扫描缓存
+    #    必须失效，否则下一轮扫描可能拿回基于修复后正文的旧结论。
     #    这里只做缓存失效 + 明确告知「需重扫」，不在确认请求内同步跑 AI 扫描 /
     #    仲裁（那会把确认接口拖到分钟级，并产生用户未预期的额外调用成本）。
+    #    ✅ R181（B-06）：改写范围已收窄到冲突级片段，判定条件不变（写没写正文）。
     rescan_required = bool(restored_sections)
     if rescan_required:
         try:
@@ -449,6 +524,12 @@ async def confirm(scheme_id: str, body: dict | None = None, db=Depends(get_db)):
         # ✅ R179（加法式）：快照缺失导致未真正回滚的章节，明确告知调用方，
         #    避免前端把「只改了冲突状态」误报成「正文已恢复」。
         "restore_skipped_sections": sorted(restore_skipped_sections),
+        # ✅ R181（B-06，加法式）：冲突级回滚明细 —— 每条拒绝冲突的
+        #    scope（conflict / section_fallback / none）、是否真正恢复、原因。
+        #    rejected_not_restored 列出「无法归因到变更片段、正文未回滚」的冲突，
+        #    调用方必须显式提示人工核对，不得当作已恢复。
+        "conflict_restore_results": conflict_restore_results,
+        "rejected_not_restored": sorted(rejected_not_restored),
         # ✅ E1（加法式）：true 表示正文已回滚 → 请重新扫描再判定结论；
         #    旧消费方忽略该键即可，既有字段语义不变。
         "rescan_required": rescan_required,

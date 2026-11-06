@@ -1267,8 +1267,11 @@ def _image_format_supported(img_bytes) -> bool:
         with PILImage.open(_sh.BytesIO(img_bytes.getvalue())) as im:
             return (im.format or "").upper() in _sh._DOCX_SAFE_IMAGE_FORMATS
     except Exception:
-        _sh.logger.debug("图片格式探测失败（按不支持处理，对应图表/配图将跳过）",
-                     exc_info=True)
+        # ✅ R179（2026-11-05）：debug 级别在默认日志配置下不可见，图片被跳过时
+        #    运维只看到「成稿少了一张图」。升级为 warning（仍按不支持处理）。
+        _sh.logger.warning(
+            "图片格式探测失败（按不支持处理，对应图表/配图将被跳过）", exc_info=True
+        )
         return False
 
 

@@ -710,9 +710,7 @@ async def load_scheme_section_index(db, scheme_id: str) -> dict:
     return {"meta": meta, "has_children": has_children}
 
 
-def _normalize_from_meta(
-    content: str, info: dict, has_db_children: bool, section_id: str = ""
-) -> tuple[str, bool]:
+def _normalize_from_meta(content: str, info: dict, has_db_children: bool, section_id: str = "") -> tuple[str, bool]:
     """用已预取的元数据执行规范化（纯计算，无 IO）。
 
     与 `normalize_section_content_subheadings` 的查库之后那半段**逐行等价**，

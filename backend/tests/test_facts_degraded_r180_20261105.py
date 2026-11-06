@@ -138,8 +138,8 @@ def test_facts_closeout_uses_shared_terminal_decision():
     src = SSE_HANDLERS.read_text(encoding="utf-8")
     closeout = src[src.index("extraction_result = await pipe_task") :]
     assert "_facts_partial_terminal_payload(" in closeout
-    assert 'await finish_task(task_id, _terminal_status, done_msg)' in closeout, (
-        "事实收尾必须按判定结果落终态（硬编码 completed 会让部分失败再次伪装成功）"
-    )
+    assert (
+        "await finish_task(task_id, _terminal_status, done_msg)" in closeout
+    ), "事实收尾必须按判定结果落终态（硬编码 completed 会让部分失败再次伪装成功）"
     assert 'yield _sse({"event": _terminal_event' in closeout, "SSE 事件名必须与任务状态同源"
     assert '"event": _terminal_event,' in closeout, "checkpoint 的 event 必须与终态同源"

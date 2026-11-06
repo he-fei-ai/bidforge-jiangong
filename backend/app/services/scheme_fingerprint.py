@@ -91,3 +91,32 @@ async def content_fingerprint(db, scheme_id: str) -> str:
         logger.warning("内容指纹计算失败（按空指纹处理）: scheme=%s err=%s", scheme_id, e)
         return ""
     return hashlib.md5("\x1f".join(parts).encode("utf-8", "replace")).hexdigest()
+
+
+async def review_state_hash(db, scheme_id: str) -> str:
+    """审核状态指纹（R181 · B-14）：章节 ``(id, review_status)`` 的有序哈希。
+
+    与 :func:`content_fingerprint` **刻意分开**：
+      · 正文指纹回答「结论对应的正文是否还是现在这份」（时效语义，落
+        ``content_fingerprint`` 列，导出缓存/一致性扫描共用）；
+      · 审核状态指纹回答「结论对应的审核进度是否还是现在这份」——审核通过 /
+        驳回不会改变正文，却会让总检里的「章节未审核」类结论与缓存载荷失真，
+        因此**只**进入总检/预检的缓存键与 ``preflight_runs.review_state_hash``，
+        不污染正文指纹（否则每次审核动作都会让全库历史指纹一起失效）。
+
+    计算失败返回空串（= 无法判定 = 不做审核状态失效判定，fail-open，与
+    ``_run_is_stale`` 对历史行的约定一致）。
+    """
+    parts: list[str] = []
+    try:
+        for row in await review_db.fetch_all(
+            db,
+            "SELECT id, review_status FROM sections WHERE scheme_id=? ORDER BY id",
+            (scheme_id,),
+            what="审核状态指纹：读取章节审核状态",
+        ):
+            parts.append(f"{row['id']}|{row.get('review_status') or ''}")
+    except Exception as e:  # noqa: BLE001 - 指纹算不出来按「无法判定」处理
+        logger.warning("审核状态指纹计算失败（按空指纹处理）: scheme=%s err=%s", scheme_id, e)
+        return ""
+    return hashlib.md5("\x1f".join(parts).encode("utf-8", "replace")).hexdigest()

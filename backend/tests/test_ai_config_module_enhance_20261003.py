@@ -10,12 +10,29 @@
    探测 max_tokens 钳制（与保存链路同口径）。
 """
 
+import socket
+
 import app.services.ai.provider_factory as pf
 import pytest
 from app.config import settings
 from app.models import AIConfigIn, AIConfigTest, ProviderModelsIn
 from app.services.crypto import encrypt_api_key
 from pydantic import ValidationError
+
+
+@pytest.fixture(autouse=True)
+def _stub_public_dns(monkeypatch):
+    """✅ R181（2026-11-06 · 遗留项）：save_ai_config 的 URL 校验不再走真实 DNS。
+
+    本文件大量用例以 ``https://api.x.com/v1`` 作为 Base URL；旧实现会真实解析
+    该域名，离线 / 解析到禁网段时随机失败。只固定解析入口为公网地址，SSRF
+    判定逻辑保持原样。
+    """
+    monkeypatch.setattr(
+        pf.socket,
+        "getaddrinfo",
+        lambda *_a, **_k: [(socket.AF_INET, socket.SOCK_STREAM, 6, "", ("93.184.216.34", 0))],
+    )
 
 
 # ===========================================================================

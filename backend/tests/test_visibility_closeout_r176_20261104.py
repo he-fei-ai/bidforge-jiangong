@@ -120,10 +120,17 @@ class TestOutlineGateParity:
 
 class TestSingleOutlineWritePathGuard:
     def test_only_two_gated_rebuild_paths_exist(self):
-        """源码级护栏：整树重建写库只允许两条入口，且都必须引用闸门。"""
+        """源码级护栏：整树重建写库只允许三条入口，且都必须引用闸门。
+
+        ✅ R179（2026-11-05）：新增第三条 —— `services/outline_versions.py` 快照回退。
+        它同样是「DELETE 全表 + 逐行 INSERT」的整树重建，故必须纳入闸门判据；
+        与另两条的差异是：回退语义为还原用户此前确认过的状态，空壳清单**只回传
+        不阻断**（阻断会把撤销功能锁死），但闸门实现必须是同一个（禁止各写一份）。
+        """
         allowed = {
             ("routers/sections.py", "_save_outline_to_db"),
             ("routers/upload_outline.py", "save_as_outline"),
+            ("services/outline_versions.py", "restore_outline_snapshot"),
         }
         found = set()
         for path in APP_DIR.rglob("*.py"):

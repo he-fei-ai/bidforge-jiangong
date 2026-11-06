@@ -148,7 +148,11 @@ class TestClampOutlineDepth:
         assert "五级" in lv3["description"]
 
     def test_prev_merge_suffix_replaced_not_appended(self):
-        """描述里已有"（含：...）"时必须替换而非叠加。"""
+        """描述里已有"（含：...）"时必须替换而非叠加。
+
+        2026-11-05 折叠口径变更：折叠后缀统一为「（1）A；（2）B」段首引导，
+        不再使用「（含：…）」；本用例锁定「旧后缀被剥离、只保留一次新引导」。
+        """
         from app.services.outline_utils import clamp_outline_depth
 
         outline = [
@@ -170,8 +174,10 @@ class TestClampOutlineDepth:
         ]
         result = clamp_outline_depth(outline)
         lv3 = result[0]["children"][0]["children"][0]
-        assert lv3["description"] == "原描述（含：新标题）"
+        assert lv3["description"] == "原描述；（1）新标题"
         assert "旧标题" not in lv3["description"]
+        assert "（含：" not in lv3["description"], "旧合并写法不得残留"
+        assert lv3["description"].count("（1）") == 1, "重复裁剪不得叠加引导后缀"
 
     def test_bare_merge_suffix_replaced(self):
         from app.services.outline_utils import clamp_outline_depth
@@ -194,7 +200,7 @@ class TestClampOutlineDepth:
             }
         ]
         result = clamp_outline_depth(outline)
-        assert result[0]["children"][0]["children"][0]["description"] == "含：新标题"
+        assert result[0]["children"][0]["children"][0]["description"] == "（1）新标题"
 
     def test_non_dict_nodes_are_dropped(self):
         from app.services.outline_utils import clamp_outline_depth

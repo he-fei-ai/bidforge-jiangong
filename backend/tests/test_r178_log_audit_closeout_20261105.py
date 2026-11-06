@@ -278,9 +278,9 @@ class TestContentPlanTokenBudget:
                 continue
             for kw in node.keywords:
                 if kw.arg == "max_tokens" and isinstance(kw.value, ast.Constant):
-                    assert isinstance(kw.value.value, int) and kw.value.value >= 1536, (
-                        f"{CP_PATH.name}:{node.lineno} 的 max_tokens 字面量 {kw.value.value} 低于地板 1536"
-                    )
+                    assert (
+                        isinstance(kw.value.value, int) and kw.value.value >= 1536
+                    ), f"{CP_PATH.name}:{node.lineno} 的 max_tokens 字面量 {kw.value.value} 低于地板 1536"
 
 
 # =====================================================================
