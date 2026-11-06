@@ -11,6 +11,7 @@
 
 from __future__ import annotations
 
+import json
 import logging
 import re
 
@@ -131,8 +132,22 @@ def _is_false_positive(key: str, var: str, template: str) -> bool:
 #:    「删行 + 豁免告警」变成「字面量残留进模型提示词」，两侧判据再次分叉。
 #:    注：``{x}`` 不会被 ``extract_variables`` 提取（它用 ``\w{1,}``），
 #:    因此「删行却不报缺失」在这个形态上是**自洽的**：没被提取 ⇒ 不会报缺失。
+#: ✅ R181（2026-11-06 · N-06 遗留）：两种占位符形态都要参与可选区块判定。
+#:    旧实现只认 ``{var}`` 独占整行，``__VAR__`` 独占整行时即使未传值也会
+#:    原样留在提示词里（线上实证：``bid_segment_merge_system`` 的
+#:    ``__TASK_PROMPT__`` 独立成行，缺值时字面量直接下发模型）。
+#:    现两种形态共用同一正则（唯一事实源），删行与豁免告警不再分叉。
 _OPTIONAL_BLOCK_RE = re.compile(
-    r"^[ \t]*\{([A-Za-z_]\w*)\}[ \t]*$", re.MULTILINE)
+    r"^[ \t]*\{([A-Za-z_]\w*)\}[ \t]*$"
+    r"|"
+    r"^[ \t]*__([A-Z][A-Z0-9_]{2,})__[ \t]*$",
+    re.MULTILINE,
+)
+
+
+def _optional_block_var_of(match: re.Match) -> str:
+    """取可选区块正则匹配到的变量名（两种形态的捕获组不同）。"""
+    return match.group(1) or match.group(2) or ""
 
 
 def _is_optional_block_var(var: str, template: str) -> bool:
@@ -140,7 +155,7 @@ def _is_optional_block_var(var: str, template: str) -> bool:
     if not template or not var:
         return False
     for m in _OPTIONAL_BLOCK_RE.finditer(template):
-        if m.group(1) == var:
+        if _optional_block_var_of(m) == var:
             return True
     return False
 
@@ -399,6 +414,29 @@ def _render_by_line(template: str, pattern: re.Pattern | None,
     return "".join(out)
 
 
+def _format_render_value(value) -> str:
+    """把非字符串实参统一成稳定的文本形态。
+
+    ✅ R181（2026-11-06 · N-06 遗留）：旧实现直接 ``str(value)``，导致
+    布尔值渲染成 Python 字面量 ``True/False``、列表渲染成 ``['a', 'b']``
+    （Repr 形态），与数字/字符串的直观形态不一致。现统一为：
+      - ``None`` → 空串；
+      - 布尔 → ``true`` / ``false``（与 JSON 一致，模型更易理解）；
+      - 列表/元组/集合 → 中文顿号分隔；
+      - 字典 → JSON（``ensure_ascii=False``）；
+      - 其余 → ``str()``。
+    """
+    if value is None:
+        return ""
+    if isinstance(value, bool):
+        return "true" if value else "false"
+    if isinstance(value, (list, tuple, set, frozenset)):
+        return "、".join(_format_render_value(v) for v in value)
+    if isinstance(value, dict):
+        return json.dumps(value, ensure_ascii=False, default=str)
+    return str(value)
+
+
 def render_prompt(template: str, **kwargs) -> str:
     """统一的变量渲染函数，替换模板中的所有变量占位符。
 
@@ -427,7 +465,7 @@ def render_prompt(template: str, **kwargs) -> str:
 
     def _replace(m: re.Match) -> str:
         name = (m.group(1) or m.group(2) or "").lower()
-        return str(lookup[name])
+        return _format_render_value(lookup[name])
 
 
     #
@@ -567,7 +605,7 @@ PROMPT_VARIABLE_CONTRACTS: dict[str, list[str]] = {
         # ✅ 2026-10-02：续写轮同样携带检查点硬约束（与首轮同一实现）。
         "content_checkpoint_block",
     ],
-    # ✅ R77（2026-10-14 · 引入易标「生成后事实冲突审计 + 定点替换」）：
+    # ✅ R77（2026-10-14 · 生成后事实冲突审计 + 定点替换）：
     #    content_fact_autofix_user ← services/content_fact_autofix
     #    .autofix_section_fact_conflicts（唯一渲染点，5/5 全传）。
     #    system 模板零占位符 → 显式空声明（R39 D6：空列表 ≠ None，
@@ -818,6 +856,9 @@ PROMPT_VARIABLE_CONTRACTS: dict[str, list[str]] = {
     "bid_section_extract_system": [],
     "bid_section_merge_system": [],
     "ocr_extract_system": [],
+    # --- M1（2026-11-05）：评分项提取模板（services/scoring_items.py 调用点逐项核过）---
+    # 唯一占位符 ``{scoring_text}`` 由 ``render("scoring_items_extract", scoring_text=text)`` 注入。
+    "scoring_items_extract": ["scoring_text"],
 }
 
 
@@ -1069,6 +1110,7 @@ from app.services.ai.prompts import (
     illustration,  # noqa: E402,F401  （自招投标平台移植：配图编排/方案）
     outline,  # noqa: E402,F401
     review_autofix,  # noqa: E402,F401  （审核预检问题定向修复）
+    scoring,  # noqa: E402,F401  （R179 M1：评分项提取）
 )
 
 # ✅ G4 变量契约：模板全部注册后再套用契约表（见上方 PROMPT_VARIABLE_CONTRACTS）
