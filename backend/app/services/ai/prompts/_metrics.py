@@ -13,6 +13,7 @@
   * :func:`get_snapshot` —— 结构化快照（HTTP 端点消费）；
   * :func:`reset` —— 清零（运维调试 / 测试隔离）。
 """
+
 from __future__ import annotations
 
 import logging
@@ -78,6 +79,7 @@ def get_snapshot() -> dict:
         _ALL_PROMPTS,
         register_lazy_prompts,
     )
+
     try:
         register_lazy_prompts()
     except Exception:  # noqa: BLE001 - 快照统计尽力而为，注册失败时返回部分快照即可
@@ -98,8 +100,7 @@ def get_snapshot() -> dict:
 
 def reset() -> None:
     """清零全部内存计数器（运维调试 / 测试隔离用）。"""
-    for c in (render_total, render_errors, token_budget_truncated,
-              repair_triggered, ai_failure_by_scene):
+    for c in (render_total, render_errors, token_budget_truncated, repair_triggered, ai_failure_by_scene):
         try:
             c.clear()
         except Exception:  # noqa: BLE001 - 计数器清零尽力而为，失败不影响其余计数器

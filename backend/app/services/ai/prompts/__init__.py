@@ -52,8 +52,7 @@ _reg("SHARED_SCOPE_RULES", "共享规则", "文件性质红线（禁投标内容
 #    修法：注册为可编辑提示词 + 模板改用 {SHARED_SCOPE_RULES_BRIEF} 占位符，
 #    由运行时统一解析。出厂默认内容**逐字不变**（仍取同一常量），
 #    故未定制用户的行为零变化。
-_reg("SHARED_SCOPE_RULES_BRIEF", "共享规则", "文件性质红线·正文简版（禁投标内容）",
-     _shared.SHARED_SCOPE_RULES_BRIEF)
+_reg("SHARED_SCOPE_RULES_BRIEF", "共享规则", "文件性质红线·正文简版（禁投标内容）", _shared.SHARED_SCOPE_RULES_BRIEF)
 
 # ✅ R38 D6（2026-10-03）：SHARED_* 在本包 __init__ 里注册，晚于 _registry 尾部
 #    的首次 _apply_variable_contracts() —— 旧时序下契约表里的 SHARED_* 条目

@@ -4,26 +4,40 @@ import zipfile
 
 import app.routers.export as _sh  # noqa: F401 — facade 命名空间延迟绑定（monkeypatch 兼容）
 
-_EXPORT_CONFIG_KEYS = frozenset({
-    "font_name", "font_size", "page_header", "page_footer",
-    "show_page_number", "show_title_page", "show_toc",
-    "bidder_name", "chapter_page_break", "page_number_style",
-    "line_spacing", "toc_depth", "cover_info", "margins",
-    "allow_pil_fallback", "chart_fail_placeholder", "heading_styles",
-    "heading_border",
-    # ✅ v15：内容自动改写开关（影响产物内容，必须纳入指纹，切换即失效旧缓存）
-    "auto_rewrite_content",
-    # ✅ 2026-09-22：未闭合围栏自动修复同样影响产物内容，纳入指纹
-    "auto_fix_unclosed_fences",
-    # ✅ v17：AI 配图导出期自动生成开关（默认 True，影响产物内容，纳入指纹）
-    "ai_image_auto_generate",
-    # ✅ 2026-10-02：专项施工方案法定前置表单（编制说明/审批表/专家论证报告/
-    #    图纸附件清单）—— 影响产物内容，必须纳入指纹，否则切换开关后
-    #    config_hash 不变 → 命中旧缓存 → 用户看不到刚打开的表单。
-    "scheme_forms",
-    # ✅ 2026-10-11：版式预设（行距 + 四边距整体切换）影响产物版式，纳入指纹。
-    "layout_preset",
-})
+_EXPORT_CONFIG_KEYS = frozenset(
+    {
+        "font_name",
+        "font_size",
+        "page_header",
+        "page_footer",
+        "show_page_number",
+        "show_title_page",
+        "show_toc",
+        "bidder_name",
+        "chapter_page_break",
+        "page_number_style",
+        "line_spacing",
+        "toc_depth",
+        "cover_info",
+        "margins",
+        "allow_pil_fallback",
+        "chart_fail_placeholder",
+        "heading_styles",
+        "heading_border",
+        # ✅ v15：内容自动改写开关（影响产物内容，必须纳入指纹，切换即失效旧缓存）
+        "auto_rewrite_content",
+        # ✅ 2026-09-22：未闭合围栏自动修复同样影响产物内容，纳入指纹
+        "auto_fix_unclosed_fences",
+        # ✅ v17：AI 配图导出期自动生成开关（默认 True，影响产物内容，纳入指纹）
+        "ai_image_auto_generate",
+        # ✅ 2026-10-02：专项施工方案法定前置表单（编制说明/审批表/专家论证报告/
+        #    图纸附件清单）—— 影响产物内容，必须纳入指纹，否则切换开关后
+        #    config_hash 不变 → 命中旧缓存 → 用户看不到刚打开的表单。
+        "scheme_forms",
+        # ✅ 2026-10-11：版式预设（行距 + 四边距整体切换）影响产物版式，纳入指纹。
+        "layout_preset",
+    }
+)
 
 
 def _normalize_config(config: dict) -> dict:
@@ -50,9 +64,11 @@ def _normalize_config(config: dict) -> dict:
             cleaned[k] = v
         return cleaned
 
-    return {k: _clean(v) if isinstance(v, dict) else v
-            for k, v in config.items()
-            if k in _sh._EXPORT_CONFIG_KEYS and v is not None and v != ""}
+    return {
+        k: _clean(v) if isinstance(v, dict) else v
+        for k, v in config.items()
+        if k in _sh._EXPORT_CONFIG_KEYS and v is not None and v != ""
+    }
 
 
 def _image_generation_signature() -> dict:
@@ -69,6 +85,7 @@ def _image_generation_signature() -> dict:
     """
     try:
         from app.config import settings as _s
+
         return {
             "enabled": bool(_s.image_enabled),
             # ✅ BUG-4（R175）：`image_provider` 决定实际调用哪家生成器
@@ -85,8 +102,7 @@ def _image_generation_signature() -> dict:
             "max_images": int(getattr(_s, "max_ai_images", 0) or 0),
         }
     except Exception:  # pragma: no cover - 配置不可用时退化为稳定值
-        return {"enabled": False, "provider": "", "model": "", "size": "",
-                "base_url": "", "max_images": 0}
+        return {"enabled": False, "provider": "", "model": "", "size": "", "base_url": "", "max_images": 0}
 
 
 def _content_fingerprint(prep: dict) -> tuple[str, str]:
@@ -110,11 +126,11 @@ def _content_fingerprint(prep: dict) -> tuple[str, str]:
     """
     # ✅ 缓存失效修复（2026-09-23）：渲染器版本号纳入指纹（见下方 "renderer" 键）。
     from app.services.ai.mermaid_renderer import _RENDERER_VERSION
+
     config = _sh._normalize_config(prep["config"])
     fe_sig = ""
     if prep["fe_codes"]:
-        fe_sig = _sh.hashlib.md5(
-            "\n---\n".join(sorted(prep["fe_codes"])).encode()).hexdigest()[:12]
+        fe_sig = _sh.hashlib.md5("\n---\n".join(sorted(prep["fe_codes"])).encode()).hexdigest()[:12]
     # R-1：前端像素指纹（同一 mermaid_code 也可能对应不同 PNG 字节）
     fe_pixels_sig = ""
     _fe_images = prep.get("fe_images") or {}
@@ -128,12 +144,13 @@ def _content_fingerprint(prep: dict) -> tuple[str, str]:
                 _parts.append(f"{_code_key}|{_sh.hashlib.md5(_payload).hexdigest()}")
             except Exception:
                 _sh.logger.warning(
-                    "前端渲染像素指纹采集失败（该图不入指纹，换图后可能命中旧缓存）:"
-                    " key=%s", _code_key, exc_info=True)
+                    "前端渲染像素指纹采集失败（该图不入指纹，换图后可能命中旧缓存）:" " key=%s",
+                    _code_key,
+                    exc_info=True,
+                )
                 continue
         if _parts:
-            fe_pixels_sig = _sh.hashlib.md5(
-                "\n---\n".join(sorted(_parts)).encode()).hexdigest()[:16]
+            fe_pixels_sig = _sh.hashlib.md5("\n---\n".join(sorted(_parts)).encode()).hexdigest()[:16]
     # ✅ BUG 修复（2026-10-11 · 跨模块数据链 R70 · 服务端开关不入指纹）：
     #    `body_subheading_demote_with_children` 直接决定渲染端的编号口径 ——
     #    开启时「有 DB 子章节」的正文子标题被降级为节内编号（1）/ a）/ …），
@@ -145,16 +162,16 @@ def _content_fingerprint(prep: dict) -> tuple[str, str]:
     #    默认值 True 与渲染端 `except: _demote = True` 的兜底口径保持一致。
     try:
         from app.config import settings as _demote_settings
-        _demote_on = bool(
-            getattr(_demote_settings, "body_subheading_demote_with_children", True))
+
+        _demote_on = bool(getattr(_demote_settings, "body_subheading_demote_with_children", True))
     except Exception:  # pragma: no cover - 配置不可用时沿用渲染端同款兜底
         _demote_on = True
     # ✅ BUG-4（R175）：补充附录开关（服务端 settings）—— 与渲染端
     #    export.py `_load_appendix_sources` 同一读取口径，不可用按关闭。
     try:
         from app.config import settings as _apx_settings
-        _appendix_on = bool(
-            getattr(_apx_settings, "export_appendix_sources", False))
+
+        _appendix_on = bool(getattr(_apx_settings, "export_appendix_sources", False))
     except Exception:  # pragma: no cover
         _appendix_on = False
     # R-2：合并 prep["image_config"] 覆盖服务器 settings（保持 settings 路径不变）
@@ -168,55 +185,70 @@ def _content_fingerprint(prep: dict) -> tuple[str, str]:
         if _ms is not None:
             _img_sig["size"] = str(_ms)
     content_hash = _sh.hashlib.md5(
-        _sh.json.dumps({
-            # ✅ BUG 修复（2026-09-18）：封面标题/页眉取自 schemes.name，旧指纹未含
-            #    方案名 → 改名后正文与配置未变会命中旧缓存，交付文档封面仍是旧名。
-            "scheme": ((prep.get("scheme") or {}).get("name", ""),
-                       (prep.get("scheme") or {}).get("project_id", "")),
-            "sections": [(s["id"], s.get("parent_id", ""), s.get("sort_order"),
-                          s.get("level"), s.get("title", ""), s.get("content") or "")
-                         for s in prep["sections"]],
-            "charts": sorted(prep["chart_fp"]),
-            # ✅ 修复（2026-09-17）：事实变更应触发缓存更新（此前指纹未含事实，
-            # invalidate_export_cache 形同空转）。用 .get 防御部分调用方拼装的
-            # 最小 prep（缺该键视为无事实），避免 _content_fingerprint 抛 KeyError。
-            "global_facts": [(f.get("gt", ""), f.get("title", ""), f.get("content") or "")
-                             for f in (prep.get("global_facts") or [])],
-            # ✅ D-3：补充附录内容纳入指纹 —— 否则开关打开/数据源变更后
-            #    指纹不变，会永久命中不含附录的旧产物（与 2026-09-17 事实变更
-            #    不失效是同一类缺陷）。用 .get 防御最小 prep。
-            "appendix_sources": [
-                (g.get("title", ""),
-                 [(i.get("name", ""), i.get("value", "")) for i in (g.get("items") or [])])
-                for g in (prep.get("appendix_sources") or [])
-            ],
-            # 事实查询失败与正常空事实必须使用不同的缓存键。
-            "global_facts_status": prep.get("global_facts_status") or {},
-            "config": config,
-            "fe_render": fe_sig,
-            # R-1：前端 PNG 像素字节指纹（补 fe_render 只看 code 的盲区）
-            "fe_render_pixels": fe_pixels_sig,
-            "exporter": _sh._EXPORTER_VERSION,
-            # ✅ 缓存失效修复（2026-09-27 · P1）：配图侧的生成参数纳入指纹。
-            #    mermaid 侧早已用 _RENDERER_VERSION 解决"渲染器变了旧图被烤进二进制"，
-            #    但图片侧遗漏：用户在 AI 配置里换 image_model / 改 image_default_size
-            #    后再导出，content_fingerprint 不变 → 命中旧缓存拿到**旧模型生成的配图**，
-            #    且响应头不提示任何异常。此处显式纳入这几个真正影响像素结果的键。
-            # R-2：使用已合并 prep["image_config"] 覆盖的 _img_sig。
-            "image_gen": _img_sig,
-            # ✅ R70（2026-10-11）：正文子标题降级开关（服务端 settings，非请求体）
-            #    —— 直接改变产物编号层级，必须参与指纹，否则切换后命中旧产物。
-            "subheading_demote": _demote_on,
-            # ✅ BUG-4（R175）：补充附录开关（服务端 settings，export.py:3721）——
-            #    「开启但知识库/提取成果为空」时 appendix_sources 仍为 []，与关闭态
-            #    指纹相同 → 会命中"没有补充附录"的旧产物。显式纳入开关本身。
-            "appendix_sources_on": _appendix_on,
-            # ✅ 缓存失效修复（2026-09-23）：纯渲染逻辑改进（mermaid/PIL 渲染器升级，
-            #    _RENDERER_VERSION 未变但逻辑已变）也应失效 DOCX 缓存，否则旧图被烤进
-            #    二进制后永远命中。图表数据(data_json)变化固然会让 chart_fp 改变，
-            #    但渲染器自身变化不反映在数据里，须显式纳入指纹。
-            "renderer": _RENDERER_VERSION,
-        }, ensure_ascii=False, sort_keys=True).encode()
+        _sh.json.dumps(
+            {
+                # ✅ BUG 修复（2026-09-18）：封面标题/页眉取自 schemes.name，旧指纹未含
+                #    方案名 → 改名后正文与配置未变会命中旧缓存，交付文档封面仍是旧名。
+                "scheme": (
+                    (prep.get("scheme") or {}).get("name", ""),
+                    (prep.get("scheme") or {}).get("project_id", ""),
+                ),
+                "sections": [
+                    (
+                        s["id"],
+                        s.get("parent_id", ""),
+                        s.get("sort_order"),
+                        s.get("level"),
+                        s.get("title", ""),
+                        s.get("content") or "",
+                    )
+                    for s in prep["sections"]
+                ],
+                "charts": sorted(prep["chart_fp"]),
+                # ✅ 修复（2026-09-17）：事实变更应触发缓存更新（此前指纹未含事实，
+                # invalidate_export_cache 形同空转）。用 .get 防御部分调用方拼装的
+                # 最小 prep（缺该键视为无事实），避免 _content_fingerprint 抛 KeyError。
+                "global_facts": [
+                    (f.get("gt", ""), f.get("title", ""), f.get("content") or "")
+                    for f in (prep.get("global_facts") or [])
+                ],
+                # ✅ D-3：补充附录内容纳入指纹 —— 否则开关打开/数据源变更后
+                #    指纹不变，会永久命中不含附录的旧产物（与 2026-09-17 事实变更
+                #    不失效是同一类缺陷）。用 .get 防御最小 prep。
+                "appendix_sources": [
+                    (g.get("title", ""), [(i.get("name", ""), i.get("value", "")) for i in (g.get("items") or [])])
+                    for g in (prep.get("appendix_sources") or [])
+                ],
+                # 事实查询失败与正常空事实必须使用不同的缓存键。
+                "global_facts_status": prep.get("global_facts_status") or {},
+                "config": config,
+                "fe_render": fe_sig,
+                # R-1：前端 PNG 像素字节指纹（补 fe_render 只看 code 的盲区）
+                "fe_render_pixels": fe_pixels_sig,
+                "exporter": _sh._EXPORTER_VERSION,
+                # ✅ 缓存失效修复（2026-09-27 · P1）：配图侧的生成参数纳入指纹。
+                #    mermaid 侧早已用 _RENDERER_VERSION 解决"渲染器变了旧图被烤进二进制"，
+                #    但图片侧遗漏：用户在 AI 配置里换 image_model / 改 image_default_size
+                #    后再导出，content_fingerprint 不变 → 命中旧缓存拿到**旧模型生成的配图**，
+                #    且响应头不提示任何异常。此处显式纳入这几个真正影响像素结果的键。
+                # R-2：使用已合并 prep["image_config"] 覆盖的 _img_sig。
+                "image_gen": _img_sig,
+                # ✅ R70（2026-10-11）：正文子标题降级开关（服务端 settings，非请求体）
+                #    —— 直接改变产物编号层级，必须参与指纹，否则切换后命中旧产物。
+                "subheading_demote": _demote_on,
+                # ✅ BUG-4（R175）：补充附录开关（服务端 settings，export.py:3721）——
+                #    「开启但知识库/提取成果为空」时 appendix_sources 仍为 []，与关闭态
+                #    指纹相同 → 会命中"没有补充附录"的旧产物。显式纳入开关本身。
+                "appendix_sources_on": _appendix_on,
+                # ✅ 缓存失效修复（2026-09-23）：纯渲染逻辑改进（mermaid/PIL 渲染器升级，
+                #    _RENDERER_VERSION 未变但逻辑已变）也应失效 DOCX 缓存，否则旧图被烤进
+                #    二进制后永远命中。图表数据(data_json)变化固然会让 chart_fp 改变，
+                #    但渲染器自身变化不反映在数据里，须显式纳入指纹。
+                "renderer": _RENDERER_VERSION,
+            },
+            ensure_ascii=False,
+            sort_keys=True,
+        ).encode()
     ).hexdigest()
     config_hash = _sh.hashlib.md5(_sh.json.dumps(config, sort_keys=True).encode()).hexdigest()
     return config_hash, content_hash
@@ -253,31 +285,36 @@ async def _guard_numbering_consistency(db, scheme_id: str) -> None:
     """
     try:
         from app.config import settings as _settings
+
         _strict = bool(_settings.numbering_consistency_strict)
     except Exception:
-        _sh.logger.debug("读取 numbering_consistency_strict 失败（沿用默认非严格模式）",
-                     exc_info=True)
+        _sh.logger.debug("读取 numbering_consistency_strict 失败（沿用默认非严格模式）", exc_info=True)
         _strict = False
     if _strict:
         from app.services.numbering import validate_scheme_numbering_consistency
+
         _rep = await validate_scheme_numbering_consistency(db, scheme_id)
         if not _rep["consistent"]:
             raise _sh.HTTPException(
                 409,
-                detail={"error": "numbering_inconsistency",
-                        "mismatched": _rep["mismatched"],
-                        "summary": _sh._summarize_numbering_consistency(_rep)})
+                detail={
+                    "error": "numbering_inconsistency",
+                    "mismatched": _rep["mismatched"],
+                    "summary": _sh._summarize_numbering_consistency(_rep),
+                },
+            )
     else:
         try:
             from app.services.numbering import validate_scheme_numbering_consistency
+
             _rep = await validate_scheme_numbering_consistency(db, scheme_id)
             if _rep.get("failed"):
                 # ✅ 2026-11-05（R2 日志驱动）：校验器读取失败时返回 failed=True +
                 #    mismatched=0，旧实现会打出「发现 0 章不一致」的误导日志；
                 #    现与「校验通过」显式区分（fail-closed 结论如实记录）。
                 _sh.logger.warning(
-                    "导出前编号一致性校验读取失败（按未通过处理，不影响导出）: %s",
-                    _rep.get("error") or "unknown")
+                    "导出前编号一致性校验读取失败（按未通过处理，不影响导出）: %s", _rep.get("error") or "unknown"
+                )
             elif not _rep["consistent"]:
                 _sh.logger.warning(
                     "导出前编号一致性校验发现 %d 章落库正文与目录编号不一致（scheme=%s），"
@@ -428,11 +465,10 @@ async def _prune_export_cache(db, scheme_id: str, protect_path: _sh.Path) -> Non
     R13 守卫：db.execute 返回 None（连接/事务异常）时 fail-soft 跳过裁剪。
     """
     cur = await db.execute(
-        "SELECT id, result_path FROM export_cache WHERE scheme_id=?"
-        " ORDER BY created_at DESC, rowid DESC",
-        (scheme_id,))
-    cache_rows = [dict(r) for r in await _sh._db_fetch_all(
-        cur, what="_prune_export_cache")]
+        "SELECT id, result_path FROM export_cache WHERE scheme_id=?" " ORDER BY created_at DESC, rowid DESC",
+        (scheme_id,),
+    )
+    cache_rows = [dict(r) for r in await _sh._db_fetch_all(cur, what="_prune_export_cache")]
     if not cache_rows:
         # 无行 = 查询失败或本方案确无缓存；两种情况都无需裁剪（fail-soft）
         return
@@ -463,8 +499,9 @@ async def _prune_export_cache(db, scheme_id: str, protect_path: _sh.Path) -> Non
                 # ✅ R176 · D2-2：产物与其审计旁车同生共死（单一删除出口）。
                 _sh._remove_export_artifact(rp)
         placeholders = ",".join("?" * len(stale_ids))
-        await _sh._db_exec(db, f"DELETE FROM export_cache WHERE id IN ({placeholders})", stale_ids,
-                    what="_prune_export_cache 清理")
+        await _sh._db_exec(
+            db, f"DELETE FROM export_cache WHERE id IN ({placeholders})", stale_ids, what="_prune_export_cache 清理"
+        )
 
 
 #: 孤儿临时产物的宽限期（秒）。DOCX 原子替换失败会降级为「本次不写缓存」，
@@ -476,8 +513,7 @@ async def _prune_export_cache(db, scheme_id: str, protect_path: _sh.Path) -> Non
 _ORPHAN_TMP_TTL_SECONDS = 600
 
 
-async def _gc_orphan_exports(db, scheme_id: str,
-                             protect: set[_sh.Path] | None = None) -> int:
+async def _gc_orphan_exports(db, scheme_id: str, protect: set[_sh.Path] | None = None) -> int:
     """✅ 孤儿导出产物回收（2026-10-06）。
 
     背景：``_prune_export_cache`` 只能清理「DB 有行但已陈旧」的文件，而下面
@@ -522,17 +558,18 @@ async def _gc_orphan_exports(db, scheme_id: str,
         # 先确认「哪些产物仍被缓存行引用」；读不到就整体跳过（保守不删）。
         try:
             rows = await _sh._db_fetch_all(
-                await db.execute(
-                    "SELECT result_path FROM export_cache WHERE scheme_id=?",
-                    (scheme_id,)),
-                what="_gc_orphan_exports 缓存行", strict=True)
+                await db.execute("SELECT result_path FROM export_cache WHERE scheme_id=?", (scheme_id,)),
+                what="_gc_orphan_exports 缓存行",
+                strict=True,
+            )
         except _sh.DBReadError as e:
             _sh.logger.warning(
-                "导出：孤儿回收跳过（无法确认哪些产物仍被缓存行引用，"
-                "保守不动任何文件；scheme=%s）: %s", scheme_id[:8], e)
+                "导出：孤儿回收跳过（无法确认哪些产物仍被缓存行引用，" "保守不动任何文件；scheme=%s）: %s",
+                scheme_id[:8],
+                e,
+            )
             return deleted
-        live = {os.path.normcase(str(dict(r).get("result_path") or ""))
-                for r in rows if dict(r).get("result_path")}
+        live = {os.path.normcase(str(dict(r).get("result_path") or "")) for r in rows if dict(r).get("result_path")}
         protected = {os.path.normcase(str(p)) for p in (protect or set())}
         # ✅ BUG 修复（2026-10-14 · P0）：跳过「在飞产物」。不同配置指纹的并发导出
         #    持不同的去重锁，可在本函数执行期间正把产物 os.replace 到最终路径、
@@ -560,8 +597,7 @@ async def _gc_orphan_exports(db, scheme_id: str,
                 if f.name.endswith(_sh._AUDIT_SIDECAR_SUFFIX):
                     host = _sh.Path(str(f)[: -len(_sh._AUDIT_SIDECAR_SUFFIX)])
                     host_key = os.path.normcase(str(host))
-                    if (host_key in live or host_key in protected
-                            or host_key in inflight or host_key in leased):
+                    if host_key in live or host_key in protected or host_key in inflight or host_key in leased:
                         continue
                     if not host.exists():
                         # 宿主已不存在 ⇒ 该旁车必为孤儿；仍走唯一删除出口，
@@ -581,6 +617,7 @@ async def _gc_orphan_exports(db, scheme_id: str,
     except Exception as e:  # noqa: BLE001
         _sh.logger.warning("孤儿导出产物回收失败（不影响本次导出）: %s", e)
     if deleted:
-        _sh.logger.info("导出：已回收 %d 个孤儿导出产物（scheme=%s, dir=%s）",
-                    deleted, scheme_id[:8], _sh.EXPORTS_DIR.name)
+        _sh.logger.info(
+            "导出：已回收 %d 个孤儿导出产物（scheme=%s, dir=%s）", deleted, scheme_id[:8], _sh.EXPORTS_DIR.name
+        )
     return deleted

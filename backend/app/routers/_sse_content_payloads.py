@@ -75,8 +75,7 @@ def build_content_checkpoint(
         ckpt["word_audit"] = {}
     else:
         try:
-            ckpt["word_audit"] = word_audit_summary(
-                run_stats.get("audit_rows") or [], tolerance=word_tol)
+            ckpt["word_audit"] = word_audit_summary(run_stats.get("audit_rows") or [], tolerance=word_tol)
         except Exception:
             ckpt["word_audit"] = {}
     # ✅ R77b（2026-10-15）：事实冲突定点修复汇总随所有终态载荷回填
@@ -97,9 +96,11 @@ def build_content_checkpoint(
                 logger.warning(
                     "正文生成顺序校验失守：派发序与目录 DFS 序不一致"
                     "（task=%s · 首个失配位=%s · 未派发=%s · 乱序多出=%s）",
-                    task_id, _oc.get("first_mismatch_index"),
+                    task_id,
+                    _oc.get("first_mismatch_index"),
                     (_oc.get("missing") or [])[:5],
-                    (_oc.get("unexpected") or [])[:5])
+                    (_oc.get("unexpected") or [])[:5],
+                )
         except Exception:
             ckpt["order_check"] = {}
     # ✅ R105（G3 · 逐章注入留痕汇总）：多少章有留痕、多少条事实
@@ -129,30 +130,27 @@ def build_content_checkpoint(
     except Exception:
         ckpt["fact_injection_summary"] = {}
     return {
-        'event': event,
-        'message': message,
+        "event": event,
+        "message": message,
         # R175 BUG-4：done 恒为**成功**章节数；processed = 已处理（成功 + 失败），
         # 与运行期 progress 事件同口径。processed 为加法字段，旧消费方读 done/total
         # 不受影响；ckpt 未写 processed 时按 done + failed 反推。
-        'done': ckpt.get("done", len(done_ids)),
-        'processed': int(
-            ckpt.get("processed")
-            or (ckpt.get("done", len(done_ids)) + len(failed_ids))
-        ),
-        'total': ckpt.get("total", total),
-        'failed_count': len(failed_ids),
-        'failed_sections': list(failed_reasons.values())[:50],
-        'words': ckpt.get("words", 0),
+        "done": ckpt.get("done", len(done_ids)),
+        "processed": int(ckpt.get("processed") or (ckpt.get("done", len(done_ids)) + len(failed_ids))),
+        "total": ckpt.get("total", total),
+        "failed_count": len(failed_ids),
+        "failed_sections": list(failed_reasons.values())[:50],
+        "words": ckpt.get("words", 0),
         # ✅ 本次运行统计（前端终态横幅 / 重挂接页展示）：
         #    run_words = 本次实际生成字数；over_count = 超字数章节数。
-        'run_words': ckpt.get("run_words", 0),
-        'over_count': ckpt.get("over_count", 0),
+        "run_words": ckpt.get("run_words", 0),
+        "over_count": ckpt.get("over_count", 0),
         # ✅ R66（2026-10-11）：逐章目标/实际/偏差明细 + 达标统计
         #    （word_audit_summary 结构，断线重挂与审核预检同读本键）。
-        'word_audit': ckpt.get("word_audit", {}),
+        "word_audit": ckpt.get("word_audit", {}),
         # ✅ R77b（2026-10-15）：事实冲突定点修复汇总（sections /
         #    fixed_sections / conflicts / applied / rejected）。
-        'fact_autofix_summary': ckpt.get("fact_autofix_summary", {}),
+        "fact_autofix_summary": ckpt.get("fact_autofix_summary", {}),
         # ✅ R105（2026-10-18 · G1/G3/G4 断线收口）：三键与上方回填
         #    同源（唯一拼装点纪律，五条收尾路径全覆盖）。
         #    order_check = 派发序 vs 目录 DFS 序逐位比对结果
@@ -160,9 +158,9 @@ def build_content_checkpoint(
         #    fact_mapping = 显式「章节 → 所需事实」映射表全量
         #    （chapter_fact_mapping 产物，与逐章注入同一判据）。
         #    fact_injection_summary = 逐章注入留痕汇总。
-        'order_check': ckpt.get("order_check", {}),
-        'fact_mapping': ckpt.get("fact_mapping", []),
-        'fact_injection_summary': ckpt.get("fact_injection_summary", {}),
+        "order_check": ckpt.get("order_check", {}),
+        "fact_mapping": ckpt.get("fact_mapping", []),
+        "fact_injection_summary": ckpt.get("fact_injection_summary", {}),
     }
 
 
@@ -195,21 +193,22 @@ def build_stopped_payload(
     加权进度取值并过不可回退护栏（`_progress_now`）。
     """
     return {
-        'event': 'stopped', 'task_id': task_id,
-        'progress': progress, 'message': message,
-        'failed_count': max(total - len(done_ids), 0),
-        'failed_sections': list(failed_reasons.values())[:50],
-        'standard_summary': standard_summary,
+        "event": "stopped",
+        "task_id": task_id,
+        "progress": progress,
+        "message": message,
+        "failed_count": max(total - len(done_ids), 0),
+        "failed_sections": list(failed_reasons.values())[:50],
+        "standard_summary": standard_summary,
         # ✅ R77b：事实冲突定点修复汇总随 stopped 一并下发 —— 终态
         #    三处拼装点（stopped / error / completed）字段完全一致
         #    （R66/R74 同款纪律：用户中途停止也要看得到修复成效）。
-        'fact_autofix_summary': fact_autofix_summary,
+        "fact_autofix_summary": fact_autofix_summary,
         # ✅ R105：顺序校验 + 事实映射汇总与 completed / error 同键同口径
         #    （三处拼装点字段一致纪律；全量映射在 checkpoint 面，
         #    SSE 事件只带 summarize_fact_mapping 汇总）。
-        'order_check': ckpt.get("order_check", {}),
-        'fact_mapping_stats': summarize_fact_mapping(
-            ckpt.get("fact_mapping") or [], fact_audit_by_leaf),
+        "order_check": ckpt.get("order_check", {}),
+        "fact_mapping_stats": summarize_fact_mapping(ckpt.get("fact_mapping") or [], fact_audit_by_leaf),
     }
 
 
@@ -238,17 +237,18 @@ def build_error_payload(
     「正文生成失败：'NoneType' object has no attribute 'fetchall'」。
     """
     payload = {
-        'event': 'error', 'task_id': task_id,
-        'message': message,
-        'progress': progress, 'total': total,
-        'failed_count': max(total - len(done_ids), 0),
-        'standard_summary': standard_summary,
-        'fact_autofix_summary': fact_autofix_summary,
+        "event": "error",
+        "task_id": task_id,
+        "message": message,
+        "progress": progress,
+        "total": total,
+        "failed_count": max(total - len(done_ids), 0),
+        "standard_summary": standard_summary,
+        "fact_autofix_summary": fact_autofix_summary,
         # ✅ R105：与 stopped / completed 两处拼装点同键同口径。
-        'order_check': ckpt.get("order_check", {}),
-        'fact_mapping_stats': summarize_fact_mapping(
-            ckpt.get("fact_mapping") or [], fact_audit_by_leaf),
+        "order_check": ckpt.get("order_check", {}),
+        "fact_mapping_stats": summarize_fact_mapping(ckpt.get("fact_mapping") or [], fact_audit_by_leaf),
     }
     if include_sections and failed_reasons:
-        payload['failed_sections'] = list(failed_reasons.values())[:50]
+        payload["failed_sections"] = list(failed_reasons.values())[:50]
     return payload

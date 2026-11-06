@@ -4,6 +4,7 @@
 同 R60/R62 方法：真实渲染 → 读真实 PNG 尺寸（不传 scale 走默认 2.5），
 再用 R62 落地的公共层 `paper_font_mm`（宽/高**双**上限）算纸面毫米。
 """
+
 import io
 import os
 import sys
@@ -28,8 +29,10 @@ def mm_of(w, h):
 
 
 def ms(n):
-    m = [{"name": f"里程碑{i + 1}", "date": f"2026-0{i % 9 + 1}-1{i % 9}",
-          "desc": "说明", "status": "done"} for i in range(n)]
+    m = [
+        {"name": f"里程碑{i + 1}", "date": f"2026-0{i % 9 + 1}-1{i % 9}", "desc": "说明", "status": "done"}
+        for i in range(n)
+    ]
     s = mt._render_timeline_image_v2({"title": "测试", "milestones": m})
     if s is None:
         return None
@@ -48,7 +51,18 @@ for n in (3, 4, 5, 6, 8, 10, 12, 16, 20, 24, 30):
     w, h = r
     d = mm_of(w, h)
     binds = mc.paper_height_binds(w, h)
-    print(f"{n:>5} | {w:>5}x{h:<4} | 名称 {d['名称15']:>5}  日期 {d['日期12']:>5}  "
-          f"描述 {d['描述11']:>5}  标题 {d['标题20']:>5} | {'是' if binds else '否'}")
-print("\n下限", mc.paper_font_min_mm(), "mm | scale=", mc.PAPER_SCALE_DEFAULT,
-      "| 栏宽", mc.PAPER_COLUMN_WIDTH_CM, "cm | 高上限", mc.PAPER_MAX_HEIGHT_CM, "cm")
+    print(
+        f"{n:>5} | {w:>5}x{h:<4} | 名称 {d['名称15']:>5}  日期 {d['日期12']:>5}  "
+        f"描述 {d['描述11']:>5}  标题 {d['标题20']:>5} | {'是' if binds else '否'}"
+    )
+print(
+    "\n下限",
+    mc.paper_font_min_mm(),
+    "mm | scale=",
+    mc.PAPER_SCALE_DEFAULT,
+    "| 栏宽",
+    mc.PAPER_COLUMN_WIDTH_CM,
+    "cm | 高上限",
+    mc.PAPER_MAX_HEIGHT_CM,
+    "cm",
+)

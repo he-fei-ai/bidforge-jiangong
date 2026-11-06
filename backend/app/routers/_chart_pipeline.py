@@ -10,6 +10,7 @@
 已移除（2026-09-13 优化）：正文后置的独立图表管线（Phase2 预测 → Phase3 生成 → Phase4 插标记）
 与手动编排接口（charts.predict / place / remove）——图表编排职责完全并入正文生成。
 """
+
 import json
 import logging
 import re
@@ -117,13 +118,12 @@ _CHART_SCHEME_TYPE_LIMITS = {"ai_image": 6}
 _CHART_MIN_WORDS = 200
 
 #: 配额提示的展示顺序（flowchart/gantt 优先，ai_image 最后）。
-_QUOTA_HINT_TYPES = ("flowchart", "gantt", "architecture", "labor",
-                     "comparison", "layout", "timeline", "ai_image")
+_QUOTA_HINT_TYPES = ("flowchart", "gantt", "architecture", "labor", "comparison", "layout", "timeline", "ai_image")
 
 
-def build_chart_quota_hint(type_counts: dict | None = None, *,
-                           word_budget: int = 0,
-                           per_section_limit: int = _CHART_PER_SECTION_LIMIT) -> str:
+def build_chart_quota_hint(
+    type_counts: dict | None = None, *, word_budget: int = 0, per_section_limit: int = _CHART_PER_SECTION_LIMIT
+) -> str:
     """生成「本章图表配额」提示片段（**纯函数、零 DB**）。
 
     ✅ R58（2026-10-10）：补上《标书智能体（六）》「程序拍板、AI 提名」里缺失的
@@ -160,16 +160,15 @@ def build_chart_quota_hint(type_counts: dict | None = None, *,
         if rest:
             lines.append(f"- {ct}：剩余 {rest} 个（全方案上限 {limit}，已用 {used}）")
         else:
-            lines.append(
-                f"- {ct}：已达全方案上限（{used}/{limit}），本章若再配该类型必被删除")
-    out = ("\n【本章图表配额（程序实时核算；超出上限的图表会被程序自动删除，"
-           "请据此决定是否配图、配哪种）】：\n")
+            lines.append(f"- {ct}：已达全方案上限（{used}/{limit}），本章若再配该类型必被删除")
+    out = "\n【本章图表配额（程序实时核算；超出上限的图表会被程序自动删除，" "请据此决定是否配图、配哪种）】：\n"
     out += "\n".join(lines) + "\n"
     out += f"（本章最多 {per_section_limit} 个图表块"
     if word_budget and word_budget < _CHART_MIN_WORDS:
         out += f"；本章目标字数仅 {word_budget} 字，量化内容少，建议不配图"
     out += "）\n"
     return out
+
 
 # ✅ BUG 修复（2026-09-22，幽灵图口径分叉）：单代码块最大行数保护阈值。
 #    旧实现本模块内部私有 500 行，而导出侧（export.py）另有一份 8000 **字符**上限，
@@ -212,8 +211,6 @@ def is_chart_fence_lang(lang: str) -> bool:
     return lang.strip().lower() in INLINE_CHART_FENCE_LANGS
 
 
-
-
 def iter_inline_chart_fences(content: str) -> list[tuple[str, str, str, int]]:
     """扫描正文中全部**图表家族**代码围栏，返回 ``[(lang, code, state, ordinal)]``。
 
@@ -241,8 +238,7 @@ def iter_inline_chart_fences(content: str) -> list[tuple[str, str, str, int]]:
         open_char, open_len, lang = pf
         lang = lang.strip().lower()
         i += 1
-        code_lines, state, i = read_fenced_block(
-            lines, i, open_char=open_char, open_len=open_len)
+        code_lines, state, i = read_fenced_block(lines, i, open_char=open_char, open_len=open_len)
         if not is_chart_fence_lang(lang):
             # 非图表家族围栏（python/json/text……）：既不算图表，也整体跳过，
             # 不能让它的闭合行被误当作本模块的扫描边界。
@@ -333,7 +329,8 @@ def _scan_chart_fences_full(content: str) -> list[tuple[str, str, int]]:
                 # 绝不静默丢弃：留 INFO 便于排查"正文有 chart-json 围栏却没出图"。
                 logger.info(
                     "内联 chart-json 结构无法判定为可渲染图表（type=%r），跳过登记",
-                    str(obj.get("type", "") or "").strip() or "(缺失)")
+                    str(obj.get("type", "") or "").strip() or "(缺失)",
+                )
     return results
 
 
@@ -377,8 +374,8 @@ def count_inline_charts(content: str) -> int:
     这两种截然不同的情况 —— 前者是提示词/模型问题，后者是限流/校验问题。
     """
     return sum(
-        1 for _lang, _code, state, _ord in iter_inline_chart_fences(content)
-        if state not in ("truncated", "eof"))
+        1 for _lang, _code, state, _ord in iter_inline_chart_fences(content) if state not in ("truncated", "eof")
+    )
 
 
 def has_inline_charts(content: str) -> bool:
@@ -410,8 +407,7 @@ def has_inline_charts(content: str) -> bool:
     return count_inline_charts(content) > 0
 
 
-def _rewrite_code_block(content: str, old_code: str,
-                        new_code: str | None) -> str:
+def _rewrite_code_block(content: str, old_code: str, new_code: str | None) -> str:
     """按围栏替换/删除指定代码块（new_code=None 时删除）
 
     ✅ 三侧口径统一（2026-09-23）：围栏读取改用与登记侧同源的共用扫描器
@@ -447,8 +443,7 @@ def _rewrite_code_block(content: str, old_code: str,
         lang = lang_raw.strip().lower()
         marker = open_char * open_len
         i += 1
-        code_lines, state, i = read_fenced_block(
-            lines, i, open_char=open_char, open_len=open_len)
+        code_lines, state, i = read_fenced_block(lines, i, open_char=open_char, open_len=open_len)
         if state in ("truncated", "eof"):
             # 未闭合块：原样保留（含原围栏行），不做任何改写。
             # ✅ R169：eof 与 truncated 同口径。旧实现只保 truncated，eof 残片
@@ -485,8 +480,8 @@ _LEAD_IN_MAX_CHARS = LEAD_IN_MAX_CHARS
 # 显然不是"独立引导语段落"的行首标记（标题 / 列表 / 引用 / 表格 / 围栏 / 编号）
 # —— 这些行即使以"如下图所示"收尾也不能删（它们是结构元素，删了会破坏层级）。
 _LEAD_IN_NOT_PARA_RE = re.compile(
-    r"^(?:#{1,6}\s|[-*+•·]\s|>|\||`{3,}|~{3,}"
-    r"|\d+(?:\.\d+)*[.)、．\s]|[（(]\s*[\d一二三四五六七八九十]+\s*[）)])")
+    r"^(?:#{1,6}\s|[-*+•·]\s|>|\||`{3,}|~{3,}" r"|\d+(?:\.\d+)*[.)、．\s]|[（(]\s*[\d一二三四五六七八九十]+\s*[）)])"
+)
 
 
 def _drop_dangling_lead_in(out: list[str]) -> bool:
@@ -571,8 +566,7 @@ def _apply_chart_fence_edits(content: str, edits: dict[int, str | None]) -> str:
         lang = lang_raw.strip().lower()
         marker = open_char * open_len
         i += 1
-        code_lines, state, i = read_fenced_block(
-            lines, i, open_char=open_char, open_len=open_len)
+        code_lines, state, i = read_fenced_block(lines, i, open_char=open_char, open_len=open_len)
         # 闭合围栏行（closed/recovered 时下一行就是它）；eof/truncated 时不存在
         close_line = lines[i - 1] if state in ("closed", "recovered") else None
 
@@ -586,7 +580,7 @@ def _apply_chart_fence_edits(content: str, edits: dict[int, str | None]) -> str:
         if not is_chart_fence_lang(lang):
             _emit_block()
             continue
-        fence_ord += 1          # 与 iter_inline_chart_fences 同口径：未闭合块也占号
+        fence_ord += 1  # 与 iter_inline_chart_fences 同口径：未闭合块也占号
         if state in ("truncated", "eof"):
             # 未闭合块（含 EOF 残片）：原样保留，不做任何改写
             # ✅ 2026-10-03：与登记侧「未闭合=不是图」同口径 —— 扫描不再产出
@@ -635,8 +629,8 @@ def _validate_inline_chart(chart_type: str, code: str) -> tuple[bool, str]:
         ms = normalized.get("milestones")
         if isinstance(ms, list):
             normalized["milestones"] = [
-                {**m, "title": m.get("title") or m.get("name")} if isinstance(m, dict) else m
-                for m in ms]
+                {**m, "title": m.get("title") or m.get("name")} if isinstance(m, dict) else m for m in ms
+            ]
         # ✅ 架构图载荷形态很多（{label,children} / {root:{...}} / {root:"名称",nodes:[...]}），
         #    校验前按与**渲染器同一套**规则归一，避免"渲染器能画、校验器判非法 → 删块"。
         if chart_type == "architecture":
@@ -669,8 +663,7 @@ def _validate_inline_chart(chart_type: str, code: str) -> tuple[bool, str]:
     return False, ""
 
 
-async def _load_scheme_type_counts(db, scheme_id: str,
-                                   exclude_section_id: str) -> dict[str, int]:
+async def _load_scheme_type_counts(db, scheme_id: str, exclude_section_id: str) -> dict[str, int]:
     """读取全方案各类型已登记图表数（**排除当前章节**）。
 
     ✅ P1-3（2026-09-17）：从 `register_inline_charts` 中抽出该查询 —— 它不需要
@@ -685,12 +678,12 @@ async def _load_scheme_type_counts(db, scheme_id: str,
         cur = await db.execute(
             "SELECT chart_type, COUNT(*) AS n FROM chart_predictions "
             "WHERE scheme_id=? AND section_id<>? GROUP BY chart_type",
-            (scheme_id, exclude_section_id))
+            (scheme_id, exclude_section_id),
+        )
         # ✅ R13 修复（2026-09-22）：与 apply_inline_chart_plan 内的同名查询同源问题——
         #    全局单连接上 execute() 可能返回 None，直接 .fetchall() 会崩。
         if cur is None:
-            logger.warning(
-                "配图上限统计：db.execute 返回 None（连接/事务异常），跳过限额")
+            logger.warning("配图上限统计：db.execute 返回 None（连接/事务异常），跳过限额")
             return {}
         return {r["chart_type"]: r["n"] for r in await cur.fetchall()}
     except Exception as e:
@@ -735,11 +728,15 @@ def chart_drop_label(drop: dict | None) -> str:
     return f"{ct}/{rs}"
 
 
-def build_inline_chart_plan(scheme_id: str, section_id: str, content: str, *,
-                            enforce_limits: bool = False,
-                            scheme_type_counts: dict[str, int] | None = None,
-                            dropped_out: list | None = None,
-                            ) -> tuple[str, list[tuple]]:
+def build_inline_chart_plan(
+    scheme_id: str,
+    section_id: str,
+    content: str,
+    *,
+    enforce_limits: bool = False,
+    scheme_type_counts: dict[str, int] | None = None,
+    dropped_out: list | None = None,
+) -> tuple[str, list[tuple]]:
     """**纯计算**：扫描 → 校验/修复 → 限额裁剪，产出修正后的正文与待写入行。
 
     不访问数据库（P1-3：可在全局写锁**之外**执行）；返回的 rows 由调用方在
@@ -764,9 +761,11 @@ def build_inline_chart_plan(scheme_id: str, section_id: str, content: str, *,
     if not isinstance(content, str):
         if isinstance(content, (tuple, list)) and content:
             logger.warning(
-                "build_inline_chart_plan: content 非 str（type=%s），尝试取首元素修复；"
-                "scheme=%s section=%s",
-                type(content).__name__, scheme_id[:8], section_id[:8])
+                "build_inline_chart_plan: content 非 str（type=%s），尝试取首元素修复；" "scheme=%s section=%s",
+                type(content).__name__,
+                scheme_id[:8],
+                section_id[:8],
+            )
             content = content[0] if isinstance(content[0], str) else str(content[0])
         elif isinstance(content, bytes):
             content = content.decode("utf-8", errors="replace")
@@ -774,8 +773,11 @@ def build_inline_chart_plan(scheme_id: str, section_id: str, content: str, *,
             logger.warning(
                 "build_inline_chart_plan: content 非 str 且无法修复（type=%s），"
                 "降级为空字符串；scheme=%s section=%s",
-                type(content).__name__, scheme_id[:8], section_id[:8],
-                exc_info=True)
+                type(content).__name__,
+                scheme_id[:8],
+                section_id[:8],
+                exc_info=True,
+            )
             content = str(content) if content else ""
 
     charts = _scan_chart_fences_full(content)
@@ -809,17 +811,16 @@ def build_inline_chart_plan(scheme_id: str, section_id: str, content: str, *,
             if section_chart_count >= _CHART_PER_SECTION_LIMIT:
                 edits[ordinal] = None
                 _record_chart_drop(dropped_out, ct, "per_section_limit")
-                logger.info("章节 %s 图表 [%s] 超出每章 %d 个上限，已移除",
-                            section_id[:8], ct, _CHART_PER_SECTION_LIMIT)
+                logger.info(
+                    "章节 %s 图表 [%s] 超出每章 %d 个上限，已移除", section_id[:8], ct, _CHART_PER_SECTION_LIMIT
+                )
                 continue
-            _limit = _CHART_SCHEME_TYPE_LIMITS.get(
-                ct, _CHART_SCHEME_TYPE_DEFAULT_LIMIT)
+            _limit = _CHART_SCHEME_TYPE_LIMITS.get(ct, _CHART_SCHEME_TYPE_DEFAULT_LIMIT)
             _used = counts.get(ct, 0) + batch_type_counts.get(ct, 0)
             if _used >= _limit:
                 edits[ordinal] = None
                 _record_chart_drop(dropped_out, ct, "scheme_type_limit")
-                logger.info("章节 %s 图表 [%s] 全方案已达 %d 个上限，已移除",
-                            section_id[:8], ct, _limit)
+                logger.info("章节 %s 图表 [%s] 全方案已达 %d 个上限，已移除", section_id[:8], ct, _limit)
                 continue
         # ✅ AI 文生图（ai_image，对齐 OpenBidKit 的 ai 插图，v17 全自动口径）：正文生成
         #    阶段仅登记占位（status=pending）；真实图片在**导出 DOCX 时**由
@@ -836,8 +837,7 @@ def build_inline_chart_plan(scheme_id: str, section_id: str, content: str, *,
             if not _prompt:
                 edits[ordinal] = None
                 _record_chart_drop(dropped_out, "ai_image", "missing_prompt")
-                logger.warning("章节 %s 内联 ai_image 缺少 prompt，已从正文删除",
-                               section_id[:8])
+                logger.warning("章节 %s 内联 ai_image 缺少 prompt，已从正文删除", section_id[:8])
                 continue
             _payload = build_chart_envelope(code=code, title=_title, reason="ai_image")
             if not _payload:
@@ -853,8 +853,7 @@ def build_inline_chart_plan(scheme_id: str, section_id: str, content: str, *,
                 # 同类型第 2 块：已通过校验，但不重复登记（清单口径）
                 continue
             registered_types.add("ai_image")
-            rows.append((str(uuid.uuid4()), section_id, scheme_id, "ai_image",
-                         _title, 5, "pending", _payload))
+            rows.append((str(uuid.uuid4()), section_id, scheme_id, "ai_image", _title, 5, "pending", _payload))
             section_chart_count += 1
             batch_type_counts["ai_image"] = batch_type_counts.get("ai_image", 0) + 1
             continue
@@ -862,8 +861,7 @@ def build_inline_chart_plan(scheme_id: str, section_id: str, content: str, *,
         if not ok:
             edits[ordinal] = None
             _record_chart_drop(dropped_out, ct, "validation_failed")
-            logger.warning("章节 %s 内联图表 [%s] 校验修复失败，已从正文删除",
-                           section_id[:8], ct)
+            logger.warning("章节 %s 内联图表 [%s] 校验修复失败，已从正文删除", section_id[:8], ct)
             continue
         if fixed != code:
             edits[ordinal] = fixed
@@ -878,8 +876,7 @@ def build_inline_chart_plan(scheme_id: str, section_id: str, content: str, *,
         #    会被当成 JSON 去解析而丢掉。
         if code.lstrip().startswith(("{", "[")):
             try:
-                payload_json = build_chart_envelope(
-                    data=json.loads(code), title="正文同步生成")
+                payload_json = build_chart_envelope(data=json.loads(code), title="正文同步生成")
             except (json.JSONDecodeError, TypeError):
                 # ✅ R48（不变式加固）：校验已通过、信封构造却失败 —— 该块无法登记，
                 #    必须从正文删除。旧实现直接 continue 留下未登记的块（幽灵图）。
@@ -888,8 +885,7 @@ def build_inline_chart_plan(scheme_id: str, section_id: str, content: str, *,
                 #    这条不变式的结构性兜底。
                 edits[ordinal] = None
                 _record_chart_drop(dropped_out, ct, "invalid_json")
-                logger.warning("章节 %s 的图表数据块不是合法 JSON，已从正文删除",
-                               section_id[:8])
+                logger.warning("章节 %s 的图表数据块不是合法 JSON，已从正文删除", section_id[:8])
                 continue
         else:
             payload_json = build_chart_envelope(code=code, title="正文同步生成")
@@ -904,22 +900,20 @@ def build_inline_chart_plan(scheme_id: str, section_id: str, content: str, *,
         batch_type_counts[ct] = batch_type_counts.get(ct, 0) + 1
         if ct in registered_types:
             # 同类型第 2 块：已通过校验，但不重复登记（清单口径）
-            logger.info("章节 %s 图表 [%s] 同类型重复块，已校验但不重复登记",
-                        section_id[:8], ct)
+            logger.info("章节 %s 图表 [%s] 同类型重复块，已校验但不重复登记", section_id[:8], ct)
             continue
         registered_types.add(ct)
         # ✅ 状态口径统一（B1 修复）：正文同步生成的图表代码已就绪，统一写
         #    "generated" —— 与 fix-mermaid / generate-ai_image 同一完成态；
         #    export_check 与 preflight_engine 的 CHART_DONE_STATUSES 同时接纳
         #    'done' 与 'generated'，二者语义等价（均为「图表已生成/完成」）。
-        rows.append((str(uuid.uuid4()), section_id, scheme_id, ct,
-                     "正文同步生成", 5, "generated", payload_json))
+        rows.append((str(uuid.uuid4()), section_id, scheme_id, ct, "正文同步生成", 5, "generated", payload_json))
     return _apply_chart_fence_edits(content, edits), rows
 
 
-async def apply_inline_chart_plan(db, section_id: str, rows: list[tuple],
-                                  content: str | None = None,
-                                  dropped_out: list | None = None) -> str | None:
+async def apply_inline_chart_plan(
+    db, section_id: str, rows: list[tuple], content: str | None = None, dropped_out: list | None = None
+) -> str | None:
     """在调用方事务内写入图表登记（**不 commit**）。
 
     ✅ 全量同步：无论本次是否含图，都先清理该章节的历史登记，避免"正文里没有的图"
@@ -958,9 +952,7 @@ async def apply_inline_chart_plan(db, section_id: str, rows: list[tuple],
        locked" 直通冒泡 → **已生成正文随异常丢失**。现接 retry_db_op（瞬态
        锁退避重放，确定性错误原样抛出），调用方语义不变。
     """
-    await retry_db_op(
-        lambda: db.execute(
-            "DELETE FROM chart_predictions WHERE section_id=?", (section_id,)))
+    await retry_db_op(lambda: db.execute("DELETE FROM chart_predictions WHERE section_id=?", (section_id,)))
     if not rows:
         return content
     scheme_id = rows[0][2] if len(rows[0]) > 2 else ""
@@ -968,16 +960,15 @@ async def apply_inline_chart_plan(db, section_id: str, rows: list[tuple],
         cur = await db.execute(
             "SELECT chart_type, COUNT(*) AS n FROM chart_predictions "
             "WHERE scheme_id=? AND section_id<>? GROUP BY chart_type",
-            (scheme_id, section_id))
+            (scheme_id, section_id),
+        )
         # ✅ R13 修复（2026-09-22）：全局单连接上，先前的 DELETE 之后 SELECT
         #    可能返回 None（aiosqlite 在连接状态异常 / 事务冲突时）。若 cur 为 None
         #    直接 .fetchall() 会抛 "'NoneType' object has no attribute 'fetchall'"，
         #    在日志里连续出现 24 次（见日志 R13），导致该路径上配图上限复核被静默跳过。
         #    此处显式判空，与下方 except 分支保持同一 fallback（live = {}）。
         if cur is None:
-            logger.warning(
-                "配图上限事务内复核：db.execute 返回 None（连接/事务异常），"
-                "跳过上限复核，按原计划写入")
+            logger.warning("配图上限事务内复核：db.execute 返回 None（连接/事务异常），" "跳过上限复核，按原计划写入")
             live = {}
         else:
             live = {r["chart_type"]: r["n"] for r in await cur.fetchall()}
@@ -1005,8 +996,7 @@ async def apply_inline_chart_plan(db, section_id: str, rows: list[tuple],
         ct = row[3] if len(row) > 3 else ""
         _limit = _CHART_SCHEME_TYPE_LIMITS.get(ct, _CHART_SCHEME_TYPE_DEFAULT_LIMIT)
         if live.get(ct, 0) + running.get(ct, 0) >= _limit:
-            logger.info("章节 %s 图表 [%s] 全方案已达 %d 个上限（事务内复核），跳过登记",
-                        section_id[:8], ct, _limit)
+            logger.info("章节 %s 图表 [%s] 全方案已达 %d 个上限（事务内复核），跳过登记", section_id[:8], ct, _limit)
             skipped_types.add(ct)
             _note_drop(ct, "scheme_type_limit")
             continue
@@ -1021,19 +1011,22 @@ async def apply_inline_chart_plan(db, section_id: str, rows: list[tuple],
             _res = await db.execute(
                 "INSERT INTO chart_predictions "
                 "(id, section_id, scheme_id, chart_type, needed, purpose, "
-                "priority, status, data_json) VALUES (?,?,?,?,1,?,?,?,?)", row)
+                "priority, status, data_json) VALUES (?,?,?,?,1,?,?,?,?)",
+                row,
+            )
         except Exception as _e:
             logger.warning(
-                "章节 %s 图表 [%s] 事务内 INSERT 失败，已降级为跳过登记（正文将同步裁剪）: %s",
-                section_id[:8], ct, _e)
+                "章节 %s 图表 [%s] 事务内 INSERT 失败，已降级为跳过登记（正文将同步裁剪）: %s", section_id[:8], ct, _e
+            )
             skipped_types.add(ct)
             _note_drop(ct, "insert_failed")
             continue
         if _res is None:
             logger.warning(
-                "章节 %s 图表 [%s] INSERT 返回 None（连接/事务异常），"
-                "已降级为跳过登记（正文将同步裁剪）",
-                section_id[:8], ct)
+                "章节 %s 图表 [%s] INSERT 返回 None（连接/事务异常），" "已降级为跳过登记（正文将同步裁剪）",
+                section_id[:8],
+                ct,
+            )
             skipped_types.add(ct)
             _note_drop(ct, "insert_none")
             continue
@@ -1042,18 +1035,16 @@ async def apply_inline_chart_plan(db, section_id: str, rows: list[tuple],
         # ✅ BUG 修复（2026-09-24）：改为按围栏序号精确删除（_apply_chart_fence_edits）。
         #    旧实现按代码内容匹配，内容相同的块会被一起删掉，可能误删**其它类型**
         #    但内容恰好相同的块；现在只删本轮复核判定超限的那几块。
-        _edits = {ord_: None for ct, _code, ord_ in _scan_chart_fences_full(content)
-                  if ct in skipped_types}
+        _edits = {ord_: None for ct, _code, ord_ in _scan_chart_fences_full(content) if ct in skipped_types}
         if _edits:
             content = _apply_chart_fence_edits(content, _edits)
-        logger.info("章节 %s 超限图表类型 %s 已同步从正文移除（避免幽灵图）",
-                    section_id[:8], sorted(skipped_types))
+        logger.info("章节 %s 超限图表类型 %s 已同步从正文移除（避免幽灵图）", section_id[:8], sorted(skipped_types))
     return content
 
 
-async def resync_inline_charts(db, scheme_id: str, section_id: str,
-                               content: str, *,
-                               enforce_limits: bool = False) -> tuple[int, str]:
+async def resync_inline_charts(
+    db, scheme_id: str, section_id: str, content: str, *, enforce_limits: bool = False
+) -> tuple[int, str]:
     """✅ R92（2026-10-17 · 正文写点同步补链）：把正文内联图表**全量重登记**到
     chart_predictions（正文改写后消除两侧漂移的唯一 DB 版原语）。
 
@@ -1075,8 +1066,8 @@ async def resync_inline_charts(db, scheme_id: str, section_id: str,
     if enforce_limits:
         scheme_type_counts = await _load_scheme_type_counts(db, scheme_id, section_id)
     new_content, rows = build_inline_chart_plan(
-        scheme_id, section_id, content,
-        enforce_limits=enforce_limits, scheme_type_counts=scheme_type_counts)
+        scheme_id, section_id, content, enforce_limits=enforce_limits, scheme_type_counts=scheme_type_counts
+    )
     # ✅ 防御（2026-09-22）：apply_inline_chart_plan 在"未传入 content"时返回 None，
     #    而本函数必定传入正文。此处兜底回退到裁剪前的正文，避免返回 None 让
     #    调用方（sse_handlers._persist_section）把整章正文覆盖成空。
@@ -1093,11 +1084,15 @@ async def resync_inline_charts(db, scheme_id: str, section_id: str,
     return len(rows), new_content
 
 
-def resync_inline_chart_rows(scheme_id: str, section_id: str, content: str, *,
-                             enforce_limits: bool,
-                             scheme_type_counts: dict[str, int] | None = None,
-                             dropped_out: list | None = None,
-                             ) -> tuple[str, list[tuple]]:
+def resync_inline_chart_rows(
+    scheme_id: str,
+    section_id: str,
+    content: str,
+    *,
+    enforce_limits: bool,
+    scheme_type_counts: dict[str, int] | None = None,
+    dropped_out: list | None = None,
+) -> tuple[str, list[tuple]]:
     """✅ R92：正文生成链路的**锁外纯计算**重登记原语（不访问 DB、不写库）。
 
     与 `resync_inline_charts`（DB 版）等价，但拆成「纯计算产 rows + content」两步，
@@ -1110,15 +1105,18 @@ def resync_inline_chart_rows(scheme_id: str, section_id: str, content: str, *,
         ``(修正后的正文, rows)``；语义逐字等同 `build_inline_chart_plan`。
     """
     return build_inline_chart_plan(
-        scheme_id, section_id, content,
+        scheme_id,
+        section_id,
+        content,
         enforce_limits=enforce_limits,
         scheme_type_counts=scheme_type_counts,
-        dropped_out=dropped_out)
+        dropped_out=dropped_out,
+    )
 
 
-async def register_inline_charts(db, scheme_id: str, section_id: str,
-                                 content: str, *,
-                                 enforce_limits: bool = False) -> tuple[int, str]:
+async def register_inline_charts(
+    db, scheme_id: str, section_id: str, content: str, *, enforce_limits: bool = False
+) -> tuple[int, str]:
     """把正文中内联的图表登记到 chart_predictions（既有入口，行为不变）。
 
     ✅ 增强（正文同步图表质量保障）：
@@ -1145,5 +1143,4 @@ async def register_inline_charts(db, scheme_id: str, section_id: str,
     ✅ R92（2026-10-17）：实现抽为 `resync_inline_charts` 作唯一出口，本函数
     委派之（既有手动保存路径 B31 与全部直接调用点的行为逐字不变）。
     """
-    return await resync_inline_charts(
-        db, scheme_id, section_id, content, enforce_limits=enforce_limits)
+    return await resync_inline_charts(db, scheme_id, section_id, content, enforce_limits=enforce_limits)

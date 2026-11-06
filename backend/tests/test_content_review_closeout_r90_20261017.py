@@ -681,10 +681,16 @@ class TestByteHealth:
 
     @pytest.mark.parametrize("rel", _TOUCHED)
     def test_no_mixed_line_endings(self, rel):
+        """口径收紧（2026-11-06）：既判「混用」，也判「整文件被翻转成 LF」。
+
+        旧断言 `not (crlf and bare)` 在整文件全裸 LF 时 crlf=0，天然成立，
+        因此测不出「整个文件从 CRLF 翻成 LF」。现要求必须存在 CRLF 且不得有裸 LF。
+        """
         raw = (_BACKEND / rel).read_bytes()
         crlf = len(re.findall(rb"\r\n", raw))
         bare = len(re.findall(rb"(?<!\r)\n", raw))
-        assert not (crlf and bare), f"行尾混用：CRLF={crlf} bareLF={bare}"
+        assert bare == 0, f"存在裸 LF 行尾：CRLF={crlf} bareLF={bare}"
+        assert crlf > 0, "整个文件被翻转成 LF：仓库约定 .py 一律纯 CRLF"
 
     @pytest.mark.parametrize("rel", _TOUCHED)
     def test_parses_as_python(self, rel):

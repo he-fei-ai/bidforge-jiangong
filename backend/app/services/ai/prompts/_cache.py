@@ -81,8 +81,7 @@ _SHARED_KEY_RE = re.compile(r"\{(SHARED_[A-Z0-9_]+)\}")
 _SHARED_MAX_DEPTH = 4
 
 
-def _resolve_shared_keys(prompt: str, _depth: int = 0,
-                         _chain: tuple[str, ...] = ()) -> str:
+def _resolve_shared_keys(prompt: str, _depth: int = 0, _chain: tuple[str, ...] = ()) -> str:
     """将模板中的 {SHARED_*} 占位符替换为对应共享提示词的当前内容（DB 优先）。
 
     ✅ 修复：旧实现 SHARED_* 在 outline.py import 期字符串拼接（值拷贝），
@@ -108,46 +107,49 @@ def _resolve_shared_keys(prompt: str, _depth: int = 0,
 
     if _depth >= _SHARED_MAX_DEPTH:
         logger.warning(
-            "共享提示词嵌套超过 %d 层，停止展开（剩余：%s）。"
-            "请检查是否存在互相引用。", _SHARED_MAX_DEPTH,
-            sorted(set(_SHARED_KEY_RE.findall(prompt))))
+            "共享提示词嵌套超过 %d 层，停止展开（剩余：%s）。" "请检查是否存在互相引用。",
+            _SHARED_MAX_DEPTH,
+            sorted(set(_SHARED_KEY_RE.findall(prompt))),
+        )
         return prompt
 
     def _repl(m: re.Match) -> str:
         key = m.group(1)
         if key in _chain:
             logger.warning(
-                "共享提示词存在循环引用：%s（链：%s），已保留字面量 { %s }",
-                key, " → ".join((*_chain, key)), key)
+                "共享提示词存在循环引用：%s（链：%s），已保留字面量 { %s }", key, " → ".join((*_chain, key)), key
+            )
             return m.group(0)
         try:
-            resolved = _resolve_shared_keys(
-                get_prompt(key), _depth + 1, (*_chain, key))
+            resolved = _resolve_shared_keys(get_prompt(key), _depth + 1, (*_chain, key))
         except Exception as e:
             logger.warning("解析共享提示词 %s 失败: %s", key, e)
             return m.group(0)
         if not resolved:
             # key 未注册（拼写错误或已下架）——保留字面量并明确告警
             logger.warning(
-                "共享提示词 %s 不存在（未注册），{ %s } 已按字面量保留；"
-                "请检查拼写。可用共享片段：%s",
-                key, key, sorted(k for k in _ALL_PROMPTS if k.startswith("SHARED_")))
+                "共享提示词 %s 不存在（未注册），{ %s } 已按字面量保留；" "请检查拼写。可用共享片段：%s",
+                key,
+                key,
+                sorted(k for k in _ALL_PROMPTS if k.startswith("SHARED_")),
+            )
             return m.group(0)
         return resolved
 
     return _SHARED_KEY_RE.sub(_repl, prompt)
 
 
-
 def _current_db_path() -> str | None:
     """取当前真实数据库路径（以 app.db.DB_PATH 为唯一事实源）。"""
     try:
         from app.db import DB_PATH
+
         return str(DB_PATH)
     except Exception as e:
         logger.debug("读取 app.db.DB_PATH 失败（回退 DATA_DIR 默认路径）: %s", e)
         try:
             from app.config import DATA_DIR
+
             return str(DATA_DIR / "scheme_assistant.db")
         except Exception:
             return None
@@ -191,11 +193,10 @@ def _query_prompt_watermark(db_path: str) -> tuple[int, str] | None:
     """
     try:
         import sqlite3
+
         conn = sqlite3.connect(db_path)
         try:
-            row = conn.execute(
-                "SELECT COUNT(*), COALESCE(MAX(updated_at), '')"
-                " FROM prompt_templates").fetchone()
+            row = conn.execute("SELECT COUNT(*), COALESCE(MAX(updated_at), '')" " FROM prompt_templates").fetchone()
             return (int(row[0]), str(row[1])) if row else None
         finally:
             conn.close()
@@ -278,10 +279,9 @@ def _load_prompt_cache_sync():
                 #    查询失败（极旧库缺列）→ None，mtime 判据逐字回退旧行为。
                 try:
                     wrow = conn.execute(
-                        "SELECT COUNT(*), COALESCE(MAX(updated_at), '')"
-                        " FROM prompt_templates").fetchone()
-                    _loaded_db_watermark = (
-                        (int(wrow[0]), str(wrow[1])) if wrow else None)
+                        "SELECT COUNT(*), COALESCE(MAX(updated_at), '')" " FROM prompt_templates"
+                    ).fetchone()
+                    _loaded_db_watermark = (int(wrow[0]), str(wrow[1])) if wrow else None
                 except Exception:
                     _loaded_db_watermark = None
                 logger.info("Prompt cache loaded: %d templates from DB", len(local_cache))
@@ -307,8 +307,7 @@ def _get_prompt_cache() -> dict[str, str]:
     global _prompt_cache
     with _cache_lock:
         current = _current_db_path()
-        if _prompt_cache is None or (
-                current is not None and _loaded_db_path != current):
+        if _prompt_cache is None or (current is not None and _loaded_db_path != current):
             _prompt_cache = {}
             try:
                 _load_prompt_cache_sync()
@@ -361,6 +360,7 @@ def get_prompt(key: str, **kwargs) -> str:
                 #   这批模板，而提取侧也拿不到 DB 覆盖。
                 try:
                     from app.services.ai.prompts._registry import register_lazy_prompts
+
                     register_lazy_prompts()
                 except Exception as e:  # noqa: BLE001 - 补注册失败不得影响读取
                     logger.warning("惰性补注册失败: %s", e)
@@ -374,9 +374,7 @@ def get_prompt(key: str, **kwargs) -> str:
                 record_render_error(key)
                 return ""
             if cached is not None and not cached.strip():
-                logger.warning(
-                    "Prompt '%s' 在数据库中内容为空，已回退到出厂默认（避免下发空提示词）", key
-                )
+                logger.warning("Prompt '%s' 在数据库中内容为空，已回退到出厂默认（避免下发空提示词）", key)
             prompt = meta.get("default_content") or meta.get("content", "")
 
         # ✅ 先动态解析 {SHARED_*} 占位符（避免其被误报为 missing 变量）
@@ -391,6 +389,7 @@ def get_prompt(key: str, **kwargs) -> str:
         if "<<" in prompt:
             try:
                 from app.services.ai.prompts.content import _wrap_fuzzy_fill
+
                 prompt = _wrap_fuzzy_fill(prompt)
             except Exception as e:  # noqa: BLE001 - 展开失败不得阻断读取
                 logger.warning("提示词标记展开失败（%s）: %s", key, e)
@@ -407,14 +406,12 @@ def get_prompt(key: str, **kwargs) -> str:
         #   "缺了什么"，所以校验只在 kwargs 非空时有意义 —— 这也让告警语义与
         #   validate_prompt_variables() 自身一致（后者同样只在有 kwargs 时才有意义）。
         if kwargs:
-            missing = [
-                v for v in validate_prompt_variables(key, **kwargs)
-                if not v.startswith("SHARED_")
-            ]
+            missing = [v for v in validate_prompt_variables(key, **kwargs) if not v.startswith("SHARED_")]
             if missing:
                 logger.warning(
                     "Prompt '%s' has missing variables (not passed in call): %s",
-                    key, missing,
+                    key,
+                    missing,
                 )
             prompt = render_prompt(prompt, **kwargs)
     except Exception:
@@ -434,10 +431,7 @@ def get_prompt_with_validation(key: str, **kwargs) -> tuple[str, list[str]]:
     该路径已在 get_prompt() 内用 `if kwargs:` 收紧（2026-09-23 修复）。
     """
     prompt = get_prompt(key, **kwargs)
-    missing = [
-        v for v in validate_prompt_variables(key, **kwargs)
-        if not v.startswith("SHARED_")
-    ]
+    missing = [v for v in validate_prompt_variables(key, **kwargs) if not v.startswith("SHARED_")]
 
     if not missing and has_residual_placeholders(prompt):
         residual = extract_variables(prompt)

@@ -44,11 +44,24 @@ _ALL_PROMPTS: dict[str, dict] = {}
 #    （业务变量均为 scheme_name / section_number 这类长名），
 #    既保留 {max}/{min} 误报抑制，又杜绝未来真业务变量（如 {title}）被漏报。
 #    已用探针验证：收窄后对全部现有模板的 FP 判定逐条一致（零行为变化）。
-_FALSE_POSITIVE_VARS = frozenset({
-    # 极短常见 JSON 字段名（长度 ≤3），业务变量名均 ≥4 字符
-    "max", "min", "id", "ok", "no", "to", "on", "off",
-    "url", "api", "tag", "key", "val",
-})
+_FALSE_POSITIVE_VARS = frozenset(
+    {
+        # 极短常见 JSON 字段名（长度 ≤3），业务变量名均 ≥4 字符
+        "max",
+        "min",
+        "id",
+        "ok",
+        "no",
+        "to",
+        "on",
+        "off",
+        "url",
+        "api",
+        "tag",
+        "key",
+        "val",
+    }
+)
 
 
 def _looks_like_json_example(context: str, var: str) -> bool:
@@ -74,11 +87,11 @@ def _looks_like_json_example(context: str, var: str) -> bool:
             break
         found = True
         start = idx + len(marker)
-        tail = context[idx + len(marker): idx + len(marker) + 10]
+        tail = context[idx + len(marker) : idx + len(marker) + 10]
         if (":" in tail) or ("[" in tail) or ("{" in tail):
             continue
         # LaTeX 下标：$p_{max}$ —— 前 15 字符里有 `$` 且后 10 字符里有 `$`
-        head = context[max(0, idx - 15): idx]
+        head = context[max(0, idx - 15) : idx]
         if "$" in head and "$" in tail:
             continue
         return False  # 该处出现是真实使用 → 整体不算误报
@@ -138,9 +151,7 @@ def _is_false_positive(key: str, var: str, template: str) -> bool:
 #:    ``__TASK_PROMPT__`` 独立成行，缺值时字面量直接下发模型）。
 #:    现两种形态共用同一正则（唯一事实源），删行与豁免告警不再分叉。
 _OPTIONAL_BLOCK_RE = re.compile(
-    r"^[ \t]*\{([A-Za-z_]\w*)\}[ \t]*$"
-    r"|"
-    r"^[ \t]*__([A-Z][A-Z0-9_]{2,})__[ \t]*$",
+    r"^[ \t]*\{([A-Za-z_]\w*)\}[ \t]*$" r"|" r"^[ \t]*__([A-Z][A-Z0-9_]{2,})__[ \t]*$",
     re.MULTILINE,
 )
 
@@ -159,6 +170,7 @@ def _is_optional_block_var(var: str, template: str) -> bool:
             return True
     return False
 
+
 # ⚠️ 排除 JSON 对象键上下文：`{key}:`（ASCII 冒号）是 JSON 示例而非变量占位符。
 #    否则提示词里未加引号的 JSON 示例（如 {tasks: [...]}）会被误当作变量：
 #    既污染变量列表 / 触发"缺失变量"误告警，又可能在 render 阶段被静默替换、
@@ -166,18 +178,13 @@ def _is_optional_block_var(var: str, template: str) -> bool:
 _VARIABLE_PATTERN = re.compile(
     r"\{([A-Za-z_]\w{1,})\}(?!\s*:)"  # {variable}：首字符字母/下划线，总长 ≥2，排除 {key}:
     r"|"
-    r"__([A-Z][A-Z0-9_]{2,})__"       # __VARIABLE__ 格式：必须大写字母开头，总长 ≥5（排除纯下划线）
+    r"__([A-Z][A-Z0-9_]{2,})__"  # __VARIABLE__ 格式：必须大写字母开头，总长 ≥5（排除纯下划线）
 )
-_RESIDUAL_PLACEHOLDER_PATTERN = re.compile(
-    r"\{[A-Za-z_]\w{1,}\}(?!\s*:)"
-    r"|"
-    r"__[A-Z][A-Z0-9_]{2,}__"
-)
+_RESIDUAL_PLACEHOLDER_PATTERN = re.compile(r"\{[A-Za-z_]\w{1,}\}(?!\s*:)" r"|" r"__[A-Z][A-Z0-9_]{2,}__")
 _ZERO_WIDTH_PATTERN = re.compile(r"[\u00AD\u200B\u200C\u200D\uFEFF]")
 
 
-def _reg(key: str, category: str, label: str, value: str,
-         requires: list[str] | None = None) -> str:
+def _reg(key: str, category: str, label: str, value: str, requires: list[str] | None = None) -> str:
     """注册一个提示词到元信息表，自动提取变量列表。
 
     BUG-FIX（提示词重置失效）：
@@ -275,8 +282,8 @@ def register_lazy_prompts() -> None:
         from app.services import bid_analysis_service  # noqa: F401
     except Exception as e:  # noqa: BLE001
         import logging
-        logging.getLogger("prompts_registry").warning(
-            "惰性注册投标分析提示词失败（可重试）: %s", e)
+
+        logging.getLogger("prompts_registry").warning("惰性注册投标分析提示词失败（可重试）: %s", e)
     else:
         _LAZY_REGISTERED = True
 
@@ -325,9 +332,12 @@ def validate_prompt_variables(key: str, **kwargs) -> list[str]:
     template = _ALL_PROMPTS.get(key, {}).get("content", "")
     # ✅ 整行独占的可选区块（2026-09-26）：未传时 render_prompt 整行丢弃，
     #    不留残留占位符 → 不算"缺失"，否则每次调用都刷无意义 WARNING。
-    missing = [v for v in required
-               if v.lower() not in kwargs_lower or kwargs_lower[v.lower()] is None
-               if not _is_optional_block_var(v, template)]
+    missing = [
+        v
+        for v in required
+        if v.lower() not in kwargs_lower or kwargs_lower[v.lower()] is None
+        if not _is_optional_block_var(v, template)
+    ]
     # 过滤误报：保留业务语义变量，只抑制"JSON 示例"类短字段
     missing = [v for v in missing if not _is_false_positive(key, v, template)]
     return missing
@@ -361,8 +371,7 @@ def extract_user_variables(template: str) -> list[str]:
     列表展示与审计 diff —— 这些场景只关心「调用方需传参的变量」，
     SHARED_* 由系统自动注入，混入会误导编辑器与审计口径。
     """
-    return sorted(set(v for v in extract_variables(template)
-                      if not _is_shared_reference(v)))
+    return sorted(set(v for v in extract_variables(template) if not _is_shared_reference(v)))
 
 
 def has_residual_placeholders(text: str) -> bool:
@@ -370,8 +379,7 @@ def has_residual_placeholders(text: str) -> bool:
     return bool(_RESIDUAL_PLACEHOLDER_PATTERN.search(text))
 
 
-def _render_by_line(template: str, pattern: re.Pattern | None,
-                    replace) -> str:
+def _render_by_line(template: str, pattern: re.Pattern | None, replace) -> str:
     """逐行渲染模板，并把「本次未传值的整行独占占位符」整行丢弃。
 
     ✅ 2026-09-27（BUG-P0-1 · 注入内容被静默删行）：
@@ -455,9 +463,7 @@ def render_prompt(template: str, **kwargs) -> str:
         names = sorted((re.escape(n) for n in lookup), key=len, reverse=True)
         # (?!\s*:) 与提取正则一致：JSON 对象键（{key}:）不参与替换，避免篡改 JSON 示例
         pattern = re.compile(
-            r"\{(" + "|".join(names) + r")\}(?!\s*:)"
-            r"|"
-            r"__(" + "|".join(names) + r")__",
+            r"\{(" + "|".join(names) + r")\}(?!\s*:)" r"|" r"__(" + "|".join(names) + r")__",
             flags=re.IGNORECASE,
         )
     else:
@@ -466,7 +472,6 @@ def render_prompt(template: str, **kwargs) -> str:
     def _replace(m: re.Match) -> str:
         name = (m.group(1) or m.group(2) or "").lower()
         return _format_render_value(lookup[name])
-
 
     #
     # ✅ 2026-09-27（BUG-P0-1 · 注入内容被静默删行，数据丢失）：
@@ -490,9 +495,7 @@ def render_prompt(template: str, **kwargs) -> str:
     if has_residual_placeholders(template):
         template_vars = extract_variables(template)
         kwargs_lower = {k.lower() for k in kwargs if kwargs[k] is not None}
-        unresolved = [v for v in template_vars
-                      if v.lower() not in kwargs_lower
-                      and not v.startswith("SHARED_")]
+        unresolved = [v for v in template_vars if v.lower() not in kwargs_lower and not v.startswith("SHARED_")]
         # ✅ 2026-09-23（正文生成深度审计 · P2 日志噪音）：此处此前**没有**套用
         #    _is_false_positive 过滤，与 validate_prompt_variables() 的两条告警
         #    路径口径分叉 —— 后者早已过滤（R6），本处仍在报。运行库实测
@@ -502,12 +505,15 @@ def render_prompt(template: str, **kwargs) -> str:
         #    `{max}` 来自提示词里的 JSON 示例，并非真缺变量，
         #    噪音会淹没真实的 scheme_name/section_number 漏传信号
         #    （AGENTS.md §5.3 已登记该遗留项）。现与 validate 路径共用同一判据。
-        unresolved = [v for v in unresolved
-                      if not _is_false_positive("", v, template)
-                      # ✅ 2026-10-02（检查点前置）：与 validate_prompt_variables
-                      #    同一口径 —— 整行独占的可选区块（未传即整行丢弃）不是
-                      #    「未解析」，否则开关型注入点每次关闭都刷一条 WARNING。
-                      if not _is_optional_block_var(v, template)]
+        unresolved = [
+            v
+            for v in unresolved
+            if not _is_false_positive("", v, template)
+            # ✅ 2026-10-02（检查点前置）：与 validate_prompt_variables
+            #    同一口径 —— 整行独占的可选区块（未传即整行丢弃）不是
+            #    「未解析」，否则开关型注入点每次关闭都刷一条 WARNING。
+            if not _is_optional_block_var(v, template)
+        ]
         if unresolved:
             logger.warning("Prompt template has unresolved placeholders: %s", unresolved)
 
@@ -528,6 +534,7 @@ def render(key: str, **kwargs) -> str:
     走 _cache.get_prompt() 逻辑，确保前端编辑保存到 DB 的提示词生效。
     """
     from app.services.ai.prompts._cache import get_prompt as _cache_get
+
     return _cache_get(key, **kwargs)
 
 
@@ -547,7 +554,8 @@ def list_prompts(category: str | None = None) -> list[dict]:
 
 
 def update_prompt(
-    key: str, content: str  # noqa: F811  content 与文件尾导入的 content 模块同名（刻意，见文件尾）
+    key: str,
+    content: str,  # noqa: F811  content 与文件尾导入的 content 模块同名（刻意，见文件尾）
 ) -> bool:
     """更新提示词内容（仅内存，持久化由路由层处理）。
 
@@ -591,17 +599,23 @@ def reset_prompt(key: str) -> str | None:
 #: 未列入的模板 = 调用点尚未逐一核对，保持「不校验」以避免误报。
 PROMPT_VARIABLE_CONTRACTS: dict[str, list[str]] = {
     "content_generation_system": [
-        "scheme_name", "scheme_type", "section_number", "standards_text",
+        "scheme_name",
+        "scheme_type",
+        "section_number",
+        "standards_text",
         # ✅ E3（2026-09-25 · 提示词条件注入）：根据本章是否有 DB 子章节、
         #    body_subheading_demote_with_children 配置，动态生成正文子标题编号规则片段。
         "subheading_rule",
         # ✅ 2026-10-02（检查点前置）：审核检查点 → 生成约束（唯一事实源
         #    services/content_checkpoint）；两变量未传时独占行占位符整行丢弃，
         #    其余调用点（DB 定制模板渲染等）行为不变。
-        "chapter_checkpoint_block", "content_checkpoint_block",
+        "chapter_checkpoint_block",
+        "content_checkpoint_block",
     ],
     "content_continue_system": [
-        "scheme_name", "scheme_type", "standards_text",
+        "scheme_name",
+        "scheme_type",
+        "standards_text",
         # ✅ 2026-10-02：续写轮同样携带检查点硬约束（与首轮同一实现）。
         "content_checkpoint_block",
     ],
@@ -612,37 +626,59 @@ PROMPT_VARIABLE_CONTRACTS: dict[str, list[str]] = {
     #    零占位模板也必须纳入契约表，否则被覆盖率测试判为脱管）。
     "content_fact_autofix_system": [],
     "content_fact_autofix_user": [
-        "global_facts", "section_id", "section_title",
-        "generation_standard", "conflicts",
+        "global_facts",
+        "section_id",
+        "section_title",
+        "generation_standard",
+        "conflicts",
     ],
     "outline_short_system": [
-        "scheme_name", "scheme_type", "construction_scope", "project_facts",
+        "scheme_name",
+        "scheme_type",
+        "construction_scope",
+        "project_facts",
         # ✅ 2026-09-26（目录生成三项依据收敛）：{scheme_basis} = 方案名称
         #   确定性解析产物（类型/工序/工艺/对象/危大分类，services/scheme_basis）；
         #   {standards_text} = standards_registry 匹配到的编制依据规范。
         #   两者均「无法匹配时渲染为空串 = 不注入」，故不传时模板仍可正常渲染。
-        "scheme_basis", "standards_text",
+        "scheme_basis",
+        "standards_text",
         # ✅ 2026-10-02（第二十五轮 · 目录侧检查点前置）：{outline_checkpoint_block}
         #   = services/outline_checkpoint 派生的必备法定章节清单（唯一事实源，
         #   判据指向 audit_rules + preflight_engine 谓词）。未传时独占行整行丢弃。
         "outline_checkpoint_block",
     ],
     "outline_level1_system": [
-        "scheme_name", "scheme_type", "construction_scope",
-        "project_brief", "reference_outline", "project_facts",
-        "scheme_basis", "standards_text", "outline_checkpoint_block",
+        "scheme_name",
+        "scheme_type",
+        "construction_scope",
+        "project_brief",
+        "reference_outline",
+        "project_facts",
+        "scheme_basis",
+        "standards_text",
+        "outline_checkpoint_block",
     ],
     "outline_review_system": [
-        "scheme_name", "scheme_type", "construction_scope",
-        "is_dangerous", "outline_json", "project_facts",
-        "scheme_basis", "outline_checkpoint_block",
+        "scheme_name",
+        "scheme_type",
+        "construction_scope",
+        "is_dangerous",
+        "outline_json",
+        "project_facts",
+        "scheme_basis",
+        "outline_checkpoint_block",
         # R38 D5: the "8.1 audit against the checklist" instruction
         # shares the block's fate (absent when outline_checkpoint_check is off).
         "outline_checkpoint_audit_hint",
     ],
     "outline_patch_system": [
-        "scheme_name", "scheme_type", "project_brief",
-        "project_facts", "chapter_titles", "missing_items",
+        "scheme_name",
+        "scheme_type",
+        "project_brief",
+        "project_facts",
+        "chapter_titles",
+        "missing_items",
     ],
     # R73（2026-10-12）：占位标题外科式重写。已核对唯一渲染点
     #   · outline_title_fix_system ← sse_handlers._try_outline_title_fix
@@ -655,9 +691,13 @@ PROMPT_VARIABLE_CONTRACTS: dict[str, list[str]] = {
     #   前 1500 字可依据）。check_prompt_variables 的 used_not_declared 双向
     #   漂移校验在 R73 时就应捕获，因模板与契约同一轮加而未暴露。
     "outline_title_fix_system": [
-        "scheme_name", "scheme_type", "construction_scope",
-        "project_brief", "project_facts",
-        "scheme_basis", "standards_text",
+        "scheme_name",
+        "scheme_type",
+        "construction_scope",
+        "project_brief",
+        "project_facts",
+        "scheme_basis",
+        "standards_text",
         # 编制要求原文：判定「每个标题本应承载什么内容」的直接依据，
         #   旧实现漏传 ⇒ 模型无从得知方案对各专项的具体要求。
         "requirements",
@@ -671,13 +711,24 @@ PROMPT_VARIABLE_CONTRACTS: dict[str, list[str]] = {
         "broken_items",
     ],
     "outline_feedback_system": [
-        "scheme_name", "scheme_type", "project_brief",
-        "project_facts", "original_outline", "review_suggestions",
+        "scheme_name",
+        "scheme_type",
+        "project_brief",
+        "project_facts",
+        "original_outline",
+        "review_suggestions",
     ],
     # 全局事实模板：调用方已逐项核对，启动期纳入统一变量契约防漂移。
     "facts_extract_system": [
-        "zone_type", "priority_weight", "priority_hint", "heading",
-        "zone_hint", "material", "chunk_index", "NORM_DICT_BLOCK", "summary",
+        "zone_type",
+        "priority_weight",
+        "priority_hint",
+        "heading",
+        "zone_hint",
+        "material",
+        "chunk_index",
+        "NORM_DICT_BLOCK",
+        "summary",
     ],
     "facts_json_fix_system": ["issues", "target_description", "invalid_content"],
     # ✅ R38（2026-10-03 · P1-c）：通用 Schema 自适应修复提示词。
@@ -695,9 +746,17 @@ PROMPT_VARIABLE_CONTRACTS: dict[str, list[str]] = {
     #    立即检出（test_all_declared_contracts_match_templates 同步兜底）。
     # --- 目录生成域 ---
     "outline_sublevel_system": [
-        "chapter_desc", "chapter_id", "chapter_title", "construction_scope",
-        "other_outline", "prior_chapters", "project_brief", "project_facts",
-        "requirements", "scheme_name", "scheme_type",
+        "chapter_desc",
+        "chapter_id",
+        "chapter_title",
+        "construction_scope",
+        "other_outline",
+        "prior_chapters",
+        "project_brief",
+        "project_facts",
+        "requirements",
+        "scheme_name",
+        "scheme_type",
         # ✅ R38（2026-10-03 · P1-d）：调用点 sse_handlers.py:4306 一直在传
         #   standards_text，但本模板**没有**该占位符 → render_prompt 静默丢弃。
         #   结果：一级目录阶段（outline_short/level1 都注入本方案类别匹配的
@@ -708,52 +767,95 @@ PROMPT_VARIABLE_CONTRACTS: dict[str, list[str]] = {
         "standards_text",
     ],
     "outline_sublevel_batch_system": [
-        "chapter_count", "chapters_text", "construction_scope", "other_outline",
-        "prior_chapters", "project_brief", "project_facts", "requirements",
-        "scheme_name", "scheme_type",
+        "chapter_count",
+        "chapters_text",
+        "construction_scope",
+        "other_outline",
+        "prior_chapters",
+        "project_brief",
+        "project_facts",
+        "requirements",
+        "scheme_name",
+        "scheme_type",
         "standards_text",  # ✅ R38：同上，见 outline_sublevel_system 注释
     ],
     "outline_adjust_system": [
-        "current_outline", "instruction", "scheme_name", "scheme_type",
+        "current_outline",
+        "instruction",
+        "scheme_name",
+        "scheme_type",
     ],
     "outline_json_fix_system": [
-        "invalid_content", "issues", "target_description",
+        "invalid_content",
+        "issues",
+        "target_description",
     ],
     "outline_recognition_system": ["raw_text"],
     # --- 正文生成域 ---
     "content_shrink_system": [
-        "current_words", "max_rounds", "round_no", "scheme_name",
-        "scheme_type", "section_title", "target_words",
+        "current_words",
+        "max_rounds",
+        "round_no",
+        "scheme_name",
+        "scheme_type",
+        "section_title",
+        "target_words",
     ],
     "word_budget_allocate_system": ["units_json"],
     # ✅ D1（2026-10-11 · 离散正文编排）：两个新增提示词同步登记契约 ——
     #    system 零占位（显式空声明）、user 的 11 个占位符逐字照抄渲染口径。
     "content_plan_system": [],
     "content_plan_user": [
-        "fact_titles_text", "knowledge_names_text", "parent_chain",
-        "project_brief", "scheme_name", "scheme_type",
-        "section_description", "section_number", "section_title",
-        "sibling_lines", "word_budget",
+        "fact_titles_text",
+        "knowledge_names_text",
+        "parent_chain",
+        "project_brief",
+        "scheme_name",
+        "scheme_type",
+        "section_description",
+        "section_number",
+        "section_title",
+        "sibling_lines",
+        "word_budget",
     ],
     # --- 一致性 Agent 域 ---
     "consistency_scan_user": [
-        "design_docs_summary", "global_facts", "project_docs_summary",
-        "section_content", "section_id", "section_title", "standards_summary",
+        "design_docs_summary",
+        "global_facts",
+        "project_docs_summary",
+        "section_content",
+        "section_id",
+        "section_title",
+        "standards_summary",
     ],
     "consistency_scan_batch_user": [
-        "design_docs_summary", "global_facts", "project_docs_summary",
-        "section_count", "sections_block", "standards_summary",
+        "design_docs_summary",
+        "global_facts",
+        "project_docs_summary",
+        "section_count",
+        "sections_block",
+        "standards_summary",
     ],
     "consistency_repair_user": [
-        "authoritative_sources", "conflicts_in_section", "global_facts",
-        "section_content", "section_id", "section_title",
+        "authoritative_sources",
+        "conflicts_in_section",
+        "global_facts",
+        "section_content",
+        "section_id",
+        "section_title",
     ],
     "consistency_arbitrate_user": [
-        "conflicts", "design_docs_summary", "global_facts",
-        "project_requirements", "standards_summary",
+        "conflicts",
+        "design_docs_summary",
+        "global_facts",
+        "project_requirements",
+        "standards_summary",
     ],
     "consistency_audit_system": [
-        "content", "facts", "scheme_name", "scheme_type",
+        "content",
+        "facts",
+        "scheme_name",
+        "scheme_type",
     ],
     # ✅ R166（2026-11-03 · 全局事实模块收口）：整卷合并修复两条提示词补登
     #    契约（R122-G2 引入时漏登 —— 提示词本体已在 consistency_repair.py 经
@@ -768,22 +870,43 @@ PROMPT_VARIABLE_CONTRACTS: dict[str, list[str]] = {
     #    load_resolved_facts_for_scope 装配 {global_facts}（与预检/正文/导出
     #    同一 fail-closed 门控），无事实时由路由层降级为「（无）」。
     "expert_review_system": [
-        "attachments", "check_items", "global_facts", "outline_tree",
-        "scheme_name", "scheme_type",
+        "attachments",
+        "check_items",
+        "global_facts",
+        "outline_tree",
+        "scheme_name",
+        "scheme_type",
     ],
     "compliance_check_system": [
-        "checklist", "content", "global_facts", "scheme_name", "scheme_type",
+        "checklist",
+        "content",
+        "global_facts",
+        "scheme_name",
+        "scheme_type",
     ],
     # --- 审核预检 · 问题定向自动修复（services/review_autofix.py） ---
     "review_autofix_user": [
-        "global_facts", "instruction", "issue", "must_contain",
-        "must_not_contain", "rule_id", "rule_title", "scheme_name",
-        "scheme_type", "section_content", "section_id", "section_title",
-        "standards_text", "targets",
+        "global_facts",
+        "instruction",
+        "issue",
+        "must_contain",
+        "must_not_contain",
+        "rule_id",
+        "rule_title",
+        "scheme_name",
+        "scheme_type",
+        "section_content",
+        "section_id",
+        "section_title",
+        "standards_text",
+        "targets",
     ],
     # --- 图表修复域（chart-json / mermaid 修复共用 {code}/{error} 口径） ---
     "chart_json_fix": [
-        "chart_type", "code", "error", "scheme_type",
+        "chart_type",
+        "code",
+        "error",
+        "scheme_type",
     ],
     "chart_json_fix_architecture": ["code", "error", "scheme_type"],
     "chart_json_fix_comparison": ["code", "error", "scheme_type"],
@@ -800,8 +923,11 @@ PROMPT_VARIABLE_CONTRACTS: dict[str, list[str]] = {
     # 一致性修复·定点编辑 user（消费方 consistency_edits.build_edits_prompt，
     # 5/5 全传；章节原文由调用方在 render 结果后追加，不走占位符）
     "consistency_repair_edits_user": [
-        "authoritative_sources", "conflicts_in_section", "global_facts",
-        "section_id", "section_title",
+        "authoritative_sources",
+        "conflicts_in_section",
+        "global_facts",
+        "section_id",
+        "section_title",
     ],
     # 事实整理域（services/facts_enrich.py，调用点逐项核过：全传）
     "facts_finalize_system": ["current_facts"],
@@ -878,8 +1004,7 @@ def _apply_variable_contracts() -> None:
 # ---------------------------------------------------------------------------
 # ✅ G4 变量契约校验（2026-09-24 · 遗留项 4 闭环）
 # ---------------------------------------------------------------------------
-def check_prompt_variables(verbose: bool = False,
-                           strict: bool = False) -> list[dict]:
+def check_prompt_variables(verbose: bool = False, strict: bool = False) -> list[dict]:
     """校验全部注册提示词的「变量契约」，返回不一致明细。
 
     检查两类双向漂移（仅对声明了 ``requires`` 的模板生效）：
@@ -923,36 +1048,39 @@ def check_prompt_variables(verbose: bool = False,
         #   （meta["content"]/["variables"] 会被 update_prompt 原地改写，用它
         #   当基线会导致「出厂模板与契约一致、但用户改过一次就误报漂移」）。
         template = meta.get("default_content") or meta.get("content", "")
-        raw_actual = {v for v in (meta.get("default_variables")
-                                  or meta.get("variables") or [])
-                      if not _is_false_positive(key, v, template)}
+        raw_actual = {
+            v
+            for v in (meta.get("default_variables") or meta.get("variables") or [])
+            if not _is_false_positive(key, v, template)
+        }
         # 与 validate_prompt_variables 同口径：大小写不敏感比较
         actual_lower = {v.lower() for v in raw_actual}
         declared_lower = {v.lower() for v in requires}
-        declared_not_used = sorted(
-            v for v in requires if v.lower() not in actual_lower)
-        used_not_declared = sorted(
-            v for v in raw_actual if v.lower() not in declared_lower)
+        declared_not_used = sorted(v for v in requires if v.lower() not in actual_lower)
+        used_not_declared = sorted(v for v in raw_actual if v.lower() not in declared_lower)
         if not (declared_not_used or used_not_declared):
             continue
-        issues.append({
-            "key": key,
-            "declared_not_used": declared_not_used,
-            "used_not_declared": used_not_declared,
-        })
+        issues.append(
+            {
+                "key": key,
+                "declared_not_used": declared_not_used,
+                "used_not_declared": used_not_declared,
+            }
+        )
         if verbose:
             parts = []
             if declared_not_used:
                 parts.append(f"声明了但模板未使用={declared_not_used}")
             if used_not_declared:
                 parts.append(f"模板使用但未声明={used_not_declared}")
-            logger.warning(
-                "提示词变量契约不一致 %s：%s", key, "；".join(parts))
+            logger.warning("提示词变量契约不一致 %s：%s", key, "；".join(parts))
     if strict and issues:
         raise PromptContractError(
             f"提示词变量契约存在 {len(issues)} 处漂移："
-            + "；".join(f"{i['key']}(未用={i['declared_not_used']}"
-                        f"/未声明={i['used_not_declared']})" for i in issues))
+            + "；".join(
+                f"{i['key']}(未用={i['declared_not_used']}" f"/未声明={i['used_not_declared']})" for i in issues
+            )
+        )
     return issues
 
 
@@ -973,7 +1101,8 @@ PROMPT_ISSUE_LABELS = {
 
 
 def validate_prompt_content(
-    key: str, content: str  # noqa: F811  content 与文件尾导入的 content 模块同名（刻意，见文件尾）
+    key: str,
+    content: str,  # noqa: F811  content 与文件尾导入的 content 模块同名（刻意，见文件尾）
 ) -> list[dict]:
     """保存提示词前的**静态体检**，返回问题清单（空列表 = 通过）。
 
@@ -1007,13 +1136,16 @@ def validate_prompt_content(
     unknown_shared = [k for k in used_shared if k not in _ALL_PROMPTS]
     if unknown_shared:
         avail = sorted(k for k in _ALL_PROMPTS if k.startswith("SHARED_"))
-        issues.append({
-            "level": "error",
-            "code": "unknown_shared_ref",
-            "message": (f"引用了不存在的共享片段：{', '.join(unknown_shared)}；"
-                        f"可用片段：{', '.join(avail) or '（无）'}"),
-            "detail": unknown_shared,
-        })
+        issues.append(
+            {
+                "level": "error",
+                "code": "unknown_shared_ref",
+                "message": (
+                    f"引用了不存在的共享片段：{', '.join(unknown_shared)}；" f"可用片段：{', '.join(avail) or '（无）'}"
+                ),
+                "detail": unknown_shared,
+            }
+        )
 
     # ② 共享片段自引用 / 环引用 —— 运行时会被 BUG-P0-2 的防护挡下并留字面量
     #    ✅ 判据修正（2026-09-30）：**必须检查待保存的 `text` 自身**。
@@ -1030,16 +1162,18 @@ def validate_prompt_content(
             continue
         # 本次保存的正文优先（首次保存自引用即在此命中）；
         # 否则回退注册表旧内容（识别"已入库的互引"）。
-        body = text if key == sk else str(
-            _ALL_PROMPTS[sk].get("content")
-            or _ALL_PROMPTS[sk].get("default_content") or "")
+        body = (
+            text if key == sk else str(_ALL_PROMPTS[sk].get("content") or _ALL_PROMPTS[sk].get("default_content") or "")
+        )
         if re.search(r"\{" + re.escape(sk) + r"\}", body):
-            issues.append({
-                "level": "error",
-                "code": "shared_self_reference",
-                "message": f"共享片段 {sk} 的内容里引用了自身，会造成循环展开",
-                "detail": [sk],
-            })
+            issues.append(
+                {
+                    "level": "error",
+                    "code": "shared_self_reference",
+                    "message": f"共享片段 {sk} 的内容里引用了自身，会造成循环展开",
+                    "detail": [sk],
+                }
+            )
             break
 
     # ③ 契约变量增删（相对出厂默认的占位符集合）
@@ -1078,27 +1212,30 @@ def validate_prompt_content(
         default_text = meta.get("default_content") or meta.get("content") or ""
         default_vars = _user_vars(default_text)
         cur_vars = _user_vars(text)
-        removed = sorted(v for v in requires
-                         if v.lower() in default_vars and v.lower() not in cur_vars)
-        added = sorted(v for v in cur_vars
-                       if v.lower() not in {r.lower() for r in requires})
+        removed = sorted(v for v in requires if v.lower() in default_vars and v.lower() not in cur_vars)
+        added = sorted(v for v in cur_vars if v.lower() not in {r.lower() for r in requires})
         if removed:
-            issues.append({
-                "level": "warning",
-                "code": "contract_var_removed",
-                "message": (f"删掉了契约变量 {', '.join(removed)}："
-                            f"调用方仍会传入，但模板已不再使用；"
-                            f"若非有意请恢复"),
-                "detail": removed,
-            })
+            issues.append(
+                {
+                    "level": "warning",
+                    "code": "contract_var_removed",
+                    "message": (
+                        f"删掉了契约变量 {', '.join(removed)}：" f"调用方仍会传入，但模板已不再使用；" f"若非有意请恢复"
+                    ),
+                    "detail": removed,
+                }
+            )
         if added:
-            issues.append({
-                "level": "warning",
-                "code": "contract_var_added",
-                "message": (f"新增了未在契约表中声明的变量 {', '.join(added)}："
-                            f"运行时永远不会被填充，位置将留空"),
-                "detail": added,
-            })
+            issues.append(
+                {
+                    "level": "warning",
+                    "code": "contract_var_added",
+                    "message": (
+                        f"新增了未在契约表中声明的变量 {', '.join(added)}：" f"运行时永远不会被填充，位置将留空"
+                    ),
+                    "detail": added,
+                }
+            )
     return issues
 
 
@@ -1115,5 +1252,3 @@ from app.services.ai.prompts import (
 
 # ✅ G4 变量契约：模板全部注册后再套用契约表（见上方 PROMPT_VARIABLE_CONTRACTS）
 _apply_variable_contracts()
-
-

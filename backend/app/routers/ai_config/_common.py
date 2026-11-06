@@ -2,6 +2,7 @@
 
 被 ``connectivity`` / ``models`` 子模块复用的纯函数，单独抽离以避免巨型单文件。
 """
+
 import logging
 import socket
 from urllib.parse import urlparse
@@ -30,7 +31,7 @@ def _http_status_of(exc: Exception) -> int | None:
     marker = "HTTP "
     idx = msg.find(marker)
     if idx >= 0:
-        tail = msg[idx + len(marker):]
+        tail = msg[idx + len(marker) :]
         digits = ""
         for ch in tail:
             if ch.isdigit():
@@ -54,8 +55,7 @@ def _classify_error(exc: Exception) -> dict:
             "label": "API Key 未配置",
             "message": "API Key 为空或格式不正确",
             "suggestion": (
-                "请检查：① 是否已填写 API Key 并保存 ② Key 是否有多余的空格 "
-                "③ Key 字符串中是否包含非法字符"
+                "请检查：① 是否已填写 API Key 并保存 ② Key 是否有多余的空格 " "③ Key 字符串中是否包含非法字符"
             ),
             "raw": msg,
         }
@@ -72,14 +72,17 @@ def _classify_error(exc: Exception) -> dict:
             "label": "DNS 解析失败",
             "message": f"无法解析域名{f'：{host}' if host else ''}",
             "suggestion": (
-                "请检查：① 网络是否已连接 ② 域名拼写是否正确 "
-                "③ 是否需要配置代理 ④ 该厂商平台域名在本网络是否可达"
+                "请检查：① 网络是否已连接 ② 域名拼写是否正确 " "③ 是否需要配置代理 ④ 该厂商平台域名在本网络是否可达"
             ),
             "raw": msg,
         }
 
     # 超时
-    if isinstance(exc, (socket.timeout, TimeoutError)) or "timed out" in msg.lower() or "TimeoutError" in type(exc).__name__:
+    if (
+        isinstance(exc, (socket.timeout, TimeoutError))
+        or "timed out" in msg.lower()
+        or "TimeoutError" in type(exc).__name__
+    ):
         return {
             "category": "timeout",
             "label": "连接超时",
@@ -123,7 +126,12 @@ def _classify_error(exc: Exception) -> dict:
         }
 
     # HTTP 401 / 403 → 认证问题
-    if status_code in (401, 403) or "Unauthorized" in msg or "Invalid API key" in msg.lower() or "authentication" in msg.lower():
+    if (
+        status_code in (401, 403)
+        or "Unauthorized" in msg
+        or "Invalid API key" in msg.lower()
+        or "authentication" in msg.lower()
+    ):
         return {
             "category": "auth",
             "label": "API Key 无效",
@@ -153,8 +161,7 @@ def _classify_error(exc: Exception) -> dict:
         }
 
     # HTTP 5xx → 供应商故障
-    if (status_code is not None and 500 <= status_code < 600) or \
-            "Bad Gateway" in msg or "Service Unavailable" in msg:
+    if (status_code is not None and 500 <= status_code < 600) or "Bad Gateway" in msg or "Service Unavailable" in msg:
         return {
             "category": "provider",
             "label": "供应商服务异常",
@@ -214,7 +221,8 @@ def _dns_precheck(base_url: str) -> dict:
             ip = ips[0][4][0]
         except Exception as e:
             return {
-                "ok": False, "step": "dns",
+                "ok": False,
+                "step": "dns",
                 "message": f"DNS 解析失败：无法找到 {host}",
                 "raw": str(e),
             }
@@ -224,7 +232,8 @@ def _dns_precheck(base_url: str) -> dict:
             s.close()
         except Exception as e:
             return {
-                "ok": False, "step": "tcp",
+                "ok": False,
+                "step": "tcp",
                 "message": f"TCP 握手失败：{host}:{port} 不可达",
                 "raw": str(e),
             }
@@ -243,4 +252,5 @@ async def _dns_precheck_async(base_url: str) -> dict:
       改为丢到线程池执行，不占用事件循环。
     """
     import asyncio
+
     return await asyncio.to_thread(_dns_precheck, base_url)

@@ -1,0 +1,14 @@
+# backend 目录专属忽略规则（2026-11-06 自仓库根 .gitignore 迁入）
+#
+# 为什么必须放在本目录：ruff 以 backend 为扫描根时，会把仓库根的 `backend/_*`
+# 重写成无锚定的 `_*`，从而把 app/routers/_*.py、**/__init__.py 等正式源码
+# 一并排除，形成 lint/format 假绿（实测 ruff 0.6.9，`/backend/_*` 同样失效）。
+# 规则锚定在本目录后，git 与 ruff 的解析结果一致：只命中 backend 的直接子项。
+
+# backend 根目录下的一次性调试脚本 / 临时文件
+/_*
+
+# backend/legacy_scripts/ 存放一次性排查脚本（不参与构建/运行，仅本地留存）；
+# 归档脚本本身不纳入版本控制，仅 README 作为说明入口保留。
+/legacy_scripts/*
+!/legacy_scripts/README.md

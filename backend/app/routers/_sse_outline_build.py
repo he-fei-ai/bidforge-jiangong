@@ -7,8 +7,7 @@ import time
 import app.routers.sse_handlers as _sh  # noqa: F401 — facade 命名空间延迟绑定（monkeypatch 兼容）
 
 
-def _section_partial(rec: dict, now: float,
-                     expect_overrides: dict | None = None) -> float:
+def _section_partial(rec: dict, now: float, expect_overrides: dict | None = None) -> float:
     """折算单个「进行中章节」在本章内已完成的进度比例（0~1）。
 
     = 阶段基准（base） + 阶段跨度（span）× 该阶段已耗时/预期耗时（封顶 85%）
@@ -63,8 +62,7 @@ def _calibrate_stage_expect(prog: dict, stage: str, actual: float) -> None:
     if base_expect <= 0:
         return
     new_expect = (1 - _sh._STAGE_EXPECT_ALPHA) * base_expect + _sh._STAGE_EXPECT_ALPHA * actual
-    overrides[stage] = round(min(max(new_expect, _sh._STAGE_EXPECT_MIN),
-                                 _sh._STAGE_EXPECT_MAX), 2)
+    overrides[stage] = round(min(max(new_expect, _sh._STAGE_EXPECT_MIN), _sh._STAGE_EXPECT_MAX), 2)
 
 
 def _monotonic_progress(prev: float, new: float) -> float:
@@ -100,8 +98,7 @@ def _weighted_progress(prog: dict) -> float:
     processed = prog.get("done", 0)
     now = time.monotonic()
     overrides = prog.get("stage_expect") or None
-    partial = sum(_sh._section_partial(rec, now, overrides)
-                  for rec in (prog.get("running") or {}).values())
+    partial = sum(_sh._section_partial(rec, now, overrides) for rec in (prog.get("running") or {}).values())
     raw = (processed + partial) / total
     return round(min(raw, 1.0) * _sh._SECTION_PHASE_MAX, 4)
 
@@ -131,6 +128,7 @@ def _done_counters(processed, failed) -> dict:
     同一任务在进度卡与终态消息/重挂摘要里会出现两个数字。现统一为：
     对外 `done` 恒为成功数，另以 `processed` 表达已处理总数。
     """
+
     def _int(v):
         try:
             return max(0, int(v or 0))
@@ -184,25 +182,27 @@ def _snapshot_stats(prog: dict, paused_ms: float = 0.0) -> dict:
         done = prog.get("done", 0)
         running = []
         for sid, rec in list((prog.get("running") or {}).items()):
-            running.append({
-                "section_id": sid,
-                "title": rec.get("title", ""),
-                "index": rec.get("index", 0),
-                "stage": rec.get("stage", ""),
-                "stage_label": rec.get("stage_label", ""),
-                "elapsed_ms": int((now - rec.get("started_at", now)) * 1000),
-            })
+            running.append(
+                {
+                    "section_id": sid,
+                    "title": rec.get("title", ""),
+                    "index": rec.get("index", 0),
+                    "stage": rec.get("stage", ""),
+                    "stage_label": rec.get("stage_label", ""),
+                    "elapsed_ms": int((now - rec.get("started_at", now)) * 1000),
+                }
+            )
         # 平均单章耗时：已完成（含失败）章节的实测均值，用于「还要多久」判断
         # ✅ 单位修复：section_ms 列表实际存的是【秒】（见 _prog 初始化与逐章 append），
         #    对外字段名是 *_ms —— 必须换算毫秒，否则前端展示「平均 20 毫秒/章」。
         durations = prog.get("section_ms") or []
-        avg_section_ms = (int(sum(durations) / len(durations) * 1000)
-                          if durations else None)
+        avg_section_ms = int(sum(durations) / len(durations) * 1000) if durations else None
         # ETA：按「已处理 + 进行中部分贡献」的有效进度外推（口径见 docstring）
         eta_ms = None
         effective = done + sum(
             _sh._section_partial(rec, now, prog.get("stage_expect") or None)
-            for rec in (prog.get("running") or {}).values())
+            for rec in (prog.get("running") or {}).values()
+        )
         if total > effective > 0:
             section_started = prog.get("sections_started_at")
             if section_started is None:
@@ -212,8 +212,7 @@ def _snapshot_stats(prog: dict, paused_ms: float = 0.0) -> dict:
             else:
                 # ✅ ETA 与 elapsed_ms 同口径：显式章节起点尚未扣暂停，需在此扣除
                 #    （否则暂停后 ETA 会凭空多出暂停时长）。
-                section_elapsed_ms = max(
-                    int((now - section_started) * 1000) - int(_paused), 0)
+                section_elapsed_ms = max(int((now - section_started) * 1000) - int(_paused), 0)
             # 至少按 1s 估算：首个统计点（耗时≈0）不应给出 0 或天量 ETA
             section_elapsed_ms = max(section_elapsed_ms, 1000)
             eta_ms = int(section_elapsed_ms / effective * (total - effective))
@@ -233,8 +232,7 @@ def _snapshot_stats(prog: dict, paused_ms: float = 0.0) -> dict:
             "phase_label": prog.get("phase_label", ""),
             # R175 BUG-3：心跳快照与 progress 事件共用单调护栏，
             # 防止 running 移除与 done 自增之间的窗口让进度条回退。
-            "progress": _sh._monotonic_progress(
-                prog.get("progress_max", 0.0), _sh._weighted_progress(prog)),
+            "progress": _sh._monotonic_progress(prog.get("progress_max", 0.0), _sh._weighted_progress(prog)),
         }
     except Exception:
         # 统计只服务于展示，任何异常都不允许影响生成主流程
@@ -253,9 +251,11 @@ def _locked_progress_updater(lock: asyncio.Lock, task_id: str):
     rollback 已无法回滚被提交的图表登记/删除变更，「事务整体原子」的守卫被旁路
     （表现为「正文里还有图表块、图表清单却没有登记」）。
     """
+
     async def _update(progress: float, message: str = "", *, event: str = "progress"):
         async with lock:
             await _sh.update_progress(task_id, progress, message, event=event)
+
     return _update
 
 
@@ -286,12 +286,13 @@ def _word_budget_hint(word_budget: int) -> str:
     lo = 1.0 - tol
     hi = 1.0 + tol
     hard = 1.0 + 2.0 * tol
-    return (f"{b}字（可接受 {lo:.1f}~{hi:.1f} 倍即 {int(b * lo)}~{int(b * hi)} 字；"
-            f"硬上限 {int(b * hard)} 字，超出即视为不合格）")
+    return (
+        f"{b}字（可接受 {lo:.1f}~{hi:.1f} 倍即 {int(b * lo)}~{int(b * hi)} 字；"
+        f"硬上限 {int(b * hard)} 字，超出即视为不合格）"
+    )
 
 
-def _should_auto_shrink(content: str, word_budget: int,
-                        over_ratio: float = _sh.WORD_OVER_RATIO) -> bool:
+def _should_auto_shrink(content: str, word_budget: int, over_ratio: float = _sh.WORD_OVER_RATIO) -> bool:
     """是否需要对该章节跑「超字数自动压缩」（与 word_status='over' 同口径）。
 
     只看**正文字数**（剔除图表代码块，见 content_utils.text_word_count）——
@@ -307,8 +308,7 @@ def _should_auto_shrink(content: str, word_budget: int,
     return wc > budget * over_ratio
 
 
-async def _await_with_stats(coro, push_stats, interval: float = _sh._STATS_PUSH_INTERVAL,
-                            task_id: str | None = None):
+async def _await_with_stats(coro, push_stats, interval: float = _sh._STATS_PUSH_INTERVAL, task_id: str | None = None):
     """等待 AI 协程完成，期间每 interval 秒调用一次 push_stats 推送运行统计。
 
     背景：原实现在 await AI 调用期间完全不产出业务事件（只有 10s 一次的心跳
@@ -349,7 +349,8 @@ async def _await_with_stats(coro, push_stats, interval: float = _sh._STATS_PUSH_
             _sh.logger.warning(
                 "子任务登记失败：父任务 %s 已不存在（或登记异常），"
                 "该 AI 调用将脱离父任务停止链路，仅靠自然完成/超时结束",
-                task_id)
+                task_id,
+            )
     try:
         while True:
             done, _ = await asyncio.wait({task}, timeout=interval)
@@ -369,7 +370,8 @@ async def _await_with_stats(coro, push_stats, interval: float = _sh._STATS_PUSH_
             except Exception as e:
                 _sh.logger.warning(
                     "SSE stats push failed (continuing AI call): %s",
-                    e, exc_info=True,
+                    e,
+                    exc_info=True,
                 )
     finally:
         if not task.done():
@@ -387,12 +389,12 @@ async def _await_with_stats(coro, push_stats, interval: float = _sh._STATS_PUSH_
 #    - 每次 AI 调用由 _await_with_stats 周期性推送 stats（3s 一次）；
 #    - 心跳通道 stats_provider 兜底（审核/修复期间调用方正 await，无法 yield）。
 _OUTLINE_PHASE_MODEL = {
-    "prepare":   {"base": 0.02, "span": 0.03, "expect": 4.0,  "label": "准备中"},
-    "draft":     {"base": 0.08, "span": 0.47, "expect": 55.0, "label": "AI 生成目录"},
-    "level1":    {"base": 0.08, "span": 0.17, "expect": 40.0, "label": "生成一级目录"},
-    "sublevels": {"base": 0.25, "span": 0.45, "expect": 0.0,  "label": "生成二三级目录"},
-    "review":    {"base": 0.70, "span": 0.20, "expect": 45.0, "label": "目录审核中"},
-    "fix":       {"base": 0.90, "span": 0.10, "expect": 60.0, "label": "按审核意见修复"},
+    "prepare": {"base": 0.02, "span": 0.03, "expect": 4.0, "label": "准备中"},
+    "draft": {"base": 0.08, "span": 0.47, "expect": 55.0, "label": "AI 生成目录"},
+    "level1": {"base": 0.08, "span": 0.17, "expect": 40.0, "label": "生成一级目录"},
+    "sublevels": {"base": 0.25, "span": 0.45, "expect": 0.0, "label": "生成二三级目录"},
+    "review": {"base": 0.70, "span": 0.20, "expect": 45.0, "label": "目录审核中"},
+    "fix": {"base": 0.90, "span": 0.10, "expect": 60.0, "label": "按审核意见修复"},
 }
 
 # ✅ 阶段耗时在线校准（2026-09-16 · 承接上一轮报告遗留建议 #1）：
@@ -400,9 +402,9 @@ _OUTLINE_PHASE_MODEL = {
 #    差异很大（弱模型一级目录 150s、强模型 15s）。校准口径与正文生成的
 #    _calibrate_stage_expect 完全一致：只用**本次任务实测耗时**做 EMA，且只在
 #    阶段切换点写入（阶段内填充曲线保持连续，不会因 expect 变化而回退）。
-_OUTLINE_EXPECT_MIN = 5.0      # 校准下限（秒）：防止个别极快样本把预期压到近 0
-_OUTLINE_EXPECT_MAX = 600.0    # 校准上限（秒）
-_OUTLINE_EXPECT_ALPHA = 0.3    # EMA 系数：新样本权重
+_OUTLINE_EXPECT_MIN = 5.0  # 校准下限（秒）：防止个别极快样本把预期压到近 0
+_OUTLINE_EXPECT_MAX = 600.0  # 校准上限（秒）
+_OUTLINE_EXPECT_ALPHA = 0.3  # EMA 系数：新样本权重
 # 校准样本下限（秒）：短于该值的阶段耗时不作为样本。
 #   —— 同一阶段被重复 _set_phase 刷新（如 draft 的「已生成，正在构建目录树」）
 #      会产生 0.x 秒的空转样本，若纳入 EMA 会把 expect 直接拽到下限，
@@ -463,8 +465,7 @@ def _calibrate_outline_expect(st: dict, phase: str, actual: float) -> None:
         overrides = {}
         st["stage_expect"] = overrides
     new_expect = (1 - _sh._OUTLINE_EXPECT_ALPHA) * base_expect + _sh._OUTLINE_EXPECT_ALPHA * actual
-    overrides[phase] = round(min(max(new_expect, _sh._OUTLINE_EXPECT_MIN),
-                                 _sh._OUTLINE_EXPECT_MAX), 2)
+    overrides[phase] = round(min(max(new_expect, _sh._OUTLINE_EXPECT_MIN), _sh._OUTLINE_EXPECT_MAX), 2)
 
 
 def _calibrate_outline_chapter_expect(st: dict, actual: float) -> None:
@@ -594,7 +595,7 @@ def _outline_eta_ms(st: dict, now: float, progress: float) -> int | None:
         # ✅ 分母优先取「子目录阶段」起点（进入 sublevels 时写入）。
         #    缺失（旧任务/单测）时退回任务耗时，保持与历史口径兼容。
         base_at = st.get("sub_started_at") or st.get("started_at", now)
-        span_ms = max(int((now - base_at) * 1000), 1000)   # ≥1s：首个统计点不给出 0
+        span_ms = max(int((now - base_at) * 1000), 1000)  # ≥1s：首个统计点不给出 0
         return int(span_ms / effective * max(total - effective, 0.0))
     expect = _sh._outline_expect(st, st.get("phase", ""))
     if expect > 0:
@@ -666,14 +667,13 @@ def _rank_sections_by_basis(text: str, basis) -> tuple[str, int]:
     正文 —— 尾部项可能只剩标题。相关性前置后，方案名称涉及的项在固定预算下
     **全部可见**，这正是要求一「与方案名称相关的解析提取内容必须进入目录」。
     """
-    if not text or basis is None or not getattr(
-            _sh.settings, "outline_basis_relevance", False):
+    if not text or basis is None or not getattr(_sh.settings, "outline_basis_relevance", False):
         return text, 0
     try:
         from app.services.scheme_basis import rank_by_relevance
+
         sections = _sh._split_md_sections(text)
-        ordered, hit = rank_by_relevance(
-            sections, basis, text_fn=lambda s: f"{s[0]} {s[1]}")
+        ordered, hit = rank_by_relevance(sections, basis, text_fn=lambda s: f"{s[0]} {s[1]}")
         if not hit:
             return text, 0
         return "\n".join(f"{t}\n{b}" if t else b for t, b in ordered), hit
@@ -730,9 +730,9 @@ def _budgeted_truncate_sections(text: str, budget: int) -> tuple[str, dict]:
     return out, {"sections": len(sections), "truncated_sections": truncated}
 
 
-async def _load_knowledge_rows(db, scheme_id: str,
-                               degraded_out: list | None = None,
-                               degraded_stage: str = "outline.assemble.knowledge_text") -> list[dict]:
+async def _load_knowledge_rows(
+    db, scheme_id: str, degraded_out: list | None = None, degraded_stage: str = "outline.assemble.knowledge_text"
+) -> list[dict]:
     """加载方案可用的知识库条目行（专属 + 项目共享），一次查询供逐章内存过滤。
 
     ✅ D-39（R176）：查询异常此前只落 WARNING 日志，用户看到的是「没有知识库
@@ -748,14 +748,20 @@ async def _load_knowledge_rows(db, scheme_id: str,
         cur = await db.execute(
             "SELECT name, usage_hint, content FROM knowledge_base "
             "WHERE project_id=? AND (scheme_id=? OR scheme_id='')",
-            (project_id, scheme_id))
+            (project_id, scheme_id),
+        )
         return [dict(r) for r in await cur.fetchall()]
     except Exception as e:  # 表缺失等异常不应阻断生成
         _sh.logger.warning("加载项目知识库素材失败（降级为无）: %s", e)
         _sh._record_context_degraded(
-            degraded_out, field="knowledge_rows", stage=degraded_stage,
-            original_chars=0, kept_chars=0,
-            reason=_sh.CONTEXT_DEGRADED_SEGMENT, segment_id="knowledge_rows")
+            degraded_out,
+            field="knowledge_rows",
+            stage=degraded_stage,
+            original_chars=0,
+            kept_chars=0,
+            reason=_sh.CONTEXT_DEGRADED_SEGMENT,
+            segment_id="knowledge_rows",
+        )
         return []
 
 
@@ -771,16 +777,20 @@ def _filter_knowledge_rows(rows: list[dict], leaf: dict) -> list[dict]:
     if not kws:
         return rows
     filtered = [
-        r for r in rows
-        if any(kw in f"{r.get('name','')} {r.get('usage_hint','')} "
-                    f"{r.get('content','')}" for kw in kws)]
+        r
+        for r in rows
+        if any(kw in f"{r.get('name','')} {r.get('usage_hint','')} " f"{r.get('content','')}" for kw in kws)
+    ]
     return filtered or rows
 
 
-async def _build_knowledge_text(db, scheme_id: str,
-                                relevant_to: dict | None = None,
-                                degraded_out: list | None = None,
-                                degraded_stage: str = "outline.assemble.knowledge_text") -> str:
+async def _build_knowledge_text(
+    db,
+    scheme_id: str,
+    relevant_to: dict | None = None,
+    degraded_out: list | None = None,
+    degraded_stage: str = "outline.assemble.knowledge_text",
+) -> str:
     """构建「项目知识库素材」文本（knowledge_base 表，产品需求 §3.9）。
 
     查询范围：该方案的专属条目（scheme_id=当前方案）+ 项目共享条目（scheme_id=''）。
@@ -791,15 +801,14 @@ async def _build_knowledge_text(db, scheme_id: str,
     企业制度库无差别注入每一章，浪费 token 并稀释指令）。
     """
     from app.routers.knowledge import build_knowledge_text
-    rows = await _sh._load_knowledge_rows(
-        db, scheme_id, degraded_out=degraded_out, degraded_stage=degraded_stage)
+
+    rows = await _sh._load_knowledge_rows(db, scheme_id, degraded_out=degraded_out, degraded_stage=degraded_stage)
     if relevant_to is not None:
         rows = _sh._filter_knowledge_rows(rows, relevant_to)
     _kn_stats: dict = {}
     text = build_knowledge_text(rows, stats_out=_kn_stats)
     # ✅ D-39（R176）：单条 500 / 总量 3000 的硬切进统一降级簿记。
-    _sh._record_knowledge_budget(
-        degraded_out, _kn_stats, stage=degraded_stage, field="knowledge_text")
+    _sh._record_knowledge_budget(degraded_out, _kn_stats, stage=degraded_stage, field="knowledge_text")
     return text
 
 
@@ -884,18 +893,13 @@ def _apply_word_budget_allocations(
         if len(unit_leaves) <= 1:
             continue
         assigned = {lf["id"]: ai_allocations.get(lf["id"]) for lf in unit_leaves}
-        if (all(isinstance(v, int) and v > 0 for v in assigned.values())
-                and sum(assigned.values()) == override):
+        if all(isinstance(v, int) and v > 0 for v in assigned.values()) and sum(assigned.values()) == override:
             u["alloc"] = assigned
         else:
             base = override // len(unit_leaves)
             rem = override - base * len(unit_leaves)
-            u["alloc"] = {
-                lf["id"]: base + (1 if i < rem else 0)
-                for i, lf in enumerate(unit_leaves)
-            }
-            _sh.logger.info("单元 %s 字数分配降级均分（每份 %d）",
-                        u["unit"].get("title", "")[:20], base)
+            u["alloc"] = {lf["id"]: base + (1 if i < rem else 0) for i, lf in enumerate(unit_leaves)}
+            _sh.logger.info("单元 %s 字数分配降级均分（每份 %d）", u["unit"].get("title", "")[:20], base)
 
 
 def _section_outline_number(sec: dict) -> str:
@@ -965,8 +969,7 @@ def _section_number_for_prompt(sec: dict) -> str:
     return _sh._section_outline_number(sec) or _sh.SECTION_NUMBER_MISSING
 
 
-def _continue_failed_flag(continue_failed: bool,
-                          word_count, word_budget) -> bool:
+def _continue_failed_flag(continue_failed: bool, word_count, word_budget) -> bool:
     """续写失败且字数仍不达标 → 置位 continue_failed（BUG-4，2026-09-19）。
 
     背景：续写轮失败 / 产出被丢弃时**只记日志**，前端无从区分
@@ -1021,6 +1024,7 @@ def chapter_key_of_title(title: str) -> str:
     if not title:
         return ""
     from app.services.facts_classification import TITLE_TO_CHAPTER
+
     bare = _sh.strip_outline_numbering(str(title)).strip()
     if not bare:
         return ""
@@ -1043,8 +1047,8 @@ def chapter_key_of_title(title: str) -> str:
 
 
 async def _build_chapter_extraction_map(
-        db, project_id: str, sections: list[dict],
-        nodes: dict, children_by_parent: dict) -> dict[str, str]:
+    db, project_id: str, sections: list[dict], nodes: dict, children_by_parent: dict
+) -> dict[str, str]:
     """按九大章节把「结构化提取」内容映射到**叶子章节**（正文按章注入）。
 
     返回 {section_id: 注入文本}，**只含叶子章节**（有子节点的不注入）。
@@ -1069,7 +1073,9 @@ async def _build_chapter_extraction_map(
         cur = await db.execute(
             "SELECT item_id, label, output_type, content FROM bid_analysis_items "
             "WHERE project_id=? AND status='success' AND content IS NOT NULL "
-            "AND content != ''", (project_id,))
+            "AND content != ''",
+            (project_id,),
+        )
         rows = await cur.fetchall()
     except Exception:
         _sh.logger.warning("章节提取映射：读取结构化提取失败（退回原行为）", exc_info=True)
@@ -1077,6 +1083,7 @@ async def _build_chapter_extraction_map(
     if not rows:
         return {}
     from app.services.bid_analysis_service import is_missing_result
+
     items: dict[str, str] = {}
     for r in rows:
         content = r["content"] or ""
@@ -1089,6 +1096,7 @@ async def _build_chapter_extraction_map(
 
     # ② 九大章节 key → source_items（唯一事实源：scheme_classification）
     from app.services import scheme_classification as _sc
+
     chapter_items: dict[str, list[str]] = {}
     for ch in getattr(_sc, "NINE_CHAPTERS", []) or []:
         key = str(ch.get("key") or "")
@@ -1101,7 +1109,7 @@ async def _build_chapter_extraction_map(
     def _top_ancestor(sec: dict) -> dict:
         """向上找顶层（level=1）祖先；走到顶仍无父节点时返回当前节点。"""
         cur_node = sec
-        for _ in range(20):          # 深度上限：脏数据成环时不至于死循环
+        for _ in range(20):  # 深度上限：脏数据成环时不至于死循环
             pid = cur_node.get("parent_id") or ""
             parent = nodes.get(pid) if pid else None
             if not parent:
@@ -1115,7 +1123,7 @@ async def _build_chapter_extraction_map(
             continue
         top = _top_ancestor(sec)
         if top.get("id") == sec.get("id") and int(top.get("level") or 1) == 1:
-            continue        # 顶层章节自身即叶子 → 不注入（见 docstring）
+            continue  # 顶层章节自身即叶子 → 不注入（见 docstring）
         title = str(top.get("title") or "")
         if not title:
             continue
@@ -1188,6 +1196,7 @@ def _validate_outline(obj, *, strict_depth: bool = True, max_nodes: int = 500) -
 def _count_nodes(nodes: list) -> int:
     """递归计算 outline 节点总数（带深度保护）"""
     count = 0
+
     def _count(ns, depth=0):
         nonlocal count
         if depth > 12:
@@ -1197,6 +1206,7 @@ def _count_nodes(nodes: list) -> int:
             children = n.get("children") if isinstance(n, dict) else None
             if isinstance(children, list) and children:
                 _count(children, depth + 1)
+
     _count(nodes)
     return count
 
@@ -1207,8 +1217,7 @@ def _outline_validate_fn(obj) -> list[str]:
     见 _validate_outline 的 strict_depth 说明。节点上限走
     ``OUTLINE_GENERATE_MAX_NODES``（P2-2 配置化，默认 500 = 原行为）。
     """
-    return _sh._validate_outline(obj, strict_depth=False,
-                             max_nodes=_sh.OUTLINE_GENERATE_MAX_NODES)
+    return _sh._validate_outline(obj, strict_depth=False, max_nodes=_sh.OUTLINE_GENERATE_MAX_NODES)
 
 
 def _outline_fix_validate_fn(obj) -> list[str]:
@@ -1301,8 +1310,7 @@ def _outline_patch_validate_fn(o) -> list[str]:
     ncs = o.get("new_chapters")
     if not isinstance(ncs, list) or not ncs:
         return ["new_chapters 必须为非空数组"]
-    bad = [c for c in ncs
-           if not isinstance(c, dict) or not str(c.get("title") or "").strip()]
+    bad = [c for c in ncs if not isinstance(c, dict) or not str(c.get("title") or "").strip()]
     return [f"存在 {len(bad)} 个缺标题的非法章节"] if bad else []
 
 
@@ -1434,11 +1442,11 @@ def _join_tail_budget(items: list[str], max_chars: int) -> str:
     budget = max(int(max_chars), 0)
     picked: list[str] = []
     used = 0
-    for item in reversed(items):          # 从最近往回取
+    for item in reversed(items):  # 从最近往回取
         text = str(item).strip()
         if not text:
             continue
-        cost = len(text) + (2 if picked else 0)   # 分隔符 "; "
+        cost = len(text) + (2 if picked else 0)  # 分隔符 "; "
         if budget and used + cost > budget:
             break
         picked.append(text)
@@ -1469,8 +1477,8 @@ def _site_trunc_extra(*args) -> dict:
     被大量假告警淹没。未超预算的项**不记录**（零记录 = 未截断）。
     """
     from app.services import input_coverage as ic
-    known = {ic.SRC_PARSE, ic.SRC_FACTS, ic.SRC_SCOPE, ic.SRC_REQ,
-             ic.SRC_BASIS, ic.SRC_STANDARDS}
+
+    known = {ic.SRC_PARSE, ic.SRC_FACTS, ic.SRC_SCOPE, ic.SRC_REQ, ic.SRC_BASIS, ic.SRC_STANDARDS}
     args = list(args)
     sources = [a for a in args if isinstance(a, str) and a in known]
     rest = [a for a in args if not (isinstance(a, str) and a in known)]
@@ -1490,7 +1498,3 @@ def _site_trunc_extra(*args) -> dict:
         label = _sh._TRUNC_LABELS.get(src, src)
         extra[src] = f"{label} {size} 字超本装配点预算 {budget_i} 字，已截断"
     return extra
-
-
-
-

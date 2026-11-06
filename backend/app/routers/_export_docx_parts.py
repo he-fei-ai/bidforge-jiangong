@@ -19,8 +19,7 @@ _INLINE_RE = _sh.re.compile(
 #: 路径此前**直写用户输入**，表单里混入一个 ``\x00`` 即让整单导出 500
 #: （连同已生成内容全部作废）。现统一经 ``_xml_safe_text`` 剥除非法字符
 #: （合法空白 \t/\n/\r 原样保留），并由 ``_safe_add_run`` 作为唯一出口。
-_XML_ILLEGAL_RE = _sh.re.compile(
-    "[\x00-\x08\x0b\x0c\x0e-\x1f\x7f\ufffe\uffff\ud800-\udfff]")
+_XML_ILLEGAL_RE = _sh.re.compile("[\x00-\x08\x0b\x0c\x0e-\x1f\x7f\ufffe\uffff\ud800-\udfff]")
 
 
 def _xml_safe_text(text) -> str:
@@ -41,8 +40,7 @@ def _safe_add_run(paragraph, text):
     return paragraph.add_run(_xml_safe_text(text))
 
 
-def _set_run_font(run, name: str, size=None, *, bold=None, italic=None,
-                  strike=None, color=None):
+def _set_run_font(run, name: str, size=None, *, bold=None, italic=None, strike=None, color=None):
     """统一设置 run 字体：同时写入 w:ascii / w:hAnsi 与 w:eastAsia。
 
     ✅ BUG 修复：旧实现只写 `run.font.name`（= w:ascii + w:hAnsi），中文实际
@@ -50,11 +48,13 @@ def _set_run_font(run, name: str, size=None, *, bold=None, italic=None,
     悄悄回退成默认字体，与配置不符。
     """
     from docx.oxml.ns import qn
+
     run.font.name = name
     rfonts = run._element.get_or_add_rPr().get_or_add_rFonts()
     rfonts.set(qn("w:eastAsia"), name)
     if size is not None:
         from docx.shared import Pt
+
         run.font.size = Pt(size)
     if bold is not None:
         run.bold = bold
@@ -64,6 +64,7 @@ def _set_run_font(run, name: str, size=None, *, bold=None, italic=None,
         run.font.strike = strike
     if color is not None:
         from docx.shared import RGBColor
+
         run.font.color.rgb = RGBColor(*color)
     return run
 
@@ -80,7 +81,7 @@ def _add_markdown_runs(paragraph, text: str):
     pos = 0
     for m in _sh._INLINE_RE.finditer(text):
         if m.start() > pos:
-            paragraph.add_run(text[pos:m.start()])
+            paragraph.add_run(text[pos : m.start()])
         if m.group("bi"):
             run = paragraph.add_run(m.group("bi"))
             run.bold = True
@@ -150,8 +151,7 @@ def _collapse_redundant_spaces(text: str) -> str:
 # 本函数是渲染层统一出口：``_add_runs_with_inline_format`` 覆盖正文 / 标题 /
 # 表格单元格；题注路径（表题 / 图题 / 占位行）单独调用。**只做确定性替换**：
 # 「一」形破折号无法与「统一」等正常词区分，明确不自动替换（列入人工校对待办）。
-_FORMULA_SPAN_RE = _sh.re.compile(
-    r"(\$\$.*?\$\$|\$[^$\n]*?\$|\\\(.+?\\\)|\\\[.+?\\\])", _sh.re.S)
+_FORMULA_SPAN_RE = _sh.re.compile(r"(\$\$.*?\$\$|\$[^$\n]*?\$|\\\(.+?\\\)|\\\[.+?\\\])", _sh.re.S)
 
 #: 「1.5% 0」→「1.5‰」（千分号被 PDF/OCR 拆成「% 0」的高置信形态）。
 _RE_PERMILLE = _sh.re.compile(r"(?<=\d)[ \t]*%[ \t]+0(?![0-9.])")
@@ -188,7 +188,9 @@ _RE_PAREN_CJK_CONTENT = _sh.re.compile(r"\(([^()\n]{0,50}[\u4e00-\u9fff][^()\n]{
 _RE_PAREN_AFTER_CJK = _sh.re.compile(r"(?<=[\u4e00-\u9fff])[ \t]?\(([^()\n]{1,50})\)")
 _RE_PAREN_STD = _sh.re.compile(
     r"\(((?:GBJ|GB/T|GB|JGJ/T|JGJ|CJJ/T|CJJ|DG/TJ|DGJ|JG/T|SH/T|HG/T)"
-    r"[ \t]*\d{2,5}(?:\.\d+)?[ \t]*[—–\-－][ \t]*[12]\d{3})\)", _sh.re.I)
+    r"[ \t]*\d{2,5}(?:\.\d+)?[ \t]*[—–\-－][ \t]*[12]\d{3})\)",
+    _sh.re.I,
+)
 
 #: 仅归一**两个中文之间**的连字符为破折号；`GB 50303-2015` / `1-2` 不动。
 _RE_CJK_DASH = _sh.re.compile(r"(?<=[\u4e00-\u9fff])[ \t]*[-–][ \t]*(?=[\u4e00-\u9fff])")
@@ -200,28 +202,49 @@ _RE_CMP_GAP = _sh.re.compile(r"(?<=\d)[ \t]*(≤|≥|≠|<|>)[ \t]*(?=\d)")
 #: ⚠️ 只收**多字符或无歧义**单位：单字母 `A/W/V/N/L/m/g/t/h/s` 会把
 #: `表 1-1 A、B`（表题列名）误改成 `1-1A、B`，故一律不纳入。
 _RE_UNIT_GAP = _sh.re.compile(
-    r"(?<=\d)[ \t\xa0\u3000]+"
-    r"(?P<u>mm|cm|km|MPa|kPa|kW|kN|mA|mL|MΩ|min|kg|Pa|℃|%|°)"
-    r"(?![A-Za-z0-9])"
+    r"(?<=\d)[ \t\xa0\u3000]+" r"(?P<u>mm|cm|km|MPa|kPa|kW|kN|mA|mL|MΩ|min|kg|Pa|℃|%|°)" r"(?![A-Za-z0-9])"
 )
 
 #: LaTeX 命令 → 普通符号。只映射**语义唯一**的常见命令，未知命令原样保留
 #: （由落盘前 lint 统计为残留并触发可见降级，绝不静默放过）。
 _LATEX_CMD_MAP = {
-    "leq": "≤", "le": "≤", "geq": "≥", "ge": "≥", "neq": "≠", "ne": "≠",
-    "approx": "≈", "times": "×", "cdot": "·", "pm": "±", "sim": "～",
-    "Omega": "Ω", "Phi": "Φ", "varphi": "φ", "phi": "φ", "mu": "μ",
-    "alpha": "α", "beta": "β", "gamma": "γ", "delta": "δ", "theta": "θ",
-    "lambda": "λ", "pi": "π", "rho": "ρ", "sigma": "σ", "tau": "τ",
-    "degree": "°", "circ": "°", "quad": " ", "qquad": " ",
+    "leq": "≤",
+    "le": "≤",
+    "geq": "≥",
+    "ge": "≥",
+    "neq": "≠",
+    "ne": "≠",
+    "approx": "≈",
+    "times": "×",
+    "cdot": "·",
+    "pm": "±",
+    "sim": "～",
+    "Omega": "Ω",
+    "Phi": "Φ",
+    "varphi": "φ",
+    "phi": "φ",
+    "mu": "μ",
+    "alpha": "α",
+    "beta": "β",
+    "gamma": "γ",
+    "delta": "δ",
+    "theta": "θ",
+    "lambda": "λ",
+    "pi": "π",
+    "rho": "ρ",
+    "sigma": "σ",
+    "tau": "τ",
+    "degree": "°",
+    "circ": "°",
+    "quad": " ",
+    "qquad": " ",
 }
 _RE_LATEX_CMD = _sh.re.compile(r"\\(?P<c>[A-Za-z]+)")
 _RE_LATEX_ESC = _sh.re.compile(r"\\(?P<c>[%&_#{}$])")
 _RE_LATEX_MATHRM = _sh.re.compile(r"\\(?:mathrm|text|mathbf|mathit)\{([^{}]*)\}")
 _RE_LATEX_FRAC = _sh.re.compile(r"\\frac\{([^{}]*)\}\{([^{}]*)\}")
 _RE_LATEX_SQRT = _sh.re.compile(r"\\sqrt\{([^{}]*)\}")
-_RE_LATEX_DEG_C = _sh.re.compile(
-    r"(?:\^\s*)?\{?\s*\\circ\s*\}?\s*(?:\\mathrm\{C\}|\{C\}|C)?")
+_RE_LATEX_DEG_C = _sh.re.compile(r"(?:\^\s*)?\{?\s*\\circ\s*\}?\s*(?:\\mathrm\{C\}|\{C\}|C)?")
 _RE_SUPERSCRIPT = _sh.re.compile(r"(?<=[A-Za-z0-9)])[ \t]*\^[ \t]*\{?([23])\}?")
 #: 数值区间里的波浪号两侧去空格（`0.6～ 0.8` → `0.6～0.8`）。
 _RE_TILDE_GAP = _sh.re.compile(r"(?<=\d)[ \t]*～[ \t]*(?=\d)")
@@ -231,6 +254,7 @@ def _latex_to_plain(text: str) -> str:
     """把**残留 LaTeX** 转成可读普通符号（已成功转 OMML 的公式不会走到这里）。"""
     if not text:
         return text
+
     def _deg(m):
         # `^{\circ}C` 是「摄氏度」不是「度」—— 有 C 才用 ℃，否则用 °
         return "℃" if m.group(0).rstrip().endswith("C") else "°"
@@ -240,8 +264,7 @@ def _latex_to_plain(text: str) -> str:
     s = _RE_LATEX_FRAC.sub(r"\1/\2", s)
     s = _RE_LATEX_SQRT.sub(r"√\1", s)
     s = _RE_SUPERSCRIPT.sub(lambda m: {"2": "²", "3": "³"}[m.group(1)], s)
-    s = _RE_LATEX_CMD.sub(
-        lambda m: _LATEX_CMD_MAP.get(m.group("c"), m.group(0)), s)
+    s = _RE_LATEX_CMD.sub(lambda m: _LATEX_CMD_MAP.get(m.group("c"), m.group(0)), s)
     s = _RE_LATEX_ESC.sub(lambda m: m.group("c"), s)
     s = s.replace("°C", "℃").replace("° C", "℃")
     return s
@@ -268,8 +291,7 @@ def _normalize_plain_segment(text: str) -> str:
     s = _RE_PERMILLE.sub("‰", s)
     s = _RE_MQ.sub("MΩ", s)
     s = s.replace("力矩矩", "力矩").replace("峻工", "竣工")
-    s = _RE_EN_TERMS.sub(
-        lambda m: m.group("cn") + _EN_TERMS_MAP[m.group("w").lower()], s)
+    s = _RE_EN_TERMS.sub(lambda m: m.group("cn") + _EN_TERMS_MAP[m.group("w").lower()], s)
 
     def _std(m):
         p = _sh.re.sub(r"[ \t]*/[ \t]*", "/", m.group("p")).upper()
@@ -337,7 +359,7 @@ def _add_runs_with_inline_format(paragraph, text: str):
     pos = 0
     for disp, latex, m in _sh.docx_math.iter_formulas(text):
         if m.start() > pos:
-            _sh._add_markdown_runs(paragraph, _sh._collapse_redundant_spaces(text[pos:m.start()]))
+            _sh._add_markdown_runs(paragraph, _sh._collapse_redundant_spaces(text[pos : m.start()]))
         whole = text.strip() == m.group(0).strip()
         _sh._add_omml_formula(paragraph, latex, disp, whole)
         pos = m.end()
@@ -352,37 +374,45 @@ def _add_runs_with_inline_format(paragraph, text: str):
 #      · `dict[k] += n` 本身非原子，并发自增还会静默丢计数。
 #    DOCX 构建全程都在**单一线程内**完成，改用线程局部存储（threading.local）
 #    即可天然隔离各次导出，无需加锁。
-_FIX_STATS_KEYS = ("formulas", "block_formulas", "replacement_chars",
-                   "control_chars", "gbk_mojibake", "latin1_mojibake",
-                   "cyrillic",
-                   # ✅ 新增（2026-10-06 · P0 逐块 fail-soft 可观测性）：
-                   #   write_section 内单个内容块渲染抛异常时降级为纯文本/跳过，
-                   #   绝不让一份文档因一个坏块整体 500。降级次数必须可观测
-                   #   （日志 + X-Fix-Stats 响应头），否则「成稿少了一块」变成
-                   #   与「静默丢数据」同级的不可见缺陷。
-                   #   加法式扩展：既有 7 个键的语义与取值一字未动。
-                   "block_render_failed",
-                    # ✅ 新增（2026-10-06 · P1 表格尺寸上限）：
-                    #   GFM 表格行列/单元格数超限时截断的次数（正常表格恒为 0）。
-                    "table_truncated",
-                    # ✅ R99 新增（2026-10-17 · 围栏自动修复可观测性）：
-                    #   导出前置「自动补齐未闭合围栏」修好的围栏数。开启该开关后
-                    #   DLV-07 的 error 级提示会被补齐动作抹掉，而围栏之后的正文
-                    #   可能被并入图表源码（实测开启后丢得比关闭时更多），用户若
-                    #   无任何提示就等于「静默丢正文」。计数随 X-Fix-Stats 下发，
-                    #   与 audit_content 的 fence_auto_fixed 提示互为佐证。
-                    #   加法式扩展：既有 9 个键的语义与取值一字未动（未开启该
-                    #   开关时恒为 0）。
-                    "fences_fixed",
-                    # ✅ 2026-10-17（文档质量报告 符号/文字/公式问题）：
-                    #   HTML 实体残留（`&gt;`/`&lt;`）/ 中英混排误植词 / 带边界空白
-                    #   LaTeX 残留的自动修复计数。加法式扩展：既有键的语义与取值
-                    #   一字未动，新键仅在源文含对应残留时非零。
-                    "html_entities", "en_residue", "latex_residue",
-                    # ✅ 2026-10-17（导出文档发现的问题）：表格「两块侧叠」错位行
-                    #   被拆分还原的次数（普通表恒为 0）。加法式扩展：既有键语义
-                    #   与取值一字未动。
-                    "table_unstacked")
+_FIX_STATS_KEYS = (
+    "formulas",
+    "block_formulas",
+    "replacement_chars",
+    "control_chars",
+    "gbk_mojibake",
+    "latin1_mojibake",
+    "cyrillic",
+    # ✅ 新增（2026-10-06 · P0 逐块 fail-soft 可观测性）：
+    #   write_section 内单个内容块渲染抛异常时降级为纯文本/跳过，
+    #   绝不让一份文档因一个坏块整体 500。降级次数必须可观测
+    #   （日志 + X-Fix-Stats 响应头），否则「成稿少了一块」变成
+    #   与「静默丢数据」同级的不可见缺陷。
+    #   加法式扩展：既有 7 个键的语义与取值一字未动。
+    "block_render_failed",
+    # ✅ 新增（2026-10-06 · P1 表格尺寸上限）：
+    #   GFM 表格行列/单元格数超限时截断的次数（正常表格恒为 0）。
+    "table_truncated",
+    # ✅ R99 新增（2026-10-17 · 围栏自动修复可观测性）：
+    #   导出前置「自动补齐未闭合围栏」修好的围栏数。开启该开关后
+    #   DLV-07 的 error 级提示会被补齐动作抹掉，而围栏之后的正文
+    #   可能被并入图表源码（实测开启后丢得比关闭时更多），用户若
+    #   无任何提示就等于「静默丢正文」。计数随 X-Fix-Stats 下发，
+    #   与 audit_content 的 fence_auto_fixed 提示互为佐证。
+    #   加法式扩展：既有 9 个键的语义与取值一字未动（未开启该
+    #   开关时恒为 0）。
+    "fences_fixed",
+    # ✅ 2026-10-17（文档质量报告 符号/文字/公式问题）：
+    #   HTML 实体残留（`&gt;`/`&lt;`）/ 中英混排误植词 / 带边界空白
+    #   LaTeX 残留的自动修复计数。加法式扩展：既有键的语义与取值
+    #   一字未动，新键仅在源文含对应残留时非零。
+    "html_entities",
+    "en_residue",
+    "latex_residue",
+    # ✅ 2026-10-17（导出文档发现的问题）：表格「两块侧叠」错位行
+    #   被拆分还原的次数（普通表恒为 0）。加法式扩展：既有键语义
+    #   与取值一字未动。
+    "table_unstacked",
+)
 _FIX_STATS_LOCAL = _sh.threading.local()
 
 
@@ -413,8 +443,7 @@ def _log_fix_stats() -> dict:
         return {}
     parts = []
     if st["formulas"]:
-        parts.append(f"公式转数学排版 {st['formulas']} 处"
-                     f"（块级 {st['block_formulas']}）")
+        parts.append(f"公式转数学排版 {st['formulas']} 处" f"（块级 {st['block_formulas']}）")
     if st["replacement_chars"]:
         parts.append(f"替换字符 {st['replacement_chars']} 处")
     if st["control_chars"]:
@@ -426,13 +455,11 @@ def _log_fix_stats() -> dict:
     if st["cyrillic"]:
         parts.append(f"西里尔误植 {st['cyrillic']} 处")
     if st["block_render_failed"]:
-        parts.append(f"内容块降级为纯文本 {st['block_render_failed']} 处"
-                     "（成稿已保留文字，版式降级）")
+        parts.append(f"内容块降级为纯文本 {st['block_render_failed']} 处" "（成稿已保留文字，版式降级）")
     if st["table_truncated"]:
         parts.append(f"超宽/超长表格截断 {st['table_truncated']} 处")
     if st["fences_fixed"]:
-        parts.append(f"未闭合围栏自动补齐 {st['fences_fixed']} 处"
-                     "（围栏之后的正文可能被并入图表源码，请核对成稿）")
+        parts.append(f"未闭合围栏自动补齐 {st['fences_fixed']} 处" "（围栏之后的正文可能被并入图表源码，请核对成稿）")
     if st["html_entities"]:
         parts.append(f"HTML 实体还原 {st['html_entities']} 处（&gt;/&lt; → >/<）")
     if st["en_residue"]:
@@ -444,12 +471,16 @@ def _log_fix_stats() -> dict:
         _sh.logger.warning(
             "DOCX 导出存在降级：%d 处内容块渲染失败（已降级为纯文本）、"
             "%d 处表格超尺寸（已截断）—— 成稿可交付但版式不完整，"
-            "请回查源文对应章节", st["block_render_failed"], st["table_truncated"])
+            "请回查源文对应章节",
+            st["block_render_failed"],
+            st["table_truncated"],
+        )
     if st["fences_fixed"]:
         _sh.logger.warning(
             "DOCX 导出前置自动补齐了 %d 处未闭合围栏：围栏之后的正文会被并入"
             "图表源码并整体跳过（CommonMark 口径），成稿请人工核对缺失段落",
-            st["fences_fixed"])
+            st["fences_fixed"],
+        )
     _sh.logger.info("DOCX 导出自动修复: %s", "、".join(parts))
     st.update({k: 0 for k in st})
     return stats
@@ -474,13 +505,13 @@ def _strip_leading_fact_name(text: str, name: str) -> str:
     for pat in (rf"^\*\*\s*{_sh.re.escape(nm)}\s*\*\*\s*[:：]\s*", rf"^{_sh.re.escape(nm)}\s*[:：]\s*"):
         m = _sh.re.match(pat, body)
         if m:
-            return body[m.end():].strip()
+            return body[m.end() :].strip()
     return text
 
 
-def _appendix_cell_paragraph(cell, text: str, font_name: str,
-                             font_size: float = 10.5, *, first: bool = False,
-                             strip_name: str = ""):
+def _appendix_cell_paragraph(
+    cell, text: str, font_name: str, font_size: float = 10.5, *, first: bool = False, strip_name: str = ""
+):
     """向附录事实表单元格写入一行内容：剥离开头列表符号并解析行内 Markdown。
 
     旧实现直接 ``add_run`` 写入全局事实原文，``- **名称**: 内容`` 等列表 +
@@ -533,8 +564,7 @@ def _add_table_caption(doc, text: str, font_name: str = "宋体", font_size: flo
 
 
 #: 表题开头「表 X-Y」/「表：」等编号前缀（剥离后再由导出统一编号，避免叠写）。
-_LEADING_TABLE_NUM_RE = _sh.re.compile(
-    r"^表\s*(?:[:：]\s*|[0-9一二三四五六七八九十][0-9.\-–—]*[\s、.：:]+)")
+_LEADING_TABLE_NUM_RE = _sh.re.compile(r"^表\s*(?:[:：]\s*|[0-9一二三四五六七八九十][0-9.\-–—]*[\s、.：:]+)")
 
 
 def _strip_leading_table_number(text: str) -> str:
@@ -560,7 +590,7 @@ def _strip_leading_table_number(text: str) -> str:
 #: `asyncio.to_thread` 的**单个工作线程**里跑、无内部超时 → 一张畸形宽表
 #: 就能把导出线程长期占死，用户侧表现为"导出卡住不动"。
 #: 正常工程表格（列 ≲ 20、行 ≲ 100）远低于下列阈值，产物逐字节不变。
-_TABLE_MAX_COLS = 63     # Word 表格硬上限即 63 列
+_TABLE_MAX_COLS = 63  # Word 表格硬上限即 63 列
 _TABLE_MAX_ROWS = 400
 _TABLE_MAX_CELLS = 12000
 
@@ -617,7 +647,7 @@ def _unstack_or_trim_table_rows(rows: list[list[str]]) -> list[list[str]]:
     if any(any(header[a:b]) for a, b in blocks[1:]):
         return grid
 
-    out: list[list[str]] = [header[blocks[0][0]:blocks[0][1]]]
+    out: list[list[str]] = [header[blocks[0][0] : blocks[0][1]]]
     width = len(out[0])
     for g in grid[1:]:
         for a, b in blocks:
@@ -628,7 +658,11 @@ def _unstack_or_trim_table_rows(rows: list[list[str]]) -> list[list[str]]:
     _sh.logger.warning(
         "导出：表格侧叠行已拆分还原（原 %d 行 × %d 列 → %d 行 × %d 列）"
         "——源文存在「两条记录挤在同一行」的错位，成稿已按记录分行。",
-        len(rows), ncols, len(out), width)
+        len(rows),
+        ncols,
+        len(out),
+        width,
+    )
     _sh._fix_stats()["table_unstacked"] = _sh._fix_stats().get("table_unstacked", 0) + 1
     return [r + [""] * (width - len(r)) for r in out]
 
@@ -668,7 +702,7 @@ def _add_table_from_markup(doc, tbl_lines: list[str], font_name: str = "宋体")
         ncols = _sh._TABLE_MAX_COLS
         truncated = True
     if len(rows) > _sh._TABLE_MAX_ROWS:
-        rows = rows[:_sh._TABLE_MAX_ROWS]
+        rows = rows[: _sh._TABLE_MAX_ROWS]
         truncated = True
     if len(rows) * ncols > _sh._TABLE_MAX_CELLS:
         keep = max(1, _sh._TABLE_MAX_CELLS // max(1, ncols))
@@ -680,8 +714,15 @@ def _add_table_from_markup(doc, tbl_lines: list[str], font_name: str = "宋体")
         _sh.logger.warning(
             "导出：表格超尺寸已截断（原始 %d 列 × %d 行 → %d 列 × %d 行，"
             "上限 %d 列 / %d 行 / %d 单元格）—— 成稿可交付但该表内容不完整，"
-            "请回查源文", raw_cols, raw_rows, ncols, len(rows),
-            _sh._TABLE_MAX_COLS, _sh._TABLE_MAX_ROWS, _sh._TABLE_MAX_CELLS)
+            "请回查源文",
+            raw_cols,
+            raw_rows,
+            ncols,
+            len(rows),
+            _sh._TABLE_MAX_COLS,
+            _sh._TABLE_MAX_ROWS,
+            _sh._TABLE_MAX_CELLS,
+        )
     table = doc.add_table(rows=len(rows), cols=ncols)
     table.style = "Table Grid"
     table.alignment = WD_TABLE_ALIGNMENT.CENTER
@@ -702,8 +743,7 @@ def _add_table_from_markup(doc, tbl_lines: list[str], font_name: str = "宋体")
                 # 单元格内也解析 **加粗** 等行内标记（旧实现整格按纯文本输出）
                 _sh._add_runs_with_inline_format(p, cell_text)
             for run in p.runs:
-                _sh._set_run_font(run, font_name, 10.5,
-                              bold=True if ri == 0 else run.bold)
+                _sh._set_run_font(run, font_name, 10.5, bold=True if ri == 0 else run.bold)
             if ri == 0:
                 # ✅ R109：按 CT_TcPr 序列插入 w:shd（旧实现 append 到末尾 →
                 #    与已写入的 w:vAlign 顺序颠倒，WPS 拒绝打开）
@@ -814,8 +854,6 @@ def _add_cover_info_table(doc, info: dict, font_name: str) -> None:
         _sh._set_cell_shading(c1, "F2F2F2")
 
 
-
-
 # ---------------------------------------------------------------------------
 # ✅ 2026-10-11（引入《文档生成规则分析与软件标准建立》第四部分 4.2 导出标准）：
 #    可选**版式预设**。既有默认（2.5cm 四边 / 行距 1.15）是历轮锁定的字节契约，
@@ -876,9 +914,14 @@ def _resolve_layout_preset(config: dict, base_opts: dict) -> dict:
 # 空值行不渲染，避免交付文档出现「XXX：」这类空栏。
 
 
-def _add_form_table(doc, rows: list[tuple[str, str]], font_name: str = "宋体",
-                    col1_cm: float = 4.0, col2_cm: float = 10.0,
-                    keep_empty: bool = False) -> None:
+def _add_form_table(
+    doc,
+    rows: list[tuple[str, str]],
+    font_name: str = "宋体",
+    col1_cm: float = 4.0,
+    col2_cm: float = 10.0,
+    keep_empty: bool = False,
+) -> None:
     """插入「标签 / 值」两列表单（审批表、论证报告表共用）。
 
     与 :func:`_add_cover_info_table` 同款固定布局（14cm 宽、灰底纹），
@@ -898,8 +941,7 @@ def _add_form_table(doc, rows: list[tuple[str, str]], font_name: str = "宋体",
     from docx.oxml.ns import qn
     from docx.shared import Cm
 
-    pairs = [(str(k), str(v or "").strip()) for k, v in rows
-             if keep_empty or str(v or "").strip()]
+    pairs = [(str(k), str(v or "").strip()) for k, v in rows if keep_empty or str(v or "").strip()]
     if not pairs:
         return
     table = doc.add_table(rows=len(pairs), cols=2)
@@ -933,8 +975,7 @@ def _add_form_table(doc, rows: list[tuple[str, str]], font_name: str = "宋体",
         _sh._add_runs_with_inline_format(p1, v)
 
 
-def _add_prelim_page_title(doc, title: str, font_name: str,
-                           basis: str = "") -> None:
+def _add_prelim_page_title(doc, title: str, font_name: str, basis: str = "") -> None:
     """前置页页题（居中加粗 + 编制依据注），并为其后留白。"""
     from docx.enum.text import WD_ALIGN_PARAGRAPH
     from docx.shared import Pt
@@ -964,8 +1005,7 @@ def _scheme_form_header(scheme: dict, cover_info: dict | None) -> list[tuple[str
     ]
 
 
-def _add_compilation_note_page(doc, scheme: dict, cover_info: dict | None,
-                               font_name: str) -> None:
+def _add_compilation_note_page(doc, scheme: dict, cover_info: dict | None, font_name: str) -> None:
     """编制说明（专项施工方案标准组成，说明编制背景与执行要求）。
 
     仅陈述可从方案自身与封面信息确定的内容；不从事实库取未经确认的数值，
@@ -979,8 +1019,8 @@ def _add_compilation_note_page(doc, scheme: dict, cover_info: dict | None,
         f"由施工单位技术负责人组织工程技术人员编制，"
         f"经施工单位技术负责人审核签字并加盖单位公章、"
         f"总监理工程师审查签字后方可实施。"
-        if project_name and scheme_name else
-        "本方案由施工单位组织工程技术人员编制，"
+        if project_name and scheme_name
+        else "本方案由施工单位组织工程技术人员编制，"
         "经施工单位技术负责人审核签字并加盖单位公章、"
         "总监理工程师审查签字后方可实施。",
         "本方案依据国家、行业及地方现行法律法规、部门规章、"
@@ -999,8 +1039,7 @@ def _add_compilation_note_page(doc, scheme: dict, cover_info: dict | None,
         _sh._add_runs_with_inline_format(p, text)
 
 
-def _add_scheme_approval_table(doc, scheme: dict, cover_info: dict | None,
-                               font_name: str) -> None:
+def _add_scheme_approval_table(doc, scheme: dict, cover_info: dict | None, font_name: str) -> None:
     """专项施工方案审批表（住建部令第37号 第十一条）。
 
     签字栏留空 —— 表单交付态即「待签」，由各方线下手签，
@@ -1008,30 +1047,41 @@ def _add_scheme_approval_table(doc, scheme: dict, cover_info: dict | None,
     """
     from docx.shared import Pt
 
-    _sh._add_prelim_page_title(doc, "专项施工方案审批表", font_name,
-                           "依据《危险性较大的分部分项工程安全管理规定》"
-                           "（住建部令第37号）第十一条")
+    _sh._add_prelim_page_title(
+        doc,
+        "专项施工方案审批表",
+        font_name,
+        "依据《危险性较大的分部分项工程安全管理规定》" "（住建部令第37号）第十一条",
+    )
     _sh._add_form_table(doc, _sh._scheme_form_header(scheme, cover_info), font_name)
     doc.add_paragraph()
-    _sh._add_form_table(doc, [
-        ("编制人（签字）", ""),
-        ("编制日期", ""),
-        ("施工单位技术负责人（审核签字）", ""),
-        ("审核日期", ""),
-        ("总承包单位技术负责人（分包工程共同审核）", ""),
-        ("专业分包单位技术负责人（分包工程共同审核）", ""),
-        ("总监理工程师（审查签字）", ""),
-        ("审查日期", ""),
-    ], font_name, col1_cm=6.0, col2_cm=8.0, keep_empty=True)
+    _sh._add_form_table(
+        doc,
+        [
+            ("编制人（签字）", ""),
+            ("编制日期", ""),
+            ("施工单位技术负责人（审核签字）", ""),
+            ("审核日期", ""),
+            ("总承包单位技术负责人（分包工程共同审核）", ""),
+            ("专业分包单位技术负责人（分包工程共同审核）", ""),
+            ("总监理工程师（审查签字）", ""),
+            ("审查日期", ""),
+        ],
+        font_name,
+        col1_cm=6.0,
+        col2_cm=8.0,
+        keep_empty=True,
+    )
     p = doc.add_paragraph()
     p.paragraph_format.space_before = Pt(10)
     _sh._add_runs_with_inline_format(
-        p, "注：本表签字并加盖单位公章（总监理工程师加盖执业印章）齐全后方可实施；"
-           "实行分包的专项施工方案，由总承包单位与分包单位技术负责人共同审核签字。")
+        p,
+        "注：本表签字并加盖单位公章（总监理工程师加盖执业印章）齐全后方可实施；"
+        "实行分包的专项施工方案，由总承包单位与分包单位技术负责人共同审核签字。",
+    )
 
 
-def _add_expert_review_form(doc, scheme: dict, cover_info: dict | None,
-                            font_name: str) -> None:
+def _add_expert_review_form(doc, scheme: dict, cover_info: dict | None, font_name: str) -> None:
     """专家论证会论证报告（住建部令第37号 第十二/十三条 + 建办质〔2018〕31号 三/四）。
 
     论证结论固定三选一（通过 / 修改后通过 / 不通过），专家栏按
@@ -1039,16 +1089,19 @@ def _add_expert_review_form(doc, scheme: dict, cover_info: dict | None,
     """
     from docx.shared import Pt
 
-    _sh._add_prelim_page_title(doc, "专项施工方案专家论证报告", font_name,
-                           "依据《危险性较大的分部分项工程安全管理规定》"
-                           "（住建部令第37号）第十二条、第十三条，"
-                           "建办质〔2018〕31号第三条、第四条")
+    _sh._add_prelim_page_title(
+        doc,
+        "专项施工方案专家论证报告",
+        font_name,
+        "依据《危险性较大的分部分项工程安全管理规定》"
+        "（住建部令第37号）第十二条、第十三条，"
+        "建办质〔2018〕31号第三条、第四条",
+    )
     _sh._add_form_table(doc, _sh._scheme_form_header(scheme, cover_info), font_name)
     doc.add_paragraph()
 
     p = doc.add_paragraph()
-    _sh._set_run_font(p.add_run("一、专家论证主要内容（建办质〔2018〕31号 第四条）"),
-                  font_name, 12, bold=True)
+    _sh._set_run_font(p.add_run("一、专家论证主要内容（建办质〔2018〕31号 第四条）"), font_name, 12, bold=True)
     for item in (
         "（一）专项施工方案内容是否完整、可行；",
         "（二）专项施工方案计算书和验算依据、施工图是否符合有关标准规范；",
@@ -1059,39 +1112,49 @@ def _add_expert_review_form(doc, scheme: dict, cover_info: dict | None,
 
     doc.add_paragraph()
     p = doc.add_paragraph()
-    _sh._set_run_font(p.add_run("二、论证结论（住建部令第37号 第十三条，三选一）"),
-                  font_name, 12, bold=True)
-    _sh._add_form_table(doc, [("论证结论", "□ 通过    □ 修改后通过    □ 不通过"),
-                          ("论证意见（修改后通过时须写明具体修改内容）", "")],
-                    font_name, col1_cm=6.0, col2_cm=8.0)
+    _sh._set_run_font(p.add_run("二、论证结论（住建部令第37号 第十三条，三选一）"), font_name, 12, bold=True)
+    _sh._add_form_table(
+        doc,
+        [("论证结论", "□ 通过    □ 修改后通过    □ 不通过"), ("论证意见（修改后通过时须写明具体修改内容）", "")],
+        font_name,
+        col1_cm=6.0,
+        col2_cm=8.0,
+    )
 
     doc.add_paragraph()
     p = doc.add_paragraph()
-    _sh._set_run_font(p.add_run("三、参会人员（建办质〔2018〕31号 第三条）"),
-                  font_name, 12, bold=True)
-    _sh._add_form_table(doc, [
-        ("专家（不得少于 5 名）", ""),
-        ("建设单位项目负责人", ""),
-        ("勘察、设计单位项目技术负责人及相关人员", ""),
-        ("施工总承包 / 分包单位项目负责人、项目技术负责人、"
-         "专项施工方案编制人员、项目专职安全生产管理人员", ""),
-        ("监理单位项目总监理工程师及专业监理工程师", ""),
-    ], font_name, col1_cm=6.0, col2_cm=8.0, keep_empty=True)
+    _sh._set_run_font(p.add_run("三、参会人员（建办质〔2018〕31号 第三条）"), font_name, 12, bold=True)
+    _sh._add_form_table(
+        doc,
+        [
+            ("专家（不得少于 5 名）", ""),
+            ("建设单位项目负责人", ""),
+            ("勘察、设计单位项目技术负责人及相关人员", ""),
+            ("施工总承包 / 分包单位项目负责人、项目技术负责人、" "专项施工方案编制人员、项目专职安全生产管理人员", ""),
+            ("监理单位项目总监理工程师及专业监理工程师", ""),
+        ],
+        font_name,
+        col1_cm=6.0,
+        col2_cm=8.0,
+        keep_empty=True,
+    )
 
     doc.add_paragraph()
     p = doc.add_paragraph()
-    _sh._set_run_font(p.add_run("四、专家签字确认（专家对论证报告负责并签字确认）"),
-                  font_name, 12, bold=True)
+    _sh._set_run_font(p.add_run("四、专家签字确认（专家对论证报告负责并签字确认）"), font_name, 12, bold=True)
     # 住建部令第37号 第十二条：专家人数不得少于 5 名 —— 固定 5 行空栏
-    _sh._add_form_table(doc, [(f"专家 {i}（签字）", "") for i in range(1, 6)],
-                    font_name, col1_cm=6.0, col2_cm=8.0, keep_empty=True)
+    _sh._add_form_table(
+        doc, [(f"专家 {i}（签字）", "") for i in range(1, 6)], font_name, col1_cm=6.0, col2_cm=8.0, keep_empty=True
+    )
     p = doc.add_paragraph()
     p.paragraph_format.space_before = Pt(10)
     _sh._add_runs_with_inline_format(
-        p, "注：专家应当从地方人民政府住房城乡建设主管部门建立的专家库中选取，"
-           "符合专业要求且人数不得少于 5 名；与本工程有利害关系的人员"
-           "不得以专家身份参加专家论证会。结论为「修改后通过」的，"
-           "应当按论证意见修改完善后重新履行审核程序后方可实施。")
+        p,
+        "注：专家应当从地方人民政府住房城乡建设主管部门建立的专家库中选取，"
+        "符合专业要求且人数不得少于 5 名；与本工程有利害关系的人员"
+        "不得以专家身份参加专家论证会。结论为「修改后通过」的，"
+        "应当按论证意见修改完善后重新履行审核程序后方可实施。",
+    )
 
 
 def _add_drawing_appendix_page(doc, scheme: dict, font_name: str) -> None:
@@ -1102,26 +1165,34 @@ def _add_drawing_appendix_page(doc, scheme: dict, font_name: str) -> None:
     """
     from docx.shared import Pt
 
-    _sh._add_prelim_page_title(doc, "施工图纸附件清单", font_name,
-                           "依据建办质〔2018〕31号 专项施工方案内容 第（九）项")
+    _sh._add_prelim_page_title(doc, "施工图纸附件清单", font_name, "依据建办质〔2018〕31号 专项施工方案内容 第（九）项")
     _sh._add_form_table(doc, _sh._scheme_form_header(scheme, None), font_name)
     doc.add_paragraph()
     p = doc.add_paragraph()
-    _sh._set_run_font(p.add_run("随本方案附以下施工图纸，图纸应与正文「计算书及相关施工图纸」"
-                            "章节相互对应、编号连续："), font_name, 10.5)
+    _sh._set_run_font(
+        p.add_run("随本方案附以下施工图纸，图纸应与正文「计算书及相关施工图纸」" "章节相互对应、编号连续："),
+        font_name,
+        10.5,
+    )
     doc.add_paragraph()
     rows = [("图号", "图纸名称", "比例 / 说明")]
     rows += [(str(i), "", "") for i in range(1, 9)]
-    _sh._add_table_from_markup(doc, [
-        "| " + " | ".join(rows[0]) + " |",
-        "| " + " | ".join(["---"] * 3) + " |",
-        *["| " + " | ".join(r) + " |" for r in rows[1:]],
-    ], font_name)
+    _sh._add_table_from_markup(
+        doc,
+        [
+            "| " + " | ".join(rows[0]) + " |",
+            "| " + " | ".join(["---"] * 3) + " |",
+            *["| " + " | ".join(r) + " |" for r in rows[1:]],
+        ],
+        font_name,
+    )
     p = doc.add_paragraph()
     p.paragraph_format.space_before = Pt(10)
     _sh._add_runs_with_inline_format(
-        p, "注：图号由导出器统一编排并与正文图题连续；本清单仅登记图名与内容，"
-           "不预填图号。危大工程涉及第三方监测的，监测点布置图一并列入本清单。")
+        p,
+        "注：图号由导出器统一编排并与正文图题连续；本清单仅登记图名与内容，"
+        "不预填图号。危大工程涉及第三方监测的，监测点布置图一并列入本清单。",
+    )
 
 
 def _set_margins(section, margins: dict) -> None:
@@ -1182,9 +1253,9 @@ def _read_image_dpi(info_dpi) -> float:
     return dpi if dpi > 1.0 else 0.0
 
 
-def _fit_image_cm(w_px, h_px, dpi: float | None = None,
-                  max_w: float = _CHART_MAX_WIDTH_CM,
-                  max_h: float = _CHART_MAX_HEIGHT_CM) -> tuple[float, float]:
+def _fit_image_cm(
+    w_px, h_px, dpi: float | None = None, max_w: float = _CHART_MAX_WIDTH_CM, max_h: float = _CHART_MAX_HEIGHT_CM
+) -> tuple[float, float]:
     """按像素尺寸 + DPI 计算图片插入尺寸（cm），**同时**受宽/高上限约束。
 
     纯函数（不依赖 docx / PIL 打开文件），便于单测直接断言尺寸口径。
@@ -1264,14 +1335,13 @@ def _image_format_supported(img_bytes) -> bool:
     """
     try:
         from PIL import Image as PILImage
+
         with PILImage.open(_sh.BytesIO(img_bytes.getvalue())) as im:
             return (im.format or "").upper() in _sh._DOCX_SAFE_IMAGE_FORMATS
     except Exception:
         # ✅ R179（2026-11-05）：debug 级别在默认日志配置下不可见，图片被跳过时
         #    运维只看到「成稿少了一张图」。升级为 warning（仍按不支持处理）。
-        _sh.logger.warning(
-            "图片格式探测失败（按不支持处理，对应图表/配图将被跳过）", exc_info=True
-        )
+        _sh.logger.warning("图片格式探测失败（按不支持处理，对应图表/配图将被跳过）", exc_info=True)
         return False
 
 
@@ -1327,8 +1397,9 @@ def _degrade_block_to_text(doc, block: dict, font_name: str, font_size: float) -
 
     st = _sh._fix_stats()
     st["block_render_failed"] = st.get("block_render_failed", 0) + 1
-    _sh.logger.warning("导出：内容块（type=%s）渲染失败，已降级为纯文本保留：%s",
-                   block.get("type"), str(block.get("text") or "")[:40])
+    _sh.logger.warning(
+        "导出：内容块（type=%s）渲染失败，已降级为纯文本保留：%s", block.get("type"), str(block.get("text") or "")[:40]
+    )
     txt = _sh._block_plain_text(block)
     if not txt.strip():
         return False
@@ -1360,6 +1431,7 @@ def _pop_orphan_lead_in(doc) -> bool:
     """
     try:
         from docx.oxml.ns import qn
+
         paras = doc.paragraphs
         if not paras:
             return False
@@ -1374,8 +1446,7 @@ def _pop_orphan_lead_in(doc) -> bool:
             if last.style is not None and (last.style.name or "").startswith("Heading"):
                 return False
         except Exception:
-            _sh.logger.debug("孤儿引导语清理：段落样式读取失败（按非标题段落处理）",
-                         exc_info=True)
+            _sh.logger.debug("孤儿引导语清理：段落样式读取失败（按非标题段落处理）", exc_info=True)
         text = (last.text or "").strip()
         if not _sh._is_orphan_lead_in_text(text):
             return False
@@ -1447,10 +1518,16 @@ def _write_chart_placeholder_line(doc, caption_text: str, reason: str) -> None:
     run.font.color.rgb = RGBColor(0xFF, 0x00, 0x00)
 
 
-def _insert_image_with_caption(doc, img_bytes, caption_text: str, *,
-                               font_name: str = "宋体", font_size: float = 10.5,
-                               log_label: str = "图片",
-                               log_height_scale: bool = False) -> bool:
+def _insert_image_with_caption(
+    doc,
+    img_bytes,
+    caption_text: str,
+    *,
+    font_name: str = "宋体",
+    font_size: float = 10.5,
+    log_label: str = "图片",
+    log_height_scale: bool = False,
+) -> bool:
     """DOCX 位图插入的**唯一实现**：尺寸换算 → 居中插图 → 居中图题。
 
     ✅ 重构（2026-10-06 · D3）：`_add_inline_chart_from_bytes` 与
@@ -1468,14 +1545,14 @@ def _insert_image_with_caption(doc, img_bytes, caption_text: str, *,
     _rb = _sh._DocxBodyRollback(doc)
     try:
         from PIL import Image as PILImage
+
         stream = _sh.BytesIO(img_bytes.getvalue())
         try:
             _im = PILImage.open(stream)
             _iw_px, _ih_px = _im.size
             _dpi = _sh._read_image_dpi(_im.info.get("dpi"))
         except Exception:
-            _sh.logger.debug("%s 尺寸/DPI 读取失败（按默认 DPI 兜底）", log_label,
-                         exc_info=True)
+            _sh.logger.debug("%s 尺寸/DPI 读取失败（按默认 DPI 兜底）", log_label, exc_info=True)
             _iw_px = _ih_px = 0
             _dpi = 0.0
         # ✅ 2026-09-25：按「栏宽 16cm × 高度 22cm」双上限等比缩放。
@@ -1484,10 +1561,15 @@ def _insert_image_with_caption(doc, img_bytes, caption_text: str, *,
         _w_cm, _h_cm = _sh._fit_image_cm(_iw_px, _ih_px, _dpi)
         if log_height_scale and _h_cm >= _sh._CHART_MAX_HEIGHT_CM:
             _sh.logger.info(
-                "%s 按高度上限缩放至 %.2f×%.2fcm（页面可用高度约 %.1fcm，"
-                "原图 %dx%dpx dpi=%s）",
-                log_label, _w_cm, _h_cm, _sh._CHART_MAX_HEIGHT_CM,
-                _iw_px, _ih_px, _dpi or _sh._CHART_DPI_FALLBACK)
+                "%s 按高度上限缩放至 %.2f×%.2fcm（页面可用高度约 %.1fcm，" "原图 %dx%dpx dpi=%s）",
+                log_label,
+                _w_cm,
+                _h_cm,
+                _sh._CHART_MAX_HEIGHT_CM,
+                _iw_px,
+                _ih_px,
+                _dpi or _sh._CHART_DPI_FALLBACK,
+            )
         stream.seek(0)
         doc.add_picture(stream, width=Cm(_w_cm))
         doc.paragraphs[-1].alignment = WD_ALIGN_PARAGRAPH.CENTER
@@ -1495,8 +1577,8 @@ def _insert_image_with_caption(doc, img_bytes, caption_text: str, *,
         caption.alignment = WD_ALIGN_PARAGRAPH.CENTER
         caption.paragraph_format.first_line_indent = Cm(0)
         _sh._set_run_font(
-            _safe_add_run(caption, _normalize_delivery_text(caption_text)),
-            font_name, font_size, bold=True)
+            _safe_add_run(caption, _normalize_delivery_text(caption_text)), font_name, font_size, bold=True
+        )
         return True
     except Exception as e:
         _sh.logger.warning("%s 插入失败: %s", log_label, e)
@@ -1504,10 +1586,16 @@ def _insert_image_with_caption(doc, img_bytes, caption_text: str, *,
         return False
 
 
-def _add_inline_chart_from_bytes(doc, chart_type: str, img_bytes, figure_num: str,
-                                 default_title: str = "",
-                                 font_name: str = "宋体", font_size: float = 10.5,
-                                 placeholder: bool = False):
+def _add_inline_chart_from_bytes(
+    doc,
+    chart_type: str,
+    img_bytes,
+    figure_num: str,
+    default_title: str = "",
+    font_name: str = "宋体",
+    font_size: float = 10.5,
+    placeholder: bool = False,
+):
     """在 DOCX 中插入已渲染的图表图片（预渲染字节流）+ 规范图题。
 
     图题遵循规范「图 {章号}-{序号} {图名}」，居中加粗，字号取正文字号。
@@ -1538,18 +1626,29 @@ def _add_inline_chart_from_bytes(doc, chart_type: str, img_bytes, figure_num: st
             _sh._write_chart_placeholder_line(doc, caption_text, "渲染失败")
         return False
     if _sh._insert_image_with_caption(
-            doc, img_bytes, caption_text, font_name=font_name,
-            font_size=font_size, log_label=f"图表({chart_type})",
-            log_height_scale=True):
+        doc,
+        img_bytes,
+        caption_text,
+        font_name=font_name,
+        font_size=font_size,
+        log_label=f"图表({chart_type})",
+        log_height_scale=True,
+    ):
         return True
     if placeholder:
         _sh._write_chart_placeholder_line(doc, caption_text, "插入失败")
     return False
 
 
-def _add_illustration_from_bytes(doc, img_bytes, figure_num: str, alt: str = "",
-                                 font_name: str = "宋体", font_size: float = 10.5,
-                                 placeholder: bool = False):
+def _add_illustration_from_bytes(
+    doc,
+    img_bytes,
+    figure_num: str,
+    alt: str = "",
+    font_name: str = "宋体",
+    font_size: float = 10.5,
+    placeholder: bool = False,
+):
     """在 DOCX 中插入 AI 配图（文生图，已下载的位图字节流）+ 规范图题。
 
     与图表版的区别（**仅此两点**，版式实现共用 `_insert_image_with_caption`）：
@@ -1567,12 +1666,11 @@ def _add_illustration_from_bytes(doc, img_bytes, figure_num: str, alt: str = "",
     from docx.shared import Cm
 
     caption_text = f"图 {figure_num} {alt or '配图'}".strip()
-    if not (img_bytes and len(img_bytes.getvalue()) > 100
-            and _sh._image_format_supported(img_bytes)):
+    if not (img_bytes and len(img_bytes.getvalue()) > 100 and _sh._image_format_supported(img_bytes)):
         return False
     if _sh._insert_image_with_caption(
-            doc, img_bytes, caption_text, font_name=font_name,
-            font_size=font_size, log_label=f"AI 配图({caption_text})"):
+        doc, img_bytes, caption_text, font_name=font_name, font_size=font_size, log_label=f"AI 配图({caption_text})"
+    ):
         return True
     if placeholder:
         p = doc.add_paragraph()

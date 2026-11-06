@@ -35,8 +35,9 @@ def _truncate_context(text: str) -> str:
         if pos > cut:
             cut = pos
     if cut > 0:
-        return window[:cut + 1]
+        return window[: cut + 1]
     return window + "…"
+
 
 def _apply_prompt_context_budget(text: str) -> str:
     """按 prompt_context_budget 对已标注分段的上下文做预算削减。
@@ -52,6 +53,7 @@ def _apply_prompt_context_budget(text: str) -> str:
         return text
     try:
         from app.services.prompt_governance import apply_context_budget
+
         return apply_context_budget(text, budget)
     except Exception:
         _sh.logger.warning("上下文预算削减失败（使用原文继续）", exc_info=True)
@@ -79,6 +81,7 @@ def _guard_external_material(text: str) -> str:
             injection_defense_enabled,
             redaction_enabled,
         )
+
         if not injection_defense_enabled() and not redaction_enabled():
             return text
         # 预算由紧随其后的 _apply_prompt_context_budget 统一处理（同一开关），
@@ -90,6 +93,7 @@ def _guard_external_material(text: str) -> str:
 
 
 # ---------- 长方案分步：子目录取回执行单元（批内并发 / 批内合并） ----------
+
 
 def _as_children(obj) -> list:
     """从 AI 响应中取 outline 数组（畸形/缺失一律回退空列表）。
@@ -120,18 +124,17 @@ async def _finish_stopped_with_partial(task_id: str, holder: dict) -> str:
     """
     outline = holder.get("outline") or []
     failed = holder.get("failed_chapters") or []
-    payload = {'event': 'stopped', 'task_id': task_id}
+    payload = {"event": "stopped", "task_id": task_id}
     if outline:
-        payload['outline'] = outline
-        payload['partial'] = True
+        payload["outline"] = outline
+        payload["partial"] = True
         if failed:
-            payload['failed_chapters'] = list(failed)
-            payload['failed_count'] = len(failed)
+            payload["failed_chapters"] = list(failed)
+            payload["failed_count"] = len(failed)
         try:
             await _sh._save_outline_checkpoint(task_id, payload)
         except Exception:
-            _sh.logger.warning("检查点写入失败（task=%s · 目录生成 · 停止时成果）", task_id,
-                           exc_info=True)
+            _sh.logger.warning("检查点写入失败（task=%s · 目录生成 · 停止时成果）", task_id, exc_info=True)
     # 清空 holder：防 finally 兜底把同一份成果再落一次库
     holder["outline"] = []
     holder["failed_chapters"] = []
@@ -179,20 +182,26 @@ async def _fetch_chapter_children(
         try:
             obj, _raw = await _sh._await_with_stats(
                 _sh.collect_json_response(
-                    sub_prompt, validate_fn, timeout=timeout,
-                    json_mode=True, temperature=0.2, scene="outline_sublevel",
-                    repair_key=_sh.OUTLINE_REPAIR_KEY),
-                push_stats, task_id=task_id)
+                    sub_prompt,
+                    validate_fn,
+                    timeout=timeout,
+                    json_mode=True,
+                    temperature=0.2,
+                    scene="outline_sublevel",
+                    repair_key=_sh.OUTLINE_REPAIR_KEY,
+                ),
+                push_stats,
+                task_id=task_id,
+            )
             return "ok", _sh._as_children(obj)
         except asyncio.CancelledError:
             raise
-        except Exception as e:          # noqa: BLE001 - 兜住任意 provider 异常
+        except Exception as e:  # noqa: BLE001 - 兜住任意 provider 异常
             # ✅ O8/O9 闸门：配额 / 认证 / 模型不存在类错误（402/403/404/429）
             #    默认**不重试** —— 这类错误重试几乎必然再失败，白烧一轮配额
             #    与超时；`AI_RETRY_ON_QUOTA_ERROR=True` 可恢复旧行为。
             if not _sh.AI_RETRY_ON_QUOTA_ERROR and _sh._is_quota_error(e):
-                _sh.logger.warning("第%d章子目录生成失败（配额/认证类，不重试）: %s",
-                               index + 1, e)
+                _sh.logger.warning("第%d章子目录生成失败（配额/认证类，不重试）: %s", index + 1, e)
                 return "failed", []
             _sh.logger.warning("第%d章子目录首次生成失败: %s，重试一次", index + 1, e)
             # 重试前再过一次闸门与停止检查：用户在首试失败后可能已点
@@ -203,14 +212,21 @@ async def _fetch_chapter_children(
             try:
                 obj, _raw = await _sh._await_with_stats(
                     _sh.collect_json_response(
-                        sub_prompt, validate_fn, timeout=timeout,
-                        json_mode=True, temperature=0.2, scene="outline_sublevel",
-                        repair_key=_sh.OUTLINE_REPAIR_KEY),
-                    push_stats, task_id=task_id)
+                        sub_prompt,
+                        validate_fn,
+                        timeout=timeout,
+                        json_mode=True,
+                        temperature=0.2,
+                        scene="outline_sublevel",
+                        repair_key=_sh.OUTLINE_REPAIR_KEY,
+                    ),
+                    push_stats,
+                    task_id=task_id,
+                )
                 return "ok", _sh._as_children(obj)
             except asyncio.CancelledError:
                 raise
-            except Exception as e2:     # noqa: BLE001
+            except Exception as e2:  # noqa: BLE001
                 _sh.logger.warning("第%d章子目录重试仍失败: %s", index + 1, e2)
                 return "failed", []
 
@@ -253,9 +269,15 @@ async def _fetch_unit_children(
     if len(unit_chapters) == 1:
         i, ch = unit_chapters[0]
         st, children = await _sh._fetch_chapter_children(
-            i, ch, sub_prompt=(single_prompts[0] if single_prompts else []),
-            task_id=task_id, sem=sem, validate_fn=_sh._sublevel_validate_fn,
-            timeout=timeout, push_stats=push_stats)
+            i,
+            ch,
+            sub_prompt=(single_prompts[0] if single_prompts else []),
+            task_id=task_id,
+            sem=sem,
+            validate_fn=_sh._sublevel_validate_fn,
+            timeout=timeout,
+            push_stats=push_stats,
+        )
         return ("stopped" if st == "stopped" else "ok"), [(st, children)]
 
     # 单元内多章：一次批量调用
@@ -265,26 +287,33 @@ async def _fetch_unit_children(
         try:
             obj, _raw = await _sh._await_with_stats(
                 _sh.collect_json_response(
-                    batch_prompt, _sh._sublevel_batch_validate_fn, timeout=timeout,
-                    json_mode=True, temperature=0.2, scene="outline_sublevel",
-                    repair_key=_sh.OUTLINE_REPAIR_KEY),
-                push_stats, task_id=task_id)
+                    batch_prompt,
+                    _sh._sublevel_batch_validate_fn,
+                    timeout=timeout,
+                    json_mode=True,
+                    temperature=0.2,
+                    scene="outline_sublevel",
+                    repair_key=_sh.OUTLINE_REPAIR_KEY,
+                ),
+                push_stats,
+                task_id=task_id,
+            )
             batch_obj = obj
             break
         except asyncio.CancelledError:
             raise
-        except Exception as e:          # noqa: BLE001
+        except Exception as e:  # noqa: BLE001
             last_err = e
             # ✅ BUG 修复（2026-10-16 · 配额/认证类错误不重试）：与
             #    _fetch_chapter_children 的 O8/O9 闸门同口径 —— 402/403/404/429
             #    重试几乎必然再失败，白烧一轮配额与超时。旧实现批量路径缺少
             #    该闸门，配额耗尽时每轮都浪费 2 次批量调用后才逐章回退。
             if not _sh.AI_RETRY_ON_QUOTA_ERROR and _sh._is_quota_error(e):
-                _sh.logger.warning("批量子目录（第%d次，%d章）配额/认证类错误（不重试）: %s",
-                               attempt, len(unit_chapters), e)
+                _sh.logger.warning(
+                    "批量子目录（第%d次，%d章）配额/认证类错误（不重试）: %s", attempt, len(unit_chapters), e
+                )
                 break
-            _sh.logger.warning("批量子目录（第%d次，%d章）失败: %s",
-                           attempt, len(unit_chapters), e)
+            _sh.logger.warning("批量子目录（第%d次，%d章）失败: %s", attempt, len(unit_chapters), e)
     if batch_obj is None:
         _sh.logger.warning("批量子目录重试仍失败（%s），逐章回退单章调用", last_err)
 
@@ -308,9 +337,15 @@ async def _fetch_unit_children(
         # 缺章（批量失败 / 模型漏回该章）→ 逐章回退，绝不丢章
         _sh.logger.info("批量响应缺第%s章，回退单章调用", cid)
         st, children = await _sh._fetch_chapter_children(
-            i, ch, sub_prompt=(single_prompts[idx] if single_prompts else []),
-            task_id=task_id, sem=sem, validate_fn=_sh._sublevel_validate_fn,
-            timeout=timeout, push_stats=push_stats)
+            i,
+            ch,
+            sub_prompt=(single_prompts[idx] if single_prompts else []),
+            task_id=task_id,
+            sem=sem,
+            validate_fn=_sh._sublevel_validate_fn,
+            timeout=timeout,
+            push_stats=push_stats,
+        )
         per.append((st, children))
     unit_status = "stopped" if any(s == "stopped" for s, _ in per) else "ok"
     return unit_status, per
@@ -407,6 +442,7 @@ def _attach_quality_report(outline: list, basis, review_obj: dict) -> dict:
             render_coverage_notice,
             render_structure_notice,
         )
+
         cont = check_outline_continuity(outline)
         cov = analyze_name_coverage(basis, outline)
         redundant = find_redundant_titles(basis, outline) if cov.get("evaluated") else []
@@ -416,13 +452,17 @@ def _attach_quality_report(outline: list, basis, review_obj: dict) -> dict:
         #    不塞 suggestions（微型方案章数少于 5 属合法形态，阻断即误伤）。
         struct = check_structure_standards(outline)
         report = {
-            "continuity": {"ok": cont.get("ok"), "nodes": cont.get("nodes"),
-                           "max_level": cont.get("max_level"),
-                           "issue_counts": cont.get("issue_counts"),
-                           "generic_titles": cont.get("generic_titles") or []},
+            "continuity": {
+                "ok": cont.get("ok"),
+                "nodes": cont.get("nodes"),
+                "max_level": cont.get("max_level"),
+                "issue_counts": cont.get("issue_counts"),
+                "generic_titles": cont.get("generic_titles") or [],
+            },
             "structure": struct,
             "name_coverage": {
-                "evaluated": cov.get("evaluated"), "covered": cov.get("covered"),
+                "evaluated": cov.get("evaluated"),
+                "covered": cov.get("covered"),
                 "total_items": cov.get("total_items"),
                 "missing": list(cov.get("missing") or [])[:20],
             },
@@ -436,8 +476,9 @@ def _attach_quality_report(outline: list, basis, review_obj: dict) -> dict:
         if cov.get("evaluated") and cov.get("missing"):
             _sh.logger.warning("目录全面性校验：%s", render_coverage_notice(cov["missing"]))
         if redundant:
-            _sh.logger.info("目录冗余候选 %d 个（仅报告不删除）：%s",
-                        len(redundant), "、".join(r["title"] for r in redundant[:5]))
+            _sh.logger.info(
+                "目录冗余候选 %d 个（仅报告不删除）：%s", len(redundant), "、".join(r["title"] for r in redundant[:5])
+            )
         if isinstance(review_obj, dict):
             review_obj["quality"] = report
         return report
@@ -447,8 +488,13 @@ def _attach_quality_report(outline: list, basis, review_obj: dict) -> dict:
 
 
 def _merge_unit_results(
-    level1: list, unit_idx: list, per: list, full_outline: list,
-    prior_l2: list, failed_chapters: list, unit_status: str = "",
+    level1: list,
+    unit_idx: list,
+    per: list,
+    full_outline: list,
+    prior_l2: list,
+    failed_chapters: list,
+    unit_status: str = "",
 ) -> tuple[bool, int]:
     """把一个「执行单元」的子目录结果按章序归位到 full_outline（纯函数，可单测）。
 
@@ -479,8 +525,7 @@ def _merge_unit_results(
             if unit_status == "stopped":
                 stopped = True
                 break
-            _sh.logger.warning("第%s章子目录结果缺失（单元返回 %d 条），按失败记账",
-                           i + 1, len(per))
+            _sh.logger.warning("第%s章子目录结果缺失（单元返回 %d 条），按失败记账", i + 1, len(per))
             st, children = "failed", []
         else:
             st, children = per[j]
@@ -505,8 +550,7 @@ def _merge_unit_results(
             # failed_chapters / failed_count 如实带出，前端有可见信号；全部章
             # 都空时 all_failed 自然成立，走 failed 终态而非 completed。
             failed_chapters.append(str(ch.get("title") or f"第{i + 1}章"))
-            _sh.logger.warning("第%s章子目录为空（模型未返回任何二级章节），按失败记账",
-                           i + 1)
+            _sh.logger.warning("第%s章子目录为空（模型未返回任何二级章节），按失败记账", i + 1)
         pending.append(ch)
 
     for ch in pending:
@@ -516,7 +560,7 @@ def _merge_unit_results(
         #    章标题为 None 时 prior_l2 会写入字面量 "None / 子节标题"，
         #    随后灌入下一级的「已生成小节」提示词，污染上下文。
         _ch_title = str(ch.get("title") or "")
-        for _sub in (ch.get("children") or []):
+        for _sub in ch.get("children") or []:
             # ✅ 崩溃点修复：守卫通过后紧接着 `_sub['title'].strip()` 直接对 None
             #    调方法 → AttributeError，整次目录生成失败。现取值前先归一为空串，
             #    并让守卫与取值用同一表达式（单一判据，杜绝两处再漂移）。
@@ -555,7 +599,7 @@ def _compact_outline_json(nodes: list, max_desc: int = 80) -> str:
             item: dict = {"title": str(n.get("title", "")).strip()}
             desc = str(n.get("description", "")).strip()
             if desc and budget[0]:
-                item["description"] = desc[:budget[0]]
+                item["description"] = desc[: budget[0]]
             children = n.get("children")
             if isinstance(children, list) and children:
                 kids = _walk(children, depth + 1)
@@ -614,8 +658,7 @@ def _dangerous_required_keywords() -> tuple[tuple[str, tuple[str, ...]], ...]:
 
 
 #: 历史别名（保留供既有调用点与护栏断言；不再独立维护）。
-_DANGEROUS_REQUIRED_KEYWORDS: tuple[tuple[str, tuple[str, ...]], ...] = (
-    _dangerous_required_keywords())
+_DANGEROUS_REQUIRED_KEYWORDS: tuple[tuple[str, tuple[str, ...]], ...] = _dangerous_required_keywords()
 
 
 # `_outline_checkpoint_kwargs` 已随拆分回迁 facade（sse_handlers.py）：
@@ -632,12 +675,11 @@ _DANGEROUS_REQUIRED_KEYWORDS: tuple[tuple[str, tuple[str, ...]], ...] = (
 #: suggestions，进而触发外科式补齐加进并不存在的章节。故改为随块同生共死。
 _OUTLINE_REVIEW_AUDIT_HINT = (
     "8.1 目录是否覆盖上方【审核检查点前置要求】列出的全部必备法定章节？"
-    "任一缺失即判 passed=false，并在 suggestions 中列出缺失章节名")
+    "任一缺失即判 passed=false，并在 suggestions 中列出缺失章节名"
+)
 
 
-def _outline_review_checkpoint_kwargs(scheme_name: str = "",
-                                      scheme_type: str = "",
-                                      is_hazardous: bool = False) -> dict:
+def _outline_review_checkpoint_kwargs(scheme_name: str = "", scheme_type: str = "", is_hazardous: bool = False) -> dict:
     """审核提示词专用的检查点变量（共享块 + 按清单核对指令）。
 
     与 :func:`_outline_checkpoint_kwargs` 的区别：**只在审核链路追加
@@ -673,9 +715,9 @@ def _split_requirement_items(requirements: str) -> list[str]:
             continue
         # 剥离 "1." / "2）" / "（三）" / "一、" 等条目编号前缀
         line = _sh.strip_outline_numbering(line).strip()
-        if len(line) < 2:      # 剥离后过短 → 不是有效条目
+        if len(line) < 2:  # 剥离后过短 → 不是有效条目
             continue
-        if line not in items:   # 去重保序
+        if line not in items:  # 去重保序
             items.append(line)
     return items
 
@@ -692,13 +734,15 @@ def _common_run(a: str, b: str) -> str:
             if a[i - 1] == b[j - 1]:
                 cur[j] = prev[j - 1] + 1
                 if cur[j] > len(best):
-                    best = a[i - cur[j]:i]
+                    best = a[i - cur[j] : i]
         prev = cur
     return best
 
 
 def _check_requirements_coverage(
-    requirements: str, outline: list, is_dangerous: bool = False,
+    requirements: str,
+    outline: list,
+    is_dangerous: bool = False,
     basis=None,
 ) -> tuple[bool, list[str]]:
     """程序化检查目录是否覆盖了编制要求 / 危大工程必备章节 / **方案名称维度**。
@@ -728,7 +772,7 @@ def _check_requirements_coverage(
        放宽只作用在**最宽松**的那条规则上，误报率不增。
     """
     titles: list[str] = []
-    for n in (outline or []):
+    for n in outline or []:
         if not isinstance(n, dict):
             continue
         t = str(n.get("title") or "").strip()
@@ -738,8 +782,8 @@ def _check_requirements_coverage(
     all_titles: list[str] = list(titles)
     try:
         from app.services.outline_quality import collect_titles
-        all_titles += [str(e.get("title") or "") for e in collect_titles(outline)
-                       if str(e.get("title") or "").strip()]
+
+        all_titles += [str(e.get("title") or "") for e in collect_titles(outline) if str(e.get("title") or "").strip()]
     except Exception:  # pragma: no cover - 纯兜底，取不到就退化为仅一级
         _sh.logger.debug("全层级标题收集失败（退化为仅一级标题参与匹配）", exc_info=True)
         all_titles = list(titles)
@@ -757,8 +801,7 @@ def _check_requirements_coverage(
     for item in _sh._split_requirement_items(requirements):
         if _hit(item):
             continue
-        parts = [p.strip() for p in re.split(r"[、，,和与及]", item)
-                 if len(p.strip()) >= 3]
+        parts = [p.strip() for p in re.split(r"[、，,和与及]", item) if len(p.strip()) >= 3]
         if parts and any(_hit(p) for p in parts):
             continue
         if any(len(_sh._common_run(item, t)) >= 4 for t in all_titles):
@@ -785,8 +828,7 @@ def _check_requirements_coverage(
         try:
             _ck_missing = _ocp.outline_coverage_missing(outline, is_hazardous=False)
         except Exception:  # pragma: no cover - 自检是体检，不是闸门
-            _sh.logger.warning("目录检查点覆盖校验异常（忽略，不阻断生成）",
-                           exc_info=True)
+            _sh.logger.warning("目录检查点覆盖校验异常（忽略，不阻断生成）", exc_info=True)
             _ck_missing = []
         for label in _ck_missing:
             entry = f"{label}（法定必备章节）"
@@ -804,6 +846,7 @@ def _check_requirements_coverage(
     if basis is not None and getattr(_sh.settings, "outline_name_coverage_check", True):
         try:
             from app.services.outline_quality import analyze_name_coverage
+
             cov = analyze_name_coverage(basis, outline)
             if cov.get("evaluated") and cov.get("missing"):
                 missing.extend(cov["missing"])
@@ -901,8 +944,7 @@ def _restore_descriptions(original: list, target: list) -> None:
 
     _restore(target)
     if _fallback_count[0]:
-        _sh.logger.debug("description 回填使用了标题回退匹配（%d 处路径偏移）",
-                     _fallback_count[0])
+        _sh.logger.debug("description 回填使用了标题回退匹配（%d 处路径偏移）", _fallback_count[0])
 
 
 def _merge_patch_chapters(outline: list, new_chapters: list) -> list:
@@ -921,7 +963,7 @@ def _merge_patch_chapters(outline: list, new_chapters: list) -> list:
     其后所有章的编号都要顺移（否则导出编号断号/重号）。
     """
     merged = [n for n in (outline or []) if isinstance(n, dict)]
-    for nc in (new_chapters or []):
+    for nc in new_chapters or []:
         if not isinstance(nc, dict):
             continue
         title = str(nc.get("title") or "").strip()
@@ -936,11 +978,10 @@ def _merge_patch_chapters(outline: list, new_chapters: list) -> list:
         if after:
             titles = [str(ex.get("title") or "").strip() for ex in merged]
             exact = [i for i, t in enumerate(titles) if t and t == after]
-            if len(exact) == 1:                      # ① 精确且唯一
+            if len(exact) == 1:  # ① 精确且唯一
                 pos = exact[0] + 1
-            elif not exact:                          # ② 无精确 → 互含回退
-                fuzzy = [i for i, t in enumerate(titles)
-                         if t and (after in t or t in after)]
+            elif not exact:  # ② 无精确 → 互含回退
+                fuzzy = [i for i, t in enumerate(titles) if t and (after in t or t in after)]
                 if len(fuzzy) == 1:
                     pos = fuzzy[0] + 1
         if pos < 0:
@@ -952,9 +993,13 @@ def _merge_patch_chapters(outline: list, new_chapters: list) -> list:
 
 
 async def _try_outline_patch(
-    outline: list, missing: list, *,
-    scheme_name: str = "", scheme_type: str = "",
-    project_brief: str = "", project_facts: str = "",
+    outline: list,
+    missing: list,
+    *,
+    scheme_name: str = "",
+    scheme_type: str = "",
+    project_brief: str = "",
+    project_facts: str = "",
 ) -> list | None:
     """外科式补齐：只为缺失项生成新的一级章节（1 次小调用替代
     「AI 审核 + 整目录重写」2 次大调用）。
@@ -974,30 +1019,29 @@ async def _try_outline_patch(
             scheme_name=scheme_name,
             scheme_type=scheme_type,
             project_brief=clip_text(project_brief or "", 1500, "目录补齐-project_brief"),
-            project_facts=clip_text(
-                project_facts or "", _sh.PROJECT_FACTS_LIMIT_OUTLINE, "目录补齐-project_facts"
-            ),
-            chapter_titles="; ".join(
-                str(n.get("title") or "") for n in (outline or [])
-                if isinstance(n, dict))[:2000],
+            project_facts=clip_text(project_facts or "", _sh.PROJECT_FACTS_LIMIT_OUTLINE, "目录补齐-project_facts"),
+            chapter_titles="; ".join(str(n.get("title") or "") for n in (outline or []) if isinstance(n, dict))[:2000],
             missing_items="; ".join(missing[:20]),
         )
         obj, _raw = await asyncio.wait_for(
             _sh.collect_json_response(
                 [{"role": "system", "content": prompt}],
                 _sh._outline_patch_validate_fn,
-                json_mode=True, temperature=0.2, scene="outline_fix",
+                json_mode=True,
+                temperature=0.2,
+                scene="outline_fix",
                 repair_key=_sh.OUTLINE_REPAIR_KEY,
-                max_tokens=_sh.OUTLINE_FIX_MAX_TOKENS),
-            timeout=_sh.OUTLINE_FIX_TIMEOUT)
+                max_tokens=_sh.OUTLINE_FIX_MAX_TOKENS,
+            ),
+            timeout=_sh.OUTLINE_FIX_TIMEOUT,
+        )
         new_chapters = obj.get("new_chapters") if isinstance(obj, dict) else None
         if not isinstance(new_chapters, list) or not new_chapters:
             return None
         return _sh.normalize_outline(_sh._merge_patch_chapters(outline, new_chapters))
     except asyncio.TimeoutError:
-        _sh.logger.warning("外科式补齐超时（%ds），回退完整 AI 审核（scheme=%s）",
-                       _sh.OUTLINE_FIX_TIMEOUT, scheme_name)
-    except Exception as e:      # noqa: BLE001
+        _sh.logger.warning("外科式补齐超时（%ds），回退完整 AI 审核（scheme=%s）", _sh.OUTLINE_FIX_TIMEOUT, scheme_name)
+    except Exception as e:  # noqa: BLE001
         _sh.logger.warning("外科式补齐失败，回退完整 AI 审核（scheme=%s）: %s", scheme_name, e)
     return None
 
@@ -1013,6 +1057,7 @@ def _detect_generic_titles(outline: list) -> list[dict]:
         return []
     try:
         from app.services.outline_quality import detect_generic_titles
+
         return detect_generic_titles(outline)
     except Exception as e:  # noqa: BLE001 - 自检是体检，不是闸门
         _sh.logger.warning("目录泛化标题检测异常（忽略）: %s", e, exc_info=True)
@@ -1032,8 +1077,9 @@ def _detect_duplicate_titles(outline: list) -> list[dict]:
     """
     try:
         from app.services.outline_quality import check_outline_continuity
+
         return check_outline_continuity(outline).get("duplicate_titles") or []
-    except Exception as e:      # noqa: BLE001 - 自检是体检，不是闸门
+    except Exception as e:  # noqa: BLE001 - 自检是体检，不是闸门
         _sh.logger.warning("目录重复标题检测异常（忽略）: %s", e, exc_info=True)
         return []
 
@@ -1050,11 +1096,11 @@ def _residual_generic_notice(hits: list[dict]) -> list[str]:
     return [
         f"⚠ 自动修复后目录仍有 {len(hits)} 处泛化/占位标题（{sample}）："
         f"请人工核对并改写这些标题，或重新生成目录（系统未强行改名，"
-        f"避免把真实章节标题改坏）"]
+        f"避免把真实章节标题改坏）"
+    ]
 
 
-def _coverage_recheck(requirements: str, tree: list, is_dangerous: bool,
-                      basis=None) -> tuple[bool, list[str]]:
+def _coverage_recheck(requirements: str, tree: list, is_dangerous: bool, basis=None) -> tuple[bool, list[str]]:
     """程序化出口的**覆盖回归复核**（✅ R73b F6/F7：纯确定性、零 AI 调用、不改树）。
 
     为何需要：两条程序化早退的「过」字是**在改名/补齐之前**判的，而两个动作都会
@@ -1070,19 +1116,24 @@ def _coverage_recheck(requirements: str, tree: list, is_dangerous: bool,
     不该比修复前更严，与 `_detect_generic_titles` 同一口径）。
     """
     try:
-        return _sh._check_requirements_coverage(requirements, tree, is_dangerous,
-                                           basis=basis)
+        return _sh._check_requirements_coverage(requirements, tree, is_dangerous, basis=basis)
     except Exception as e:  # noqa: BLE001
-        _sh.logger.warning("程序化出口覆盖复核异常（按不额外阻断处理）: %s", e,
-                       exc_info=True)
+        _sh.logger.warning("程序化出口覆盖复核异常（按不额外阻断处理）: %s", e, exc_info=True)
         return True, []
 
 
 async def _review_and_fix_outline(
-    outline: list, scheme_type: str, is_dangerous: bool, project_brief: str = "",
-    scheme_name: str = "", project_facts: str = "", requirements: str = "",
-    phase_cb=None, construction_scope: str = "",
-    scheme_basis: str | None = None, basis=None,
+    outline: list,
+    scheme_type: str,
+    is_dangerous: bool,
+    project_brief: str = "",
+    scheme_name: str = "",
+    project_facts: str = "",
+    requirements: str = "",
+    phase_cb=None,
+    construction_scope: str = "",
+    scheme_basis: str | None = None,
+    basis=None,
     standards_text: str = "",
 ) -> tuple[list, dict]:
     """目录审核 + 超时保护的自动修复。返回 (outline, review_obj)。
@@ -1132,10 +1183,9 @@ async def _review_and_fix_outline(
     # ⚠️ 保留 ``settings.outline_checkpoint_check`` 开关（默认 True）：设 False
     # 即完整回到本轮之前的门控与判据（可回退，不删代码）。
     if _sh.OUTLINE_REVIEW_MODE != "always" and (
-            (requirements or basis is not None)
-            or getattr(_sh.settings, "outline_checkpoint_check", True)):
-        _covered, _missing = _sh._check_requirements_coverage(
-            requirements, outline, is_dangerous, basis=basis)
+        (requirements or basis is not None) or getattr(_sh.settings, "outline_checkpoint_check", True)
+    ):
+        _covered, _missing = _sh._check_requirements_coverage(requirements, outline, is_dangerous, basis=basis)
         # ✅ R73 根因 A：占位标题**检出闸门**。旧实现两条程序化早退都在
         #    detect_generic_titles 之前 return，于是「填了编制要求 / 有方案解析」
         #    的目录（长方案常态）里的「专项6」「总体实施策划（2）」从未被检出、
@@ -1143,8 +1193,7 @@ async def _review_and_fix_outline(
         #    先走一次小调用标题重写；重写后仍脏 → 落回完整 AI 审核 + 修复链路。
         _hits = _sh._detect_generic_titles(outline)
         if _hits:
-            _sh.logger.info("程序化预检出口检出 %d 处泛化/占位标题，闸门不得早退",
-                        len(_hits))
+            _sh.logger.info("程序化预检出口检出 %d 处泛化/占位标题，闸门不得早退", len(_hits))
         # ✅ R89 S5：重复标题同为早退闸门（AI 审核的「跨章重复」检查不能跳过）。
         # 根因：`_level1_validate_fn` 只判 outline 非空 + title 非空 + 无 4 级，
         # **不判重复标题**；模型回同名两章时早退直接 passed=True，重复章进成品，
@@ -1160,43 +1209,69 @@ async def _review_and_fix_outline(
         if not _missing and (requirements or basis is not None):
             if not _hits and not _dups:
                 _sh.logger.info("程序化覆盖预检全过，跳过 AI 审核（省 1~2 次调用）")
-                return outline, {"passed": True, "review_mode": "programmatic",
-                                 "suggestions": ["✅ 程序化预检：编制要求与危大必备"
-                                                 "章节均已覆盖，跳过 AI 审核"]}
+                return outline, {
+                    "passed": True,
+                    "review_mode": "programmatic",
+                    "suggestions": ["✅ 程序化预检：编制要求与危大必备" "章节均已覆盖，跳过 AI 审核"],
+                }
             # 脏目录：先试外科式标题重写（1 次小调用，结构零风险）
             _titled = await _sh._try_outline_title_fix(
-                outline, _hits, scheme_name=scheme_name, scheme_type=scheme_type,
-                project_brief=project_brief, project_facts=project_facts,
-                construction_scope=construction_scope, requirements=requirements,
-                scheme_basis=scheme_basis, standards_text=standards_text,
-                _collect=_sh.collect_json_response, _render=_sh.render)
+                outline,
+                _hits,
+                scheme_name=scheme_name,
+                scheme_type=scheme_type,
+                project_brief=project_brief,
+                project_facts=project_facts,
+                construction_scope=construction_scope,
+                requirements=requirements,
+                scheme_basis=scheme_basis,
+                standards_text=standards_text,
+                _collect=_sh.collect_json_response,
+                _render=_sh.render,
+            )
             if _titled is not None and not _sh._detect_generic_titles(_titled):
                 # ✅ R73b F6：改名后必须回头复检覆盖。旧实现只复检「标题脏不脏」，
                 #    不复检「要求还盖不盖得住」—— 占位标题曾顶住的那条要求会在这
                 #    一步静默失去落点，而出口仍以 passed=True 宣称通过。
-                _covered2, _new_missing = _sh._coverage_recheck(
-                    requirements, _titled, is_dangerous, basis)
+                _covered2, _new_missing = _sh._coverage_recheck(requirements, _titled, is_dangerous, basis)
                 if not _covered2 and _new_missing:
                     outline = _titled
                     _missing = _new_missing
-                    _sh.logger.info("占位标题已重写（%d 处），但覆盖出现新缺口 %d 项，"
-                                "不得早退，转入补齐/审核链路：%s",
-                                len(_hits), len(_new_missing), _new_missing[:5])
+                    _sh.logger.info(
+                        "占位标题已重写（%d 处），但覆盖出现新缺口 %d 项，" "不得早退，转入补齐/审核链路：%s",
+                        len(_hits),
+                        len(_new_missing),
+                        _new_missing[:5],
+                    )
                 else:
                     _sh.logger.info("占位标题已外科式重写（%d 处），出口干净", len(_hits))
                     return _titled, {
-                        "passed": True, "review_mode": f"programmatic+{_sh._TITLE_FIXED_MODE_SUFFIX}",
+                        "passed": True,
+                        "review_mode": f"programmatic+{_sh._TITLE_FIXED_MODE_SUFFIX}",
                         "suggestions": [
-                            f"✅ 程序化预检：必备章节均已覆盖；已将 {len(_hits)} 处"
-                            f"泛化/占位标题重写为具体标题"]}
+                            f"✅ 程序化预检：必备章节均已覆盖；已将 {len(_hits)} 处" f"泛化/占位标题重写为具体标题"
+                        ],
+                    }
             # 重写不可用 / 仍有残留 → 不早退，落回完整 AI 审核链路
-        if requirements or is_dangerous or basis is not None or (
-                getattr(_sh.settings, "outline_checkpoint_check", True)):
+        if (
+            requirements
+            or is_dangerous
+            or basis is not None
+            or (getattr(_sh.settings, "outline_checkpoint_check", True))
+        ):
             _notify("fix")
-            _patched = await _sh._try_outline_patch(
-                outline, _missing, scheme_name=scheme_name,
-                scheme_type=scheme_type, project_brief=project_brief,
-                project_facts=project_facts) if _missing else None
+            _patched = (
+                await _sh._try_outline_patch(
+                    outline,
+                    _missing,
+                    scheme_name=scheme_name,
+                    scheme_type=scheme_type,
+                    project_brief=project_brief,
+                    project_facts=project_facts,
+                )
+                if _missing
+                else None
+            )
             if _patched:
                 # ✅ R73 根因 A（第二条早退）：补齐后的目录仍可能带占位标题，
                 #    旧实现直接以 passed=True 返回 → 同样从未被检出。先重写再判出口。
@@ -1206,12 +1281,19 @@ async def _review_and_fix_outline(
                     _p_missing: list[str] = []
                 else:
                     _titled2 = await _sh._try_outline_title_fix(
-                        _patched, _p_hits, scheme_name=scheme_name,
-                        scheme_type=scheme_type, project_brief=project_brief,
+                        _patched,
+                        _p_hits,
+                        scheme_name=scheme_name,
+                        scheme_type=scheme_type,
+                        project_brief=project_brief,
                         project_facts=project_facts,
-                        construction_scope=construction_scope, requirements=requirements,
-                        scheme_basis=scheme_basis, standards_text=standards_text,
-                        _collect=_sh.collect_json_response, _render=_sh.render)
+                        construction_scope=construction_scope,
+                        requirements=requirements,
+                        scheme_basis=scheme_basis,
+                        standards_text=standards_text,
+                        _collect=_sh.collect_json_response,
+                        _render=_sh.render,
+                    )
                     if _titled2 is not None and not _sh._detect_generic_titles(_titled2):
                         _p_titled = _titled2
                         _p_missing = []
@@ -1224,32 +1306,37 @@ async def _review_and_fix_outline(
                     # ✅ R73b F6/F7：补齐与改名都动过标题集，出口前回头复检。
                     #    旧实现只看「补齐调用有没有产出」，从不验证产出是否真盖住了
                     #    missing —— 模型回一章无关内容就能骗到「✅ 已外科式补齐 N 项」。
-                    _cov_ok, _still_missing = _sh._coverage_recheck(
-                        requirements, _p_titled, is_dangerous, basis)
+                    _cov_ok, _still_missing = _sh._coverage_recheck(requirements, _p_titled, is_dangerous, basis)
                     if not _cov_ok and _still_missing:
                         outline = _p_titled
                         _missing = _still_missing
-                        _sh.logger.info("外科补齐后仍有 %d 项未真正覆盖，不得以程序化"
-                                    "出口宣称通过，转入 AI 审核：%s",
-                                    len(_still_missing), _still_missing[:5])
+                        _sh.logger.info(
+                            "外科补齐后仍有 %d 项未真正覆盖，不得以程序化" "出口宣称通过，转入 AI 审核：%s",
+                            len(_still_missing),
+                            _still_missing[:5],
+                        )
                     elif _p_hits:
-                        _sh.logger.info("外科补齐 %d 项 + 占位标题重写 %d 处均完成且复检通过",
-                                    len(_missing), len(_p_hits))
+                        _sh.logger.info(
+                            "外科补齐 %d 项 + 占位标题重写 %d 处均完成且复检通过", len(_missing), len(_p_hits)
+                        )
                         return _p_titled, {
                             "passed": True,
-                            "review_mode": (f"programmatic+surgical"
-                                            f"+{_sh._TITLE_FIXED_MODE_SUFFIX}"),
+                            "review_mode": (f"programmatic+surgical" f"+{_sh._TITLE_FIXED_MODE_SUFFIX}"),
                             "suggestions": [
                                 f"✅ 已外科式补齐 {len(_missing)} 项缺失"
                                 f"（{'；'.join(_missing[:5])}），"
-                                f"并将 {len(_p_hits)} 处泛化/占位标题重写为具体标题"]}
+                                f"并将 {len(_p_hits)} 处泛化/占位标题重写为具体标题"
+                            ],
+                        }
                     else:
                         _sh.logger.info("外科式补齐完成（缺失 %d 项）且复检通过", len(_missing))
                         return _p_titled, {
-                            "passed": True, "review_mode": "programmatic+surgical",
+                            "passed": True,
+                            "review_mode": "programmatic+surgical",
                             "suggestions": [
-                                f"✅ 已按程序化预检外科式补齐 {len(_missing)} 项缺失"
-                                f"（{'；'.join(_missing[:5])}）"]}
+                                f"✅ 已按程序化预检外科式补齐 {len(_missing)} 项缺失" f"（{'；'.join(_missing[:5])}）"
+                            ],
+                        }
             # 补齐失败 → 落回完整 AI 审核链路（不写 review_mode，
             # 前端据此判断「审核依据仍是 AI 审核结论」）
     # 说明（✅ 2026-10-02 已更新）：程序化预检的**触发门控**已放宽 ——
@@ -1258,36 +1345,38 @@ async def _review_and_fix_outline(
     #   「编制要求」本身无内容时其条目检查自然为空，不产生额外判定。
     #   关闭 settings.outline_checkpoint_check 即完整回到旧门控与旧判据。
 
-    review_prompt = _sh.render("outline_review_system",
-                           scheme_name=scheme_name,
-                           scheme_type=scheme_type,
-                           # ✅ 必须传 construction_scope / scheme_basis：
-                           #    模板含这两个占位符，未传时**字面量 {scheme_basis} 会
-                           #    残留进发给模型的提示词** —— 模型要么把它当正文、
-                           #    要么按未知变量编造内容，审核结论随之失真。
-                           #    2026-09-26：两者改为**不同来源**（施工内容清单 /
-                           #    方案名称解析区块），不再同值双注入。
-                           construction_scope=construction_scope,
-                           scheme_basis=scheme_basis,
-                           is_dangerous="是" if is_dangerous else "否",
-                           # ✅ R38 D4：审核链路**有意不截断**事实（只读核对，
-                           #    事实越全审得越准；与生成侧预算解耦，勿顺手对齐）
-                           project_facts=project_facts or "",
-                           outline_json=json.dumps(_sh._outline_skeleton(outline), ensure_ascii=False),
-                           # NOTE(R38 D5): MUST be the review variant, not the shared one --
-                           # the "8.1 audit against the checklist" instruction has to live and
-                           # die with the checklist block. With the shared variant, turning
-                           # outline_checkpoint_check off leaves a dangling reference to a
-                           # checklist that is not in the prompt at all.
-                           **_sh._outline_review_checkpoint_kwargs(
-                               scheme_name, scheme_type, is_dangerous))
+    review_prompt = _sh.render(
+        "outline_review_system",
+        scheme_name=scheme_name,
+        scheme_type=scheme_type,
+        # ✅ 必须传 construction_scope / scheme_basis：
+        #    模板含这两个占位符，未传时**字面量 {scheme_basis} 会
+        #    残留进发给模型的提示词** —— 模型要么把它当正文、
+        #    要么按未知变量编造内容，审核结论随之失真。
+        #    2026-09-26：两者改为**不同来源**（施工内容清单 /
+        #    方案名称解析区块），不再同值双注入。
+        construction_scope=construction_scope,
+        scheme_basis=scheme_basis,
+        is_dangerous="是" if is_dangerous else "否",
+        # ✅ R38 D4：审核链路**有意不截断**事实（只读核对，
+        #    事实越全审得越准；与生成侧预算解耦，勿顺手对齐）
+        project_facts=project_facts or "",
+        outline_json=json.dumps(_sh._outline_skeleton(outline), ensure_ascii=False),
+        # NOTE(R38 D5): MUST be the review variant, not the shared one --
+        # the "8.1 audit against the checklist" instruction has to live and
+        # die with the checklist block. With the shared variant, turning
+        # outline_checkpoint_check off leaves a dangling reference to a
+        # checklist that is not in the prompt at all.
+        **_sh._outline_review_checkpoint_kwargs(scheme_name, scheme_type, is_dangerous),
+    )
     # ✅ 编制要求覆盖检查（对齐 OpenBidKit score-planning 的「评分大项必须映射为目录分支」）：
     #    用户在方案设置里填写的编制要求/评审要点，逐条对应目录章节；缺失即审核不通过。
     if requirements:
         review_prompt += (
             "\n\n【编制要求覆盖检查（最高优先级）】目录必须逐条覆盖以下编制要求；"
             "任何一条在目录中没有对应章节（或仅含糊带过），即判 passed=false，"
-            "并在 suggestions 中逐条列出缺失项及建议补充的章节：\n" + requirements)
+            "并在 suggestions 中逐条列出缺失项及建议补充的章节：\n" + requirements
+        )
     # ✅ BUG 修复（2026-10-04）：outline_review_system 第 10 条把「合并修复输出」
     #    的触发条件写成"调用方在追加指令中要求合并修复"，但本调用方此前从未
     #    追加任何要求合并修复的指令，导致模型永远不输出 fixed_outline，第 10 条
@@ -1295,22 +1384,28 @@ async def _review_and_fix_outline(
     #    分支有机会命中，从而省下一轮独立修复调用（OUTLINE_FIX_TIMEOUT 的 120s）。
     review_prompt += (
         "\n\n【合并修复】本次调用要求合并修复：若判定 passed=false，"
-        "请务必在同一 JSON 中额外输出 \"fixed_outline\" 字段（按 suggestions "
+        '请务必在同一 JSON 中额外输出 "fixed_outline" 字段（按 suggestions '
         "修正后的完整三级目录数组，节点 description 保持原文不要改写）；"
-        "passed=true 时不要输出 fixed_outline。")
+        "passed=true 时不要输出 fixed_outline。"
+    )
     _notify("review")
     try:
         review_obj, _ = await asyncio.wait_for(
             _sh.collect_json_response(
                 [{"role": "system", "content": review_prompt}],
                 lambda o: [] if "passed" in o else ["缺少 passed 字段"],
-                json_mode=True, temperature=0.2, scene="outline_review",
+                json_mode=True,
+                temperature=0.2,
+                scene="outline_review",
                 repair_key=_sh.OUTLINE_REPAIR_KEY,
-                max_tokens=_sh.OUTLINE_REVIEW_MAX_TOKENS),
-            timeout=_sh.OUTLINE_REVIEW_TIMEOUT)
+                max_tokens=_sh.OUTLINE_REVIEW_MAX_TOKENS,
+            ),
+            timeout=_sh.OUTLINE_REVIEW_TIMEOUT,
+        )
     except asyncio.TimeoutError:
-        _sh.logger.warning("目录审核超时（%ds），跳过审核直接完成（scheme=%s）",
-                       _sh.OUTLINE_REVIEW_TIMEOUT, scheme_name)
+        _sh.logger.warning(
+            "目录审核超时（%ds），跳过审核直接完成（scheme=%s）", _sh.OUTLINE_REVIEW_TIMEOUT, scheme_name
+        )
         review_obj = {"passed": True, "suggestions": ["审核超时已跳过"]}
     except Exception as e:
         _sh.logger.warning("目录审核失败（scheme=%s）: %s，跳过审核直接完成", scheme_name, e)
@@ -1320,7 +1415,7 @@ async def _review_and_fix_outline(
         # 弱模型可能把审核结果写成顶层数组/裸值，兜底避免后续 .get 抛 AttributeError
         review_obj = {"passed": True, "suggestions": ["审核结果结构异常，已跳过"]}
     # ✅ BUG 修复：统一把 passed / suggestions 归一化为 bool / list[str]
-    #（字符串 "false" 不再被当作通过；字符串 suggestions 不再被按字符拆分）
+    # （字符串 "false" 不再被当作通过；字符串 suggestions 不再被按字符拆分）
     suggestions = _sh._coerce_suggestions(review_obj.get("suggestions"))
     # ✅ 2026-10-10（目录占位/泛化标题收口）：AI 审核可能漏报泛化占位标题与
     #    「（N）」编号冲突后缀（生产实证「专项6」「总体实施策划（2）」）。
@@ -1330,18 +1425,24 @@ async def _review_and_fix_outline(
     _generic_hits = _sh._detect_generic_titles(outline)
     if _generic_hits:
         _titled3 = await _sh._try_outline_title_fix(
-            outline, _generic_hits, scheme_name=scheme_name,
-            scheme_type=scheme_type, project_brief=project_brief,
+            outline,
+            _generic_hits,
+            scheme_name=scheme_name,
+            scheme_type=scheme_type,
+            project_brief=project_brief,
             project_facts=project_facts,
-            construction_scope=construction_scope, requirements=requirements,
-            scheme_basis=scheme_basis, standards_text=standards_text,
-            _collect=_sh.collect_json_response, _render=_sh.render)
+            construction_scope=construction_scope,
+            requirements=requirements,
+            scheme_basis=scheme_basis,
+            standards_text=standards_text,
+            _collect=_sh.collect_json_response,
+            _render=_sh.render,
+        )
         if _titled3 is not None:
             outline = _titled3
             _still = _sh._detect_generic_titles(outline)
             if not _still:
-                _sh.logger.info("占位标题已由外科式重写全部修正（%d 处）",
-                            len(_generic_hits))
+                _sh.logger.info("占位标题已由外科式重写全部修正（%d 处）", len(_generic_hits))
                 _generic_hits = []
             else:
                 _generic_hits = _still
@@ -1391,7 +1492,8 @@ async def _review_and_fix_outline(
                 _issues = [
                     f"审核轮合并修复结果节点数异常（{_sh._count_nodes(_merged_fixed)}"
                     f" < 原目录 {_sh._count_nodes(outline)} 的 "
-                    f"{int(_sh.OUTLINE_FIX_MIN_COVERAGE * 100)}%）"]
+                    f"{int(_sh.OUTLINE_FIX_MIN_COVERAGE * 100)}%）"
+                ]
             if not _issues:
                 # ✅ 恢复原描述：审核输入是 _outline_skeleton 截断版，
                 # 模型回传的 description 同样是截断的；按 (id, title) 回填原文。
@@ -1404,17 +1506,13 @@ async def _review_and_fix_outline(
                 review_obj["generic_residual"] = len(_residual)
                 review_obj["passed"] = not _residual
                 if _residual:
-                    suggestions = (_sh._residual_generic_notice(_residual)
-                                   + suggestions)
-                    _sh.logger.warning("审核轮合并修复后仍残留 %d 处占位标题（不判通过）",
-                                   len(_residual))
+                    suggestions = _sh._residual_generic_notice(_residual) + suggestions
+                    _sh.logger.warning("审核轮合并修复后仍残留 %d 处占位标题（不判通过）", len(_residual))
                 else:
-                    suggestions = (["✅ 已根据审核意见自动修复（审核轮合并输出）"]
-                                   + suggestions)
+                    suggestions = ["✅ 已根据审核意见自动修复（审核轮合并输出）"] + suggestions
                 review_obj["suggestions"] = suggestions
                 return outline, review_obj
-            _sh.logger.warning("审核轮合并修复结果不可用，回退独立修复调用（scheme=%s）: %s",
-                           scheme_name, _issues[:2])
+            _sh.logger.warning("审核轮合并修复结果不可用，回退独立修复调用（scheme=%s）: %s", scheme_name, _issues[:2])
 
         async def _do_fix():
             # ✅ 统一提示词源：消费注册条目 outline_feedback_system（旧内联版与注册条目双份漂移，
@@ -1424,26 +1522,30 @@ async def _review_and_fix_outline(
             #    或超时 ⇒ 修复轮整轮空转。改用 _compact_outline_json 压缩（同语义、
             #    字符量约降 60%），并记日志便于排查。命中路径由 json 保持合法。
             _orig_json = _sh._compact_outline_json(outline)
-            _sh.logger.info("目录修复轮输入：原目录 %d 节点 / 压缩后 %d 字符",
-                        _sh._count_nodes(outline), len(_orig_json))
+            _sh.logger.info(
+                "目录修复轮输入：原目录 %d 节点 / 压缩后 %d 字符", _sh._count_nodes(outline), len(_orig_json)
+            )
             # ✅ R179：同 _try_outline_patch，硬切片改为带日志/指标的可见截断。
             from app.services.prompt_material_guard import clip_text
 
-            fix_prompt = _sh.render("outline_feedback_system",
-                                original_outline=_orig_json,
-                                review_suggestions="; ".join(suggestions),
-                                scheme_name=scheme_name,
-                                scheme_type=scheme_type,
-                                project_brief=clip_text(project_brief or "", 1500, "目录修复-project_brief"),
-                                project_facts=clip_text(
-                                    project_facts or "", _sh.PROJECT_FACTS_LIMIT_OUTLINE,
-                                    "目录修复-project_facts"))
+            fix_prompt = _sh.render(
+                "outline_feedback_system",
+                original_outline=_orig_json,
+                review_suggestions="; ".join(suggestions),
+                scheme_name=scheme_name,
+                scheme_type=scheme_type,
+                project_brief=clip_text(project_brief or "", 1500, "目录修复-project_brief"),
+                project_facts=clip_text(project_facts or "", _sh.PROJECT_FACTS_LIMIT_OUTLINE, "目录修复-project_facts"),
+            )
             return await _sh.collect_json_response(
                 [{"role": "system", "content": fix_prompt}],
                 _sh._outline_fix_validate_fn,
-                json_mode=True, temperature=0.2, scene="outline_fix",
+                json_mode=True,
+                temperature=0.2,
+                scene="outline_fix",
                 repair_key=_sh.OUTLINE_REPAIR_KEY,
-                max_tokens=_sh.OUTLINE_FIX_MAX_TOKENS)
+                max_tokens=_sh.OUTLINE_FIX_MAX_TOKENS,
+            )
 
         try:
             fix_obj, _ = await asyncio.wait_for(_do_fix(), timeout=_sh.OUTLINE_FIX_TIMEOUT)
@@ -1476,15 +1578,14 @@ async def _review_and_fix_outline(
                 # ✅ 保留原始审核建议（追加而非覆盖）：前端「审核结论」区块要展示
                 #    本轮到底按哪些建议改的，旧实现直接替换成一句话，审核依据丢失。
                 if _residual2:
-                    suggestions = (_sh._residual_generic_notice(_residual2)
-                                   + suggestions)
-                    _sh.logger.warning("独立修复轮后仍残留 %d 处占位标题（不判通过）",
-                                   len(_residual2))
+                    suggestions = _sh._residual_generic_notice(_residual2) + suggestions
+                    _sh.logger.warning("独立修复轮后仍残留 %d 处占位标题（不判通过）", len(_residual2))
                 else:
                     suggestions = ["✅ 已根据审核意见自动修复"] + suggestions
         except asyncio.TimeoutError:
-            _sh.logger.warning("目录自动修复超时（%ds），跳过修复保留原目录（scheme=%s）",
-                           _sh.OUTLINE_FIX_TIMEOUT, scheme_name)
+            _sh.logger.warning(
+                "目录自动修复超时（%ds），跳过修复保留原目录（scheme=%s）", _sh.OUTLINE_FIX_TIMEOUT, scheme_name
+            )
             suggestions = suggestions + ["自动修复超时，保留原目录"]
         except Exception as e:
             _sh.logger.warning("目录自动修复失败（scheme=%s）: %s，保留原目录", scheme_name, e)
@@ -1493,17 +1594,23 @@ async def _review_and_fix_outline(
     # 统一回写为 list[str]，保证下游（SSE payload / 前端）拿到的形态稳定
     review_obj["suggestions"] = suggestions
     # ✅ R73：未走修复采用的出口同样给一个稳定的残留读数（前端/护栏可消费）
-    review_obj.setdefault("generic_residual",
-                          len(_sh._detect_generic_titles(outline)))
+    review_obj.setdefault("generic_residual", len(_sh._detect_generic_titles(outline)))
     return outline, review_obj
 
 
 # ---------- 目录生成 ----------
 
-async def _build_structured_brief(db, project_id: str, raw_brief: str,
-                                  max_chars: int = 4000, basis=None, *,
-                                  degraded_out: list | None = None,
-                                  degraded_stage: str = "outline.assemble.structured_brief") -> str:
+
+async def _build_structured_brief(
+    db,
+    project_id: str,
+    raw_brief: str,
+    max_chars: int = 4000,
+    basis=None,
+    *,
+    degraded_out: list | None = None,
+    degraded_stage: str = "outline.assemble.structured_brief",
+) -> str:
     """构建目录生成用的「项目摘要」：优先消费结构化提取成果，回退原始摘录。
 
     数据来源：bid_analysis_items（「结构化提取」18 项的 success 结果），
@@ -1520,7 +1627,9 @@ async def _build_structured_brief(db, project_id: str, raw_brief: str,
         cur = await db.execute(
             "SELECT item_id, label, output_type, content FROM bid_analysis_items "
             "WHERE project_id=? AND status='success' AND content IS NOT NULL "
-            "AND content != ''", (project_id,))
+            "AND content != ''",
+            (project_id,),
+        )
         rows = await cur.fetchall()
         if not rows:
             return raw_brief
@@ -1528,6 +1637,7 @@ async def _build_structured_brief(db, project_id: str, raw_brief: str,
             format_downstream_context,
             is_missing_result,
         )
+
         items: dict[str, dict] = {}
         for r in rows:
             content = r["content"] or ""
@@ -1552,18 +1662,27 @@ async def _build_structured_brief(db, project_id: str, raw_brief: str,
         #    **边界感知**截断（truncate_to_boundary），不再硬切 —— 硬切会把
         #    小节或 ``` 围栏切成两半，模型看到半截代码块会当成坏数据忽略。
         from app.utils.text_splitter import truncate_to_boundary
+
         _before_len = len(structured)
         structured, rep = _sh._budgeted_truncate_sections(structured, max_chars)
         structured = truncate_to_boundary(structured, max_chars)
         if rep.get("truncated_sections"):
-            _sh.logger.info("结构化项目摘要按小节比例截断：%d/%d 小节被截（预算 %d 字）",
-                        rep["truncated_sections"], rep["sections"], max_chars)
+            _sh.logger.info(
+                "结构化项目摘要按小节比例截断：%d/%d 小节被截（预算 %d 字）",
+                rep["truncated_sections"],
+                rep["sections"],
+                max_chars,
+            )
         # ✅ D-39（R176）：截断不能只留日志 —— 结构性摘要被切短必须进 SSE。
         if len(structured) < _before_len:
             _sh._record_context_degraded(
-                degraded_out, field="structured_brief", stage=degraded_stage,
-                original_chars=_before_len, kept_chars=len(structured),
-                segment_id="structured_brief")
+                degraded_out,
+                field="structured_brief",
+                stage=degraded_stage,
+                original_chars=_before_len,
+                kept_chars=len(structured),
+                segment_id="structured_brief",
+            )
         appendix = ""
         if raw_brief.strip():
             _appendix_src = raw_brief
@@ -1571,11 +1690,13 @@ async def _build_structured_brief(db, project_id: str, raw_brief: str,
             appendix = f"\n\n【原始资料摘录】\n{_appendix_kept}"
             if len(_appendix_kept) < len(_appendix_src):
                 _sh._record_context_degraded(
-                    degraded_out, field="raw_brief_appendix",
+                    degraded_out,
+                    field="raw_brief_appendix",
                     stage=degraded_stage,
                     original_chars=len(_appendix_src),
                     kept_chars=len(_appendix_kept),
-                    segment_id="raw_brief_appendix")
+                    segment_id="raw_brief_appendix",
+                )
         # ⚠️ 不得在此再做 `[:max_chars+900]` 硬切片 —— 那会把刚按比例
         #    分配好的尾部小节再次砍掉（比例截断等于白做）。此处直接拼接。
         return structured + appendix
@@ -1593,11 +1714,11 @@ async def _outline_input_audit(db, project_id: str) -> str:
     """
     try:
         cur = await db.execute(
-            "SELECT item_id, label, status FROM bid_analysis_items "
-            "WHERE project_id=? ORDER BY item_id", (project_id,))
+            "SELECT item_id, label, status FROM bid_analysis_items " "WHERE project_id=? ORDER BY item_id",
+            (project_id,),
+        )
         rows = await cur.fetchall()
-        done = [str(r["label"] or r["item_id"]) for r in rows
-                if (r["status"] or "") == "success"]
+        done = [str(r["label"] or r["item_id"]) for r in rows if (r["status"] or "") == "success"]
         return "；".join(done[:30])
     except Exception:
         _sh.logger.debug("目录输入差集审计读取失败（忽略）", exc_info=True)
@@ -1614,6 +1735,7 @@ def _scheme_basis_obj(scheme: dict):
         return None
     try:
         from app.services.scheme_basis import parse_scheme_basis
+
         return parse_scheme_basis(str(scheme.get("name") or ""))
     except Exception:
         _sh.logger.warning("方案名称解析对象构建失败（目录生成降级继续）", exc_info=True)
@@ -1637,6 +1759,7 @@ def _scheme_is_dangerous(scheme: dict) -> bool:
         return False
     try:
         from app.services.scheme_basis import parse_scheme_basis
+
         return bool(parse_scheme_basis(str(scheme.get("name") or "")).is_dangerous)
     except Exception:
         _sh.logger.warning("方案名称危大判定失败（回退 type 口径）", exc_info=True)
@@ -1665,6 +1788,7 @@ def _outline_construction_scope(scheme: dict) -> str:
             extract_construction_scope,
             render_scope_for_prompt,
         )
+
         name = str(scheme.get("name") or "")
         # 拆不出条目时返回空串（而非 render_scope_for_prompt 的兜底占位文案）：
         # 保持「无内容 → 整段不注入」的既有语义，调用点的 `if construction_scope:`
@@ -1697,11 +1821,10 @@ def _outline_scheme_basis(scheme: dict) -> str:
         return ""
     try:
         from app.services.scheme_basis import parse_scheme_basis
-        text = str(parse_scheme_basis(
-            str(scheme.get("name") or "")).prompt_text() or "").strip()
+
+        text = str(parse_scheme_basis(str(scheme.get("name") or "")).prompt_text() or "").strip()
     except Exception:
-        _sh.logger.warning("方案名称解析（scheme_basis）构建失败（目录生成降级继续）",
-                       exc_info=True)
+        _sh.logger.warning("方案名称解析（scheme_basis）构建失败（目录生成降级继续）", exc_info=True)
         return ""
     if not text:
         return ""
@@ -1714,15 +1837,20 @@ def _outline_scheme_basis(scheme: dict) -> str:
     if getattr(_sh.settings, "outline_template_inject", True):
         try:
             from app.services.outline_templates import _TEMPLATE_NAMES
+
             key = parse_scheme_basis(str(scheme.get("name") or "")).template_key
             tname = str(_TEMPLATE_NAMES.get(key) or "").strip()
             if tname:
-                text += f"\n标准章节模板：{tname}（其章节骨架为通用九大章节结构的"\
-                        f"专项变体，优先于通用骨架；缺失的专项子节用名称解析的工序/工艺/对象补齐）"
+                text += (
+                    f"\n标准章节模板：{tname}（其章节骨架为通用九大章节结构的"
+                    f"专项变体，优先于通用骨架；缺失的专项子节用名称解析的工序/工艺/对象补齐）"
+                )
         except Exception:
             _sh.logger.debug("标准章节模板注入失败（降级为仅通用骨架）", exc_info=True)
-    return ("【方案名称解析（按方案名称字面确定性拆解，章节划分与三级标题须逐项落实，"
-            "不得虚构名称之外的内容）】：\n" + text)
+    return (
+        "【方案名称解析（按方案名称字面确定性拆解，章节划分与三级标题须逐项落实，"
+        "不得虚构名称之外的内容）】：\n" + text
+    )
 
 
 def _outline_standards_text(scheme: dict) -> str:
@@ -1734,15 +1862,17 @@ def _outline_standards_text(scheme: dict) -> str:
     if not getattr(_sh.settings, "outline_standards_inject", False):
         return ""
     try:
-        return _sh.get_standards_text(
-            str(scheme.get("type") or ""), str(scheme.get("name") or ""))
+        return _sh.get_standards_text(str(scheme.get("type") or ""), str(scheme.get("name") or ""))
     except Exception:
         _sh.logger.warning("编制依据规范构建失败（目录生成降级继续）", exc_info=True)
         return ""
 
 
 async def _register_task_exclusive(
-    kind: str, project_id: str, scheme_id: str, conflict_types: tuple = (),
+    kind: str,
+    project_id: str,
+    scheme_id: str,
+    conflict_types: tuple = (),
 ) -> tuple[str | None, "TaskTypeConflict | None"]:
     """注册任务并把跨类型互斥冲突转成返回值（F5 · 2026-10-05）。
 
@@ -1754,8 +1884,7 @@ async def _register_task_exclusive(
     锚定的「第一个 try」顶掉（2026-10-05 全量跑当场抓到 3 例）。
     """
     try:
-        return await _sh.register_task(kind, project_id, scheme_id,
-                                   conflict_types=conflict_types), None
+        return await _sh.register_task(kind, project_id, scheme_id, conflict_types=conflict_types), None
     except TaskTypeConflict as tc:
         return None, tc
 
@@ -1772,6 +1901,7 @@ def _stream_end_guard(holder: dict):
     running 才回收，语义与 event_stream finally 既有的「客户端断开，任务已终止」
     一致。回调自身抛异常只记 WARNING，绝不干扰流收尾。
     """
+
     def _on_end():
         tid = holder.get("task_id")
         if not tid:
@@ -1780,6 +1910,5 @@ def _stream_end_guard(holder: dict):
             _sh._tr.mark_stream_ended(tid)
         except Exception:
             _sh.logger.warning("mark_stream_ended 调用失败（task=%s）", tid, exc_info=True)
+
     return _on_end
-
-

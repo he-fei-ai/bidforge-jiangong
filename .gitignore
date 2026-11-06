@@ -69,9 +69,12 @@ backend/*.txt
 backend/*.ps1.log
 backend/*.err
 backend/*.out
-# backend 根目录下所有一次性调试脚本 / 临时文件
+# backend 根目录下的一次性调试脚本 / 临时文件
+# ⚠️ 这些规则必须写在 backend/.gitignore：ruff 以 backend 为扫描根时，`backend/_*`
+#    与 `/backend/_*` 都会被重写成无锚定的 `_*`，误伤 app/routers/_*.py、
+#    **/__init__.py 等正式源码（2026-11-06 ruff 0.6.9 实测）。锚定到 backend 本目录
+#    才能让 git 与 ruff 都只命中 backend 根目录的直接子项。
 backend/check_db.py
-backend/_*
 # 依赖清单与配置模板必须入库（覆盖上面的 backend/*.txt 通配，规则顺序敏感）
 !backend/requirements.txt
 !backend/requirements-*.txt
@@ -187,7 +190,4 @@ _tmp_screenshot.png
 !backend/app/**/*.png
 
 # ---------------- 归档目录 ----------------
-# backend/legacy_scripts/ 存放一次性排查脚本（不参与构建/运行，仅本地留存）；
-# 归档脚本本身不纳入版本控制，仅 README 作为说明入口保留。
-backend/legacy_scripts/*
-!backend/legacy_scripts/README.md
+# backend/legacy_scripts/ 的忽略规则已迁至 backend/.gitignore（原因同上：跨根解析歧义）。
