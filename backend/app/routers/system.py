@@ -522,6 +522,62 @@ async def _governance_kv_save(kv: dict[str, str]) -> None:
     await conn.commit()
 
 
+async def load_governance_settings() -> dict[str, int | bool]:
+    """启动期从库回放提示词治理开关到运行时 ``settings``（R175 BUG-2 收口）。
+
+    ``PUT /system/governance`` 等端点把开关持久化到 ``governance_settings``
+    kv 表；进程重启时若不回填 ``settings``，用户开启的注入防护 / 凭据脱敏会
+    静默回落到 .env 默认值（表现为「配置就是这样」）。本函数是启动期回放的
+    唯一入口，由 ``app/main.py`` 的 lifespan 调用。
+
+    设计约束：
+    - 库内无对应键 = 不配置该治理项，保持 .env / 默认值不动；
+    - 单键解析失败只告警并保留该键当前值，不影响其它键；
+    - 返回实际生效值，供启动日志与回归用例断言。
+    """
+    kv = await _governance_kv_load()
+
+    if "prompt_context_budget" in kv:
+        try:
+            settings.prompt_context_budget = int(kv["prompt_context_budget"] or 0)
+        except (TypeError, ValueError):
+            logger.warning(
+                "治理配置 prompt_context_budget 值非法（%r），保留当前值 %s",
+                kv["prompt_context_budget"],
+                settings.prompt_context_budget,
+            )
+
+    for kv_key, attr in (
+        ("prompt_injection_defense", "prompt_injection_defense"),
+        ("redaction_enabled", "prompt_redact_sensitive"),
+    ):
+        if kv_key not in kv:
+            continue
+        raw = str(kv[kv_key]).strip().lower()
+        if raw not in ("true", "false"):
+            logger.warning(
+                "治理配置 %s 值非法（%r），保留当前值 %s",
+                kv_key,
+                kv[kv_key],
+                getattr(settings, attr),
+            )
+            continue
+        setattr(settings, attr, raw == "true")
+
+    applied = {
+        "prompt_context_budget": int(settings.prompt_context_budget or 0),
+        "prompt_injection_defense": bool(settings.prompt_injection_defense),
+        "redaction_enabled": bool(settings.prompt_redact_sensitive),
+    }
+    logger.info(
+        "治理配置已从库回放: context_budget=%d, injection_defense=%s, redaction=%s",
+        applied["prompt_context_budget"],
+        applied["prompt_injection_defense"],
+        applied["redaction_enabled"],
+    )
+    return applied
+
+
 async def governance_get():
     """读取提示词治理开关当前生效值（持久化优先，重启不丢）。
 
