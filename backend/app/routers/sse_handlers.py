@@ -198,6 +198,9 @@ from app.services.numbering import (
     validate_section_content_numbering,
 )
 
+# ✅ R179 Phase F（2026-11-06）：数值锁（机械校验，纯函数）。
+from app.services.numeric_lock import enforce_text as enforce_numeric_lock
+
 # ✅ 2026-10-17（分层债收口）：占位标题外科式重写整组下沉 services/；
 #    本模块同名 import（调用点零改动），路由器（sections.py）改从 services 取，
 #    消除「路由器反向 import sse_handlers 私有符号」的分层耦合。
@@ -218,6 +221,14 @@ from app.services.placeholder_sections import (
     PLACEHOLDER_CONTENT,
     persist_placeholder_sections,
     split_placeholder_leaves,
+)
+from app.services.section_router import (
+    allowed_numbers_for,
+    blacklist_from_settings,
+    build_hybrid_block,
+    route_node,
+    search_for_section,
+    verify_experience_text,
 )
 from app.services.standards_registry import get_standards_text
 
@@ -2460,6 +2471,9 @@ async def generate_content(scheme_id: str, request: Request, db=Depends(get_db))
         _dispatched_order: list = []
         _expected_order: list = []
         _fact_audit_by_leaf: dict = {}
+        # ✅ R179 Phase F（2026-11-06）：开关打开时逐章记录混合生成状态
+        #    （路由 / 允许数值集合 / 检索结果），供生成后置校验与终态报告使用。
+        _hybrid_by_leaf: dict = {}
         _order_warned: dict = {"flag": False}
 
         # ✅ B1 拆分（2026-11-03）：三个终态拼装点已下沉到
@@ -4274,6 +4288,44 @@ async def generate_content(scheme_id: str, request: Request, db=Depends(get_db))
                         )
                         _plan_json = ""
 
+                # ✅ R179 Phase F（2026-11-06 · 分区混合生成，默认关闭）：
+                #    按节点 content_type 决定注入策略 —— 规范驱动节点检索条款并注入
+                #    「条款上下文 + 数值锁清单」，经验驱动节点注入事实引用与空话黑名单。
+                #    开关关闭时 _hybrid_user_block 恒为 ""、_hybrid_by_leaf 无记录，
+                #    两条装配路径与本项引入前逐字一致。注入失败不阻断生成，但必须
+                #    留下「无法判定」记录 —— 不许把「没检查」显示成「没问题」。
+                _hybrid_user_block = ""
+                if bool(getattr(settings, "hybrid_generation_enabled", False)):
+                    _hroute = None
+                    try:
+                        _hroute = route_node(leaf)
+                        _hresult = await search_for_section(db, _hroute.title)
+                        _hallowed = allowed_numbers_for(_hroute, _hresult.hits)
+                        _hblock = build_hybrid_block(_hroute, _hresult, _hallowed, blacklist=blacklist_from_settings())
+                        _hybrid_by_leaf[str(leaf.get("id") or "")] = {
+                            "route": _hroute,
+                            "allowed": _hallowed,
+                            "hits": len(_hresult.hits),
+                            "search_status": _hresult.status,
+                            "search_message": _hresult.message,
+                        }
+                        if _stable_prefix:
+                            _chapter_extras = (_chapter_extras + "\n" + _hblock).strip("\n")
+                        else:
+                            _hybrid_user_block = _hblock
+                    except Exception as exc:  # noqa: BLE001 - 注入失败仍必须留下「无法判定」记录
+                        logger.warning(
+                            "章节 %s 混合生成注入失败（记为无法判定）", str(leaf.get("title") or ""), exc_info=True
+                        )
+                        if _hroute is not None:
+                            _hybrid_by_leaf[str(leaf.get("id") or "")] = {
+                                "route": _hroute,
+                                "allowed": None,
+                                "hits": 0,
+                                "search_status": "error",
+                                "search_message": f"混合生成注入失败：{exc}",
+                            }
+
                 if _stable_prefix:
                     messages, user_content = build_chapter_layered_messages(
                         sys_prompt=sys_prompt,
@@ -4323,6 +4375,10 @@ async def generate_content(scheme_id: str, request: Request, db=Depends(get_db))
                     #    现直接拼到 user_content 末尾，两种配置下引导语都必达。
                     if _plan_guidance:
                         user_content = user_content + "\n\n" + _plan_guidance
+                    # ✅ R179 Phase F：分层前缀关闭时混合生成块同样直接拼到末尾，
+                    #    保证两条装配路径都能看到条款上下文 / 经验段约束。
+                    if _hybrid_user_block:
+                        user_content = user_content + "\n\n" + _hybrid_user_block
                     messages = [{"role": "system", "content": sys_prompt}, {"role": "user", "content": user_content}]
                 _sec_facts = _filter_facts_rows(facts_rows, leaf)
                 # ✅ R105（G3 · 逐章注入留痕）：按叶子记录「本章注入了哪些事实 /
@@ -4944,6 +5000,61 @@ async def generate_content(scheme_id: str, request: Request, db=Depends(get_db))
                     #    "先落库再改写" 产生两倍写库与中间态。
                     if auto_shrink_over:
                         result = await _auto_shrink_if_over(result, leaf, _stage_cb)
+
+                    # ✅ R179 Phase F（2026-11-06 · 生成后置校验）：
+                    #    规范驱动 → 数值锁机械比对（集合外数值按句拦截，拒绝写出）；
+                    #    经验驱动 → 空话黑名单命中即记缺陷。校验只读、不改路由与落库
+                    #    契约；失败 fail-soft 保留原文。报告仅随终态载荷回传（开关关闭
+                    #    时完全不产生 hybrid_report，载荷与引入前逐字一致）。
+                    _hybrid_report = None
+                    if bool(getattr(settings, "hybrid_generation_enabled", False)):
+                        _hstate = _hybrid_by_leaf.get(str(leaf_id or ""))
+                        if _hstate:
+                            _hroute = _hstate["route"]
+                            try:
+                                if _hroute.strategy == "rag":
+                                    _hlock = None
+                                    _hallowed = _hstate["allowed"]
+                                    if _hstate["search_status"] != "ok" or _hallowed is None or not _hallowed.tokens:
+                                        # 条款库不可用 / 无可比对数值 → 无法判定（不得冒充通过）
+                                        _hstatus = "undetermined"
+                                    else:
+                                        result, _hlock = enforce_numeric_lock(result, _hallowed)
+                                        _hstatus = _hlock.status
+                                    _hybrid_report = {
+                                        "strategy": "rag",
+                                        "content_type": _hroute.content_type,
+                                        "search_status": _hstate["search_status"],
+                                        "search_message": _hstate["search_message"],
+                                        "hits": _hstate["hits"],
+                                        "numeric_lock_status": _hstatus,
+                                        "numeric_lock": _hlock.as_dict() if _hlock else None,
+                                    }
+                                else:
+                                    _hdefects = verify_experience_text(result, _hroute, blacklist_from_settings())
+                                    _hybrid_report = {
+                                        "strategy": "llm",
+                                        "content_type": _hroute.content_type,
+                                        "fact_status": _hroute.fact_status,
+                                        "missing_fact_deps": list(_hroute.missing_deps),
+                                        "defect_count": len(_hdefects),
+                                        "defects": _hdefects,
+                                    }
+                                    if _hdefects:
+                                        logger.warning("章节 %s 经验段命中空话/缺事实引用 %d 处", title, len(_hdefects))
+                            except Exception as exc:  # noqa: BLE001 - 校验失败保留原文，但仍须留下可见记录
+                                logger.warning(
+                                    "章节 %s 混合生成后置校验失败（保留原文并记为无法判定）", title, exc_info=True
+                                )
+                                _hybrid_report = {
+                                    "strategy": _hroute.strategy,
+                                    "content_type": _hroute.content_type,
+                                    "search_status": "error",
+                                    "search_message": f"混合生成后置校验失败：{exc}",
+                                    "hits": _hstate["hits"],
+                                    "numeric_lock_status": "undetermined" if _hroute.strategy == "rag" else None,
+                                    "numeric_lock": None,
+                                }
                     content, wc, wb, ws, _std_report = await _persist_and_notify(
                         leaf_id,
                         result,
@@ -5045,6 +5156,10 @@ async def generate_content(scheme_id: str, request: Request, db=Depends(get_db))
                             "standard_error_count": _std_rep.get("error_count", 0),
                             "standard_warning_count": _std_rep.get("warning_count", 0),
                         }
+                        # ✅ R179 Phase F：混合生成报告仅在开关打开且本章有记录时下发
+                        #    （关闭时不新增任何键，终态载荷与引入前逐字一致）。
+                        if _hybrid_report is not None:
+                            _done_payload["hybrid_report"] = _hybrid_report
                         # ✅ R181：体积闸门（默认关闭=0，与引入前一致；配置正数后
                         #    超出时显式降级，绝不静默截断）
                         _done_payload = _degrade_section_done_payload(
