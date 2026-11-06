@@ -899,4 +899,58 @@ CREATE INDEX IF NOT EXISTS idx_fix_decisions_defect ON fix_decisions(defect_id);
 CREATE INDEX IF NOT EXISTS idx_fix_decisions_project ON fix_decisions(project_id);
 """
 
-SCHEMA_SQL = SCHEMA_SQL + SCORING_DDL + DEFECT_LEDGER_DDL
+# ✅ R179 Phase E（2026-11-06）：条款级规范库基表。
+#    仅建基表 + 索引，不建 FTS（trigram 与 bm25 重排留到下一阶段）。
+#    版权边界靠结构强制：没有全文字段；excerpt 1–500 字 CHECK；
+#    excerpt_type 禁止 full；license_note 非空；
+#    source_url / page_ref 至少一项非空；source_kind=internal 时 page_ref 必填；
+#    标准号 + 版本 + 条款号 + 摘录 + 适用条件 + 来源（URL 或页码）六项成套。
+#    ``id INTEGER PRIMARY KEY`` 为后续 FTS ``content_rowid`` 留位（VACUUM 后稳定）；
+#    业务主键用 ``clause_uid TEXT NOT NULL UNIQUE``（SQLite 的 TEXT PRIMARY KEY 允许 NULL）。
+#    条款库是全局数据（不按 project_id / scheme_id 归属），因此不登记级联清理。
+STANDARD_CLAUSES_DDL = """
+CREATE TABLE IF NOT EXISTS standard_clauses (
+    id                  INTEGER PRIMARY KEY,
+    clause_uid          TEXT NOT NULL UNIQUE,
+    standard_code       TEXT NOT NULL,
+    standard_code_norm  TEXT NOT NULL,
+    standard_base_norm  TEXT NOT NULL,
+    standard_name       TEXT NOT NULL DEFAULT '',
+    version             TEXT NOT NULL CHECK(length(trim(version)) > 0),
+    clause_no           TEXT NOT NULL CHECK(length(trim(clause_no)) > 0),
+    clause_no_norm      TEXT NOT NULL CHECK(length(trim(clause_no_norm)) > 0),
+    clause_kind         TEXT NOT NULL DEFAULT 'clause'
+                        CHECK(clause_kind IN ('clause', 'appendix', 'table_note')),
+    chapter             TEXT NOT NULL DEFAULT '',
+    clause_title        TEXT NOT NULL DEFAULT '',
+    excerpt             TEXT NOT NULL
+                        CHECK(length(excerpt) BETWEEN 1 AND 500),
+    excerpt_type        TEXT NOT NULL DEFAULT 'summary'
+                        CHECK(excerpt_type IN ('summary', 'key_sentence', 'data_point')),
+    excerpt_hash        TEXT NOT NULL,
+    mandatory           INTEGER NOT NULL DEFAULT 0
+                        CHECK(mandatory IN (0, 1)),
+    applicability       TEXT NOT NULL CHECK(length(trim(applicability)) > 0),
+    license_note        TEXT NOT NULL CHECK(length(trim(license_note)) > 0),
+    source_url          TEXT NOT NULL DEFAULT '',
+    page_ref            TEXT NOT NULL DEFAULT '',
+    source_kind         TEXT NOT NULL DEFAULT 'public'
+                        CHECK(source_kind IN ('public', 'internal')),
+    verification_status TEXT NOT NULL DEFAULT 'unverified'
+                        CHECK(verification_status IN ('unverified', 'verified', 'doubtful')),
+    status              TEXT NOT NULL DEFAULT 'active'
+                        CHECK(status IN ('active', 'superseded', 'abolished', 'draft')),
+    batch_id            TEXT NOT NULL DEFAULT '',
+    created_at          TEXT NOT NULL DEFAULT (datetime('now', 'localtime')),
+    updated_at          TEXT NOT NULL DEFAULT (datetime('now', 'localtime')),
+    CHECK(length(trim(source_url)) > 0 OR length(trim(page_ref)) > 0),
+    CHECK(source_kind <> 'internal' OR length(trim(page_ref)) > 0),
+    UNIQUE(standard_code_norm, version, clause_no_norm)
+);
+CREATE INDEX IF NOT EXISTS idx_sc_code   ON standard_clauses(standard_code_norm, version, status);
+CREATE INDEX IF NOT EXISTS idx_sc_base   ON standard_clauses(standard_base_norm, status);
+CREATE INDEX IF NOT EXISTS idx_sc_status ON standard_clauses(status, verification_status);
+CREATE INDEX IF NOT EXISTS idx_sc_hash   ON standard_clauses(excerpt_hash);
+"""
+
+SCHEMA_SQL = SCHEMA_SQL + SCORING_DDL + DEFECT_LEDGER_DDL + STANDARD_CLAUSES_DDL

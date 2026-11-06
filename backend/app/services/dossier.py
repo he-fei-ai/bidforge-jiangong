@@ -4,11 +4,11 @@
 本模块只在同一条 docx 末尾追加三类附属产物：
 
 1. **缺陷与修复记录**：只读 ``scheme_defects`` / ``fix_decisions``（Phase C 账本）；
-2. **规范引用溯源附录**：Phase E 条款库尚未建立 → **显式声明「无法判定」**，
-   绝不输出空表冒充「无引用问题」；E 落地后替换 :func:`load_clause_traces` 的实现即可；
+2. **规范引用溯源附录**：本阶段没有方案级引用关联，附录**始终显式声明「无法判定」**；
+   绝不把条款库现行条目当作「本文引用了什么」，也不输出空表冒充「无引用问题」；
 3. **人工复核清单**：事实待确认（低置信度 / 未 resolve）、缺陷待决策
    （``fix_policy=protected`` 或仍为 ``suggested``）、标准待核实
-   （``verification_status`` 非 verified —— 该数据源目前同样不存在，显式声明）。
+   （``verification_status`` 非 verified；表缺失或空库时同样显式声明「无法判定」）。
 
 失败语义：任一数据源表缺失或查询失败，只在对应附录写「无法判定」并记 WARNING，
 绝不阻断整份底稿产出（空数据 / 表缺失 / 查询失败都必须得到可打开的文件）。
@@ -20,6 +20,7 @@ import logging
 import sqlite3
 from pathlib import Path
 
+from app.config import settings
 from app.services.facts_extractor import FACT_SCOPE_PREDICATE, resolve_scheme_project_id
 
 logger = logging.getLogger(__name__)
@@ -30,10 +31,10 @@ LOW_CONFIDENCE = 0.8
 #: Phase E 条款库表名（见 docs/条款级规范库_技术预研_R179_20261106.md）。
 CLAUSE_LIBRARY_TABLE = "standard_clauses"
 
-#: 条款库未建立时的固定声明（逐字锁定，禁止用空表代替）。
-CLAUSE_LIBRARY_DECLARATION = "尚未建立条款库，无法判定"
+#: 方案级引用关联未建立时的固定声明（逐字锁定，禁止用库内条目或空表代替）。
+CLAUSE_LIBRARY_DECLARATION = "尚未建立方案级引用关联，无法判定本文引用了哪些规范条款"
 
-#: 标准核实数据源未建立时的固定声明（Phase E ``standard_clauses`` 尚未建表）。
+#: 标准核实数据源未建立 / 条款库开关关闭时的固定声明。
 STANDARD_VERIFICATION_DECLARATION = "尚未建立标准核实数据源（verification_status），无法判定"
 
 _DEFECT_COLUMNS = (
@@ -99,22 +100,27 @@ async def collect_facts(db, scheme_id: str, project_id: str) -> dict:
 
 
 async def load_clause_traces(db, scheme_id: str) -> dict:
-    """Phase E 预留取数接口：条款库未建立时返回显式声明（items 恒为空）。"""
-    if not await _table_exists(db, CLAUSE_LIBRARY_TABLE):
-        return {"available": False, "items": [], "statement": CLAUSE_LIBRARY_DECLARATION}
-    # Phase E 落地后：在此按 scheme / 章节 → 引用 → 条款 取溯源行并返回 available=True。
-    return {
-        "available": False,
-        "items": [],
-        "statement": "条款库已建立（standard_clauses），引用溯源取数适配待 Phase E 接入，当前无法判定",
-    }
+    """规范引用溯源：没有方案级引用关联时只声明「无法判定」，且不查询条款库。
+
+    附录要回答「这份方案引用了哪些条款」，而不是「条款库里有什么」。
+    在 ``scheme_clause_refs`` 这类真实登记来源落地前，拿库内 active 条目填充附录
+    会把「库有数据」误读为「方案有引用」，因此本阶段一律回到声明态。
+    """
+    return {"available": False, "items": [], "statement": CLAUSE_LIBRARY_DECLARATION}
 
 
 async def load_standard_pending(db, scheme_id: str) -> dict:
     """标准待核实：``verification_status`` 非 verified（Phase E 数据源预留）。
 
-    表不存在 → 显式声明「无法判定」；表存在 → 取库内未核 / 待核条款清单。
+    条款库开关关闭 → 直接声明「无法判定」，不执行任何 ``standard_clauses`` 查询；
+    开关开启但表不存在 / 空表 → 同样声明「无法判定」。
     """
+    if not settings.clause_library_enabled:
+        return {
+            "available": False,
+            "items": [],
+            "statement": STANDARD_VERIFICATION_DECLARATION,
+        }
     if not await _table_exists(db, CLAUSE_LIBRARY_TABLE):
         return {
             "available": False,
@@ -130,7 +136,12 @@ async def load_standard_pending(db, scheme_id: str) -> dict:
         (),
         what="standard_clauses:verification_status",
     )
-    return {"available": True, "items": rows, "statement": err}
+    if err:
+        return {"available": True, "items": rows, "statement": err}
+    if not rows:
+        # 空集不得冒充「无待核实标准」：表存在但无数据时仍按数据源缺失处理。
+        return {"available": False, "items": [], "statement": STANDARD_VERIFICATION_DECLARATION}
+    return {"available": True, "items": rows, "statement": ""}
 
 
 async def collect_all(db, scheme_id: str, scheme: dict | None = None) -> dict:
@@ -254,14 +265,10 @@ def _add_defect_appendix(doc, data: dict) -> None:
 def _add_clause_appendix(doc, data: dict) -> None:
     _heading(doc, "附件二：规范引用溯源附录", 2)
     clauses = data["clauses"]
-    if not clauses["available"]:
-        doc.add_paragraph(clauses["statement"])
-        doc.add_paragraph(
-            "本附录为 Phase E（条款库）预留的取数接口：条款库就绪后按「章节 → 引用 → 条款」"
-            "逐条溯源；当前不输出空表，以免把「无法判定」误读为「无引用问题」。"
-        )
-        return
-    _table(doc, ["章节", "引用", "条款", "核实状态"], [[_cell(v) for v in row] for row in clauses["items"]])
+    doc.add_paragraph(clauses["statement"])
+    doc.add_paragraph(
+        "本附录只陈述方案级引用关联缺失的事实，不列出条款库现行条目，" "以免把「库内有什么」误读为「本文引用了什么」。"
+    )
 
 
 def _add_review_checklist(doc, data: dict) -> None:

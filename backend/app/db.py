@@ -16,7 +16,7 @@ from pathlib import Path
 import aiosqlite
 
 from app.config import DATA_DIR, settings
-from app.schema_sql import DEFECT_LEDGER_DDL, SCHEMA_SQL, SCORING_DDL
+from app.schema_sql import DEFECT_LEDGER_DDL, SCHEMA_SQL, SCORING_DDL, STANDARD_CLAUSES_DDL
 
 logger = logging.getLogger("db")
 
@@ -1340,6 +1340,15 @@ async def _migrate(conn: aiosqlite.Connection):
         await conn.executescript(DEFECT_LEDGER_DDL)
     except Exception as e:
         _record_migration_degraded("Phase C 缺陷账本新表迁移", e)
+
+    # --- ✅ R179 Phase E（2026-11-06）：条款级规范库基表兜底 ---
+    #    纯 CREATE TABLE/INDEX IF NOT EXISTS，重复执行零副作用；
+    #    正常库由 init_db 的 executescript(SCHEMA_SQL) 建好，此处只覆盖老库/测试路径。
+    #    不改动 PRAGMA user_version 的只读语义。
+    try:
+        await conn.executescript(STANDARD_CLAUSES_DDL)
+    except Exception as e:
+        _record_migration_degraded("Phase E 条款库基表迁移", e)
 
     # --- 迁移索引（CREATE INDEX IF NOT EXISTS 自带幂等性，无需先探存） ---
     index_migrations = [

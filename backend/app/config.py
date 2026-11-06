@@ -447,6 +447,10 @@ class Settings(BaseSettings):
     #    默认关闭 —— 关闭时 POST /schemes/{id}/dossier 首行 404，
     #    /export/docx、/export/pdf 与 export_cache 链路零改动。
     dossier_enabled: bool = False
+    # ✅ R179 Phase E（2026-11-06）：条款级规范库总开关。
+    #    默认关闭 —— 关闭时新路由一律 404；建表与导入为独立能力，
+    #    不触碰正文生成、导出链路与前端。
+    clause_library_enabled: bool = False
 
     # ---------- 正文生成·全文一致性扫描优化（2026-09-22，P0-1） ----------
     # 扫描的「单次调用合并章数」：1 = 逐章一次调用（旧行为，质量最稳）；

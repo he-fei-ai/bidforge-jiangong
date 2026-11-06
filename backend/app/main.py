@@ -32,6 +32,7 @@ from app.routers import (
     scoring,
     sections,
     sse_handlers,
+    standards_admin,
     system,
     upload_outline,
 )
@@ -500,6 +501,7 @@ for r in (
     export,
     export_dossier,
     defects,
+    standards_admin,
     ai_config,
     charts,
     scheme_catalog,
