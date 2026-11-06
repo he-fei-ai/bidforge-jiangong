@@ -82,10 +82,17 @@ def test_d3_loader_reads_both_sources():
 
 
 def test_d3_loader_fail_soft():
-    """数据源加载失败只记 WARNING，不阻断导出。"""
+    """数据源加载失败只记 WARNING，不阻断导出。
+
+    ✅ R179 Phase D：异常捕获已收窄为 ``sqlite3.Error`` + ``DBReadError``
+    （表/列缺失、连接层错误属于可接受失败），编程错误照常上抛，
+    不再用 ``except Exception`` 无条件吞掉。
+    """
     src = _fn("_load_appendix_sources")
-    assert src.count("except Exception as e:") >= 2, "两类数据源均需 fail-soft 兜底"
+    assert src.count("except sqlite3.Error as e:") >= 2, "两类数据源均需 fail-soft 兜底"
+    assert src.count("except DBReadError as e:") >= 2, "R13 严格读异常也需降级留痕"
     assert "降级跳过" in src
+    assert src.count("except Exception as e:") == 0, "禁止无条件吞异常"
 
 
 def test_d3_excludes_stale_extractions():

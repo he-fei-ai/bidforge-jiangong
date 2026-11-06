@@ -9,6 +9,7 @@ import logging
 import os
 import re
 import socket
+import sqlite3
 import threading
 import time
 import uuid
@@ -4987,26 +4988,33 @@ async def _load_appendix_sources(db, scheme_id: str, project_id: str) -> list[di
     groups: list[dict] = []
 
     # ① 知识库条目
+    # ✅ R179 Phase D（2026-11-06）：列名修正。旧实现查 `title, usage_text`，
+    #    而 knowledge_base 的真实列是 `name / usage_hint` —— SQL 必然抛
+    #    OperationalError，被下方 `except Exception` 吞成 WARNING，附录**静默为空**
+    #    （用户看到「没有知识库条目」，实际库里有数据）。异常捕获同步收窄为
+    #    sqlite3.Error（可接受的失败 = 表/列缺失、连接层错误），编程错误不再被吞。
     try:
         cur = await db.execute(
-            "SELECT title, usage_text, content FROM knowledge_base " "WHERE project_id=? ORDER BY id LIMIT 200",
+            "SELECT name, usage_hint, content FROM knowledge_base " "WHERE project_id=? ORDER BY id LIMIT 200",
             (project_id,),
         )
         items = []
         for r in await _db_fetch_all(cur, what="_load_appendix_sources:knowledge_base"):
             d = dict(r)
-            val = str(d.get("content") or d.get("usage_text") or "")
-            items.append({"name": str(d.get("title") or ""), "value": val[:500]})
+            val = str(d.get("content") or d.get("usage_hint") or "")
+            items.append({"name": str(d.get("name") or ""), "value": val[:500]})
         if items:
             groups.append({"title": "知识库条目", "items": items})
-    except Exception as e:
+    except sqlite3.Error as e:
         logger.warning("导出：加载知识库附录数据源失败（降级跳过）: %s", e)
+    except DBReadError as e:
+        logger.warning("导出：加载知识库附录数据源读取失败（降级跳过）: %s", e)
 
     # ② 解析提取成果（四层存储的提取层）
     try:
         cur = await db.execute(
             "SELECT extract_type, extract_data FROM doc_extractions "
-            "WHERE project_id=? AND status != 'stale' ORDER BY id LIMIT 200",
+            "WHERE project_id=? AND status != 'stale' ORDER BY extraction_id LIMIT 200",
             (project_id,),
         )
         items = []
@@ -5015,8 +5023,10 @@ async def _load_appendix_sources(db, scheme_id: str, project_id: str) -> list[di
             items.append({"name": str(d.get("extract_type") or ""), "value": str(d.get("extract_data") or "")[:500]})
         if items:
             groups.append({"title": "解析提取成果", "items": items})
-    except Exception as e:
+    except sqlite3.Error as e:
         logger.warning("导出：加载解析提取成果附录数据源失败（降级跳过）: %s", e)
+    except DBReadError as e:
+        logger.warning("导出：加载解析提取成果附录数据源读取失败（降级跳过）: %s", e)
 
     return groups
 
