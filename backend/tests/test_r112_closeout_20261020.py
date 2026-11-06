@@ -25,10 +25,21 @@ APP = BACKEND / "app"
 
 
 def _reload_file_parser():
-    """重新加载 file_parser 模块（模块级常量在 import 期读取环境变量）。"""
-    # 先摘掉已加载的模块，再 import 触发重新求值
-    sys.modules.pop("app.services.file_parser", None)
+    """重新加载 file_parser 模块（模块级常量在 import 期读取环境变量）。
+
+    ⚠️ 必须**原地 reload**，不得 ``sys.modules.pop`` 后重新 import：
+    pop + import 会得到第二个模块对象与**全新的 ParseError 类**，而进程内
+    早先 ``from app.services.file_parser import ...`` 的引用仍指向旧模块 /
+    旧类 —— 一旦本文件先于依赖方执行，就会出现「旧函数抛旧类 / 新 import
+    拿新类」的错配（二进制拒绝用例抓不到异常、CSV 截断的 monkeypatch 失效）。
+    原地 reload 保持模块对象与 ``__dict__`` 同一，既有函数引用继续读到新常量。
+    """
     mod = importlib.import_module("app.services.file_parser")
+    # reload 会重建模块内的类对象；把既有 ParseError 放回去，保证所有
+    # 已导入的 `except ParseError` 旧引用与新抛出的异常仍是同一类。
+    old_parse_error = mod.ParseError
+    importlib.reload(mod)
+    mod.ParseError = old_parse_error
     return mod
 
 
