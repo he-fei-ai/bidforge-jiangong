@@ -1,0 +1,43 @@
+{
+  "columns": [
+    "clause_uid",
+    "standard_code",
+    "standard_name",
+    "version",
+    "clause_no",
+    "chapter",
+    "clause_title",
+    "excerpt",
+    "excerpt_type",
+    "mandatory",
+    "applicability",
+    "license_note",
+    "source_url",
+    "page_ref",
+    "source_kind",
+    "verification_status",
+    "status"
+  ],
+  "field_guide": [
+    {
+      "clause_uid": "__FIELD_GUIDE__",
+      "standard_code": "必填；标准号，须已在现行标准库中收录",
+      "standard_name": "建议填写；标准中文名称",
+      "version": "必填；标准版本（年号或版本标识）",
+      "clause_no": "必填；条款号（如 5.2.1 或 第5.2.1条）",
+      "chapter": "可选；所属章",
+      "clause_title": "可选；条款标题",
+      "excerpt": "必填；仅摘录要点，1–500 字，禁止全文",
+      "excerpt_type": "可选；summary / key_sentence / data_point，禁止 full",
+      "mandatory": "可选；0/1，是否为强制性条文",
+      "applicability": "必填；适用条件",
+      "license_note": "必填；许可说明（仅摘录授权口径）",
+      "source_url": "来源之一；公开来源链接（与 page_ref 至少一项非空）",
+      "page_ref": "来源之一；页码或内部资料位置（source_kind=internal 时必填）",
+      "source_kind": "可选；public / internal",
+      "verification_status": "可选；unverified / verified / doubtful",
+      "status": "可选；active / superseded / abolished / draft"
+    }
+  ],
+  "clauses": []
+}
