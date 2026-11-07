@@ -444,7 +444,12 @@ def test_05_update_fact_field_whitelist_stays_model_restricted():
 
 
 def test_06_detector_really_catches_a_new_ungated_write():
-    """自检：向真实源码注入一条未登记写路径，检测集合必须变化（否则棘轮是空转）。"""
+    """自检：向真实源码的**内存副本**注入未登记写路径（只读，绝不写盘）。
+
+    共享工作区里禁止任何测试改写 ``app/`` 源码：其它会话可能正在跑测试/ruff/
+    ``git add``，注入态会被读到；中途崩溃会把裸 UPDATE 留在工作树。检测器是
+    纯函数 ``(文件名, 源码字符串) → 写点列表``，本用例只在内存拼接样本。
+    """
     rel = "app/routers/global_facts.py"
     source = (APP_DIR.parent / rel).read_text(encoding="utf-8")
     injected = source + (
