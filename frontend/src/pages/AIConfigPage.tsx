@@ -82,7 +82,7 @@ import type {
   AIUsageStats,
 } from "../types/aiConfig";
 
-import { PageHero, StatCards, StatItem } from "../utils/ui";
+import { PageHero, PageSkeleton, StatCards, StatItem } from "../utils/ui";
 import { exportSceneRoutesNotice, importDryRunDisabledNotice } from "../utils/diagnosticsText";
 
 const { Title, Text } = Typography;
@@ -96,10 +96,10 @@ const statsCache = new TtlCache<AIUsageStats | null>(30_000);
 /** 健康状态 → 展示颜色（no_key / key_invalid 都是「配置存在但没就绪」的警告态） */
 const healthColor = (status?: string) =>
   status === "configured"
-    ? "#52c41a"
+    ? "var(--bp-success)"
     : status === "key_invalid" || status === "no_key" || status === "env_corrupt"
-      ? "#faad14"
-      : "#ff4d4f";
+      ? "var(--bp-warning)"
+      : "var(--bp-error)";
 
 /** /ai/health 的 status → 中文标签
  *  configured    = 已配置且 Key 可用
@@ -188,6 +188,8 @@ export default function AIConfigPage() {
   // ✅ D7 收敛（2026-09-23）：全部改为后端契约类型（types/aiConfig.ts），
   //    细节字段拼错/读取不存在的字段从此在 tsc 阶段暴露。
   const [configs, setConfigs] = useState<AIConfigItem[]>([]);
+  // ✅ 首屏加载态：数据未到时展示骨架屏（与全屏 Spin 区分：页面级 = Skeleton）
+  const [pageLoading, setPageLoading] = useState(true);
   const [presets, setPresets] = useState<Record<string, AIConfigPresetRaw>>({});
   const [providers, setProviders] = useState<Record<string, ProviderInfo>>({});
   const [health, setHealth] = useState<AIHealth | null>(null);
@@ -409,6 +411,8 @@ export default function AIConfigPage() {
     } catch (e: unknown) {
       const err = e as { message?: string };
       msg.error(err.message || "加载失败");
+    } finally {
+      setPageLoading(false);
     }
   };
 
@@ -657,7 +661,7 @@ export default function AIConfigPage() {
     modal.confirm({
       title: "确认回滚该次变更",
       content: (
-        <div style={{ fontSize: 12 }}>
+        <div style={{ fontSize: "var(--bp-font-sm)" }}>
           <div style={{ marginBottom: 8 }}>
             将把该配置恢复到 <b>{record.action_label || record.action}</b> 之前的状态：
           </div>
@@ -670,11 +674,11 @@ export default function AIConfigPage() {
             ))}
             {changes.length === 0 && <li>（该记录无结构化差异信息，将按快照恢复）</li>}
           </ul>
-          <div style={{ marginTop: 8, color: "#888" }}>
+          <div style={{ marginTop: 8, color: "var(--bp-text-tertiary)" }}>
             注：API Key <b>不参与回滚</b>（不会复活旧密钥，也不会清掉当前密钥）。
           </div>
           <Checkbox
-            style={{ marginTop: 8, fontSize: 12 }}
+            style={{ marginTop: 8, fontSize: "var(--bp-font-sm)" }}
             onChange={(e) => {
               opt.includeActive = e.target.checked;
             }}
@@ -947,7 +951,7 @@ export default function AIConfigPage() {
       width: 520,
       content: (
         <Space direction="vertical" style={{ width: "100%" }}>
-          <Text type="secondary" style={{ fontSize: 12 }}>
+          <Text type="secondary" style={{ fontSize: "var(--bp-font-sm)" }}>
             导入文件需为本系统「导出配置」产生的 JSON（不含 API Key，导入后需逐条补齐）。
           </Text>
           <Space>
@@ -957,7 +961,7 @@ export default function AIConfigPage() {
                 overwrite = v;
               }}
             />
-            <Text style={{ fontSize: 12 }}>
+            <Text style={{ fontSize: "var(--bp-font-sm)" }}>
               覆盖同名配置（同供应商 + 同模型 + 同地址时更新参数，否则跳过）
             </Text>
           </Space>
@@ -968,7 +972,7 @@ export default function AIConfigPage() {
                 setFirstActive = v;
               }}
             />
-            <Text style={{ fontSize: 12 }}>导入后把第一条新配置设为「当前使用」</Text>
+            <Text style={{ fontSize: "var(--bp-font-sm)" }}>导入后把第一条新配置设为「当前使用」</Text>
           </Space>
         </Space>
       ),
@@ -1084,7 +1088,7 @@ export default function AIConfigPage() {
       title: "清理历史用量日志",
       content: (
         <Space direction="vertical" style={{ width: "100%" }}>
-          <Text type="secondary" style={{ fontSize: 12 }}>
+          <Text type="secondary" style={{ fontSize: "var(--bp-font-sm)" }}>
             仅保留最近若干天的调用日志，更早的记录会被删除，用于控制数据库体积。
           </Text>
           <Space>
@@ -1106,7 +1110,7 @@ export default function AIConfigPage() {
                 onlyFailed = v;
               }}
             />
-            <Text style={{ fontSize: 12 }}>仅清理失败记录（保留成功样本用于统计）</Text>
+            <Text style={{ fontSize: "var(--bp-font-sm)" }}>仅清理失败记录（保留成功样本用于统计）</Text>
           </Space>
         </Space>
       ),
@@ -1304,7 +1308,7 @@ export default function AIConfigPage() {
       render: (v: string) =>
         v ? (
           <Tooltip title={v}>
-            <Text code style={{ fontSize: 11 }}>
+            <Text code style={{ fontSize: "var(--bp-font-xs)" }}>
               {v.length > 38 ? v.slice(0, 38) + "…" : v}
             </Text>
           </Tooltip>
@@ -1495,7 +1499,7 @@ export default function AIConfigPage() {
       width: 200,
       render: (v: string) =>
         v ? (
-          <Text code style={{ fontSize: 11 }}>
+          <Text code style={{ fontSize: "var(--bp-font-xs)" }}>
             {v}
           </Text>
         ) : (
@@ -1512,11 +1516,11 @@ export default function AIConfigPage() {
       // 便于区分「真的没场景」与「老记录未埋点」
       render: (v: string) =>
         v ? (
-          <Tag color="blue" style={{ fontSize: 11 }}>
+          <Tag color="blue" style={{ fontSize: "var(--bp-font-xs)" }}>
             {sceneLabel(v)}
           </Tag>
         ) : (
-          <Text type="secondary" style={{ fontSize: 11 }}>
+          <Text type="secondary" style={{ fontSize: "var(--bp-font-xs)" }}>
             未标记
           </Text>
         ),
@@ -1528,7 +1532,7 @@ export default function AIConfigPage() {
         const total = (r.prompt_tokens || 0) + (r.completion_tokens || 0);
         if (!total)
           return (
-            <Text type="secondary" style={{ fontSize: 12 }}>
+            <Text type="secondary" style={{ fontSize: "var(--bp-font-sm)" }}>
               —
             </Text>
           );
@@ -1578,6 +1582,14 @@ export default function AIConfigPage() {
   // 并发上限以 /ai/health 下发的 max_concurrency 为准（health 未就绪时回落兜底 5）。
   const concurrencyMax = resolveConcurrencyMax(health);
 
+  if (pageLoading) {
+    return (
+      <div className="scroll-area" style={{ overflowY: "auto", overflowX: "hidden" }}>
+        <PageSkeleton rows={8} />
+      </div>
+    );
+  }
+
   return (
     <div className="scroll-area" style={{ overflowY: "auto", overflowX: "hidden" }}>
       {/* 顶部状态卡片 */}
@@ -1585,7 +1597,7 @@ export default function AIConfigPage() {
         <Col span={6}>
           <Card
             size="small"
-            style={{ borderLeft: activeConfig ? "3px solid #52c41a" : "3px solid #ff4d4f" }}
+            style={{ borderLeft: activeConfig ? "3px solid var(--bp-success)" : "3px solid var(--bp-error)" }}
           >
             <Statistic
               title="当前使用平台"
@@ -1595,20 +1607,20 @@ export default function AIConfigPage() {
                   : "未配置"
               }
               prefix={<ApiOutlined />}
-              valueStyle={{ fontSize: 18, color: activeConfig ? "#52c41a" : "#ff4d4f" }}
+              valueStyle={{ fontSize: "var(--bp-font-xl)", color: activeConfig ? "var(--bp-success)" : "var(--bp-error)" }}
             />
           </Card>
         </Col>
         <Col span={6}>
           <Card
             size="small"
-            style={{ borderLeft: activeConfig ? "3px solid #52c41a" : "3px solid #ff4d4f" }}
+            style={{ borderLeft: activeConfig ? "3px solid var(--bp-success)" : "3px solid var(--bp-error)" }}
           >
             <Statistic
               title="当前模型"
               value={activeConfig?.model || "—"}
               prefix={<ThunderboltOutlined />}
-              valueStyle={{ fontSize: 18 }}
+              valueStyle={{ fontSize: "var(--bp-font-xl)" }}
             />
           </Card>
         </Col>
@@ -1619,13 +1631,13 @@ export default function AIConfigPage() {
               value={HEALTH_LABELS[health?.status || ""] || "未配置"}
               prefix={
                 health?.status === "configured" ? (
-                  <CheckCircleOutlined style={{ color: "#52c41a" }} />
+                  <CheckCircleOutlined style={{ color: "var(--bp-success)" }} />
                 ) : (
                   <CloseCircleOutlined style={{ color: healthColor(health?.status) }} />
                 )
               }
               valueStyle={{
-                fontSize: 18,
+                fontSize: "var(--bp-font-xl)",
                 color: healthColor(health?.status),
               }}
             />
@@ -1637,7 +1649,7 @@ export default function AIConfigPage() {
               title="总调用次数"
               value={stats?.summary?.total || 0}
               prefix={<BarChartOutlined />}
-              valueStyle={{ fontSize: 18 }}
+              valueStyle={{ fontSize: "var(--bp-font-xl)" }}
             />
           </Card>
         </Col>
@@ -1688,12 +1700,12 @@ export default function AIConfigPage() {
           message="「当前生效环境」的值非法，AI 调用已停止（模型配置本身没有损坏）"
           description={
             <Space direction="vertical" size={4} style={{ width: "100%" }}>
-              <Text style={{ fontSize: 12 }}>
+              <Text style={{ fontSize: "var(--bp-font-sm)" }}>
                 {health?.hint ||
                   envError ||
                   "运行环境值未通过校验，后端拒绝按通用环境继续（避免误用其它环境的密钥与地址）。"}
               </Text>
-              <Text type="secondary" style={{ fontSize: 12 }}>
+              <Text type="secondary" style={{ fontSize: "var(--bp-font-sm)" }}>
                 下方配置清单已按「通用环境」展示，可正常查看。恢复方法：把当前生效环境
                 清空（回到不做环境过滤的通用模式），或改选一个存在的环境标签。
               </Text>
@@ -1706,7 +1718,7 @@ export default function AIConfigPage() {
                 >
                   恢复为通用环境
                 </Button>
-                <Text type="secondary" style={{ fontSize: 12 }}>
+                <Text type="secondary" style={{ fontSize: "var(--bp-font-sm)" }}>
                   库中已有环境：{envOptions.length ? envOptions.join("、") : "（无）"}
                 </Text>
               </Space>
@@ -1720,10 +1732,10 @@ export default function AIConfigPage() {
         <Card size="small" style={{ marginBottom: 16 }}>
           <Row gutter={24}>
             <Col span={8}>
-              <Text type="secondary" style={{ fontSize: 12 }}>
+              <Text type="secondary" style={{ fontSize: "var(--bp-font-sm)" }}>
                 当前接入地址：
               </Text>
-              <Text code style={{ fontSize: 12 }}>
+              <Text code style={{ fontSize: "var(--bp-font-sm)" }}>
                 {health.base_url || "—"}
               </Text>
             </Col>
@@ -1732,13 +1744,13 @@ export default function AIConfigPage() {
                 title="降级候选"
                 value={health.fallback_count ?? 0}
                 suffix="个"
-                valueStyle={{ fontSize: 16 }}
+                valueStyle={{ fontSize: "var(--bp-font-lg)" }}
               />
             </Col>
             <Col span={4}>
               {/* ✅ 新增：当前使用配置的请求方式 —— 排查「同一份配置首字节慢 /
                   长正文易断」时必须能看到运行时真正生效的是哪一种 */}
-              <Text type="secondary" style={{ fontSize: 12 }}>
+              <Text type="secondary" style={{ fontSize: "var(--bp-font-sm)" }}>
                 请求方式：
               </Text>
               <Tag color={health.request_mode === "stream" ? "purple" : "default"}>
@@ -1754,11 +1766,11 @@ export default function AIConfigPage() {
                 title="并发（配置 / 运行）"
                 value={health.concurrency ?? 0}
                 suffix={`/ ${health.live_concurrency ?? "—"}`}
-                valueStyle={{ fontSize: 16 }}
+                valueStyle={{ fontSize: "var(--bp-font-lg)" }}
               />
             </Col>
             <Col span={6}>
-              <Text type="secondary" style={{ fontSize: 12 }}>
+              <Text type="secondary" style={{ fontSize: "var(--bp-font-sm)" }}>
                 熔断状态：
               </Text>
               {Object.keys(health.degraded_providers || {}).length === 0 ? (
@@ -1783,7 +1795,7 @@ export default function AIConfigPage() {
           style={{ marginBottom: 16 }}
           extra={
             <Space>
-              <Text type="secondary" style={{ fontSize: 12 }}>
+              <Text type="secondary" style={{ fontSize: "var(--bp-font-sm)" }}>
                 统计范围
               </Text>
               <Select
@@ -1863,10 +1875,10 @@ export default function AIConfigPage() {
               </Tooltip>
             </Col>
             <Col span={2}>
-              <div style={{ fontWeight: 600, marginBottom: 8, fontSize: 12 }}>按操作</div>
+              <div style={{ fontWeight: 600, marginBottom: 8, fontSize: "var(--bp-font-sm)" }}>按操作</div>
               <Space wrap size={4}>
                 {stats.by_action?.map((a) => (
-                  <Tag key={a.action} style={{ fontSize: 11 }}>
+                  <Tag key={a.action} style={{ fontSize: "var(--bp-font-xs)" }}>
                     {a.action}: {a.calls}
                   </Tag>
                 ))}
@@ -1912,7 +1924,7 @@ export default function AIConfigPage() {
             <div style={{ marginTop: 12 }}>
               <div style={{ fontWeight: 600, marginBottom: 8 }}>
                 按业务场景
-                <Text type="secondary" style={{ fontSize: 11, marginLeft: 8 }}>
+                <Text type="secondary" style={{ fontSize: "var(--bp-font-xs)", marginLeft: 8 }}>
                   点击场景可直接查看其调用明细
                 </Text>
               </div>
@@ -1946,7 +1958,7 @@ export default function AIConfigPage() {
             <div style={{ marginTop: 12 }}>
               <div style={{ fontWeight: 600, marginBottom: 8 }}>
                 每日调用趋势
-                <Text type="secondary" style={{ fontSize: 11, marginLeft: 8 }}>
+                <Text type="secondary" style={{ fontSize: "var(--bp-font-xs)", marginLeft: 8 }}>
                   {stats.daily.length} 天 · 条高 = 当日调用次数，红色含失败
                 </Text>
               </div>
@@ -1967,7 +1979,7 @@ export default function AIConfigPage() {
                           height: h,
                           borderRadius: 2,
                           flex: "0 0 auto",
-                          background: fail > 0 ? "#ff7875" : "#597ef7",
+                          background: fail > 0 ? "var(--bp-error)" : "var(--bp-info)",
                           opacity: calls ? 1 : 0.35,
                         }}
                       />
@@ -1982,7 +1994,7 @@ export default function AIConfigPage() {
           <div style={{ marginTop: 12 }}>
             <div style={{ fontWeight: 600, marginBottom: 8 }}>
               失败类别占比
-              <Text type="secondary" style={{ fontSize: 11, marginLeft: 8 }}>
+              <Text type="secondary" style={{ fontSize: "var(--bp-font-xs)", marginLeft: 8 }}>
                 分母 = 窗口内失败逻辑调用数；逐次失败明细见审计 attempts_json
               </Text>
             </div>
@@ -2048,7 +2060,7 @@ export default function AIConfigPage() {
                         ...envOptions.map((e) => ({ value: e, label: e })),
                       ]}
                     />
-                    <Text type="secondary" style={{ fontSize: 12 }}>
+                    <Text type="secondary" style={{ fontSize: "var(--bp-font-sm)" }}>
                       通用环境不过滤任何配置（与未启用多环境时一致）；选择具体环境后，
                       主配置优先取该环境专用配置，降级链只使用「通用 + 该环境」的候选，
                       不会跨环境降级。环境标签在每条配置的「环境」列维护。
@@ -2150,7 +2162,7 @@ export default function AIConfigPage() {
                     style={{ marginTop: 16 }}
                     extra={
                       <Space>
-                        <Text type="secondary" style={{ fontSize: 12 }}>
+                        <Text type="secondary" style={{ fontSize: "var(--bp-font-sm)" }}>
                           越靠上越先尝试（当前使用中的配置不受顺序影响，始终最先）
                         </Text>
                         <Tooltip title="对全部配置做 DNS/TCP 连通性预检，不发认证请求、不消耗额度，用于识别不可用的备选配置">
@@ -2179,7 +2191,7 @@ export default function AIConfigPage() {
                       showIcon
                       style={{ marginBottom: 8 }}
                       message={
-                        <Text style={{ fontSize: 12 }}>
+                        <Text style={{ fontSize: "var(--bp-font-sm)" }}>
                           调用失败时按顺序依次降级尝试。
                           <Text strong>当前使用中的配置始终最先尝试</Text>
                           （不受此顺序影响）；其余配置按下方顺序降级，越靠上越先尝试。
@@ -2232,11 +2244,11 @@ export default function AIConfigPage() {
                             <Text strong>
                               {providers[c.provider_name]?.label || c.provider_name}
                             </Text>
-                            <Text type="secondary" style={{ fontSize: 12 }}>
+                            <Text type="secondary" style={{ fontSize: "var(--bp-font-sm)" }}>
                               {c.model || "-"}
                             </Text>
                             {c.remark && (
-                              <Text type="secondary" style={{ fontSize: 11 }}>
+                              <Text type="secondary" style={{ fontSize: "var(--bp-font-xs)" }}>
                                 {c.remark}
                               </Text>
                             )}
@@ -2270,7 +2282,7 @@ export default function AIConfigPage() {
                     style={{ marginTop: 16 }}
                     extra={
                       <Space>
-                        <Text type="secondary" style={{ fontSize: 12 }}>
+                        <Text type="secondary" style={{ fontSize: "var(--bp-font-sm)" }}>
                           即时生效、无需重启；可用于「某厂商临时欠费 / 限流 / 故障 / 合规下线」
                         </Text>
                         <Button
@@ -2290,7 +2302,7 @@ export default function AIConfigPage() {
                         showIcon
                         style={{ marginBottom: 8 }}
                         message={
-                          <Text style={{ fontSize: 12 }}>
+                          <Text style={{ fontSize: "var(--bp-font-sm)" }}>
                             运行时厂商开关读取异常：{runtimeError}
                             <br />
                             该值已按「空集（全部可用）」处理以保证恢复入口可用；
@@ -2306,7 +2318,7 @@ export default function AIConfigPage() {
                           showIcon
                           style={{ marginBottom: 8 }}
                           message={
-                            <Text style={{ fontSize: 12 }}>
+                            <Text style={{ fontSize: "var(--bp-font-sm)" }}>
                               被禁用的厂商<Text strong>不参与任何 AI 调用</Text>
                               （连探测请求都不发）， 调用会自动降级到其它候选，并在用量日志中留下{" "}
                               <Text code>provider_disabled</Text> 记录。
@@ -2320,7 +2332,7 @@ export default function AIConfigPage() {
                           }
                         />
                         <Space wrap>
-                          <Text style={{ fontSize: 13 }}>禁用厂商：</Text>
+                          <Text style={{ fontSize: "var(--bp-font-md)" }}>禁用厂商：</Text>
                           <Select
                             mode="multiple"
                             size="small"
@@ -2335,14 +2347,14 @@ export default function AIConfigPage() {
                                 : `${providers[p]?.label || p}（未配置）`,
                             }))}
                           />
-                          <Text type="secondary" style={{ fontSize: 12 }}>
+                          <Text type="secondary" style={{ fontSize: "var(--bp-font-sm)" }}>
                             已配置厂商仍可用：{runtime.effective_provider_count} /{" "}
                             {runtime.configured_providers.length}
                           </Text>
                         </Space>
                       </>
                     ) : (
-                      <Text type="secondary" style={{ fontSize: 12 }}>
+                      <Text type="secondary" style={{ fontSize: "var(--bp-font-sm)" }}>
                         开关数据暂不可用：点击右上角「保存开关」即可重置为「全部可用」并恢复。
                       </Text>
                     )}
@@ -2365,7 +2377,7 @@ export default function AIConfigPage() {
                       showIcon
                       style={{ marginBottom: 8 }}
                       message={
-                        <Text style={{ fontSize: 12 }}>
+                        <Text style={{ fontSize: "var(--bp-font-sm)" }}>
                           默认为<Text strong>跟随「当前使用」配置</Text> ——
                           不设置时行为与旧版完全一致。
                           可为特定业务场景指定专属配置（例如「正文生成」用长文模型、「事实提取」用快模型）。
@@ -2375,7 +2387,7 @@ export default function AIConfigPage() {
                             <>
                               {" "}
                               当前生效环境为{" "}
-                              <Tag color="blue" style={{ fontSize: 11 }}>
+                              <Tag color="blue" style={{ fontSize: "var(--bp-font-xs)" }}>
                                 {activeEnv || sceneActiveEnv}
                               </Tag>
                               指向<Text strong>其它环境</Text>
@@ -2393,7 +2405,7 @@ export default function AIConfigPage() {
                         {sceneRoutes.map((s) => (
                           <Col span={12} key={s.scene}>
                             <Space wrap>
-                              <Text style={{ display: "inline-block", width: 132, fontSize: 13 }}>
+                              <Text style={{ display: "inline-block", width: 132, fontSize: "var(--bp-font-md)" }}>
                                 {s.label}
                               </Text>
                               <Select
@@ -2442,13 +2454,13 @@ export default function AIConfigPage() {
                   }
                   style={{ marginTop: 16 }}
                   extra={
-                    <Text type="secondary" style={{ fontSize: 12 }}>
+                    <Text type="secondary" style={{ fontSize: "var(--bp-font-sm)" }}>
                       最近 30 天 · 最多 20 条（不含明文密钥）
                     </Text>
                   }
                 >
                   {configAudits.length === 0 ? (
-                    <Text type="secondary" style={{ fontSize: 12 }}>
+                    <Text type="secondary" style={{ fontSize: "var(--bp-font-sm)" }}>
                       暂无记录。新增/修改/删除配置、切换「当前使用」、调整降级链与密钥时都会在此留痕。
                     </Text>
                   ) : (
@@ -2481,15 +2493,15 @@ export default function AIConfigPage() {
                             <Space wrap size="small">
                               <Tag color="blue">{r.action_label || r.action}</Tag>
                               {(r.provider_name || r.model) && (
-                                <Text style={{ fontSize: 12 }}>
+                                <Text style={{ fontSize: "var(--bp-font-sm)" }}>
                                   {r.provider_name}
                                   {r.model ? ` / ${r.model}` : ""}
                                 </Text>
                               )}
-                              <Text type="secondary" style={{ fontSize: 12 }}>
+                              <Text type="secondary" style={{ fontSize: "var(--bp-font-sm)" }}>
                                 {r.detail}
                               </Text>
-                              <Text type="secondary" style={{ fontSize: 11 }}>
+                              <Text type="secondary" style={{ fontSize: "var(--bp-font-xs)" }}>
                                 {r.created_at}
                                 {r.client_ip ? ` · ${r.client_ip}` : ""}
                               </Text>
@@ -2498,7 +2510,7 @@ export default function AIConfigPage() {
                             {(r.changes || []).length > 0 && (
                               <Space wrap size="small">
                                 {(r.changes || []).map((c) => (
-                                  <Tag key={c.field} color="default" style={{ fontSize: 11 }}>
+                                  <Tag key={c.field} color="default" style={{ fontSize: "var(--bp-font-xs)" }}>
                                     {c.label}：{String(c.before) || "（空）"} →{" "}
                                     {String(c.after) || "（空）"}
                                   </Tag>
@@ -2533,7 +2545,7 @@ export default function AIConfigPage() {
                             hoverable
                             style={{
                               borderLeft: configured
-                                ? "3px solid #52c41a"
+                                ? "3px solid var(--bp-success)"
                                 : "3px solid transparent",
                             }}
                             onClick={() => {
@@ -2563,21 +2575,21 @@ export default function AIConfigPage() {
                                   <Tag>未配置</Tag>
                                 )}
                               </Space>
-                              <Text type="secondary" style={{ fontSize: 12 }}>
+                              <Text type="secondary" style={{ fontSize: "var(--bp-font-sm)" }}>
                                 {info.description}
                               </Text>
                               <Space size={4} wrap>
                                 {info.models.slice(0, 3).map((m) => (
-                                  <Tag key={m.value} style={{ fontSize: 11 }}>
+                                  <Tag key={m.value} style={{ fontSize: "var(--bp-font-xs)" }}>
                                     {m.label.split(" ")[0]}
                                     {m.recommended && (
-                                      <FireOutlined style={{ color: "#fa8c16", marginLeft: 2 }} />
+                                      <FireOutlined style={{ color: "var(--bp-warning-strong)", marginLeft: 2 }} />
                                     )}
                                   </Tag>
                                 ))}
                                 {info.models.length > 3 && <Tag>+{info.models.length - 3}</Tag>}
                               </Space>
-                              <Text type="secondary" style={{ fontSize: 11 }}>
+                              <Text type="secondary" style={{ fontSize: "var(--bp-font-xs)" }}>
                                 {info.pricing}
                               </Text>
                             </Space>
@@ -2591,7 +2603,7 @@ export default function AIConfigPage() {
                         size="small"
                         hoverable
                         style={{
-                          borderLeft: "3px solid #fa8c16",
+                          borderLeft: "3px solid var(--bp-warning-strong)",
                           borderStyle: "dashed",
                         }}
                         onClick={() => {
@@ -2606,19 +2618,19 @@ export default function AIConfigPage() {
                       >
                         <Space direction="vertical" size={4} style={{ width: "100%" }}>
                           <Space style={{ width: "100%", justifyContent: "space-between" }}>
-                            <Text strong style={{ color: "#fa8c16" }}>
+                            <Text strong style={{ color: "var(--bp-warning-strong)" }}>
                               自定义
                             </Text>
                             <Tag color="orange">OpenAI 兼容</Tag>
                           </Space>
-                          <Text type="secondary" style={{ fontSize: 12 }}>
+                          <Text type="secondary" style={{ fontSize: "var(--bp-font-sm)" }}>
                             适用于任何兼容 OpenAI API 格式的供应商平台
                           </Text>
                           <Space size={4} wrap>
-                            <Tag style={{ fontSize: 11 }}>自动获取模型</Tag>
-                            <Tag style={{ fontSize: 11 }}>自定义 Base URL</Tag>
+                            <Tag style={{ fontSize: "var(--bp-font-xs)" }}>自动获取模型</Tag>
+                            <Tag style={{ fontSize: "var(--bp-font-xs)" }}>自定义 Base URL</Tag>
                           </Space>
-                          <Text type="secondary" style={{ fontSize: 11 }}>
+                          <Text type="secondary" style={{ fontSize: "var(--bp-font-xs)" }}>
                             填写地址和 Key 后自动拉取可用模型
                           </Text>
                         </Space>
@@ -2766,7 +2778,7 @@ export default function AIConfigPage() {
                       }
                       if (!attempts.length) {
                         return (
-                          <Text type="secondary" style={{ fontSize: 12 }}>
+                          <Text type="secondary" style={{ fontSize: "var(--bp-font-sm)" }}>
                             历史记录无逐次尝试明细
                           </Text>
                         );
@@ -2774,27 +2786,27 @@ export default function AIConfigPage() {
                       return (
                         <Space direction="vertical" size={2} style={{ width: "100%" }}>
                           {attempts.map((a, i) => (
-                            <Space key={i} size="small" wrap style={{ fontSize: 12 }}>
-                              <Tag style={{ fontSize: 11 }}>第 {i + 1} 次</Tag>
-                              <Text code style={{ fontSize: 11 }}>
+                            <Space key={i} size="small" wrap style={{ fontSize: "var(--bp-font-sm)" }}>
+                              <Tag style={{ fontSize: "var(--bp-font-xs)" }}>第 {i + 1} 次</Tag>
+                              <Text code style={{ fontSize: "var(--bp-font-xs)" }}>
                                 {a.provider || "-"}
                               </Text>
-                              <Text code style={{ fontSize: 11 }}>
+                              <Text code style={{ fontSize: "var(--bp-font-xs)" }}>
                                 {a.model || "-"}
                               </Text>
-                              <Tag color={a.ok ? "success" : "error"} style={{ fontSize: 11 }}>
+                              <Tag color={a.ok ? "success" : "error"} style={{ fontSize: "var(--bp-font-xs)" }}>
                                 {a.ok ? "成功" : "失败"}
                               </Tag>
                               {!a.ok && (
-                                <Tag color="orange" style={{ fontSize: 11 }}>
+                                <Tag color="orange" style={{ fontSize: "var(--bp-font-xs)" }}>
                                   {a.error_class || "unknown"}
                                 </Tag>
                               )}
-                              <Text type="secondary" style={{ fontSize: 11 }}>
+                              <Text type="secondary" style={{ fontSize: "var(--bp-font-xs)" }}>
                                 {Number(a.duration || 0).toFixed(2)}s
                               </Text>
                               {!a.ok && a.error ? (
-                                <Text type="secondary" style={{ fontSize: 11 }}>
+                                <Text type="secondary" style={{ fontSize: "var(--bp-font-xs)" }}>
                                   {a.error}
                                 </Text>
                               ) : null}
@@ -2848,7 +2860,7 @@ export default function AIConfigPage() {
               onChange={(checked) => saveGovernance({ prompt_injection_defense: checked })}
             />
             <Text strong>注入防护</Text>
-            <Text type="secondary" style={{ fontSize: 12 }}>
+            <Text type="secondary" style={{ fontSize: "var(--bp-font-sm)" }}>
               对外部资料加围栏 / 凭据脱敏，防止提示词注入
             </Text>
           </Space>
@@ -2866,7 +2878,7 @@ export default function AIConfigPage() {
               }}
               onBlur={() => saveGovernance({ prompt_context_budget: govBudget })}
             />
-            <Text type="secondary" style={{ fontSize: 12 }}>
+            <Text type="secondary" style={{ fontSize: "var(--bp-font-sm)" }}>
               ≤0 关闭；&gt;0 时超出预算的外部资料会被截断
             </Text>
           </Space>
@@ -2878,7 +2890,7 @@ export default function AIConfigPage() {
               onChange={(checked) => void saveAutoConfirm(checked)}
             />
             <Text strong>目录自动确认</Text>
-            <Text type="secondary" style={{ fontSize: 12 }}>
+            <Text type="secondary" style={{ fontSize: "var(--bp-font-sm)" }}>
               默认关闭（人工确认闸门）。开启后目录生成完成且校验通过时，
               {Math.round(autoConfirmDelayMs / 1000)} 秒内无操作将自动保存并锁定一级章节； 任何点击
               / 切页 / 报错都会立即切回人工；已存在正文的项目永不自动确认。
@@ -2941,7 +2953,7 @@ export default function AIConfigPage() {
               showIcon
               style={{ marginBottom: 16, padding: "6px 12px" }}
               message={
-                <Text type="secondary" style={{ fontSize: 12 }}>
+                <Text type="secondary" style={{ fontSize: "var(--bp-font-sm)" }}>
                   按量计费：使用平台预设地址（只读）；包月套餐：API
                   地址与按量计费不同，需手动填写厂商提供的包月接入点。两种计划对应各自的 API Key。
                 </Text>
@@ -2969,10 +2981,10 @@ export default function AIConfigPage() {
                     </Tooltip>
                   )}
                 </Space>
-                <Text type="secondary" style={{ fontSize: 12 }}>
+                <Text type="secondary" style={{ fontSize: "var(--bp-font-sm)" }}>
                   {providers[selectedProvider].description}
                 </Text>
-                <Text type="secondary" style={{ fontSize: 12 }}>
+                <Text type="secondary" style={{ fontSize: "var(--bp-font-sm)" }}>
                   {providers[selectedProvider].pricing}
                 </Text>
               </Space>
@@ -2983,14 +2995,14 @@ export default function AIConfigPage() {
           {selectedProvider === "custom" && (
             <Card size="small" style={{ marginBottom: 16, background: "rgba(250,140,22,0.08)" }}>
               <Space direction="vertical" size={2} style={{ width: "100%" }}>
-                <Text strong style={{ color: "#fa8c16" }}>
+                <Text strong style={{ color: "var(--bp-warning-strong)" }}>
                   自定义供应商
                 </Text>
-                <Text type="secondary" style={{ fontSize: 12 }}>
+                <Text type="secondary" style={{ fontSize: "var(--bp-font-sm)" }}>
                   适用于任何兼容 OpenAI API 格式的供应商。填写 Base URL 和 API Key
                   后，系统将自动获取可用模型列表。
                 </Text>
-                <Text type="secondary" style={{ fontSize: 12 }}>
+                <Text type="secondary" style={{ fontSize: "var(--bp-font-sm)" }}>
                   Base URL 格式示例：https://api.example.com/v1
                 </Text>
               </Space>
@@ -3004,7 +3016,7 @@ export default function AIConfigPage() {
               <Space>
                 <span>API Key</span>
                 <Tooltip title="API Key 使用 AES-256 加密存储，不会明文保存">
-                  <SafetyCertificateOutlined style={{ color: "#52c41a" }} />
+                  <SafetyCertificateOutlined style={{ color: "var(--bp-success)" }} />
                 </Tooltip>
               </Space>
             }
@@ -3029,12 +3041,12 @@ export default function AIConfigPage() {
               <Space>
                 <span>Base URL</span>
                 {selectedProvider !== "custom" && watchPlan === "pay_as_you_go" && (
-                  <Tag color="blue" style={{ fontSize: 11, margin: 0 }}>
+                  <Tag color="blue" style={{ fontSize: "var(--bp-font-xs)", margin: 0 }}>
                     平台预设
                   </Tag>
                 )}
                 {watchPlan === "coding_plan" && (
-                  <Tag color="purple" style={{ fontSize: 11, margin: 0 }}>
+                  <Tag color="purple" style={{ fontSize: "var(--bp-font-xs)", margin: 0 }}>
                     包月·手填
                   </Tag>
                 )}
@@ -3076,7 +3088,7 @@ export default function AIConfigPage() {
             presets[selectedProvider]?.base_url && (
               <Text
                 type="secondary"
-                style={{ fontSize: 12, display: "block", marginTop: -8, marginBottom: 12 }}
+                style={{ fontSize: "var(--bp-font-sm)", display: "block", marginTop: -8, marginBottom: 12 }}
               >
                 按量计费使用平台预设地址：<Text code>{presets[selectedProvider].base_url}</Text>
                 （只读，如需自定义地址请选包月套餐或自定义供应商）
@@ -3085,7 +3097,7 @@ export default function AIConfigPage() {
           {watchPlan === "coding_plan" && (
             <Text
               type="secondary"
-              style={{ fontSize: 12, display: "block", marginTop: -8, marginBottom: 12 }}
+              style={{ fontSize: "var(--bp-font-sm)", display: "block", marginTop: -8, marginBottom: 12 }}
             >
               包月套餐（Coding Plan）为包月计费，API
               地址不同于按量计费，请填写厂商提供的包月接入点地址
@@ -3177,13 +3189,13 @@ export default function AIConfigPage() {
               {!fetchingModels && customFetchError && (
                 <Space direction="vertical" size={2}>
                   <Tag color="error">获取失败：{customFetchError}</Tag>
-                  <Text type="secondary" style={{ fontSize: 12 }}>
+                  <Text type="secondary" style={{ fontSize: "var(--bp-font-sm)" }}>
                     可手动在上方输入模型名称，或检查 Base URL 和 API Key 是否正确
                   </Text>
                 </Space>
               )}
               {!fetchingModels && customModels.length === 0 && !customFetchError && (
-                <Text type="secondary" style={{ fontSize: 12 }}>
+                <Text type="secondary" style={{ fontSize: "var(--bp-font-sm)" }}>
                   填写 Base URL 和 API Key 后自动获取可用模型列表。也可点击上方「🔄
                   获取最新模型」按钮手动拉取。
                 </Text>
@@ -3199,7 +3211,7 @@ export default function AIConfigPage() {
               <Space>
                 <span>请求方式</span>
                 <Tooltip title="仅决定后端与厂商平台之间的调用方式；应用侧仍等待完整结果后继续流程，对外行为完全一致">
-                  <ThunderboltOutlined style={{ color: "#722ed1" }} />
+                  <ThunderboltOutlined style={{ color: "var(--bp-purple)" }} />
                 </Tooltip>
               </Space>
             }
@@ -3214,7 +3226,7 @@ export default function AIConfigPage() {
           </Form.Item>
           <Text
             type="secondary"
-            style={{ fontSize: 12, display: "block", marginTop: -8, marginBottom: 12 }}
+            style={{ fontSize: "var(--bp-font-sm)", display: "block", marginTop: -8, marginBottom: 12 }}
           >
             {watchRequestMode === "stream"
               ? "流式请求：后端以分片方式接收厂商响应，拼接为完整结果后再继续后续流程。首字节到达更快、长正文更不易被网关超时掐断；应用侧行为不变。若该平台不支持 stream 接口，系统会自动回退为普通请求重试，不会导致生成失败。"
@@ -3311,14 +3323,14 @@ export default function AIConfigPage() {
                     {testResult.label || "连接失败"}
                   </Tag>
                 )}
-                <Text type={testResult.ok ? "success" : "danger"} style={{ fontSize: 12 }}>
+                <Text type={testResult.ok ? "success" : "danger"} style={{ fontSize: "var(--bp-font-sm)" }}>
                   {testResult.msg}
                 </Text>
                 {!testResult.ok && testResult.suggestion && (
-                  <Text style={{ fontSize: 11, color: "#888" }}>💡 {testResult.suggestion}</Text>
+                  <Text style={{ fontSize: "var(--bp-font-xs)", color: "var(--bp-text-tertiary)" }}>💡 {testResult.suggestion}</Text>
                 )}
                 {testResult.ok && testResult.warning && (
-                  <Text style={{ fontSize: 11, color: "#d46b08" }}>⚠ {testResult.warning}</Text>
+                  <Text style={{ fontSize: "var(--bp-font-xs)", color: "var(--bp-warning-text)" }}>⚠ {testResult.warning}</Text>
                 )}
                 {testResult.network?.ok && <Tag color="blue">网络可达</Tag>}
               </Space>
@@ -3372,7 +3384,7 @@ export default function AIConfigPage() {
                 成功率过低 {configsHealthResult.summary.runtime_dead || 0}
               </Tag>
             </Space>
-            <Text type="secondary" style={{ fontSize: 12 }}>
+            <Text type="secondary" style={{ fontSize: "var(--bp-font-sm)" }}>
               当前生效环境：<Text strong>{configsHealthResult.active_env || "通用（不过滤）"}</Text>
               {configsHealthResult.disabled_providers.length
                 ? `；已禁用厂商：${configsHealthResult.disabled_providers.join("、")}`
@@ -3390,7 +3402,7 @@ export default function AIConfigPage() {
                   render: (v: string, r: AIConfigsHealthItem) => (
                     <Space direction="vertical" size={0}>
                       <Text strong>{providers[v]?.label || v}</Text>
-                      <Text type="secondary" style={{ fontSize: 11 }}>
+                      <Text type="secondary" style={{ fontSize: "var(--bp-font-xs)" }}>
                         {r.model || "-"}
                       </Text>
                     </Space>
@@ -3469,7 +3481,7 @@ export default function AIConfigPage() {
                     const h = r.runtime_health;
                     if (!h) {
                       return (
-                        <Text type="secondary" style={{ fontSize: 11 }}>
+                        <Text type="secondary" style={{ fontSize: "var(--bp-font-xs)" }}>
                           —
                         </Text>
                       );
@@ -3509,7 +3521,7 @@ export default function AIConfigPage() {
                     }
                     if (!h.samples) {
                       return (
-                        <Text type="secondary" style={{ fontSize: 11 }}>
+                        <Text type="secondary" style={{ fontSize: "var(--bp-font-xs)" }}>
                           暂无样本
                         </Text>
                       );
@@ -3531,7 +3543,7 @@ export default function AIConfigPage() {
                   width: 150,
                   render: (v: boolean, r: AIConfigsHealthItem) =>
                     r.no_url ? (
-                      <Text type="secondary" style={{ fontSize: 11 }}>
+                      <Text type="secondary" style={{ fontSize: "var(--bp-font-xs)" }}>
                         未测（无地址）
                       </Text>
                     ) : v ? (
@@ -3592,7 +3604,7 @@ export default function AIConfigPage() {
       >
         {keyRotationResult && (
           <Space direction="vertical" size="small" style={{ width: "100%" }}>
-            <Text type="secondary" style={{ fontSize: 12 }}>
+            <Text type="secondary" style={{ fontSize: "var(--bp-font-sm)" }}>
               主密钥来源：
               <Text strong>
                 {keyRotationResult.master_key_source === "env"
@@ -3616,7 +3628,7 @@ export default function AIConfigPage() {
             {keyRotationResult.mode === "inspect" &&
               (keyRotationResult.health?.broken_count ?? 0) > 0 && (
                 <Space direction="vertical" size={4} style={{ width: "100%" }}>
-                  <Text type="secondary" style={{ fontSize: 12 }}>
+                  <Text type="secondary" style={{ fontSize: "var(--bp-font-sm)" }}>
                     若这些坏密文是用「更换前的旧主密钥」加密的，填入旧主密钥即可一键恢复；
                     不填则无法恢复，只能逐条重新填写 API Key。
                   </Text>

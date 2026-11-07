@@ -5,7 +5,7 @@
  * 所有组件零业务依赖，纯表现层。
  */
 import React, { useEffect, useState } from "react";
-import { Button, Tooltip } from "antd";
+import { Button, Skeleton, Tooltip } from "antd";
 import { BulbOutlined, BulbFilled } from "@ant-design/icons";
 import { useBlueprintTheme, type ThemeMode } from "./theme";
 
@@ -14,18 +14,21 @@ import { useBlueprintTheme, type ThemeMode } from "./theme";
 /**
  * 断点定义（移动优先）
  * ----------------------------------------------------------
- * - BP_XS     380  小手机（iPhone SE/mini 375）
- * - BP_PHONE  560  手机竖屏上界（iPhone 14/15 390-430）
- * - BP_SMALL  768  手机横屏 / 小平板（历史兼容值）
- * - BP_TABLET 1200 平板 / 笔记本边界（侧边栏自动折叠阈值）
- * - BP_DESKTOP 1600 大屏
- * 断点值与 index.css 中的 @media 断点保持一致。
+ * - BP_XS      380  小手机（iPhone SE/mini 375）
+ * - BP_PHONE   560  手机竖屏上界（iPhone 14/15 390-430）
+ * - BP_SMALL   768  手机横屏 / 小平板
+ * - BP_MEDIUM  900  常规平板（内容区由 2 列转 1 列）
+ * - BP_TABLET  1200 平板 / 笔记本边界（侧边栏自动折叠阈值）
+ * - BP_DESKTOP 1440 大屏
+ * 以上 6 个值与 index.css 的 @media 断点（380 / 560 / 768 / 900 / 1200 / 1440）
+ * 一一对应；新增或调整断点时必须两处同步修改。
  */
 export const BP_XS = 380;
 export const BP_PHONE = 560;
-export const BP_SMALL = 768; // 手机
+export const BP_SMALL = 768;
+export const BP_MEDIUM = 900;
 export const BP_TABLET = 1200; // 平板（侧边栏自动折叠阈值）
-export const BP_DESKTOP = 1600;
+export const BP_DESKTOP = 1440;
 
 export function useBreakpoint() {
   const [w, setW] = useState(() =>
@@ -82,6 +85,22 @@ export function ThemeToggle({ collapsed }: { collapsed?: boolean }) {
         )}
       </Button>
     </Tooltip>
+  );
+}
+
+// ---------- PageSkeleton ----------
+
+/**
+ * 页面级加载骨架
+ * ----------------------------------------------------------
+ * data：页面首屏的「数据未到」统一用骨架屏，而不是全屏 Spin。
+ * 局部/行内等待（按钮、抽屉内小区域）仍可用 Spin，两者语义不同。
+ */
+export function PageSkeleton({ rows = 6 }: { rows?: number }) {
+  return (
+    <div style={{ padding: 24 }}>
+      <Skeleton active title paragraph={{ rows }} />
+    </div>
   );
 }
 

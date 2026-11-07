@@ -146,7 +146,7 @@ export function ScoringCoveragePanel({
     <Card
       size="small"
       data-testid="scoring-coverage-panel"
-      style={{ marginBottom: 12, background: "#f7fbff" }}
+      style={{ marginBottom: 12, background: "var(--bp-panel-bg)" }}
       styles={{ body: { padding: "8px 12px" } }}
       title={
         <Space size={8}>
@@ -157,7 +157,15 @@ export function ScoringCoveragePanel({
           {status && (
             <Tag
               data-testid="scoring-status-tag"
-              color={status === "ok" ? "green" : status === "partial" ? "orange" : "default"}
+              color={
+                status === "ok"
+                  ? "green"
+                  : status === "partial"
+                    ? "orange"
+                    : status === "undetermined"
+                      ? "gold"
+                      : "default"
+              }
             >
               {data?.extraction?.status === "empty"
                 ? "沿用旧快照（未更新）"
@@ -201,7 +209,7 @@ export function ScoringCoveragePanel({
           type="error"
           showIcon
           style={{ marginBottom: 8 }}
-          message="无法判定（数据不可用）"
+          message="评分项覆盖校验加载失败（数据不可用）"
           description={error}
           action={
             <Button size="small" onClick={() => void load()}>
@@ -265,7 +273,7 @@ export function ScoringCoveragePanel({
                 {
                   key: "mapped",
                   label: (
-                    <Text strong style={{ fontSize: 12, color: "#389e0d" }}>
+                    <Text strong style={{ fontSize: 12, color: "var(--bp-success-text)" }}>
                       已覆盖 {mappedItems.length} 项（点击展开明细）
                     </Text>
                   ),
@@ -318,7 +326,7 @@ export function ScoringCoveragePanel({
 
           {data.missing.length > 0 && (
             <div data-testid="scoring-missing-list" style={{ marginBottom: 8 }}>
-              <Text strong style={{ fontSize: 12, color: "#cf1322" }}>
+              <Text strong style={{ fontSize: 12, color: "var(--bp-error-text)" }}>
                 缺失章节（评分项在目录中无对应章节）
               </Text>
               {data.missing.map((m) => (
@@ -361,7 +369,7 @@ export function ScoringCoveragePanel({
 
           {data.extra.length > 0 && (
             <div data-testid="scoring-extra-list" style={{ marginBottom: 8 }}>
-              <Text strong style={{ fontSize: 12, color: "#d46b08" }}>
+              <Text strong style={{ fontSize: 12, color: "var(--bp-warning-text)" }}>
                 多余章节（目录中无评分项支撑的叶子章节）
               </Text>
               {data.extra.map((n: ScoringExtraNode) => (
@@ -385,7 +393,7 @@ export function ScoringCoveragePanel({
 
           {data.unmatched.length > 0 && (
             <div data-testid="scoring-unmatched-list" style={{ marginBottom: 8 }}>
-              <Text strong style={{ fontSize: 12, color: "#ad4e00" }}>
+              <Text strong style={{ fontSize: 12, color: "var(--bp-warning-text)" }}>
                 未解析来源（这些文档的评分项未纳入校验）
               </Text>
               {data.unmatched.map((s: FailedSource, idx: number) => (

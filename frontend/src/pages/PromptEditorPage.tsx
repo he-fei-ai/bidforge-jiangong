@@ -28,7 +28,7 @@ import { promptsApi } from "../api";
 import type { PromptSyncResult } from "../api";
 import { useAntdMessageHub } from "../utils/activityCenter";
 
-import { PageHero, StatCards, StatItem } from "../utils/ui";
+import { PageHero, PageSkeleton, StatCards, StatItem } from "../utils/ui";
 import type { PromptAuditLog, PromptItem } from "../types/prompt";
 import { diffPromptVariables, extractPromptVariables } from "../utils/promptVariables";
 
@@ -322,8 +322,7 @@ export default function PromptEditorPage() {
     [modal, msg],
   );
 
-  if (loading)
-    return <Spin size="large" style={{ display: "block", marginTop: 80, textAlign: "center" }} />;
+  if (loading) return <PageSkeleton rows={7} />;
 
   const categoryPrompts = (cat: string) => prompts.filter((p) => p.category === cat);
 
