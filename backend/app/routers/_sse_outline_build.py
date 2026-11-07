@@ -2,6 +2,7 @@
 
 import asyncio
 import copy
+import re
 import time
 
 import app.routers.sse_handlers as _sh  # noqa: F401 — facade 命名空间延迟绑定（monkeypatch 兼容）
@@ -857,7 +858,7 @@ def _build_parent_chain(
         # （存储态），于是同一个祖先在正文提示词里显示 "1.1 第一节"，
         # 而导出版是 "1 第一节" —— 同一份文档两套编号，模型据此写出的
         # 子标题编号（3.2.1）也会与成稿（2.1）错位一整级。
-        stored = _sh.stored_outline_id(p)
+        stored = _preferred_section_number(p)
         if stored:
             level_tag = _sh.stored_id_to_display(stored)
         else:
@@ -902,6 +903,27 @@ def _apply_word_budget_allocations(
             _sh.logger.info("单元 %s 字数分配降级均分（每份 %d）", u["unit"].get("title", "")[:20], base)
 
 
+#: 合法章节编号（点分数字路径）的唯一校验口径，与 numbering._DOT_PATH_RE 同形。
+_SECTION_NUMBER_RE = re.compile(r"\d+(?:\.\d+)*")
+
+
+def _preferred_section_number(sec: dict) -> str:
+    """优先取**生成前按真实树重算**的编号，缺失/非法时回退存储编号。
+
+    ✅ R182（2026-11-07 · 陈旧存储编号进提示词）：
+    ``outline_json.id`` 是落库时的快照；目录重排/结构漂移后可能与真实树分叉。
+    选叶子时（``content_utils.select_target_leaves``）已把真实树编号写入
+    ``sec["_prompt_number"]``，提示词侧必须优先读它，否则
+    ``{section_number}`` 与父级链会带陈旧编号（实测第 2 章存储编号被改成
+    ``1`` 后，提示词仍注入 ``1``/``1.1``）。
+    回退路径保持原语义：存储编号合法点分路径，否则空串（由兜底文案接管）。
+    """
+    recomputed = str((sec or {}).get("_prompt_number") or "").strip()
+    if recomputed and _SECTION_NUMBER_RE.fullmatch(recomputed):
+        return recomputed
+    return _sh.stored_outline_id(sec)
+
+
 def _section_outline_number(sec: dict) -> str:
     """取章节目录编号（如 1.1.1），用于提示词中的『当前章节编号』。
 
@@ -911,8 +933,11 @@ def _section_outline_number(sec: dict) -> str:
     一串 `550e8400-e29b-41d4-a716-446655440000`。模型会照抄进正文子标题，
     或据此误判层级（UUID 含连字符、不含点分段），成稿编号彻底失真。
     现一律返回合法点分路径，非法即空串（由提示词侧「编号缺失」兜底口径接管）。
+
+    ✅ R182（2026-11-07）：真实树重算编号优先，存储编号仅作回退
+    （详见 :func:`_preferred_section_number`）。
     """
-    return _sh.stored_outline_id(sec)
+    return _preferred_section_number(sec)
 
 
 #: 章节编号缺失时的提示词兜底文案。

@@ -197,6 +197,41 @@ class TestNormalizeRawContent:
         out, _ = normalize_raw_content("合格率95%、占比0.85")
         assert "95%" in out and "0.85" in out
 
+    # ✅ 2026-11-07（R182 · 围栏内不得归一化）：
+    #    chart-json 字符串值里的 ``\n`` 是 JSON 转义，不是排版换行；旧实现
+    #    把它还原成真实换行 → JSON 出现非法控制字符 → 图表块被解析器整块
+    #    跳过（成稿静默缺图）。
+    def test_fenced_chart_json_escape_preserved(self):
+        import json
+
+        # 用中文邻居，避免"两侧 ASCII 不还原"的防误伤规则替你挡住回归
+        src = '```chart-json\n{"title":"第一行\\n第二行","series":[1,2]}\n```'
+        out, stats = normalize_raw_content(src)
+        assert out == src
+        assert stats["literal_newline"] == 0
+        assert json.loads(out.split("\n")[1])["title"] == "第一行\n第二行"
+
+    def test_fenced_page_mark_and_typo_preserved(self):
+        # 代码/图表块内的分页标记与"错别字"是示例文本，不是排版杂质
+        src = "```\n===== Page 3 =====\n峻工 0.5MQ\n```"
+        out, stats = normalize_raw_content(src)
+        assert out == src
+        assert stats["page_marks"] == 0 and stats["typo_fixed"] == 0
+
+    def test_windows_path_not_split(self):
+        # 路径里的 \n 是字面字符（盘符/已有反斜杠），拆开会把路径劈成两段
+        src = r"资料存放于 D:\资料\newfile.doc 与 C:\new 两处。"
+        out, stats = normalize_raw_content(src)
+        assert out == src and stats["literal_newline"] == 0
+
+    def test_whole_document_escaped_still_unrolled(self):
+        # 整篇被 JSON 转义时围栏标记也粘成一行（扫描器只能判未闭合）。
+        # 若误把未闭合围栏纳入保护，字面换行将永远无法还原。
+        src = "```mermaid\\ngraph TD\\nA-->B\\n```"
+        out, stats = normalize_raw_content(src)
+        assert out == "```mermaid\ngraph TD\nA-->B\n```"
+        assert stats["literal_newline"] == 3
+
 
 # ---------------------------------------------------------------------------
 # 防线二：编号重排不叠源前缀（"a、a、" / "1）1）"）

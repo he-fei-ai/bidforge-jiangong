@@ -981,6 +981,60 @@ def section_sort_order_key(sort_order, section_id) -> tuple[int, str]:
     return (so_i, str(section_id or ""))
 
 
+def recompute_section_numbers(all_sections: list[dict]) -> dict[str, str]:
+    """按**真实目录树**重算章节编号（纯函数、只读、不抛异常）。
+
+    ✅ R182（2026-11-07 · 陈旧存储编号进提示词）：
+    ``sections.outline_json.id`` 是写入时快照，目录重排/结构漂移后可能
+    与真实树分叉（实测把第 2 章存储编号改成 ``1`` 后，正文提示词的
+    ``{section_number}`` 仍是 ``1``/``1.1``，与工作台、导出口径 30/30 分叉）。
+    生成前必须按真实树（``parent_id`` + 同级 ``sort_order``）重算，
+    不能依赖存储编号，也不能在提示词侧做字符串修补。
+
+    编号规则与目录树/导出完全一致：根节点按同级序 1,2,3…；子节点为
+    「父编号 + '.' + 同级序号（1 起）」。同级排序委托
+    :func:`section_sort_order_key`（展示序/生成序/导出序的单一出口）。
+
+    Returns:
+        ``{section_id: "1.2.3"}``。父链悬空视作根节点（与导出口径一致）；
+        自环/环路中不可从根到达的节点不返回（调用方回退存储编号，
+        避免把不可达分支硬编进提示词）。
+    """
+    if not all_sections:
+        return {}
+    nodes: dict[str, dict] = {}
+    for s in all_sections:
+        sid = str(s.get("id") or "")
+        if sid:
+            nodes.setdefault(sid, s)  # 主键重复时取首条，与 nodes_map 同口径
+    children: dict[str, list[str]] = {sid: [] for sid in nodes}
+    roots: list[str] = []
+    for sid, sec in nodes.items():
+        pid = str(sec.get("parent_id") or "")
+        if pid and pid in nodes and pid != sid:
+            children[pid].append(sid)
+        else:
+            roots.append(sid)
+    for sid in children:
+        children[sid].sort(key=lambda cid: section_sort_order_key(nodes[cid].get("sort_order"), cid))
+    roots.sort(key=lambda sid: section_sort_order_key(nodes[sid].get("sort_order"), sid))
+
+    numbers: dict[str, str] = {}
+    # 迭代前序 DFS：深目录（>1000 级脏数据）也不触发 RecursionError
+    stack: list[tuple[str, str]] = [
+        (roots[i], str(i + 1)) for i in range(len(roots) - 1, -1, -1)
+    ]
+    while stack:
+        sid, number = stack.pop()
+        if sid in numbers:
+            continue  # 环路/重复父链保护
+        numbers[sid] = number
+        kids = children.get(sid, [])
+        for i in range(len(kids) - 1, -1, -1):
+            stack.append((kids[i], f"{number}.{i + 1}"))
+    return numbers
+
+
 def verify_generation_order(dispatched, expected) -> dict:
     """校验章节**派发序**是否与目录 DFS 序一致（R102 · G1 顺序留痕）。
 
@@ -1179,6 +1233,15 @@ def select_target_leaves(
     # 3) 叶子
     target_sections = [s for s in all_sections if s["id"] in target_set]
     parent_ids_in_target = {s["parent_id"] for s in target_sections if s.get("parent_id")}
+    # ✅ R182（2026-11-07）：生成前按真实树重算编号，注入各章节 dict 供提示词
+    #    读取（叶子用于 {section_number}，祖先用于父级标题链）。存储编号
+    #    （outline_json.id）可能因目录重排/结构漂移而陈旧，直接注入会与
+    #    工作台、导出的真实树编号分叉。字段名以下划线开头，属生成期内部量。
+    numbers = recompute_section_numbers(all_sections)
+    for s in all_sections:
+        num = numbers.get(str(s.get("id") or ""))
+        if num:
+            s["_prompt_number"] = num
     return [s for s in target_sections if s["id"] not in parent_ids_in_target]
 
 

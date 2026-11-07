@@ -348,6 +348,35 @@ class TestExportPureFunctions:
         assert _detect_plain_heading("3.1.12 身份证复印件、照片；") is None
         assert _detect_plain_heading("3.1 搭设完成并验收合格，方可投入使用，") is None
 
+    def test_detect_plain_heading_rejects_quantity_tail(self):
+        """R182（2026-11-07）：`N 空格 量词` 行是正文陈述，不是章节标题。
+
+        修复前实测：``3 台挖掘机进场`` → ``(2, '台挖掘机进场')``（"3 " 被静默
+        丢弃、整行正文变标题）；``3.5 米厚底板浇筑`` → ``(3, '米厚底板浇筑')``。
+        """
+        from app.routers.export import _detect_plain_heading
+
+        assert _detect_plain_heading("3 台挖掘机进场") is None
+        assert _detect_plain_heading("3 台挖掘机进场施工") is None
+        assert _detect_plain_heading("3.5 米厚底板浇筑") is None
+        assert _detect_plain_heading("5 人班组进场") is None
+        assert _detect_plain_heading("3 天完成基础施工") is None
+        assert _detect_plain_heading("4 号楼主体结构施工") is None
+        assert _detect_plain_heading("3 m 厚回填土") is None
+        assert _detect_plain_heading("3 mm 厚钢板") is None
+        assert _detect_plain_heading("3 分钟完成") is None
+
+    def test_detect_plain_heading_keeps_word_heads(self):
+        """量词首字组成普通词时（人力/项目/次生/层站/分阶段）仍是正常标题。"""
+        from app.routers.export import _detect_plain_heading
+
+        assert _detect_plain_heading("3 人力资源配置") == (2, "人力资源配置")
+        assert _detect_plain_heading("3 项目划分") == (2, "项目划分")
+        assert _detect_plain_heading("7.2.3 次生灾害风险阻断措施") == (4, "次生灾害风险阻断措施")
+        assert _detect_plain_heading("2.3.1 层站门洞对接") == (4, "层站门洞对接")
+        assert _detect_plain_heading("8.3.1 分阶段验收节点划分") == (4, "分阶段验收节点划分")
+        assert _detect_plain_heading("3 立面分区") == (2, "立面分区")
+
     def test_cn_numeral_to_int(self):
         from app.routers.export import _cn_numeral_to_int
 

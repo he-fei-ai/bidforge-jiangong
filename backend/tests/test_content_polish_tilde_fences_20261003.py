@@ -68,3 +68,21 @@ def test_protected_ranges_backtick_still_works():
     ranges = _protected_ranges(text)
     covered = any(s <= text.index("x") < e for s, e in ranges)
     assert covered
+
+
+def test_sanitize_protects_table_without_trailing_pipe():
+    """R182（2026-11-07）：AI 常漏写表格行尾竖线，解析器仍按表格渲染。
+
+    清洗侧若要求尾竖线，会把单元格当散文改写（"搞定"→"完成"、
+    "咱们"→"施工项目部"）并折叠单元格内空格 —— 交付数据被静默改写。
+    """
+    content = "| 项目 | 说明\n| --- | ---\n| 搞定 | 咱们做到位\n| 正常 | 保持 双  空格"
+    out = sanitize_ai_content(content)
+    assert out == content
+
+
+def test_sanitize_still_cleans_prose_outside_table():
+    content = "咱们开始施工。\n| 项目 | 说明\n| --- | ---\n| 搞定 | 咱们"
+    out = sanitize_ai_content(content)
+    assert "施工项目部" in out.split("\n")[0]
+    assert out.split("\n")[3] == "| 搞定 | 咱们"

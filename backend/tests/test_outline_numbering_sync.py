@@ -469,6 +469,71 @@ class TestPromptNumberReader:
         assert _build_parent_chain(sections, "uuid-d") == "第二章 第二章 > 1 小节"
 
 
+class TestRecomputedPromptNumber:
+    """R182（2026-11-07）：提示词编号必须按真实树重算，不得沿用陈旧存储编号。
+
+    取证：构造「第 2 章存储编号仍是 1」的结构漂移（目录模块 30/30 分叉
+    的同一输入），生成前选叶子后读取的编号必须是 2/2.1/2.2。
+    """
+
+    @staticmethod
+    def _row(sid, pid, so, lv, num, title):
+        return {
+            "id": sid,
+            "parent_id": pid,
+            "sort_order": so,
+            "level": lv,
+            "outline_json": json.dumps({"id": num, "level": lv}),
+            "title": title,
+            "content": "",
+            "status": "empty",
+            "word_count": 0,
+        }
+
+    def test_stale_stored_number_overridden_by_real_tree(self):
+        from app.routers.sse_handlers import _build_parent_chain, _section_outline_number
+        from app.services.content_utils import (
+            order_sections_dfs,
+            recompute_section_numbers,
+            select_target_leaves,
+        )
+
+        flat = [
+            self._row("A", "", 0, 1, "1", "工程概况"),
+            self._row("B", "", 1, 1, "1", "施工部署"),  # 漂移：真实应为 2
+            self._row("B1", "B", 0, 2, "1.1", "施工总平面布置"),  # 漂移：真实应为 2.1
+            self._row("B2", "B", 1, 2, "1.2", "施工进度计划"),  # 漂移：真实应为 2.2
+            self._row("C", "", 2, 1, "3", "质量保证措施"),
+        ]
+        ordered = order_sections_dfs(flat)
+        assert recompute_section_numbers(ordered) == {
+            "A": "1",
+            "B": "2",
+            "B1": "2.1",
+            "B2": "2.2",
+            "C": "3",
+        }
+        leaves = select_target_leaves(ordered, mode="all")
+        got = {s["id"]: _section_outline_number(s) for s in leaves}
+        assert got == {"A": "1", "B1": "2.1", "B2": "2.2", "C": "3"}
+        nodes = {s["id"]: s for s in ordered}
+        assert _build_parent_chain(ordered, "B1", nodes) == "第二章 施工部署"
+
+    def test_recompute_handles_orphan_and_cycle(self):
+        """悬空父链按根节点参与编号（与导出口径一致）；环内节点不进入编号表"""
+        from app.services.content_utils import recompute_section_numbers
+
+        rows = [
+            self._row("ok", "", 0, 1, "1", "正常根"),
+            self._row("orphan", "missing-parent", 1, 2, "9", "悬空节点"),
+            self._row("c1", "c2", 0, 2, "7", "环1"),
+            self._row("c2", "c1", 1, 2, "8", "环2"),
+        ]
+        nums = recompute_section_numbers(rows)
+        # orphan 的父级不存在 → 视作根，按 sort_order 排在 ok 之后
+        assert nums == {"ok": "1", "orphan": "2"}
+
+
 # ============================================================
 # 一致性扫描缓存失效（2026-09-23 · 缓存未失效修复）
 # ============================================================

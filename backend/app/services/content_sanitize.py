@@ -32,6 +32,8 @@ from __future__ import annotations
 import logging
 import re
 
+from app.services.fence_common import iter_all_blocks
+
 logger = logging.getLogger("content_sanitize")
 
 # ---------------------------------------------------------------------------
@@ -85,6 +87,147 @@ SANITIZE_STATS_KEYS = (
 )
 
 
+def _fence_line_mask(text: str) -> list[bool]:
+    """按行标记「该行处于代码围栏内」（含开/闭围栏行、未闭合块之后的全部行）。
+
+    为什么归一化必须认得围栏：围栏内是**代码/图表语法**，不是散文。
+      · chart-json 的字符串值里合法存在 ``\\n`` 转义（JSON 规范），若被当成
+        「字面换行」拆开，JSON 立即出现非法控制字符 → 解析器整块跳过 →
+        成稿静默缺图（且日志只有一行 INFO）；
+      · mermaid / 代码块里的 ``===== Page N =====``、``峻工``、``0.5MQ``
+        是示例文本或标识，按散文规则删除/改写等于破坏图表数据。
+    未闭合围栏按「其后全部行都在块内」处理 —— 与解析器 / 导出侧同口径。
+    """
+    lines = text.split("\n")
+    mask = [False] * len(lines)
+    for b in iter_all_blocks(text):
+        end = b["close_line"] if b["close_line"] >= 0 else len(lines) - 1
+        for i in range(b["open_line"], min(end, len(lines) - 1) + 1):
+            mask[i] = True
+    return mask
+
+
+def _closed_fence_char_ranges(text: str) -> list[tuple[int, int]]:
+    """**闭合**围栏的字符区间（``[start, end)``，行首到闭合行末）。
+
+    只保护闭合围栏，是「整份正文被 JSON 转义」场景的必要条件：那种正文里
+    所有换行都是字面 ``\\n``，围栏标记本身也粘成一行，扫描器只能判为
+    「未闭合」。若把未闭合区间也纳入保护，字面换行永远无法还原，整篇正文
+    会退化成一个代码块。闭合围栏说明换行结构本身是真的，块内转义才有
+    「属于语法而非排版」的语义。
+    """
+    lines = text.split("\n")
+    offsets: list[int] = []
+    pos = 0
+    for ln in lines:
+        offsets.append(pos)
+        pos += len(ln) + 1
+    ranges: list[tuple[int, int]] = []
+    for b in iter_all_blocks(text):
+        if b["close_line"] < 0:
+            continue
+        end_line = b["close_line"]
+        ranges.append((offsets[b["open_line"]], offsets[end_line] + len(lines[end_line])))
+    return ranges
+
+
+def _looks_like_pathish(text: str, backslash_pos: int, floor: int = 0) -> bool:
+    """判断 ``backslash_pos`` 处的 ``\\n`` 是否位于路径/转义片段中。
+
+    背景：字面 ``\\n`` 既可能是「被 JSON 转义的真换行」，也可能是 Windows
+    路径（``D:\\资料\\newfile.doc`` / ``\\\\server\\newshare``）的一部分。
+    后者拆开会把路径劈成两段（实测 ``C:\\new`` → ``C:`` + 换行 + ``ew``）。
+    判据只看 ``\\n`` 所在 token（向前到空白/全角标点为止）：
+      · 含盘符 ``[A-Za-z]:`` → 路径；
+      · 已含反斜杠 → 路径/转义片段。
+    两个判据都不命中时按真换行还原（中文正文的转义换行至少一侧是中文，
+    不会被误判成路径）。
+    """
+    start = backslash_pos
+    j = start - 1
+    # floor = 上一个字面 \n 的结束位置：token 不得跨越已识别的转义换行，
+    # 否则其反斜杠会被误当作路径分隔符（``A-->B\n``` `` 的 token 会变成
+    # ``\nA-->B`` → 误判为路径，最后一段换行永远无法还原）。
+    limit = max(floor, start - 60)
+    while j >= limit:
+        ch = text[j]
+        if ch.isspace() or ch in "，。；：、（）()\"'“”":
+            break
+        j -= 1
+    token = text[j + 1 : start]
+    if not token:
+        return False
+    if "\\" in token:
+        return True
+    return bool(re.search(r"[A-Za-z]:", token))
+
+
+def _unroll_literal_newlines(segment: str, *, ascii_guard: bool = True) -> tuple[str, int]:
+    """把片段里的字面 ``\\n`` 还原为真实换行，返回 ``(新片段, 替换数)``。
+
+    两道**防误伤**：
+      · ``\\n`` 所在 token 像 Windows 路径（盘符 / 已有反斜杠）→ 永不还原；
+      · ``\\n`` 两侧都是 ASCII 字符（``Hello\\nWorld``、``s/\\n//``）→ 不还原
+        （``ascii_guard=False`` 的整篇转义模式除外：那时全文都是字面换行，
+        代码/英文段落也必须还原，否则粘成一行）。
+    中文正文里被 JSON 转义的真换行至少有一侧是中文/全角字符，仍会正常还原。
+    """
+    if "\\n" not in segment:
+        return segment, 0
+    out: list[str] = []
+    cursor = 0
+    count = 0
+    floor = 0
+    for m in _RE_LITERAL_NEWLINE.finditer(segment):
+        prev = segment[m.start() - 1] if m.start() else ""
+        nxt = segment[m.end() : m.end() + 1]
+        both_ascii = bool(prev and prev.isascii() and nxt and nxt.isascii())
+        pathish = _looks_like_pathish(segment, m.start(), floor)
+        floor = m.end()
+        if pathish or (ascii_guard and both_ascii):
+            continue
+        out.append(segment[cursor : m.start()])
+        out.append("\n")
+        cursor = m.end()
+        count += 1
+    out.append(segment[cursor:])
+    return "".join(out), count
+
+
+def _transform_outside_ranges(
+    text: str,
+    ranges: list[tuple[int, int]],
+    fn,
+) -> tuple[str, int]:
+    """仅对围栏区间之外的片段执行 ``fn``，区间内逐字保留。"""
+    if not ranges:
+        return fn(text)
+    out: list[str] = []
+    cursor = 0
+    total = 0
+    for start, end in ranges:
+        if start > cursor:
+            seg, n = fn(text[cursor:start])
+            total += n
+            out.append(seg)
+        out.append(text[start:end])
+        cursor = end
+    if cursor < len(text):
+        seg, n = fn(text[cursor:])
+        total += n
+        out.append(seg)
+    return "".join(out), total
+
+
+def _apply_typo_rules(line: str, stats: dict[str, int]) -> str:
+    """对单行应用确定性错别字 / 单位符号规则（就地累计统计）。"""
+    for rx, repl in _TYPO_RULES:
+        line, n_sub = rx.subn(repl, line)
+        if n_sub:
+            stats["typo_fixed"] += n_sub
+    return line
+
+
 def normalize_raw_content(content: str) -> tuple[str, dict[str, int]]:
     """解析前置归一化：返回 (归一化后的正文, 修复统计)。
 
@@ -99,14 +242,31 @@ def normalize_raw_content(content: str) -> tuple[str, dict[str, int]]:
 
     text = str(content)
 
-    # 1) 字面 \n → 真实换行；\r\n / \r → \n
-    text, n_sub = _RE_LITERAL_NEWLINE.subn("\n", text)
+    # 1) 字面 \n → 真实换行；\r\n / \r → \n。
+    #    闭合围栏内不还原（chart-json 的 \n 是 JSON 转义，拆开即语法损坏）。
+    #    但整篇被 JSON 转义时（几乎全是字面 \n，真实换行 ≤ 1），围栏标记也
+    #    粘成一行、扫描器无法识别围栏 —— 此时必须全文还原，否则整篇正文
+    #    会退化成一个代码块。该场景下图表 JSON 自身的 \n 已被双重转义为
+    #    ``\\n``，本正则（前后不允许再出现反斜杠）不会误伤。
+    _real_nl = text.count("\n")
+    _literal_nl = len(_RE_LITERAL_NEWLINE.findall(text))
+    if _real_nl <= 1 and _literal_nl >= 2:
+        text, n_sub = _unroll_literal_newlines(text, ascii_guard=False)
+    else:
+        text, n_sub = _transform_outside_ranges(
+            text, _closed_fence_char_ranges(text), _unroll_literal_newlines
+        )
     stats["literal_newline"] += n_sub
     text = _RE_CR.sub("\n", text)
 
-    # 2)/3) 逐行处理：删分页标记 / 页脚残留行；拆表题粘连行
-    out_lines: list[str] = []
-    for line in text.split("\n"):
+    # 2)/3) 逐行处理：删分页标记 / 页脚残留行；拆表题粘连行。
+    #    围栏内的行原样保留（代码/图表内容不是排版杂质）。
+    line_mask = _fence_line_mask(text)
+    out_lines: list[tuple[str, bool]] = []
+    for line, protected in zip(text.split("\n"), line_mask):
+        if protected:
+            out_lines.append((line, True))
+            continue
         if _RE_PAGE_MARK_LINE.match(line):
             stats["page_marks"] += 1
             continue
@@ -118,18 +278,17 @@ def normalize_raw_content(content: str) -> tuple[str, dict[str, int]]:
             caption = m.group(1).strip()
             rest = line[line.index("|") :].strip()
             if caption and rest:
-                out_lines.append(caption)
-                out_lines.append(rest)
+                out_lines.append((caption, False))
+                out_lines.append((rest, False))
                 stats["caption_pipe_split"] += 1
                 continue
-        out_lines.append(line)
-    text = "\n".join(out_lines)
+        out_lines.append((line, False))
 
-    # 4) 确定性错别字 / 单位符号
-    for rx, repl in _TYPO_RULES:
-        text, n_sub = rx.subn(repl, text)
-        if n_sub:
-            stats["typo_fixed"] += n_sub
+    # 4) 确定性错别字 / 单位符号（仅围栏外；逐行等价于全文替换，
+    #    规则均不含跨行断言）
+    text = "\n".join(
+        line if protected else _apply_typo_rules(line, stats) for line, protected in out_lines
+    )
 
     if any(stats.values()):
         logger.warning(

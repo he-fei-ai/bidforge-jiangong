@@ -263,24 +263,86 @@ def _detect_plain_heading(line: str) -> tuple[int, str] | None:
     # N.N.N 标题（优先级最高，先匹配）
     m = _RE_HEADING_NNN.match(s_inside)
     if m and _is_reasonable_heading_number(m.group(1)):
-        return 4, m.group(2).strip()
+        return _plain_heading_result(4, m.group(2))
 
     # N.N.N.N(.N…) 深层标题（≥4 段）：层级 = 段数 + 1，封顶 7
     m = _RE_HEADING_DEEP.match(s_inside)
     if m and _is_reasonable_heading_number(m.group(1)):
-        return min(m.group(1).count(".") + 2, 7), m.group(2).strip()
+        return _plain_heading_result(min(m.group(1).count(".") + 2, 7), m.group(2))
 
     # N.N 标题
     m = _RE_HEADING_NN.match(s_inside)
     if m and _is_reasonable_heading_number(m.group(1)):
-        return 3, m.group(2).strip()
+        return _plain_heading_result(3, m.group(2))
 
     # N 标题
     m = _RE_HEADING_N.match(s_inside)
     if m and _is_reasonable_heading_number(m.group(1)):
-        return 2, m.group(2).strip()
+        return _plain_heading_result(2, m.group(2))
 
     return None
+
+
+#: 数量词/计量单位首字（`N 台挖掘机进场` 这类正文不得当标题）。
+_UNIT_TAIL_CHARS = "台人天米个套吨层根处项次月年周日时分号元组张栋座榀块份册页批车辆樘扇倍"
+#: 紧跟单位首字、能把该字组成普通词（而非量词）的下一字 —— 命中则**不**按数量词排除。
+#: 例：`3 人力资源配置`（人力）、`3 项目划分`（项目）、`7.2.3 次生灾害…`（次生）
+#: 都是正常标题，不能被误降级为正文。
+_UNIT_TAIL_EXEMPT_NEXT = {
+    "人": "力员数才均家口手",
+    "天": "气",
+    "台": "账帐",
+    "处": "理置",
+    "项": "目",
+    "次": "生序数要日",
+    "组": "织",
+    "月": "度报",
+    "年": "度",
+    "周": "边期报",
+    "日": "常期",
+    "时": "间段期效",
+    "分": "析阶段区布项工类层隔部仓包户支配散离化解享级数子外内中",
+    "元": "件素",
+    "张": "拉",
+    "套": "管",
+    "层": "站",
+    "平": "面衡台均",
+    "立": "面方杆",
+    "根": "据",
+}
+#: ASCII / 符号计量单位（`3 mm 厚`、`3 m 高`、`5 % 掺量`、`30 ℃`）。
+_UNIT_TAIL_ASCII_RE = re.compile(
+    r"^(?:mm|cm|km|kg|min|ml|m2|m3|m\u00b2|m\u00b3|\u33a1|m|t|h|d|s|L|[%\uff05\u2103\u00b0])(?![A-Za-z0-9])"
+)
+
+
+def _tail_starts_with_quantity(title: str) -> bool:
+    """标题正文是否为「数量词 + 名词」形态（`3 台挖掘机进场` / `3.5 米厚底板浇筑`）。
+
+    ✅ R182（2026-11-07 · 标题误判吞数字）：`_is_reasonable_heading_number` 只拦
+    年份/超两位数编号（2023、100），`3 台挖掘机进场` 的编号 3 合法 → 被提升为
+    level-2 标题且 **"3 " 被静默丢弃**（成稿标题变成「台挖掘机进场」，
+    正文段落消失）；`3.5 米厚底板浇筑` 更会被判成 level-3（"米厚底板浇筑"）。
+    这类「数字 + 空格 + 量词」行是正文陈述（工程量/规格），不是章节标题，
+    故在四个编号分支出口统一排除；排除后整行保留为普通段落，内容零丢失。
+    """
+    t = (title or "").strip()
+    if not t:
+        return False
+    if _UNIT_TAIL_ASCII_RE.match(t):
+        return True
+    if t[0] not in _UNIT_TAIL_CHARS:
+        return False
+    exempt = _UNIT_TAIL_EXEMPT_NEXT.get(t[0], "")
+    return not (len(t) > 1 and t[1] in exempt)
+
+
+def _plain_heading_result(level: int, title: str):
+    """纯文本编号标题出口：命中数量词形态时返回 None（降级为正文段落）。"""
+    title = (title or "").strip()
+    if _tail_starts_with_quantity(title):
+        return None
+    return level, title
 
 
 def _is_reasonable_heading_number(num_str: str) -> bool:
@@ -1275,6 +1337,21 @@ def _parse_content_blocks(content: str, diagnostics: dict | None = None) -> list
             )
             i += 1
             continue
+        # ✅ R182（2026-11-07 · 列表样式被拍平）：列表项的缩进续行不得降级为普通段落。
+        #    Markdown 语义（以及前端预览）中，缩进续行属于上一列表项的内容；旧实现
+        #    落到 paragraph 分支，导出按 Normal 样式渲染（无列表左缩进/悬挂缩进），
+        #    与预览不一致且层级丢失。此处并入上一 list_item 的 text（换行保留）。
+        #    · 仅当续行视觉缩进（tab=4）≥2 且比上一列表项更深时合并，避免误吞
+        #      与列表无关的正文段；
+        #    · 表格行/标题/围栏在上方分支已先行识别，不会进入本分支。
+        _vis_indent = len(line.expandtabs(4)) - len(line.expandtabs(4).lstrip())
+        if _vis_indent >= 2 and blocks and blocks[-1].get("type") == "list_item":
+            _prev_indent = int(blocks[-1].get("indent") or 0)
+            if _vis_indent > _prev_indent:
+                _prev = blocks[-1]
+                _prev["text"] = f"{_prev.get('text', '')}\n{stripped}"
+                i += 1
+                continue
         blocks.append({"type": "paragraph", "text": line})
         i += 1
     # ✅ 2026-10-17（文档质量报告 图号问题）：收尾清理「有题无图」的残留图题段落 ——
