@@ -100,6 +100,7 @@ from app.services.file_parser import (  # noqa: F401  re-export for tests monkey
     parse_file_content_ex,
     signature_valid,
 )
+from app.services.prompt_governance import serialize_bounded_json_array
 
 # ✅ R184（2026-11-07）：本模块所有异常文本回显统一走脱敏单一出口。
 #    上游厂商 401/403 错误体可能回显 `Authorization: Bearer sk-…`；
@@ -3633,6 +3634,54 @@ def _facts_for_adjust_prompt(rows: list) -> list:
     return out
 
 
+#: 全局事实调整 prompt 中事实 JSON 的字符预算（与原硬切片上限一致）。
+FACTS_ADJUST_PROMPT_CHARS = 30000
+
+
+def _clip_fact_for_budget(item: dict, max_chars: int) -> tuple[dict, int]:
+    """单条事实超预算时的**条目内**裁剪：削最长的 value/name，结构不动。
+
+    ✅ 2026-11-07（G-STRUCT）：只对这一条做显式标注的文本裁剪，条目内写
+    ``__truncated_chars__`` 注明省略字数；fact_id/category 永远保留，保证可定位。
+    """
+    clipped = dict(item)
+    # 预留 __truncated_chars__ 标记与 JSON 包装开销
+    budget = max(1, int(max_chars) - 60)
+    omitted = 0
+    while len(json.dumps(clipped, ensure_ascii=False)) > budget:
+        candidates = [
+            (k, len(v)) for k, v in clipped.items()
+            if k in ("value", "name") and isinstance(v, str) and v
+        ]
+        if not candidates:
+            break
+        key, _length = max(candidates, key=lambda kv: kv[1])
+        text = clipped[key]
+        excess = len(json.dumps(clipped, ensure_ascii=False)) - budget
+        cut = min(len(text), max(1, excess))
+        clipped[key] = text[: len(text) - cut]
+        omitted += cut
+    clipped["__truncated_chars__"] = omitted
+    return clipped, omitted
+
+
+def _facts_adjust_current_text(items: list, max_chars: int = FACTS_ADJUST_PROMPT_CHARS) -> str:
+    """事实调整 prompt 的事实文本：未超预算逐字节同旧实现，超预算按整条事实裁剪。
+
+    ✅ 2026-11-07（G-STRUCT）：旧实现 ``json.dumps(...)[:30000]`` 会切在 JSON
+    中间，模型拿到非法 JSON。现按整条事实保留/省略，并在结构内显式标注
+    省略条目数/字符数/原因；单条超预算时只裁该条文本并注明省略字数。
+    """
+    return serialize_bounded_json_array(
+        items,
+        max_chars,
+        field="facts",
+        label="全局事实",
+        clip_item=_clip_fact_for_budget,
+        reason=f"事实 JSON 超过 prompt 字符预算 {max_chars}，已按整条事实裁剪；保留条目结构完整",
+    )
+
+
 def _validate_adjust_ops(
     obj, valid_ids: set, *, existing_keys: set | None = None, ignored_out: list | None = None
 ) -> tuple:
@@ -3808,7 +3857,10 @@ async def adjust_facts(data: AdjustRequest, db=Depends(get_db)):
     else:
         prompt = render(
             "global_facts_adjust_system",
-            current_facts=json.dumps(_facts_for_adjust_prompt(rows), ensure_ascii=False)[:30000],
+            # ✅ 2026-11-07（G-STRUCT）：原 ``json.dumps(...)[:30000]`` 会切在 JSON
+            #    中间，模型收到非法输入。现未超预算逐字节不变；超预算按整条事实
+            #    裁剪，并在结构内显式标注省略条目数/字符数/原因。
+            current_facts=_facts_adjust_current_text(_facts_for_adjust_prompt(rows)),
             instruction=instruction[:3000],
         )
         try:

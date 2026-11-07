@@ -23,6 +23,7 @@
 
 from __future__ import annotations
 
+import json
 import logging
 import re
 
@@ -747,3 +748,117 @@ def allocate_char_budgets(lengths: list[int], budget: int) -> list[int]:
         return base
     extra = [min(cap - base[i], int(remaining * flexible[i] / flex_total)) for i in range(n)]
     return [base[i] + extra[i] for i in range(n)]
+
+
+# ==========================================================================
+# 三、结构化 JSON 预算器（原 json.dumps(...)[:N] · R184 G-STRUCT）
+# ==========================================================================
+def serialize_bounded_json_array(
+    items: list,
+    max_chars: int,
+    *,
+    field: str,
+    label: str = "条目",
+    clip_item=None,
+    reason: str = "",
+) -> str:
+    """把列表序列化为**始终可被 ``json.loads`` 解析**的 JSON 文本，超预算按条目边界裁剪。
+
+    ✅ 2026-11-07（G-STRUCT）：旧实现 ``json.dumps(items)[:30000]`` 直接按字符数
+    硬切 —— 模型收到半截 JSON（既无法解析，又可能被当作「输入就到这」而漏掉
+    整章/整条事实）。本函数保证：
+
+    - 未超预算：返回 ``json.dumps(items, ensure_ascii=False)``，
+      **与原实现逐字节一致**（不改未截断路径）；
+    - 超预算：返回 ``{field: [...保留的完整条目...], "truncation": {...}}``，
+      覆盖处只落在条目边界；``truncation`` 显式给出省略条目数 / 字符数 / 原因；
+    - 单条自身超预算：调用 ``clip_item(item, allowed_chars)`` 只对**该条**做带
+      标注的文本裁剪（回调须在条目内写 ``__truncated_chars__``），其余条目仍按
+      整条省略并计入 ``truncation``。
+
+    :param items: 待序列化的列表（顶层条目是「整条保留/整条省略」的最小单位）。
+    :param max_chars: 字符预算（``<=0`` 表示不限制，与旧实现无上限语义一致）。
+    :param field: 超预算包装对象里保留条目所在键名（如 ``outline`` / ``facts``）。
+    :param label: 人类可读条目名，写进 ``truncation.item_label`` 与日志。
+    :param clip_item: 单条超预算回调 ``(item, allowed_chars) -> (clipped, dropped)``。
+    :param reason: 写进 ``truncation.reason`` 的省略原因。
+    """
+    items = list(items or [])
+
+    def _dumps(obj) -> str:
+        return json.dumps(obj, ensure_ascii=False)
+
+    def _marker(kept_n: int, omitted_n: int, omitted_chars: int) -> dict:
+        return {
+            "truncated": True,
+            "item_label": label,
+            "kept_items": kept_n,
+            "omitted_items": omitted_n,
+            "omitted_chars": omitted_chars,
+            "reason": reason or "输入超过 prompt 字符预算，已按条目边界裁剪",
+            "note": "仅下列条目参与本次推理；被省略条目不在输入中，禁止臆造其内容。",
+        }
+
+    def _payload(kept: list, omitted_n: int, omitted_chars: int) -> str:
+        return _dumps({field: list(kept), "truncation": _marker(len(kept), omitted_n, omitted_chars)})
+
+    whole = _dumps(items)
+    if max_chars is None or int(max_chars) <= 0 or len(whole) <= int(max_chars):
+        return whole
+    if not items:  # 空列表：无可裁内容（外壳可能仍超预算，保持合法 JSON）
+        return whole
+
+    budget = int(max_chars)
+    sizes = [len(_dumps(it)) for it in items]
+    total_chars = sum(sizes)
+
+    # ① 单条自身超预算：只对该条做显式标注的文本裁剪，其余条目整条省略。
+    if clip_item is not None:
+        head_payload = _payload([items[0]], len(items) - 1, total_chars - sizes[0])
+        if len(head_payload) > budget:
+            # 预留包装外壳（空列表 + 完整省略计数）后再给该条分配字符额度。
+            overhead = len(_payload([], len(items), total_chars))
+            allowance = max(1, budget - overhead - 20)
+            clipped, _dropped = clip_item(items[0], allowance)
+            omitted_chars = max(0, total_chars - len(_dumps(clipped)))
+            payload = _payload([clipped], len(items) - 1, omitted_chars)
+            logger.warning(
+                "JSON 预算裁剪·单条（%s）：首条约 %d 字符超出预算 %d，已裁剪该条文本%s",
+                label,
+                sizes[0],
+                budget,
+                "" if len(payload) <= budget else "（包装开销后仍略超预算，已尽力收敛）",
+            )
+            return payload
+
+    # ② 多条超预算：按顶层条目边界贪心保留，尾部整条省略。
+    kept: list = []
+    used = 0
+    reserve = len(_payload([], 0, total_chars))  # 空列表情形的包装固定开销
+    for idx, item in enumerate(items):
+        sep = 1 if kept else 0
+        if used + sep + sizes[idx] + reserve > budget:
+            break
+        used += sep + sizes[idx]
+        kept.append(item)
+
+    omitted_n = len(items) - len(kept)
+    omitted_chars = sum(sizes[len(kept):])
+    payload = _payload(kept, omitted_n, omitted_chars)
+    # 省略计数会随位数增长；若外壳恰好越界，逐条回退直到可容纳（至少保留 0 条）。
+    while len(payload) > budget and kept:
+        kept.pop()
+        omitted_n = len(items) - len(kept)
+        omitted_chars = sum(sizes[len(kept):])
+        payload = _payload(kept, omitted_n, omitted_chars)
+
+    logger.warning(
+        "JSON 预算裁剪（%s）：保留 %d/%d 条，省略 %d 条共 %d 字符（预算 %d）",
+        label,
+        len(kept),
+        len(items),
+        omitted_n,
+        omitted_chars,
+        budget,
+    )
+    return payload

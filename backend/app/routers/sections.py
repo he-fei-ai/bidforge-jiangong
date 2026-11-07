@@ -63,6 +63,7 @@ from app.services.outline_quality import (
     detect_empty_top_chapters as _detect_empty_top_chapters,
 )
 from app.services.outline_utils import MAX_OUTLINE_DEPTH, normalize_outline
+from app.services.prompt_governance import serialize_bounded_json_array
 
 # ✅ 2026-09-30 深度上限文案单一来源：create_section 与 update_section（移动路径）
 # 共用同一条错误文案，避免两处各自硬编码后再次分叉（本仓反复出现的根因模式）。
@@ -1816,6 +1817,70 @@ def _slim_tree_for_adjust(nodes: list) -> list:
     return slim
 
 
+#: 目录调整 prompt 中目录 JSON 的字符预算（与原硬切片上限一致）。
+OUTLINE_ADJUST_PROMPT_CHARS = 30000
+
+
+def _iter_outline_text_fields(node: dict):
+    """深度优先产出目录节点里可裁剪的文本字段 ``(节点, 键)``。"""
+    for key in ("description", "title"):
+        value = node.get(key)
+        if isinstance(value, str) and value:
+            yield node, key
+    for child in node.get("children") or []:
+        if isinstance(child, dict):
+            yield from _iter_outline_text_fields(child)
+
+
+def _clip_outline_node_for_budget(node: dict, max_chars: int) -> tuple[dict, int]:
+    """单条目录超预算时的**条目内**裁剪：削最长文本字段，结构（children）不动。
+
+    ✅ 2026-11-07（G-STRUCT）：按用户判据，单条自身超预算时只裁剪这一条的文本，
+    并在条目内写 ``__truncated_chars__`` 注明省略字数；绝不切在 JSON 中间。
+    """
+    def _rebuild(n):
+        if not isinstance(n, dict):
+            return n
+        return {
+            k: ([_rebuild(c) for c in (v or [])] if k == "children" else v)
+            for k, v in n.items()
+        }
+
+    clipped = _rebuild(node)
+    # 预留 __truncated_chars__ 标记与 JSON 包装开销
+    budget = max(1, int(max_chars) - 60)
+    omitted = 0
+    while len(json.dumps(clipped, ensure_ascii=False)) > budget:
+        candidates = [(n, k) for n, k in _iter_outline_text_fields(clipped) if len(n[k]) > 0]
+        if not candidates:
+            break
+        target, key = max(candidates, key=lambda nk: len(nk[0][nk[1]]))
+        text = target[key]
+        excess = len(json.dumps(clipped, ensure_ascii=False)) - budget
+        cut = min(len(text), max(1, excess))
+        target[key] = text[: len(text) - cut]
+        omitted += cut
+    clipped["__truncated_chars__"] = omitted
+    return clipped, omitted
+
+
+def _outline_adjust_current_text(nodes: list, max_chars: int = OUTLINE_ADJUST_PROMPT_CHARS) -> str:
+    """目录调整 prompt 的目录文本：未超预算逐字节同旧实现，超预算按一级章节边界裁剪。
+
+    ✅ 2026-11-07（G-STRUCT）：旧实现 ``json.dumps(slim)[:30000]`` 会切在 JSON
+    中间，模型拿到非法 JSON。现交给统一的结构化预算器：整条保留/整条省略，
+    并在结构内显式标注省略条目数 / 字符数 / 原因。
+    """
+    return serialize_bounded_json_array(
+        nodes,
+        max_chars,
+        field="outline",
+        label="目录章节",
+        clip_item=_clip_outline_node_for_budget,
+        reason=f"目录 JSON 超过 prompt 字符预算 {max_chars}，已按一级章节边界裁剪；保留条目结构完整",
+    )
+
+
 def _relink_adjusted_original_ids(nodes: list, valid_ids: set) -> None:
     """把 AI 回传的合法 DB id 落到 __original_id（保住正文），剔除编造的 id。
 
@@ -1880,13 +1945,15 @@ async def adjust_outline(scheme_id: str, body: dict, db=Depends(get_db)):
 
     valid_ids = _collect_section_ids(tree)
     slim = _slim_tree_for_adjust(tree)
-    current_outline_text = json.dumps(slim, ensure_ascii=False)
-    # 目录过大时截断保护 prompt 体积（超长方案兜底；正常三级目录远小于此）
+    # ✅ 2026-11-07（G-STRUCT）：原 ``json.dumps(slim)[:30000]`` 会切在 JSON 中间，
+    #    模型收到非法输入。现未超预算逐字节不变；超预算按一级章节边界裁剪，
+    #    并在结构内显式标注省略条目数/字符数/原因。
+    current_outline_text = _outline_adjust_current_text(slim)
     prompt = render(
         "outline_adjust_system",
         scheme_name=str(scheme.get("name") or ""),
         scheme_type=str(scheme.get("type") or ""),
-        current_outline=current_outline_text[:30000],
+        current_outline=current_outline_text,
         instruction=instruction[:3000],
     )
     try:
