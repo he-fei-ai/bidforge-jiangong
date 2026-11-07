@@ -4,7 +4,9 @@
 1. ``_validate_adjust_ops``：同一 AI 计划内重复 ``add`` 必须被拦下
    （旧实现只比对既有键，计划内两条同名 add 会全部放行 → 双值注入）。
 2. ``create_fact`` 手工新增同名守卫：
-   - 同 key 同值 → 幂等去重（不新增行，返回既有分组）；
+   - 同 key 同值且既有行**可注入** → 幂等去重（不新增行，返回既有分组）；
+   - 同 key 同值但既有行未过门控（模拟/待确认/过期/矛盾）→ 409（R183 口径，
+     旧实现静默去重会让补录的真实值永远进不了正文）；
    - 同 key 不同值 → 409，且一行都不落库；
    - 方案级新增必须能看见项目共享同名事实；
    - 项目级新增不得误伤其他方案的私有同名事实。
@@ -43,7 +45,8 @@ def _group(title: str, items: list[FactItem], category: str = "personnel") -> Fa
 
 async def _rows(db, sid: str) -> list[dict]:
     cur = await db.execute(
-        "SELECT id, group_id, title, content, fact_key FROM global_facts " "WHERE scheme_id=? ORDER BY title, id",
+        "SELECT id, group_id, title, content, fact_key, is_simulated, is_resolved "
+        "FROM global_facts WHERE scheme_id=? ORDER BY title, id",
         (sid,),
     )
     return [dict(r) for r in await cur.fetchall()]
@@ -203,8 +206,14 @@ async def test_r179_create_fact_scope_shared_and_private(ctx):
     assert res["deduplicated"] == 0
 
 
-async def test_r179_create_fact_simulated_marker_same_value_dedupes(ctx):
-    """既有值为「12.5m（模拟值）」时，新增 12.5m 视为同值去重（标记不参与比较）。"""
+async def test_r179_create_fact_simulated_marker_same_value_now_blocked(ctx):
+    """同名同值但既有行是模拟值时，不再静默去重：409 引导先确认既有行（R183 口径）。
+
+    旧断言（`deduplicated == 1` + 仅 1 行）只校验行数，未校验可注入性，导致：
+    模拟值行原样保留（`is_simulated=1`），被 `_FACTS_INJECT_WHERE` 拦截，
+    用户补录的真实值从未进入正文 —— 接口回 ok、功能静默为空、测试一直绿。
+    R183 起宁可 409 也不谎报成功；同值也不再吞掉真实的「转正」意图。
+    """
     db, _pid, sid = ctx
     await gf.create_fact(
         _group(
@@ -216,15 +225,20 @@ async def test_r179_create_fact_simulated_marker_same_value_dedupes(ctx):
         project_id="",
         db=db,
     )
-    res = await gf.create_fact(
-        _group("技术参数", [FactItem(name="基坑深度", value="12.5m")], category="tech_param"),
-        scheme_id=sid,
-        project_id="",
-        db=db,
-    )
-    assert res["deduplicated"] == 1
+    with pytest.raises(HTTPException) as ei:
+        await gf.create_fact(
+            _group("技术参数", [FactItem(name="基坑深度", value="12.5m")], category="tech_param"),
+            scheme_id=sid,
+            project_id="",
+            db=db,
+        )
+    assert ei.value.status_code == 409
+    detail = str(ei.value.detail)
+    assert "未通过注入门控" in detail
+    assert "12.5m" in detail
     rows = await _rows(db, sid)
     assert len(rows) == 1
+    assert rows[0]["is_simulated"] == 1
 
 
 # ------------------------------------------------------------ 3. 附录名称去重
