@@ -44,6 +44,17 @@ _today_prefix_cache: tuple[float, str] | None = None
 # 故这是防御性上限而非真实约束（AI 并发硬上限为 5，见 AGENTS.md §4.1）。
 _RUNNING_MAX = 50
 
+#: 「AI 调用侧」在 ai_audit_logs 里的 action 全集 —— 由两个写入方的实际字面量推导，
+#: 不是凭印象写：provider_factory.py（chat / circuit_skipped / provider_disabled）
+#: + compliance.py（COMPLIANCE_BATCH_ACTION = compliance_batch）。
+#:
+#: 用途仅限 **按整表聚合、无法逐字段过滤**的两项：``tokens_today`` 与 ``last_call_at``。
+#: 二者此前没有 action 过滤，会被 ``agent_*``（任务状态迁移流水，见
+#: services/agent/state_machine.py）顶掉/污染：迁移一落库，「最近一次调用时间」
+#: 就变成「最近一次状态迁移时间」，非 chat 行带 token 则虚增今日 token。
+#: 其余指标（calls/ok/attempts/avg_duration）本来就逐条带 ``action='chat'``，保持不动。
+_AI_AUDIT_ACTIONS = ("chat", "circuit_skipped", "provider_disabled", "compliance_batch")
+
 
 def _today_local_prefix() -> str:
     """返回今日本地时间零点前缀（1 天 TTL 缓存）。"""
@@ -191,7 +202,12 @@ async def _build_activity_snapshot(limit: int = 8) -> dict:
             #    （方案 B 合并后，每次业务调用恰好一行；尝试次数见 attempts_today）
             "SELECT COALESCE(SUM(CASE WHEN action='chat' THEN 1 ELSE 0 END), 0)"
             " AS calls_today,"
-            " COALESCE(SUM(prompt_tokens + completion_tokens), 0) AS tokens_today,"
+            # ✅ 2026-11-07（迁移审计隔离）：tokens_today / last_call_at 是整表聚合，
+            #    必须按「AI 调用侧 action 全集」过滤，否则 agent_* 状态迁移行会把
+            #    「最近一次调用时间」顶成迁移时间、并把非 chat 行的 token 计进来。
+            #    过滤集合见模块常量 _AI_AUDIT_ACTIONS（由两个写入方的实际字面量推导）。
+            " COALESCE(SUM(CASE WHEN action IN (?,?,?,?)"
+            " THEN prompt_tokens + completion_tokens ELSE 0 END), 0) AS tokens_today,"
             # ✅ 2026-11-05（口径修复）：平均耗时只取**成功真实调用**，
             #    与 AIConfigPage 统计口径一致；失败尝试（大量 0.18s 快速失败）
             #    不再拉低均值。全量均值另给 avg_duration_all 便于排查。
@@ -212,9 +228,9 @@ async def _build_activity_snapshot(limit: int = 8) -> dict:
             #    旧行无该列时由迁移补 1，历史口径不变。
             " COALESCE(SUM(CASE WHEN action='chat' THEN COALESCE(attempt_count, 1) ELSE 0 END), 0)"
             " AS attempts_today,"
-            " MAX(created_at) AS last_call_at"
+            " MAX(CASE WHEN action IN (?,?,?,?) THEN created_at END) AS last_call_at"
             " FROM ai_audit_logs WHERE created_at >= ?",
-            (_today_local_prefix(),),
+            (*_AI_AUDIT_ACTIONS, *_AI_AUDIT_ACTIONS, _today_local_prefix()),
         )
         row = await cur.fetchone()
         if row:
