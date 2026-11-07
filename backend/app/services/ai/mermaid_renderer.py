@@ -1047,6 +1047,10 @@ class ChartCache:
             if cache_path.exists():
                 cached_content = cache_path.read_bytes()
                 self._stats["hits"] += 1
+                # ✅ R183（2026-11-07）：与 get() 同口径 —— 命中必须刷新 LRU 时间戳。
+                #    get_or_render 是预览/导出的主路径，旧实现只统计 hits 不刷新，
+                #    热点图会按首次写入时间被误判「最久未访问」而提前淘汰。
+                self._access_order[cache_key] = time.time()
             if cached_content is not None:
                 return BytesIO(cached_content)
 
@@ -1070,6 +1074,8 @@ class ChartCache:
             with self._lock:
                 if cache_path.exists():
                     self._stats["hits"] += 1
+                    # ✅ R183：follower 从缓存命中同样刷新 LRU 时间戳
+                    self._access_order[cache_key] = time.time()
                     return BytesIO(cache_path.read_bytes())
             if not _signaled:
                 # leader 已失联：清理残留 in-flight 登记，自行承担渲染

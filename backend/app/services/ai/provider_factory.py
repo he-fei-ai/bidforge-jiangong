@@ -3749,7 +3749,7 @@ async def _call_provider(
             logger.info(
                 "流式请求命中确定性错误，跳过普通请求重试直接切换候选（provider=%s）：%s",
                 getattr(provider, "name", "?"),
-                str(stream_err)[:160],
+                _error_summary(stream_err)[:160],
             )
             raise
         if _note_stream_failure(_cap_key):
@@ -3762,7 +3762,7 @@ async def _call_provider(
         logger.warning(
             "流式请求失败，自动回退普通请求重试（provider=%s）：%s",
             getattr(provider, "name", "?"),
-            str(stream_err)[:160],
+            _error_summary(stream_err)[:160],
         )
         return await provider.chat(
             messages, temperature=temperature, json_mode=json_mode, max_tokens=max_tokens, extra_body=extra_body

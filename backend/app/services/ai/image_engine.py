@@ -55,7 +55,10 @@ def _image_cache_set(key: str, value: str | None) -> None:
 #    甘特图：任务 ID 重复 / 依赖成环 / 竣工里程碑
 # ---------------------------------------------------------------------------
 _ARROW_SPLIT_RE = re.compile(r"\s*(?:-->|---|-\.->|==>|--x|--o)\s*")
-_ID_TOKEN_RE = re.compile(r"^([A-Za-z_][\w\-]*)")
+# 节点 ID 允许以 ASCII 数字开头（Prompt 明确「字母/数字/下划线」；Mermaid 亦支持
+# `1[施工准备] --> 2[基础施工]`）。旧正则要求首字母/下划线，导致合法数字 ID 流程图
+# 在 `_parse_flow_graph` 中解析出 0 个节点 → 判「节点数不足（0<3）」→ 整块删除。
+_ID_TOKEN_RE = re.compile(r"^([A-Za-z0-9_][A-Za-z0-9_\-]*)")
 _GANTT_META_KEYS = {
     "dateformat",
     "axisformat",
@@ -114,7 +117,8 @@ def _parse_flow_graph(code: str) -> tuple[set[str], set[str], int, list[str]]:
             edge_count += max(0, len(toks) - 1)
         else:
             # 无箭头行：节点定义 `A1["标签"]` / `A1(标签)` / `A1{标签}`
-            m = re.match(r"^([A-Za-z_][\w\-]*)\s*[\[\{\(]", s)
+            # 与 _ID_TOKEN_RE 同口径：允许数字开头（`1["施工准备"]`）。
+            m = re.match(r"^([A-Za-z0-9_][A-Za-z0-9_\-]*)\s*[\[\{\(]", s)
             if m:
                 tok = m.group(1)
                 _check_id(tok)
@@ -255,7 +259,10 @@ def validate_mermaid(code: str) -> tuple[bool, str]:
         code = "graph TD\n" + code
 
     if code.startswith("graph") or code.startswith("flowchart"):
-        if "--> " not in code and "-->" not in code:
+        # Mermaid 合法连线不止 `-->`：虚线 `-.->`、粗线 `==>`、无箭头 `---`、
+        # `--x` / `--o` 均有效。旧实现只认 `"-->"` 子串，导致「渲染器能出图、
+        # 校验器判缺连接关系」的删块型错配（虚线/粗线流程图被整块删除）。
+        if not _ARROW_SPLIT_RE.search(code):
             return False, "流程图缺少连接关系"
 
         # For simple flowcharts detected without prefix, skip length check as they may be short
@@ -266,16 +273,13 @@ def validate_mermaid(code: str) -> tuple[bool, str]:
             return False, "流程图代码包含反引号"
         lines = code.split("\n")
         node_count = 0
-        edge_count = 0
         for line in lines:
             stripped = line.strip()
             if not stripped or stripped.startswith("subgraph") or stripped.startswith("end"):
                 continue
-            # 支持一行内多个节点：A[开始] --> B[结束]
+            # 用于判断「是否需要补充统计裸标识符节点」：只数方括号/花括号标记
             node_count += stripped.count("[") if "[" in stripped else 0
             node_count += stripped.count("{") if "{" in stripped else 0
-            if "-->" in stripped:
-                edge_count += stripped.count("-->")
         # 修复：补充统计裸标识符节点（A --> B 格式中无方括号的节点）。
         # 原实现仅统计 [ 和 { 标记的节点，导致 AI 生成的裸标识符流程图
         # （如 "graph TD\nA --> B\nB --> C"）被误判为节点数不足。
@@ -302,10 +306,12 @@ def validate_mermaid(code: str) -> tuple[bool, str]:
                     if ident and not ident.startswith("//") and len(ident) <= 30:
                         _bare_nodes.add(ident)
             node_count = max(node_count, len(_bare_nodes))
-        if node_count < 2:
-            return False, f"流程图节点数不足（{node_count}<2）"
-        if edge_count < 1:
-            return False, f"流程图连线数不足（{edge_count}<1）"
+        # ✅ 2026-11-07（R183）：删除「方括号/`-->` 计数」旧预检查。它们只数
+        #    `[`/`{` 与 `-->` 字面量：
+        #    · `A[开始] --> B --> C --> D`（带标签 + 裸节点混合链）节点数被算成 1；
+        #    · 数字 ID 与 `-.->`/`==>`/`---` 连线的合法图同样被判不足。
+        #    最小规模/连线/孤立节点由下方 `_parse_flow_graph`（与渲染器同口径）
+        #    统一裁决，避免同一事实维护两套判据再次分叉。
         if "--> ... -->" in code:
             return False, "流程图存在未填充的连写箭头占位符"
         # Mermaid 原生支持方括号/花括号中的中文（如 A[开始]），无需双引号

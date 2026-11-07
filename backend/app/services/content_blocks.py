@@ -106,7 +106,19 @@ _LEAD_IN_HINT_RE = LEAD_IN_HINT_RE
 ORPHAN_LEAD_IN_RE = LEAD_IN_HINT_RE
 # 私有常量别名（_chart_pipeline 既有 import 名保持不变）。
 _LEAD_IN_MAX_CHARS = LEAD_IN_MAX_CHARS
-_LEAD_IN_TAIL_RE = re.compile(r"(?:如下|如后|见下)?\s*(?:图|表)?\s*(?:所示|如下)?\s*[:：。]?\s*$")
+# ✅ R183（2026-11-07）：图题候选专用门控。`_is_orphan_lead_in_text` 的宽判据
+#    里 `如(?:下|后)(?:图|表)` 要求“如下”后紧跟“图/表”，覆盖不到
+#    「主体施工工艺流程如下：」这类以“如下”收尾的引导语（仅紧邻图表块时调用本
+#    函数，不会影响普通正文的孤儿引导语回收口径）。
+_LEAD_IN_TITLE_HINT_RE = re.compile(
+    r"(?:如(?:下|后)(?:图|表)?|见(?:下|上)(?:图|表)?|如图|图示)\s*(?:所示)?\s*[:：。]?\s*$"
+)
+# ✅ R183（2026-11-07）：去掉可选的 `(?:图|表)?` —— 它会把图题**末尾的"图"**
+#    当作引导语的一部分剥掉（"施工流程图如下：" → "施工流程"）。只有明确的
+#    引导短语后缀才应被剥除；"施工流程图""布置图"等名词短语必须保留。
+_LEAD_IN_TAIL_RE = re.compile(
+    r"(?:如下|如后|见下|见上|如图|图示)?\s*(?:所示|如下)?\s*[:：。]?\s*$"
+)
 _MERMAID_TITLE_RES = (
     re.compile(r"^\s*%%\s*(?:图题|标题|title)\s*[:：]\s*(.+?)\s*$", re.M),
     re.compile(r"^\s*(?:title|图题)\s*[:：]?\s*(.+?)\s*$", re.M),
@@ -625,6 +637,22 @@ def _html_table_to_gfm(html_text: str) -> list[str] | None:
     return gfm
 
 
+# ✅ R183（2026-11-07）：图题自带「图 3-1 / 图 2-1.1 / 图一」前缀时，导出会再拼一次
+#    「图 {章号}-{序号}」，产出「图 3-1 图 3-1 主体阶段劳动力配置」的重复编号。
+#    该前缀只允许紧跟数字/中文数字/X（可带 `1.2` / `1-2` 小节号）并带分隔符，
+#    因此「图示化」「图纸会审」等正常词不会被误剥。
+_RE_FIGURE_NUMBER_PREFIX = re.compile(
+    r"^\s*(?:图|Figure|Fig\.?)\s*([0-9一二三四五六七八九十Xx]+(?:[.\-–—][0-9一二三四五六七八九十Xx]+)?)"
+    r"\s*(?:[、.：:\-–—]\s*|\s+)",
+    re.I,
+)
+
+
+def _strip_leading_figure_number(raw) -> str:
+    """去掉图题开头的「图 X-Y」自编号（唯一实现，图题/指令标题两处共用）。"""
+    return _RE_FIGURE_NUMBER_PREFIX.sub("", str(raw or ""), count=1)
+
+
 def _clean_chart_title(raw, limit: int = 40) -> str:
     """图题清洗：**折叠**空白（连续空白压成一个空格、保留词间分隔）、限长。
 
@@ -633,7 +661,7 @@ def _clean_chart_title(raw, limit: int = 40) -> str:
     ``"SiteLayoutPlan施工平面布置"``），导出后图题不可读、也不可检索。
     现保留单个分隔空格（全角空格同样归一为半角单空格）。
     """
-    return _RE_WS_RUN.sub(" ", str(raw or "")).strip()[:limit]
+    return _RE_WS_RUN.sub(" ", _strip_leading_figure_number(raw)).strip()[:limit]
 
 
 def _title_candidate(raw: str) -> str:
@@ -641,7 +669,7 @@ def _title_candidate(raw: str) -> str:
 
     ★ R175（BUG-175-04）：同 ``_clean_chart_title``，空白**折叠**为单空格而非删除。
     """
-    t = _RE_WS_RUN.sub(" ", str(raw or "")).strip()
+    t = _RE_WS_RUN.sub(" ", _strip_leading_figure_number(raw)).strip()
     t = t.strip("“”\"'（）()【】[]：:。，,、;；-—")
     if not (4 <= len(t) <= 30):
         return ""
@@ -671,7 +699,13 @@ def _lead_in_title(blocks: list[dict]) -> str:
     if prev.get("type") != "paragraph":
         return ""
     text = _RE_BOLD_WRAP.sub(r"\1", str(prev.get("text") or "").strip()).strip()
-    if not text or len(text) > LEAD_IN_MAX_CHARS or not _LEAD_IN_HINT_RE.search(text):
+    # ✅ R183（2026-11-07）：门控放宽为「孤儿引导语宽判据 ∪ 专用引导语后缀」，
+    #    覆盖「主体施工工艺流程如下：」「施工流程图如下：」等不含
+    #    「如下图/见下图/如图」词序的变体 —— 否则该图题被丢弃，图题退化为
+    #    类型通用名（"流程图"），违反图名提取优先级。
+    if not text or len(text) > LEAD_IN_MAX_CHARS or not (
+        _is_orphan_lead_in_text(text) or _LEAD_IN_TITLE_HINT_RE.search(text)
+    ):
         return ""
     return _title_candidate(_LEAD_IN_TAIL_RE.sub("", _LEAD_IN_HINT_RE.sub("", text)))
 

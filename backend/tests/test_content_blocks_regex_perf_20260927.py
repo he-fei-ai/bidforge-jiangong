@@ -106,6 +106,13 @@ _REVERSE_MAP = [
         '_RE_SUBITEM_ORD_PREFIX.sub("", s, count=1)',
         're.sub(r"^\\s*[a-zA-Z]\\s*[、.．)）]\\s*", "", s, count=1)',
     ),
+    # ✅ 2026-11-07（R183）：补登「图题自带图号前缀剥离」新增预编译常量。
+    (
+        '_RE_FIGURE_NUMBER_PREFIX.sub("", str(raw or ""), count=1)',
+        're.sub(r"^\\s*(?:图|Figure|Fig\\.?)\\s*([0-9一二三四五六七八九十Xx]+'
+        '(?:[.\\-–—][0-9一二三四五六七八九十Xx]+)?)\\s*(?:[、.：:\\-–—]\\s*|\\s+)", '
+        '"", str(raw or ""), count=1, flags=re.I)',
+    ),
 ]
 
 
