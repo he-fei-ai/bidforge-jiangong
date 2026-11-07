@@ -6,8 +6,18 @@
 
 from __future__ import annotations
 
+import json
 import math
 import re
+
+# ✅ R182-2（2026-11-07 · 编号重算复用权威实现）：`recompute_section_numbers`
+#    曾自写一份「同级排序 + 前序 DFS + 深度/环处理」的编号规则，与
+#    `numbering.renumber_section_outline_ids` 构成第二份实现（本仓反复翻车的
+#    正是这种形态）。现改为：本模块只负责「扁平行 → 嵌套树」的**数据形状
+#    适配**（排序键仍委托 `section_sort_order_key`），编号规则本身完全交给
+#    `numbering` 权威实现（目录路由 `_outline_structure_report`、审核 DLV-13、
+#    导出严格模式阻断共用同一段代码）。
+from app.services.numbering import renumber_section_outline_ids
 
 # 围栏代码块（```lang ... ```）：图表（mermaid / chart-json）与普通代码块
 # ✅ 判据唯一事实源（R76 · 2026-10-13）：本模块**不再自行判定闭合行**，全部委托
@@ -991,47 +1001,62 @@ def recompute_section_numbers(all_sections: list[dict]) -> dict[str, str]:
     生成前必须按真实树（``parent_id`` + 同级 ``sort_order``）重算，
     不能依赖存储编号，也不能在提示词侧做字符串修补。
 
-    编号规则与目录树/导出完全一致：根节点按同级序 1,2,3…；子节点为
-    「父编号 + '.' + 同级序号（1 起）」。同级排序委托
-    :func:`section_sort_order_key`（展示序/生成序/导出序的单一出口）。
+    ✅ R182-2（2026-11-07 · 消除第二份编号实现）：编号规则**不在本模块维护**。
+    本函数只做「扁平行 → 嵌套节点头」的数据形状适配（排序键委托
+    :func:`section_sort_order_key`，与 ``sections._build_tree`` 的
+    ``(sort_order, id)`` 同键），随后把树交给权威实现
+    :func:`numbering.renumber_section_outline_ids` —— 目录结构报告、审核
+    DLV-13、导出严格模式阻断共用同一段编号代码。深度上限（200）、环引用
+    守卫、非法节点跳过、``outline_json`` 保留字段等语义全部继承自该实现，
+    不再由本模块另写一份。
 
     Returns:
-        ``{section_id: "1.2.3"}``。父链悬空视作根节点（与导出口径一致）；
-        自环/环路中不可从根到达的节点不返回（调用方回退存储编号，
+        ``{section_id: "1.2.3"}``。父链悬空视作根节点（与 ``_build_tree``/
+        导出口径一致）；环内不可从根到达的节点不返回（调用方回退存储编号，
         避免把不可达分支硬编进提示词）。
     """
     if not all_sections:
         return {}
-    nodes: dict[str, dict] = {}
+    rows: dict[str, dict] = {}
+    order: list[str] = []
     for s in all_sections:
+        if not isinstance(s, dict):
+            continue
         sid = str(s.get("id") or "")
-        if sid:
-            nodes.setdefault(sid, s)  # 主键重复时取首条，与 nodes_map 同口径
-    children: dict[str, list[str]] = {sid: [] for sid in nodes}
-    roots: list[str] = []
-    for sid, sec in nodes.items():
-        pid = str(sec.get("parent_id") or "")
+        if not sid:
+            continue
+        if sid not in rows:
+            order.append(sid)
+        # 重复主键以最后一条为准 —— 与 sections._build_tree 的
+        # ``nodes = {r["id"]: {...} for r in rows}`` 同口径（DB 主键本应唯一，
+        # 此分支只防御异常调用方）。
+        rows[sid] = s
+
+    nodes: dict[str, dict] = {sid: {"id": sid, "outline_json": "", "children": []} for sid in order}
+    roots: list[dict] = []
+    for sid in order:
+        node = nodes[sid]
+        pid = str(rows[sid].get("parent_id") or "")
         if pid and pid in nodes and pid != sid:
-            children[pid].append(sid)
+            nodes[pid]["children"].append(node)
         else:
-            roots.append(sid)
-    for sid in children:
-        children[sid].sort(key=lambda cid: section_sort_order_key(nodes[cid].get("sort_order"), cid))
-    roots.sort(key=lambda sid: section_sort_order_key(nodes[sid].get("sort_order"), sid))
+            roots.append(node)
+
+    def _sort_key(n: dict) -> tuple:
+        return section_sort_order_key(rows[n["id"]].get("sort_order"), n["id"])
+
+    roots.sort(key=_sort_key)
+    for sid in order:
+        nodes[sid]["children"].sort(key=_sort_key)
 
     numbers: dict[str, str] = {}
-    # 迭代前序 DFS：深目录（>1000 级脏数据）也不触发 RecursionError
-    stack: list[tuple[str, str]] = [
-        (roots[i], str(i + 1)) for i in range(len(roots) - 1, -1, -1)
-    ]
-    while stack:
-        sid, number = stack.pop()
-        if sid in numbers:
-            continue  # 环路/重复父链保护
-        numbers[sid] = number
-        kids = children.get(sid, [])
-        for i in range(len(kids) - 1, -1, -1):
-            stack.append((kids[i], f"{number}.{i + 1}"))
+    for payload, _level, sid in renumber_section_outline_ids(roots):
+        try:
+            num = str(json.loads(payload).get("id") or "")
+        except (json.JSONDecodeError, TypeError, AttributeError):
+            continue
+        if num:
+            numbers[sid] = num
     return numbers
 
 

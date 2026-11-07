@@ -534,6 +534,129 @@ class TestRecomputedPromptNumber:
         assert nums == {"ok": "1", "orphan": "2"}
 
 
+class TestNumberingParity:
+    """R182-2（2026-11-07）：生成侧编号与权威实现逐节点交叉一致。
+
+    背景：``content_utils.recompute_section_numbers`` 曾自写一份编号规则，
+    与 ``numbering.renumber_section_outline_ids``（目录结构报告 / 审核 DLV-13 /
+    导出严格模式阻断共用的权威实现）构成第二份实现。现改为只做形状适配，
+    本组用例**同一棵树分别走两条路径**，逐节点编号必须相等。
+
+    样本刻意覆盖实现差异面：深层嵌套、兄弟 sort_order 空洞、孤儿节点、
+    环引用、超过深度上限（200）的失控嵌套。
+    """
+
+    @staticmethod
+    def _row(sid, pid, so, lv=1, num="", title=""):
+        return {
+            "id": sid,
+            "parent_id": pid,
+            "sort_order": so,
+            "level": lv,
+            "outline_json": json.dumps({"id": num or "9", "level": lv}, ensure_ascii=False),
+            "title": title or sid,
+        }
+
+    @staticmethod
+    def _authoritative(rows) -> dict[str, str]:
+        """按 sections._build_tree 的形状组装嵌套树，再走权威实现。"""
+        from app.services.content_utils import section_sort_order_key
+        from app.services.numbering import renumber_section_outline_ids
+
+        nodes = {r["id"]: {**r, "children": []} for r in rows}
+        roots = []
+        for n in nodes.values():
+            pid = n.get("parent_id")
+            if pid and pid in nodes and pid != n["id"]:
+                nodes[pid]["children"].append(n)
+            else:
+                roots.append(n)
+        key = lambda n: section_sort_order_key(n.get("sort_order"), n["id"])  # noqa: E731
+
+        def _sort(ns):
+            ns.sort(key=key)
+            for n in ns:
+                _sort(n["children"])
+
+        _sort(roots)
+        return {
+            sid: json.loads(payload)["id"]
+            for payload, _level, sid in renumber_section_outline_ids(roots)
+        }
+
+    def _assert_parity(self, rows) -> dict[str, str]:
+        from app.services.content_utils import recompute_section_numbers
+
+        mine = recompute_section_numbers(rows)
+        auth = self._authoritative(rows)
+        assert mine == auth, f"生成侧与权威实现编号分叉：mine={mine}, auth={auth}"
+        return mine
+
+    def test_deep_nested_parity(self):
+        rows = [
+            self._row("A", "", 0),
+            self._row("B", "A", 0),
+            self._row("C", "B", 0),
+            self._row("D", "C", 0),
+            self._row("E", "D", 0),
+            self._row("B2", "B", 1),
+        ]
+        assert self._assert_parity(rows) == {
+            "A": "1",
+            "B": "1.1",
+            "B2": "1.1.2",
+            "C": "1.1.1",
+            "D": "1.1.1.1",
+            "E": "1.1.1.1.1",
+        }
+
+    def test_sibling_sort_holes_parity(self):
+        """sort_order 空洞（10/30/20）按值排序，而非按插入序/存储编号。"""
+        rows = [
+            self._row("r30", "", 30),
+            self._row("r10", "", 10),
+            self._row("r20", "", 20),
+            self._row("c50", "r20", 50),
+            self._row("c10", "r20", 10),
+        ]
+        assert self._assert_parity(rows) == {
+            "r10": "1",
+            "r20": "2",
+            "c10": "2.1",
+            "c50": "2.2",
+            "r30": "3",
+        }
+
+    def test_orphan_parity(self):
+        """父级不存在 → 视作根，与 ``_build_tree`` 的 roots 判定一致。"""
+        rows = [
+            self._row("ok", "", 0),
+            self._row("orphan", "missing-parent", 1),
+            self._row("ok1", "ok", 0),
+        ]
+        assert self._assert_parity(rows) == {"ok": "1", "ok1": "1.1", "orphan": "2"}
+
+    def test_cycle_parity(self):
+        """环内不可从根到达的节点不编号（两条路径一致）。"""
+        rows = [
+            self._row("ok", "", 0),
+            self._row("ok1", "ok", 0),
+            self._row("c1", "c2", 0),
+            self._row("c2", "c1", 1),
+        ]
+        assert self._assert_parity(rows) == {"ok": "1", "ok1": "1.1"}
+
+    def test_depth_cap_parity(self):
+        """超过 200 级的失控嵌套：两条路径在同一节点截断。"""
+        rows = [self._row("n0", "", 0)]
+        for i in range(1, 205):
+            rows.append(self._row(f"n{i}", f"n{i - 1}", 0))
+        nums = self._assert_parity(rows)
+        assert "n0" in nums
+        # 深度上限（_MAX_TREE_DEPTH=200）内的节点有编号，超限子树整体跳过
+        assert "n200" in nums and "n201" not in nums
+
+
 # ============================================================
 # 一致性扫描缓存失效（2026-09-23 · 缓存未失效修复）
 # ============================================================
