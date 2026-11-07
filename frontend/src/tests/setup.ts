@@ -1,3 +1,6 @@
+import { afterEach } from "vitest";
+import { cleanup } from "@testing-library/react";
+
 // 测试全局桩（vitest setupFiles）：补齐 jsdom/Node 环境下缺失或残缺的浏览器 API。
 //
 // 桩 1（2026-09-22 前端测试基线修复）：jsdom 未实现 `URL.createObjectURL` /
@@ -49,3 +52,18 @@ if (!_ls || typeof (_ls as { clear?: unknown }).clear !== "function") {
     writable: true,
   });
 }
+
+// 桩 3（2026-11-07）：全局自动卸载。
+//
+// 背景：`vitest.config.ts` 未开启 `globals`，而 RTL 只在检测到全局 `afterEach` 时
+// 才注册自动 cleanup（见 @testing-library/react/dist/index.js 的启注册分支）。
+// 本仓库因此**没有任何自动卸载**：任何忘记手写 `cleanup()` 的测试文件都会把已
+// 挂载组件留到文件结束，jsdom 拆除后再触发定时器就会变成
+// `ReferenceError: window is not defined` 这类与代码质量无关的偶发红。
+//
+// 处置：在 setupFiles 里显式注册一次（`globals: false` 下的标准写法，不改
+// vitest 配置、不引入全局变量）。实测全量 93 文件 / 1570 用例全绿，未暴露
+// 任何跨用例挂载依赖；各文件里已有的单独 `cleanup` 重复执行无副作用。
+afterEach(() => {
+  cleanup();
+});
