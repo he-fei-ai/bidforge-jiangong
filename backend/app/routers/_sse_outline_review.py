@@ -92,6 +92,24 @@ def _guard_external_material(text: str) -> str:
         return text
 
 
+def _govern_prompt_text(text: str) -> str:
+    """目录/审核/标题修复链路的统一治理入口：先围栏脱敏，再按预算裁剪。
+
+    ✅ G6（2026-11-07）：此前 ``_guard_external_material`` 与
+    ``_apply_prompt_context_budget`` 只接到正文链路的 user 消息，目录生成、
+    目录审核、目录补齐/修复、标题修复的提示词组装全部**裸奔** ——
+    项目资料摘要/项目关键事实/参考提纲未经围栏直接进 system，资料里的
+    「忽略以上指令」与 ``sk-…`` 原样抵达模型。本函数把两条既有治理
+    按与正文链路**相同的顺序**（围栏 → 脱敏 → 预算）接进这些链路。
+
+    两个开关默认关闭（``prompt_injection_defense`` / ``prompt_redact_sensitive``
+    / ``prompt_context_budget``），关闭时逐字节返回原文，既有生成行为不变。
+    """
+    if not text:
+        return text
+    return _apply_prompt_context_budget(_guard_external_material(text))
+
+
 # ---------- 长方案分步：子目录取回执行单元（批内并发 / 批内合并） ----------
 
 
@@ -1023,6 +1041,9 @@ async def _try_outline_patch(
             chapter_titles="; ".join(str(n.get("title") or "") for n in (outline or []) if isinstance(n, dict))[:2000],
             missing_items="; ".join(missing[:20]),
         )
+        # ✅ G6（2026-11-07）：补齐链路的 system 提示词此前裸奔（项目资料/事实未围栏、
+        #    不受预算约束）。与正文链路同序治理；默认开关全关 → 逐字节不变。
+        prompt = _govern_prompt_text(prompt)
         obj, _raw = await asyncio.wait_for(
             _sh.collect_json_response(
                 [{"role": "system", "content": prompt}],
@@ -1358,8 +1379,9 @@ async def _review_and_fix_outline(
         construction_scope=construction_scope,
         scheme_basis=scheme_basis,
         is_dangerous="是" if is_dangerous else "否",
-        # ✅ R38 D4：审核链路**有意不截断**事实（只读核对，
-        #    事实越全审得越准；与生成侧预算解耦，勿顺手对齐）
+        # ✅ R38 D4：审核链路对事实**不做生成侧那样的字数上限**（只读核对，
+        #    事实越全审得越准）；但 G6 起统一接入围栏/脱敏，预算仅在全局开关
+        #    开启时按统一优先级处理（项目关键事实已登记为高优先级，不会被先削）。
         project_facts=project_facts or "",
         outline_json=json.dumps(_sh._outline_skeleton(outline), ensure_ascii=False),
         # NOTE(R38 D5): MUST be the review variant, not the shared one --
@@ -1388,6 +1410,9 @@ async def _review_and_fix_outline(
         "修正后的完整三级目录数组，节点 description 保持原文不要改写）；"
         "passed=true 时不要输出 fixed_outline。"
     )
+    # ✅ G6（2026-11-07）：审核链路此前是治理盲区（system 内含项目资料/事实/目录
+    #    JSON 全裸）。在所有追加段之后统一治理，保证追加的编制要求也被覆盖。
+    review_prompt = _govern_prompt_text(review_prompt)
     _notify("review")
     try:
         review_obj, _ = await asyncio.wait_for(
@@ -1537,6 +1562,8 @@ async def _review_and_fix_outline(
                 project_brief=clip_text(project_brief or "", 1500, "目录修复-project_brief"),
                 project_facts=clip_text(project_facts or "", _sh.PROJECT_FACTS_LIMIT_OUTLINE, "目录修复-project_facts"),
             )
+            # ✅ G6（2026-11-07）：修复链路与补齐/审核同口径治理（围栏 → 脱敏 → 预算）。
+            fix_prompt = _govern_prompt_text(fix_prompt)
             return await _sh.collect_json_response(
                 [{"role": "system", "content": fix_prompt}],
                 _sh._outline_fix_validate_fn,

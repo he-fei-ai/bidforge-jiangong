@@ -824,6 +824,7 @@ from app.routers._sse_outline_review import (  # noqa: F401,E402 — 拆分兼�
     _fetch_chapter_children,
     _fetch_unit_children,
     _finish_stopped_with_partial,
+    _govern_prompt_text,
     _guard_external_material,
     _merge_patch_chapters,
     _merge_unit_results,
@@ -1466,6 +1467,11 @@ async def generate_outline(scheme_id: str, request: Request, db=Depends(get_db))
                         "【编制要求（目录必须逐条覆盖，每一条都要有对应章节，缺失即为不合格）】：\n"
                         f"{requirements_text}\n"
                     )
+                # ✅ G6（2026-11-07）：目录生成此前不接围栏/预算（资料摘要与
+                #    参考提纲里的注入手法、凭据原样进 system）。与正文链路同序治理；
+                #    开关默认全关 → 逐字节不变。system 与 user 两路都要覆盖。
+                sys_prompt = _govern_prompt_text(sys_prompt)
+                user_prompt = _govern_prompt_text(user_prompt)
                 messages = [{"role": "system", "content": sys_prompt}, {"role": "user", "content": user_prompt}]
 
                 # ✅ 进度增强：目录 AI 调用最长 180s，期间用 _await_with_stats
@@ -1657,6 +1663,11 @@ async def generate_outline(scheme_id: str, request: Request, db=Depends(get_db))
                             ),
                         }
                     )
+                # ✅ G6（2026-11-07）：一级目录链路此前同样裸奔。对 system 与所有
+                #    追加 user 段逐条治理（与正文链路的逐消息口径一致）；
+                #    开关默认全关 → 逐字节不变。
+                for _m in messages:
+                    _m["content"] = _govern_prompt_text(_m.get("content") or "")
                 # ✅ 进度增强：一级目录 AI 调用同样用 _await_with_stats 保活进度
                 obj, _ = await _await_with_stats(
                     collect_json_response(
@@ -1807,23 +1818,27 @@ async def generate_outline(scheme_id: str, request: Request, db=Depends(get_db))
                         if not ch.get("title"):
                             ch["title"] = f"第{i + 1}章"
                         other_titles = [t for j, t in enumerate(level1_titles) if j != i]
+                        # ✅ G6（2026-11-07）：子目录链路同口径治理（项目资料/事实/
+                        #    前序章节均可能含外部素材）；开关全关时逐字节不变。
                         single_prompts.append(
-                            render(
-                                "outline_sublevel_system",
-                                chapter_id=str(i + 1),
-                                chapter_title=ch.get("title", ""),
-                                chapter_desc=ch.get("description", ""),
-                                scheme_name=scheme.get("name", ""),
-                                scheme_type=scheme.get("type", ""),
-                                construction_scope=construction_scope,
-                                standards_text=standards_text,
-                                project_brief=project_brief[:1500],
-                                other_outline=_join_tail_budget(other_titles, 1200),
-                                prior_chapters=_join_tail_budget(prior_ctx, 1500) or "无",
-                                requirements=requirements_text[:1500] or "无",
-                                # ✅ R77：按章相关性重排的事实（无关键词/关闭时
-                                #    与旧行为逐字等价：整案事实截断）。
-                                project_facts=_sublevel_facts_text([i]),
+                            _govern_prompt_text(
+                                render(
+                                    "outline_sublevel_system",
+                                    chapter_id=str(i + 1),
+                                    chapter_title=ch.get("title", ""),
+                                    chapter_desc=ch.get("description", ""),
+                                    scheme_name=scheme.get("name", ""),
+                                    scheme_type=scheme.get("type", ""),
+                                    construction_scope=construction_scope,
+                                    standards_text=standards_text,
+                                    project_brief=project_brief[:1500],
+                                    other_outline=_join_tail_budget(other_titles, 1200),
+                                    prior_chapters=_join_tail_budget(prior_ctx, 1500) or "无",
+                                    requirements=requirements_text[:1500] or "无",
+                                    # ✅ R77：按章相关性重排的事实（无关键词/关闭时
+                                    #    与旧行为逐字等价：整案事实截断）。
+                                    project_facts=_sublevel_facts_text([i]),
+                                )
                             )
                         )
                     batch_prompt = None
@@ -1836,23 +1851,25 @@ async def generate_outline(scheme_id: str, request: Request, db=Depends(get_db))
                         batch_prompt = [
                             {
                                 "role": "system",
-                                "content": render(
-                                    "outline_sublevel_batch_system",
-                                    chapter_count=len(unit_idx),
-                                    scheme_name=scheme.get("name", ""),
-                                    scheme_type=scheme.get("type", ""),
-                                    construction_scope=construction_scope,
-                                    standards_text=standards_text,
-                                    project_brief=project_brief[:1500],
-                                    other_outline=_join_tail_budget(
-                                        [t for j, t in enumerate(level1_titles) if j not in unit_idx], 1200
-                                    ),
-                                    prior_chapters=_join_tail_budget(prior_ctx, 1500) or "无",
-                                    requirements=requirements_text[:1500] or "无",
-                                    # ✅ R77：批内多章按并集相关性重排（见
-                                    #    _sublevel_facts_text docstring）。
-                                    project_facts=_sublevel_facts_text(unit_idx),
-                                    chapters_text=chapters_text,
+                                "content": _govern_prompt_text(
+                                    render(
+                                        "outline_sublevel_batch_system",
+                                        chapter_count=len(unit_idx),
+                                        scheme_name=scheme.get("name", ""),
+                                        scheme_type=scheme.get("type", ""),
+                                        construction_scope=construction_scope,
+                                        standards_text=standards_text,
+                                        project_brief=project_brief[:1500],
+                                        other_outline=_join_tail_budget(
+                                            [t for j, t in enumerate(level1_titles) if j not in unit_idx], 1200
+                                        ),
+                                        prior_chapters=_join_tail_budget(prior_ctx, 1500) or "无",
+                                        requirements=requirements_text[:1500] or "无",
+                                        # ✅ R77：批内多章按并集相关性重排（见
+                                        #    _sublevel_facts_text docstring）。
+                                        project_facts=_sublevel_facts_text(unit_idx),
+                                        chapters_text=chapters_text,
+                                    )
                                 ),
                             }
                         ]
@@ -4283,10 +4300,13 @@ async def generate_content(scheme_id: str, request: Request, db=Depends(get_db))
                 #    避免「画了又被程序按上限删掉」。纯读一次全方案已用计数
                 #    （已排除本章），失败不阻断生成（软提示）。
                 _chart_hint = ""
-                # ✅ G5（2026-11-07 · R167/R169 回归修复）：图表配额提示是**逐章**
-                #    软约束，与装配模式无关。此前误挂在 `_stable_prefix` 条件下，
-                #    非分层路径根本没有配额提示，R169 的「双消费」修复也在 Phase F
-                #    合入时被回退。现两条装配路径统一计算并传入。
+                # ✅ G5（2026-11-07 · 图表配额逐章软约束）：图表配额提示是**逐章**
+                #    软约束，与装配模式无关。旧形状把它挂在 `_stable_prefix` 条件下，
+                #    非分层路径因此拿不到配额提示 —— 这是该条件自 `f4581b4`（R72，
+                #    2026-10-12）首次出现时就带着的缺陷，`96d0a5e` 只是把条件重排成
+                #    一行，**不是回归**：R167/R169（含 `43f6604`）只存在于分支
+                #    `feature/r126-r129-omml-degradation`，`git merge-base --is-ancestor`
+                #    非祖先，主线从未合入。漏洞真实存在，只是并非被后续改动覆盖出来的。
                 if bool(getattr(settings, "content_chart_quota_hint_enabled", True)):
                     try:
                         _chart_hint = build_chart_quota_hint(

@@ -45,9 +45,26 @@ from app.services.outline_quality import (
 )
 
 # ✅ R179：上下文截断统一走带留痕的实现（超限时写日志 + 计入截断指标）。
-from app.services.prompt_material_guard import clip_text
+# ✅ G6（2026-11-07）：govern_text 为标题修复链路统一治理入口（围栏 → 脱敏 → 预算）。
+from app.services.prompt_material_guard import clip_text, govern_text
 
 logger = logging.getLogger("outline_title_fix")
+
+
+def _govern_prompt_text(text: str) -> str:
+    """标题修复 prompt 的统一治理入口（与目录/审核/正文链路同序同开关）。
+
+    ✅ G6（2026-11-07）：此前标题修复 prompt 由 ``_render`` 直接下发 ——
+    项目资料摘要 / 项目关键事实未加围栏、凭据未脱敏、也不参与预算，属于
+    治理盲区。三个开关（``prompt_injection_defense`` / ``prompt_redact_sensitive``
+    / ``prompt_context_budget``）默认关闭，关闭时逐字节返回原文，既有行为不变。
+    """
+    try:
+        return govern_text(text)
+    except Exception:
+        logger.warning("标题修复提示词治理失败（使用原文继续）", exc_info=True)
+        return text
+
 
 # ✅ 与 sse_handlers 同款口径（原 L222/L227）：下沉后 sse_handlers 从本模块
 #    import 这两个名字（``test_outline_generation.py`` 锁 ``sse_handlers.OUTLINE_FIX_TIMEOUT >= 120``）。
@@ -381,6 +398,8 @@ async def _try_outline_title_fix(
                 broken_items=items,
                 rewrite_feedback=feedback,
             )
+            # ✅ G6（2026-11-07）：标题修复链路接入围栏/脱敏/预算（默认关闭时逐字节不变）。
+            prompt = _govern_prompt_text(prompt)
             obj, _raw = await asyncio.wait_for(
                 _collect(
                     [{"role": "system", "content": prompt}],
