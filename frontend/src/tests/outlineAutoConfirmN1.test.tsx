@@ -10,7 +10,7 @@
  *     倒计时到期才调用自动保存（snapshot_before=outline_auto_confirm）。
  */
 import { describe, it, expect, vi, afterEach } from "vitest";
-import { renderHook, act } from "@testing-library/react";
+import { renderHook, act, cleanup } from "@testing-library/react";
 import type { MessageInstance } from "antd/es/message/interface";
 import {
   countdownSeconds,
@@ -21,6 +21,18 @@ import {
 import { useOutlineAutoConfirm } from "../pages/schemeWorkbench/useOutlineAutoConfirm.tsx";
 
 const READY = { ready: true, blockers: [] };
+
+// ✅ 显式卸载（2026-11-07）：本文件 vitest 未开 globals，RTL 自动 cleanup 不会注册；
+//    而「开启 + ready」用例会让 hook 保持 armed，留下 100ms setInterval。
+//    不卸载则该 interval 活过本文件、jsdom 拆除后再触发 setRemainingMs，
+//    抛出未捕获的 `ReferenceError: window is not defined`
+//    （react-dom getCurrentEventPriority → useOutlineAutoConfirm.tsx:134）。
+//    产品侧 useEffect cleanup 本身正确（hook 卸载即 clearInterval），这里补的是
+//    测试生命周期：每个用例结束都 unmount。
+afterEach(() => {
+  cleanup();
+  vi.useRealTimers();
+});
 
 function makeMsg() {
   return {
@@ -95,10 +107,6 @@ describe("outlineAutoConfirm 纯判定", () => {
 });
 
 describe("useOutlineAutoConfirm 编排", () => {
-  afterEach(() => {
-    vi.useRealTimers();
-  });
-
   it("开关关闭：逐字委托 openOutlineGate（同一引用、不 arm、不保存）", () => {
     const gate = vi.fn();
     const save = vi.fn(async () => true);
