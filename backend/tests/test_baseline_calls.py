@@ -574,6 +574,7 @@ def report(rows, bad_rows, worst_rows, m):
 # ============================================================
 @pytest.mark.asyncio
 async def test_scan_cache_and_scale(db_conn):
+    os.makedirs(OUT_DIR, exist_ok=True)  # 单独 -k 运行时不依赖前一条用例建目录
     cache_rows, scale_rows = [], []
     for label, batch_size, conc in (("batch=1(旧行为)", 1, 1), ("batch=4(当前默认)", 4, 3), ("batch=12(极限)", 12, 3)):
         await _fresh(db_conn)

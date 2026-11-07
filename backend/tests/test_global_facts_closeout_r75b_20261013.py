@@ -47,6 +47,16 @@ INVENTORY_PATH = os.path.join(
     "inventory_g8.py",
 )
 
+#: G8 盘点脚本**从未入库**（``git ls-files`` 查无此路径，本机也不存在），
+#: 两条护栏在归档入库前不可能执行。显式 skip 让「未跑」可见；不得改回
+#: 条件式 ``pytest.skip``——那在全绿套件里与「已覆盖」无法区分（假覆盖）。
+_G8_SCRIPT_MISSING = pytest.mark.skip(
+    reason=(
+        "缺少 artifacts/r75b_g8/inventory_g8.py（该脚本从未入库，本机也不存在）；"
+        "归档入库并删除本 skip 前，本护栏不执行"
+    )
+)
+
 
 def _read(path: str) -> str:
     with io.open(path, encoding="utf-8") as f:
@@ -177,9 +187,8 @@ class TestBatchResolveFailClosedDeadBranch:
 class TestInventoryScriptReadOnly:
     """G8 · 盘点脚本的只读形态锁（防被改成推断回填工具）。"""
 
+    @_G8_SCRIPT_MISSING
     def test_inventory_script_is_read_only(self):
-        if not os.path.exists(INVENTORY_PATH):
-            pytest.skip("G8 盘点脚本未随仓携带（artifacts 归档缺失）")
         src = _read(INVENTORY_PATH)
         assert "mode=ro" in src, "盘点脚本不再以只读 URI 打开运行库"
         for bad in ("UPDATE ", "INSERT ", "DELETE ", "executescript"):
@@ -189,6 +198,7 @@ class TestInventoryScriptReadOnly:
             )
             assert bad not in code, f"盘点脚本出现写语句 {bad!r} —— 只读保证失守"
 
+    @_G8_SCRIPT_MISSING
     def test_caliber1_checks_comment_mark_not_divergence_proxy(self):
         """口径 1 必须**真的调用**注释标记判定，不得用「两口径分叉」当代理。
 
@@ -204,8 +214,6 @@ class TestInventoryScriptReadOnly:
         三元路由改回 `cal1.append(r)`）后仍 18 例全绿 —— 定义与报告文字里
         的名字都在，判据却已失效。锚点选宽看似严格，实则放过最该拦的形态。
         """
-        if not os.path.exists(INVENTORY_PATH):
-            pytest.skip("G8 盘点脚本未随仓携带（artifacts 归档缺失）")
         src = _read(INVENTORY_PATH)
         fn = _fn_def(src, "main")
         assert fn, "main() 消失（护栏锚点漂移）"

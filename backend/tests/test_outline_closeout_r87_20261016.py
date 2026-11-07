@@ -54,6 +54,9 @@ APP_DIR = Path(__file__).resolve().parents[1] / "app"
 REPO = Path(__file__).resolve().parents[2]
 FE_PAGE = REPO / "frontend" / "src" / "pages" / "SchemeWorkbenchPage.tsx"
 FE_UTIL = REPO / "frontend" / "src" / "utils" / "outlineNumbering.ts"
+#: 前端依赖产物（node_modules 不入库）—— 缺它就【显式跳过】跨语言 parity，
+#: 而不是让断言在 CI / 全新 clone 上判红（曾属「必红型」）。
+ESBUILD = REPO / "frontend" / "node_modules" / "@esbuild" / "win32-x64" / "esbuild.exe"
 
 #: 零宽 / 不可见字符族（用户完全看不见，却能让全部判据失效）
 INVISIBLE = ["\u200b", "\u200c", "\u2060", "\ufeff", "\u00ad"]
@@ -90,10 +93,9 @@ def _fe_transpiled() -> str:
     # ⚠️ 必须用 `@esbuild/win32-x64/esbuild.exe` **本体**，不能用 `.bin/esbuild.cmd`
     #    包装脚本 —— 它在非 ASCII 仓路径（`专项方案工具箱`）下按 GBK 解码，
     #    路径被吃成 `J:\???\...` 而失败（AGENTS §5.9 的老坑）。
-    esbuild = REPO / "frontend" / "node_modules" / "@esbuild" / "win32-x64" / "esbuild.exe"
-    assert esbuild.exists(), "esbuild 本体不存在（需先 npm i）；不得退化为正则剥离 TS 类型"
+    assert ESBUILD.exists(), "esbuild 本体不存在（需先 npm i）；不得退化为正则剥离 TS 类型"
     out = subprocess.run(
-        [str(esbuild), "--loader:.ts=ts", "--format=cjs", "--platform=node", str(FE_UTIL)],
+        [str(ESBUILD), "--loader:.ts=ts", "--format=cjs", "--platform=node", str(FE_UTIL)],
         capture_output=True,
         timeout=120,
     )
@@ -274,6 +276,13 @@ class TestFix1FrontendLegalityUnified:
         util = FE_UTIL.read_bytes().decode("utf-8")
         assert "\uff10-\uff19" in util or "０-９" in util, "前端未覆盖全角数字（与后端 \\d 值域不一致 ⇒ 反向分叉）"
 
+    @pytest.mark.skipif(
+        not ESBUILD.exists(),
+        reason=(
+            "缺少 frontend/node_modules/@esbuild/win32-x64/esbuild.exe（需先在 frontend 执行 npm i）；"
+            "跨语言 parity 用例未执行——不得退化为正则剥离 TS 类型"
+        ),
+    )
     def test_frontend_and_backend_agree_on_garbage(self):
         """**跨语言行为 parity**（真跑 node，而非比对两份源码字符串）。
 
