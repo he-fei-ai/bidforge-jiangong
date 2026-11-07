@@ -453,9 +453,20 @@ async def get_conn() -> aiosqlite.Connection:
                     _last_health_check = now
                     return _conn
         DB_PATH.parent.mkdir(parents=True, exist_ok=True)
-        _conn = await aiosqlite.connect(DB_PATH)
+        conn = await aiosqlite.connect(DB_PATH)
+        try:
+            await _setup_connection(conn)
+        except BaseException:
+            # 建连成功但 setup 失败：立刻关闭这次新建的连接，避免 aiosqlite 的非守护
+            # 工作线程跟随「启动失败」的进程，导致起不来也退不出去。这里只关闭本地
+            # 新建的 conn；已有健康连接的分支在上面已经 return，不会被误关。
+            try:
+                await conn.close()
+            except Exception as e:
+                logger.debug("关闭 setup 失败的全局连接失败（清理路径，忽略）: %s", e)
+            raise
+        _conn = conn
         _conn_path = DB_PATH
-        await _setup_connection(_conn)
         _last_health_check = time.time()
         return _conn
 
@@ -883,19 +894,28 @@ async def init_db():
     #    正文生成全部失败且前端只见「后端连接超时（30s 无响应）」。
     _startup_db_integrity_gate()
     conn = await get_conn()
-    await conn.executescript(SCHEMA_SQL)
-    await _migrate(conn)
-    await conn.commit()
-    # ✅ R181（N-10）：结构自检（只读、fail-soft）。放在迁移之后，确保自检看到的是
-    #    本次启动最终结构；问题由 /api/v1/health 的 schema 字段暴露。
     try:
-        await check_schema_integrity()
-    except Exception as e:  # noqa: BLE001 - 自检异常不得阻断启动
-        logger.warning("数据库结构自检异常（fail-soft，已忽略）: %s", e)
-    logger.info("数据库初始化完成: %s", DB_PATH)
-    # ✅ R165b（2026-11-03）：运行期完整性巡检 —— J: USB 盘持续丢页（事件日志
-    #    实证 11-01/11-02 每日数百条寻页错误），启动闸门只覆盖进程启动时刻。
-    _start_integrity_probe_task()
+        await conn.executescript(SCHEMA_SQL)
+        await _migrate(conn)
+        await conn.commit()
+        # ✅ R181（N-10）：结构自检（只读、fail-soft）。放在迁移之后，确保自检看到的是
+        #    本次启动最终结构；问题由 /api/v1/health 的 schema 字段暴露。
+        try:
+            await check_schema_integrity()
+        except Exception as e:  # noqa: BLE001 - 自检异常不得阻断启动
+            logger.warning("数据库结构自检异常（fail-soft，已忽略）: %s", e)
+        logger.info("数据库初始化完成: %s", DB_PATH)
+        # ✅ R165b（2026-11-03）：运行期完整性巡检 —— J: USB 盘持续丢页（事件日志
+        #    实证 11-01/11-02 每日数百条寻页错误），启动闸门只覆盖进程启动时刻。
+        _start_integrity_probe_task()
+    except BaseException:
+        # 迁移/初始化失败时 lifespan 走不到关闭段，这里主动回收全局连接与连接池，
+        # 避免非守护工作线程让失败进程「起不来也不退出」；异常原样重抛，类型与消息不变。
+        try:
+            await close_db()
+        except Exception as e:
+            logger.warning("初始化失败后关闭数据库连接失败（清理路径，忽略）: %s", e)
+        raise
 
 
 async def _migrate(conn: aiosqlite.Connection):
