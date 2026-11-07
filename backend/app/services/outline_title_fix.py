@@ -46,7 +46,7 @@ from app.services.outline_quality import (
 
 # ✅ R179：上下文截断统一走带留痕的实现（超限时写日志 + 计入截断指标）。
 # ✅ G6（2026-11-07）：govern_text 为标题修复链路统一治理入口（围栏 → 脱敏 → 预算）。
-from app.services.prompt_material_guard import clip_text, govern_text
+from app.services.prompt_material_guard import clip_text_notice, govern_text
 
 logger = logging.getLogger("outline_title_fix")
 
@@ -389,8 +389,8 @@ async def _try_outline_title_fix(
                 scheme_type=scheme_type,
                 construction_scope=construction_scope,
                 # ✅ R179：硬切片改为带日志/指标的可见截断（超限时留痕）。
-                project_brief=clip_text(project_brief or "", 1500, "目录标题修复-project_brief"),
-                project_facts=clip_text(project_facts or "", PROJECT_FACTS_LIMIT_OUTLINE, "目录标题修复-project_facts"),
+                project_brief=clip_text_notice(project_brief or "", 1500, "目录标题修复-project_brief"),
+                project_facts=clip_text_notice(project_facts or "", PROJECT_FACTS_LIMIT_OUTLINE, "目录标题修复-project_facts"),
                 scheme_basis=scheme_basis,
                 standards_text=standards_text,
                 requirements=requirements,

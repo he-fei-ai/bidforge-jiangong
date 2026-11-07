@@ -1060,16 +1060,16 @@ async def _try_outline_patch(
     if not missing:
         return None
     try:
-        # ✅ R179：硬切片改为带留痕的截断（超限时写日志 + 计入截断指标），
-        #    避免 project_brief/project_facts 被悄悄丢弃且无人可查。
-        from app.services.prompt_material_guard import clip_text, clip_text_notice
+        # ✅ R179/R186：截断统一走带留痕的实现；R186 收紧后模型可见路径只用
+        #    clip_text_notice（超限时把「原文/保留/省略」账面留在提示词里）。
+        from app.services.prompt_material_guard import clip_text_notice
 
         prompt = _sh.render(
             "outline_patch_system",
             scheme_name=scheme_name,
             scheme_type=scheme_type,
-            project_brief=clip_text(project_brief or "", 1500, "目录补齐-project_brief"),
-            project_facts=clip_text(project_facts or "", _sh.PROJECT_FACTS_LIMIT_OUTLINE, "目录补齐-project_facts"),
+            project_brief=clip_text_notice(project_brief or "", 1500, "目录补齐-project_brief"),
+            project_facts=clip_text_notice(project_facts or "", _sh.PROJECT_FACTS_LIMIT_OUTLINE, "目录补齐-project_facts"),
             # ✅ R186 清零：章节标题串 2000 字硬切改为留痕裁剪（未超限逐字节
             #    原样；超限按边界收刀并附「原文/保留/省略」账面，模型可见）。
             chapter_titles=clip_text_notice(
@@ -1588,8 +1588,8 @@ async def _review_and_fix_outline(
             _sh.logger.info(
                 "目录修复轮输入：原目录 %d 节点 / 压缩后 %d 字符", _sh._count_nodes(outline), len(_orig_json)
             )
-            # ✅ R179：同 _try_outline_patch，硬切片改为带日志/指标的可见截断。
-            from app.services.prompt_material_guard import clip_text
+            # ✅ R179/R186：同 _try_outline_patch，模型可见路径只用 clip_text_notice。
+            from app.services.prompt_material_guard import clip_text_notice
 
             fix_prompt = _sh.render(
                 "outline_feedback_system",
@@ -1597,8 +1597,8 @@ async def _review_and_fix_outline(
                 review_suggestions="; ".join(suggestions),
                 scheme_name=scheme_name,
                 scheme_type=scheme_type,
-                project_brief=clip_text(project_brief or "", 1500, "目录修复-project_brief"),
-                project_facts=clip_text(project_facts or "", _sh.PROJECT_FACTS_LIMIT_OUTLINE, "目录修复-project_facts"),
+                project_brief=clip_text_notice(project_brief or "", 1500, "目录修复-project_brief"),
+                project_facts=clip_text_notice(project_facts or "", _sh.PROJECT_FACTS_LIMIT_OUTLINE, "目录修复-project_facts"),
             )
             # ✅ G6（2026-11-07）：修复链路与补齐/审核同口径治理（围栏 → 脱敏 → 预算）。
             fix_prompt = _govern_prompt_text(fix_prompt)

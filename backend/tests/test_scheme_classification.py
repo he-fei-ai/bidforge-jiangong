@@ -288,8 +288,12 @@ def test_build_chapter_extraction_text():
     text = build_chapter_extraction_text(items, "overview")
     assert "深度 6m" in text and "工艺要点" in text
     assert "施工工艺技术" not in text
-    # 截断
-    assert build_chapter_extraction_text(items, "overview", max_chars=5) == "### 方案级基本信"[:5]
+    # 截断：R186 起走 clip_text_notice，超限时模型可见「原文/保留/省略」账面
+    clipped = build_chapter_extraction_text(items, "overview", max_chars=5)
+    assert clipped.startswith("### ")
+    assert "本章专项提取成果已截断" in clipped
+    # limit<=0 仍表示不截断（逐字节原样）
+    assert build_chapter_extraction_text(items, "overview", max_chars=0) == text
 
 
 async def test_build_category_reference_outline():
