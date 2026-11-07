@@ -1593,8 +1593,11 @@ export default function AIConfigPage() {
   return (
     <div className="scroll-area" style={{ overflowY: "auto", overflowX: "hidden" }}>
       {/* 顶部状态卡片 */}
+      {/* ✅ 2026-11-07 视觉验收：原固定 span=6 在 390 下把四张卡挤成 ~80px 宽，
+          Statistic 标题/数值逐字竖排（实测不可读）。改为响应式：<576 单列、
+          ≥576 双列、≥1200 四列，与 1280/1920 既有版式保持一致。 */}
       <Row gutter={16} style={{ marginBottom: 16 }}>
-        <Col span={6}>
+        <Col span={6} xs={24} sm={12} xl={6}>
           <Card
             size="small"
             style={{ borderLeft: activeConfig ? "3px solid var(--bp-success)" : "3px solid var(--bp-error)" }}
@@ -1611,7 +1614,7 @@ export default function AIConfigPage() {
             />
           </Card>
         </Col>
-        <Col span={6}>
+        <Col span={6} xs={24} sm={12} xl={6}>
           <Card
             size="small"
             style={{ borderLeft: activeConfig ? "3px solid var(--bp-success)" : "3px solid var(--bp-error)" }}
@@ -1624,7 +1627,7 @@ export default function AIConfigPage() {
             />
           </Card>
         </Col>
-        <Col span={6}>
+        <Col span={6} xs={24} sm={12} xl={6}>
           <Card size="small">
             <Statistic
               title="连接状态"
@@ -1643,7 +1646,7 @@ export default function AIConfigPage() {
             />
           </Card>
         </Col>
-        <Col span={6}>
+        <Col span={6} xs={24} sm={12} xl={6}>
           <Card size="small">
             <Statistic
               title="总调用次数"

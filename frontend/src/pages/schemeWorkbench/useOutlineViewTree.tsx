@@ -116,6 +116,11 @@ export function useOutlineViewTree(deps: OutlineViewTreeDeps) {
                 ? "rgba(22,119,255,0.06)"
                 : "transparent";
 
+      // ✅ 2026-11-07 视觉验收：390 下左侧树标题会被容器硬裁（实测越界 12–40px），
+      //    这里把「完整标题」挂到截断文本的原生 title 上，配合 CSS 让标题自身省略号
+      //    截断，用户悬停即可看到全文，不再依赖父级裁切。
+      const fullTitle = formatOutlineTitle(node.outlineId || node.key, node.level, node.title);
+
       const wordTagColor = isPlaceholder
         ? "purple"
         : isGenerated
@@ -168,6 +173,7 @@ export function useOutlineViewTree(deps: OutlineViewTreeDeps) {
               {statusIcon}
               {node.level > 1 && <span style={{ color: "#bfbfbf" }}>·</span>}
               <span
+                title={fullTitle}
                 style={{
                   fontWeight: node.level === 1 ? 600 : 400,
                   color: isPlaceholder
@@ -187,7 +193,7 @@ export function useOutlineViewTree(deps: OutlineViewTreeDeps) {
                   maxWidth: 180,
                 }}
               >
-                {formatOutlineTitle(node.outlineId || node.key, node.level, node.title)}
+                {fullTitle}
               </span>
               {isPlaceholder && (
                 <Tag

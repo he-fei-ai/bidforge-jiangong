@@ -1368,6 +1368,38 @@ pre,
     max-height: 38vh;
     flex: 0 0 38vh !important;
   }
+  /* ✅ 2026-11-07 视觉验收：390 下目录树行会越出面板 12–40px，标题被面板边框裁掉。
+     antd 的 treenode / content-wrapper 默认没有 min-width:0，nowrap 标题把它们撑宽；
+     补上后才由标题自身的 text-overflow: ellipsis 生效（配合 title 原生提示）。 */
+  .swb-side-panel .ant-tree .ant-tree-treenode {
+    max-width: 100%;
+    min-width: 0;
+  }
+  .swb-side-panel .ant-tree .ant-tree-node-content-wrapper {
+    min-width: 0;
+    max-width: 100%;
+  }
+  .swb-side-panel .ant-tree .ant-tree-title {
+    display: block;
+    min-width: 0;
+    overflow: hidden;
+  }
+  /* ✅ 2026-11-07 视觉验收：导入子 Tab 的卡片头在 390 下被右侧操作按钮挤到
+     62–172px（「上传项目资料（…）」「资料与解析」标题被硬裁、无省略号）。
+     窄屏让 header 换行：标题独占一行，按钮组落到下一行，标题获得整行可用宽度。 */
+  .swb-workbench-main .ant-card-head-wrapper {
+    flex-wrap: wrap;
+    row-gap: 4px;
+  }
+  .swb-workbench-main .ant-card-head-title {
+    flex: 1 1 100%;
+    white-space: normal;
+    overflow: visible;
+  }
+  .swb-workbench-main .ant-card-extra {
+    flex: 1 1 100%;
+    margin-left: 0;
+  }
 }
 
 /* 手机专属：xs/sm 断点进一步收敛 */

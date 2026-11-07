@@ -202,11 +202,15 @@ export const SchemeTreePanel = memo(function SchemeTreePanel(p: SchemeTreePanelP
               return (
                 <div
                   className="swb-tree-row"
-                  style={{ display: "flex", alignItems: "center", gap: 4, width: "100%" }}
+                  // ✅ 2026-11-07 视觉验收：390 下标题行会越出面板 12–40px（被面板裁切）。
+                  //    行与标题都必须允许收缩（minWidth:0），否则 nowrap 文本会把
+                  //    antd 的 content-wrapper 撑到面板外，省略号永远不会出现。
+                  style={{ display: "flex", alignItems: "center", gap: 4, width: "100%", minWidth: 0, maxWidth: "100%" }}
                 >
                   <span
                     style={{
                       flex: 1,
+                      minWidth: 0,
                       overflow: "hidden",
                       textOverflow: "ellipsis",
                       whiteSpace: "nowrap",
