@@ -2,7 +2,7 @@ import { useRef, type Dispatch, type MutableRefObject, type SetStateAction } fro
 import type { ModalFuncProps } from "antd";
 import { factsApi, docPipelineApi } from "../../api";
 import { computeDocStats, buildUploadNotice } from "../../utils/workflowDerived";
-import type { DocRecord } from "../../utils/workflowDerived";
+import type { DocRecord, PreviewError } from "../../utils/workflowDerived";
 import type { FactsSummary } from "../../types/facts";
 import {
   MAX_UPLOAD_BYTES,
@@ -21,6 +21,32 @@ import type {
 // ✅ any 清理专项（2026-11-02）：本域消费的后端 REST 响应契约。
 //    字段按 hook 内实际读取推导，未知字段一律 ? 修饰，不虚构。
 // =========================================================================
+
+/** 窄断言 axios 错误对象上真实存在的字段（不虚构属性） */
+function errFields(e: unknown) {
+  return e as { code?: string; name?: string; message?: string };
+}
+
+/** 用户主动取消 / 组件卸载中断：不当作失败提示 */
+function isCanceledError(e: unknown): boolean {
+  const err = errFields(e);
+  return err?.code === "ERR_CANCELED" || err?.name === "CanceledError" || err?.name === "AbortError";
+}
+
+/** axios 超时（ECONNABORTED）或同类 timeout 文案 */
+function isTimeoutError(e: unknown): boolean {
+  const err = errFields(e);
+  return err?.code === "ECONNABORTED" || /timeout of \d+ms exceeded/i.test(err?.message || "");
+}
+
+/**
+ * 请求错误文案：超时统一中文化并写明「哪一层 + 多少秒」（秒数取各 API 定义处实际值），
+ * 其余错误保留后端 detail 原文，不透传 axios 英文兜底。
+ */
+function requestErrorText(e: unknown, label: string, timeoutSeconds: number, fallback: string) {
+  if (isTimeoutError(e)) return `${label}请求超时（${timeoutSeconds} 秒），请稍后重试`;
+  return errFields(e)?.message || fallback;
+}
 
 /** 文档预览响应（GET /global-facts/documents/{id}/preview；本域读 is_parsed/message/preview） */
 export interface DocPreviewData {
@@ -72,10 +98,12 @@ export interface DocumentWorkflowDeps {
   docList: DocRecord[];
   loadDocuments: () => void | Promise<void>;
   // 预览 / 四层管线
-  setPreviewDoc: (v: DocRecord) => void;
+  setPreviewDoc: (v: DocRecord | null) => void;
   setPreviewText: (v: string) => void;
   setPreviewData: (v: DocPreviewData | null) => void;
   setPreviewLoading: (v: boolean) => void;
+  /** 预览失败状态位（超时 / 请求失败）；null 表示未失败 */
+  setPreviewError: (v: PreviewError | null) => void;
   previewDoc: DocRecord | null;
   setPipelineStatus: Dispatch<SetStateAction<DocumentPipelineStatusLike | null>>;
   setPipelineError: (v: string | null) => void;
@@ -114,6 +142,7 @@ export function useDocumentWorkflow(deps: DocumentWorkflowDeps) {
     setPreviewText,
     setPreviewData,
     setPreviewLoading,
+    setPreviewError,
     previewDoc,
     setPipelineStatus,
     setPipelineError,
@@ -133,6 +162,8 @@ export function useDocumentWorkflow(deps: DocumentWorkflowDeps) {
   const previewReqIdRef = useRef(0);
   const pipelineReqIdRef = useRef(0);
   const pipelineDocIdRef = useRef<string | null>(null);
+  // ✅ 真正的取消通道：关闭弹窗 / 切换文档时中断在途预览（不只是丢弃结果）
+  const previewAbortRef = useRef<AbortController | null>(null);
 
   // ✅ 分步工作流 ①：上传保存（仅存文件，不解析不提取）
   const handleUploadDocuments = async (files: File[]) => {
@@ -232,7 +263,8 @@ export function useDocumentWorkflow(deps: DocumentWorkflowDeps) {
       // 结构化窄断言：仅读取 axios 错误对象上真实存在的 name / message
       const err = e as { name?: string; message?: string };
       if (err?.name === "AbortError" || ac.signal.aborted) return;
-      msg.error(err.message || "上传保存失败");
+      // API 超时 120s（api/index.ts uploadDocuments 配置）
+      msg.error(requestErrorText(e, "上传", 120, "上传保存失败"));
     } finally {
       if (uploadAbortRef.current === ac) {
         uploadAbortRef.current = null;
@@ -308,7 +340,8 @@ export function useDocumentWorkflow(deps: DocumentWorkflowDeps) {
     } catch (e: unknown) {
       const err = e as { name?: string; message?: string };
       if (err?.name === "AbortError" || ac.signal.aborted) return;
-      msg.error(err.message || "解析失败");
+      // 批量解析 API 超时 600s（api/index.ts parseAllDocuments 配置）
+      msg.error(requestErrorText(e, "批量解析", 600, "解析失败"));
     } finally {
       if (parseAbortRef.current === ac) {
         parseAbortRef.current = null;
@@ -352,7 +385,8 @@ export function useDocumentWorkflow(deps: DocumentWorkflowDeps) {
     } catch (e: unknown) {
       const err = e as { name?: string; message?: string };
       if (err?.name === "AbortError" || ac.signal.aborted) return;
-      msg.error(err.message || "解析失败");
+      // 单份解析 API 超时 300s（api/index.ts parseDocument 配置）
+      msg.error(requestErrorText(e, "解析", 300, "解析失败"));
       // ✅ 失败/超时后补一次列表刷新：后端可能已落库，避免 UI 与后端不同步
       loadDocuments();
     } finally {
@@ -363,22 +397,44 @@ export function useDocumentWorkflow(deps: DocumentWorkflowDeps) {
     }
   };
 
+  /** 关闭预览弹窗：中断在途请求并清空预览/管线状态（取消 = 不再等，而非仅丢弃结果） */
+  const handleCancelPreview = () => {
+    // 先让序号失效，再 abort：即使中断异常同步抛回 catch，也已不会写状态
+    previewReqIdRef.current += 1;
+    pipelineReqIdRef.current += 1;
+    previewAbortRef.current?.abort();
+    previewAbortRef.current = null;
+    setPreviewDoc(null);
+    setPreviewText("");
+    setPreviewData(null);
+    setPreviewError(null);
+    setPreviewLoading(false);
+    setPipelineStatus(null);
+    setPipelineError(null);
+    setPipelineLoading(false);
+  };
+
   /** 查看解析内容预览（前 N 字，不下载整份文件） */
   const handlePreviewDocument = async (doc: DocRecord) => {
     if (!doc?.id) return;
     // ✅ 竞态守卫：本次请求的序号 + 当前预览文档，晚到的旧响应一律丢弃
     const reqId = ++previewReqIdRef.current;
+    // ✅ 取消通道：切换文档时中断上一份仍在途的预览请求
+    previewAbortRef.current?.abort();
+    const ac = new AbortController();
+    previewAbortRef.current = ac;
     pipelineDocIdRef.current = doc.id;
     setPreviewDoc(doc);
     setPreviewText("");
     setPreviewData(null);
+    setPreviewError(null);
     setPreviewLoading(true);
     // 重置四层质量概览，随后异步拉取（不阻断正文预览）
     setPipelineStatus(null);
     setPipelineError(null);
     setPipelineLoading(true);
     try {
-      const { data } = await factsApi.previewDocument(doc.id);
+      const { data } = await factsApi.previewDocument(doc.id, 5000, { signal: ac.signal });
       if (reqId !== previewReqIdRef.current) return;
       if (!data.is_parsed) {
         msg.warning(data.message || "该文档尚未解析");
@@ -386,11 +442,14 @@ export function useDocumentWorkflow(deps: DocumentWorkflowDeps) {
       setPreviewText(data.preview || "");
       setPreviewData(data);
     } catch (e: unknown) {
-      // 已切到别的文档：不弹错误、不写状态（避免「标题是 B、提示是 A」）
-      if (reqId !== previewReqIdRef.current) return;
-      const err = e as { message?: string };
-      msg.error(err.message || "获取预览失败");
+      // 已切到别的文档 / 用户取消：不弹错误、不写状态（避免「标题是 B、提示是 A」）
+      if (reqId !== previewReqIdRef.current || isCanceledError(e)) return;
+      const text = requestErrorText(e, "预览", 60, "获取预览失败");
+      // ✅ 失败状态位：让空态显示「失败/超时」，而不是复用「尚未解析」
+      setPreviewError({ kind: isTimeoutError(e) ? "timeout" : "request", message: text });
+      msg.error(text);
     } finally {
+      if (previewAbortRef.current === ac) previewAbortRef.current = null;
       if (reqId === previewReqIdRef.current) setPreviewLoading(false);
     }
     if (reqId !== previewReqIdRef.current) return;
@@ -663,6 +722,7 @@ export function useDocumentWorkflow(deps: DocumentWorkflowDeps) {
     handleParseDocuments,
     handleParseDocument,
     handlePreviewDocument,
+    handleCancelPreview,
     handlePipelineAction,
     handleCategoryChange,
     handleBatchResolve,

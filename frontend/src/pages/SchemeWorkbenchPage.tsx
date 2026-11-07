@@ -124,6 +124,7 @@ import {
   canShrinkSection,
   type WorkflowTabKey,
   type DocRecord,
+  type PreviewError,
 } from "../utils/workflowDerived";
 import {
   UPLOAD_FILE_ACCEPT,
@@ -891,6 +892,8 @@ export default function SchemeWorkbenchPage() {
   // 只存 text 会把后端已经算好的 truncated / parse_warnings 丢掉，
   // 用户在预览里看到的是一段看起来正常的短正文，无法判断内容是否真的完整。
   const [previewData, setPreviewData] = useState<DocPreviewData | null>(null);
+  // 预览失败状态位：区分「超时 / 请求失败 / 确实未解析」，避免失败被空态「尚未解析」盖掉
+  const [previewError, setPreviewError] = useState<PreviewError | null>(null);
   // ✅ 四层存储（解析质量）预览接线：预览弹窗内展示 status/completeness 概览，
   //    并提供重新解析 / 物化提取层 / 交叉校验 / 刷新质量四个动作。
   const [pipelineStatus, setPipelineStatus] = useState<DocumentPipelineStatusLike | null>(null);
@@ -2637,6 +2640,7 @@ export default function SchemeWorkbenchPage() {
     handleParseDocuments,
     handleParseDocument,
     handlePreviewDocument,
+    handleCancelPreview,
     handlePipelineAction,
     handleCategoryChange,
     handleBatchResolve,
@@ -2666,6 +2670,7 @@ export default function SchemeWorkbenchPage() {
     setPreviewText,
     setPreviewData,
     setPreviewLoading,
+    setPreviewError,
     previewDoc,
     setPipelineStatus,
     setPipelineError,
@@ -3756,9 +3761,10 @@ export default function SchemeWorkbenchPage() {
         libApplying={libApplying}
         onApplyLibrary={handleApplyLibrary}
         previewDoc={previewDoc}
-        setPreviewDoc={setPreviewDoc}
+        onCancelPreview={handleCancelPreview}
         previewLoading={previewLoading}
         previewData={previewData}
+        previewError={previewError}
         previewText={previewText}
         pipelineLoading={pipelineLoading}
         pipelineStatus={pipelineStatus}

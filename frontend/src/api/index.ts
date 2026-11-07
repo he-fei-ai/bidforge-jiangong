@@ -587,8 +587,12 @@ export const factsApi = {
     }),
   deleteDocument: (docId: string) => api.delete(`/global-facts/documents/${docId}`),
   // ✅ 文件导入/解析增强：文件预览（前 N 字）和分类管理
-  previewDocument: (docId: string, maxChars = 5000) =>
-    api.get(`/global-facts/documents/${docId}/preview`, { params: { max_chars: maxChars } }),
+  // options.signal：预览弹窗关闭/切换文档时中断在途请求（默认走全局 60s 超时）
+  previewDocument: (docId: string, maxChars = 5000, options?: { signal?: AbortSignal }) =>
+    api.get(`/global-facts/documents/${docId}/preview`, {
+      params: { max_chars: maxChars },
+      signal: options?.signal,
+    }),
   updateDocumentCategory: (docId: string, docCategory: string) =>
     api.patch(`/global-facts/documents/${docId}/category`, { doc_category: docCategory }),
   categoryOptions: () => api.get("/global-facts/documents/category-options"),

@@ -18,6 +18,7 @@ import {
   selectPlacedExportCharts,
   findDefaultExportPreset,
   canShrinkSection,
+  previewEmptyDescription,
   WORD_OVER_RATIO,
   type DocRecord,
 } from "../utils/workflowDerived";
@@ -593,5 +594,33 @@ describe("canShrinkSection", () => {
     // 1200 × 1.3 = 1560.0000000000002（IEEE754 两端同 doubles，边界逐字一致）
     expect(canShrinkSection({ content: "x", word_count: 1561 })).toBe(true);
     expect(canShrinkSection({ content: "x", word_count: 1560 })).toBe(false);
+  });
+});
+
+describe("previewEmptyDescription · 预览空态按真实状态给文案", () => {
+  it("请求超时 → 明确「超时」，不复用「尚未解析」", () => {
+    const copy = previewEmptyDescription({ is_parsed: false }, {
+      kind: "timeout",
+      message: "预览请求超时（60 秒），请稍后重试",
+    });
+    expect(copy).toContain("超时");
+    expect(copy).not.toContain("尚未解析");
+  });
+
+  it("请求失败 → 明确「加载失败」并带原因", () => {
+    const copy = previewEmptyDescription(null, { kind: "request", message: "网络连接中断" });
+    expect(copy).toContain("加载失败");
+    expect(copy).toContain("网络连接中断");
+    expect(copy).not.toContain("尚未解析");
+  });
+
+  it("请求成功但已解析且正文为空 → 「已解析但正文为空」，不是「尚未解析」", () => {
+    const copy = previewEmptyDescription({ is_parsed: true }, null);
+    expect(copy).toContain("正文为空");
+    expect(copy).not.toContain("尚未解析");
+  });
+
+  it("请求成功且确实未解析 → 保留「尚未解析」", () => {
+    expect(previewEmptyDescription({ is_parsed: false }, null)).toContain("尚未解析");
   });
 });

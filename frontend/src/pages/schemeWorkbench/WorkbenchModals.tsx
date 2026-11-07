@@ -26,7 +26,11 @@ import {
 } from "antd";
 import type { FormInstance } from "antd";
 import { AimOutlined, DeleteOutlined, ReloadOutlined } from "@ant-design/icons";
-import type { DocRecord } from "../../utils/workflowDerived";
+import {
+  previewEmptyDescription,
+  type DocRecord,
+  type PreviewError,
+} from "../../utils/workflowDerived";
 import { normalizeBaGroups } from "../../utils/bidAnalysis";
 import type { BaGroup, BaItemDef, BaStoredItem } from "../../utils/bidAnalysis";
 import { previewNotices } from "../../utils/parseSourceNotice";
@@ -83,9 +87,12 @@ export interface WorkbenchModalsProps {
 
   // ---- 解析内容预览 ----
   previewDoc: DocRecord | null;
-  setPreviewDoc: (doc: DocRecord | null) => void;
+  /** 关闭预览：中断在途请求并清空预览状态 */
+  onCancelPreview: () => void;
   previewLoading: boolean;
   previewData: DocPreviewData | null;
+  /** 预览失败状态（超时 / 请求失败），用于空态按真实原因给文案 */
+  previewError: PreviewError | null;
   previewText: string;
   pipelineLoading: boolean;
   pipelineStatus: DocumentPipelineStatusLike | null;
@@ -149,9 +156,10 @@ export function WorkbenchModals(props: WorkbenchModalsProps) {
     libApplying,
     onApplyLibrary,
     previewDoc,
-    setPreviewDoc,
+    onCancelPreview,
     previewLoading,
     previewData,
+    previewError,
     previewText,
     pipelineLoading,
     pipelineStatus,
@@ -409,7 +417,7 @@ export function WorkbenchModals(props: WorkbenchModalsProps) {
             : "解析内容预览"
         }
         open={!!previewDoc}
-        onCancel={() => setPreviewDoc(null)}
+        onCancel={onCancelPreview}
         footer={null}
         width={760}
       >
@@ -448,7 +456,10 @@ export function WorkbenchModals(props: WorkbenchModalsProps) {
               {previewText}
             </div>
           ) : (
-            !previewLoading && <Empty description="该文档尚未解析，请先执行解析" />
+            !previewLoading && (
+              // 空态按真实状态给文案：失败/超时不得复用「尚未解析」
+              <Empty description={previewEmptyDescription(previewData, previewError)} />
+            )
           )}
         </Spin>
       </Modal>

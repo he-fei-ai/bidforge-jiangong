@@ -20,6 +20,34 @@ export type DocRecord = {
   [k: string]: unknown;
 };
 
+/**
+ * 预览失败状态位：区分「超时」与「请求失败」。
+ *
+ * 没有这个状态位时，预览失败与「文档从未解析」都落到同一个空态文案
+ * 「该文档尚未解析」——把「没做成」显示成「还没做」，用户会重复点解析。
+ */
+export interface PreviewError {
+  kind: "timeout" | "request";
+  message: string;
+}
+
+/**
+ * 预览弹窗空态文案：按真实状态区分 超时 / 请求失败 / 已解析但正文为空 / 确实未解析。
+ * 失败分支优先于 is_parsed，避免失败被「尚未解析」盖掉。
+ */
+export function previewEmptyDescription(
+  data: { is_parsed?: boolean } | null | undefined,
+  error: PreviewError | null | undefined,
+): string {
+  if (error) {
+    return error.kind === "timeout"
+      ? error.message || "预览请求超时，请稍后重试"
+      : `预览加载失败：${error.message || "未知错误"}`;
+  }
+  if (data?.is_parsed) return "该文档已解析，但正文为空，请查看解析提示";
+  return "该文档尚未解析，请先执行解析";
+}
+
 export type DocStats = {
   /** 已成功解析（parse_status==='success' 或旧数据 text_len > 0） */
   parsedCount: number;

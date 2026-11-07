@@ -39,7 +39,7 @@ const doc = (id: string, name: string) => ({ id, file_name: name }) as DocRecord
 
 /** 记录 hook 写入的预览/管线状态（不触发 React 重渲染，断言即“最后一次写入”） */
 type Recorder = {
-  previewDoc: DocRecord[];
+  previewDoc: (DocRecord | null)[];
   previewText: string[];
   previewData: Array<unknown>;
   previewLoading: boolean[];
@@ -47,6 +47,7 @@ type Recorder = {
   pipelineError: (string | null)[];
   pipelineLoading: boolean[];
   pipelineAction: (string | null)[];
+  previewError: unknown[];
 };
 
 function setup(previewDocNow: DocRecord | null = null, docListNow: DocRecord[] = []) {
@@ -59,6 +60,7 @@ function setup(previewDocNow: DocRecord | null = null, docListNow: DocRecord[] =
     pipelineError: [],
     pipelineLoading: [],
     pipelineAction: [],
+    previewError: [],
   };
   const msg = {
     success: vi.fn(),
@@ -85,10 +87,11 @@ function setup(previewDocNow: DocRecord | null = null, docListNow: DocRecord[] =
     setParsingDocId: vi.fn(),
     docList: docListNow,
     loadDocuments: vi.fn(),
-    setPreviewDoc: (d: DocRecord) => rec.previewDoc.push(d),
+    setPreviewDoc: (d: DocRecord | null) => rec.previewDoc.push(d),
     setPreviewText: (t: string) => rec.previewText.push(t),
     setPreviewData: (d: unknown) => rec.previewData.push(d),
     setPreviewLoading: (v: boolean) => rec.previewLoading.push(v),
+    setPreviewError: (v: unknown) => rec.previewError.push(v),
     previewDoc: previewDocNow,
     setPipelineStatus: (v: unknown) => rec.pipelineStatus.push(v),
     setPipelineError: (v: string | null) => rec.pipelineError.push(v),
@@ -276,7 +279,7 @@ describe("useDocumentWorkflow · 上传/解析错误与部分成功", () => {
     await act(async () => {
       await result.current.handleParseDocuments();
     });
-    expect(msg.error).toHaveBeenCalledWith("timeout of 60000ms exceeded");
+    expect(msg.error).toHaveBeenCalledWith("批量解析请求超时（600 秒），请稍后重试");
     expect(deps.setParsingDocs).toHaveBeenLastCalledWith(false);
   });
 });
@@ -305,5 +308,124 @@ describe("useDocumentWorkflow · 重解析后预览缓存失效", () => {
     expect(rec.previewText[rec.previewText.length - 1]).toBe("重解析后的新正文");
     const lastData = rec.previewData[rec.previewData.length - 1] as { preview?: string };
     expect(lastData.preview).toBe("重解析后的新正文");
+  });
+});
+
+describe("useDocumentWorkflow · 预览取消（AbortController）", () => {
+  /** axios 中断抛出的是 CanceledError（code=ERR_CANCELED），不是 AbortError */
+  const canceled = () => Object.assign(new Error("canceled"), { code: "ERR_CANCELED" });
+
+  it("发起 → 取消：旧请求被中断，结果不写回正文/错误/加载态", async () => {
+    const seenSignals: AbortSignal[] = [];
+    vi.spyOn(factsApi, "previewDocument").mockImplementation((_docId, _maxChars, options) => {
+      const signal = options?.signal;
+      if (signal) seenSignals.push(signal);
+      return new Promise((_resolve, reject) => {
+        signal?.addEventListener("abort", () => reject(canceled()));
+      }) as never;
+    });
+    vi.spyOn(docPipelineApi, "status").mockResolvedValue({ data: {} } as never);
+
+    const { result, rec, msg } = setup();
+    let pending!: Promise<void>;
+    await act(async () => {
+      pending = result.current.handlePreviewDocument(doc("d1", "A.pdf"));
+    });
+    await act(async () => {
+      result.current.handleCancelPreview();
+    });
+
+    expect(seenSignals[0]?.aborted).toBe(true);
+    await act(async () => {
+      await pending;
+    });
+
+    // 中断是「不再等」，不是「写错结果」：不弹错误、不写正文、加载态收敛
+    expect(msg.error).not.toHaveBeenCalled();
+    expect(rec.previewText.filter((t) => t !== "")).toEqual([]);
+    expect(rec.previewDoc[rec.previewDoc.length - 1]).toBeNull();
+    expect(rec.previewLoading[rec.previewLoading.length - 1]).toBe(false);
+    expect(rec.previewError[rec.previewError.length - 1] ?? null).toBeNull();
+  });
+
+  it("发起 B 时自动中断仍在途的 A", async () => {
+    const signals: Record<string, AbortSignal | undefined> = {};
+    vi.spyOn(factsApi, "previewDocument").mockImplementation((docId, _maxChars, options) => {
+      signals[docId] = options?.signal;
+      if (docId === "d2") {
+        return Promise.resolve({ data: { is_parsed: true, preview: "B-body" } }) as never;
+      }
+      return new Promise(() => undefined) as never; // A 永不返回
+    });
+    vi.spyOn(docPipelineApi, "status").mockResolvedValue({ data: {} } as never);
+
+    const { result, rec } = setup();
+    await act(async () => {
+      void result.current.handlePreviewDocument(doc("d1", "A.pdf"));
+      await result.current.handlePreviewDocument(doc("d2", "B.pdf"));
+    });
+
+    expect(signals.d1?.aborted).toBe(true);
+    expect(rec.previewText[rec.previewText.length - 1]).toBe("B-body");
+  });
+});
+
+describe("useDocumentWorkflow · 预览失败状态位", () => {
+  it("请求失败：previewError.kind=request，且区分于「尚未解析」", async () => {
+    vi.spyOn(factsApi, "previewDocument").mockRejectedValue(new Error("网络连接中断"));
+    vi.spyOn(docPipelineApi, "status").mockResolvedValue({ data: {} } as never);
+
+    const { result, rec, msg } = setup();
+    await act(async () => {
+      await result.current.handlePreviewDocument(doc("d1", "A.pdf"));
+    });
+
+    expect(rec.previewError[rec.previewError.length - 1]).toEqual({
+      kind: "request",
+      message: "网络连接中断",
+    });
+    expect(msg.error).toHaveBeenCalledWith("网络连接中断");
+  });
+
+  it("请求超时：previewError.kind=timeout，中文文案（60 秒）", async () => {
+    vi.spyOn(factsApi, "previewDocument").mockRejectedValue(
+      Object.assign(new Error("timeout of 60000ms exceeded"), { code: "ECONNABORTED" }),
+    );
+    vi.spyOn(docPipelineApi, "status").mockResolvedValue({ data: {} } as never);
+
+    const { result, rec, msg } = setup();
+    await act(async () => {
+      await result.current.handlePreviewDocument(doc("d1", "A.pdf"));
+    });
+
+    expect(rec.previewError[rec.previewError.length - 1]).toEqual({
+      kind: "timeout",
+      message: "预览请求超时（60 秒），请稍后重试",
+    });
+    expect(msg.error).toHaveBeenCalledWith("预览请求超时（60 秒），请稍后重试");
+  });
+});
+
+describe("useDocumentWorkflow · 超时文案中文化", () => {
+  it("上传超时：120 秒中文提示", async () => {
+    vi.spyOn(factsApi, "uploadDocuments").mockRejectedValue(
+      Object.assign(new Error("timeout of 120000ms exceeded"), { code: "ECONNABORTED" }),
+    );
+    const { result, msg } = setup();
+    await act(async () => {
+      await result.current.handleUploadDocuments([new File(["a"], "a.pdf")]);
+    });
+    expect(msg.error).toHaveBeenCalledWith("上传请求超时（120 秒），请稍后重试");
+  });
+
+  it("单份解析超时：300 秒中文提示", async () => {
+    vi.spyOn(factsApi, "parseDocument").mockRejectedValue(
+      Object.assign(new Error("timeout of 300000ms exceeded"), { code: "ECONNABORTED" }),
+    );
+    const { result, msg } = setup();
+    await act(async () => {
+      await result.current.handleParseDocument("d1", "a.pdf");
+    });
+    expect(msg.error).toHaveBeenCalledWith("解析请求超时（300 秒），请稍后重试");
   });
 });
