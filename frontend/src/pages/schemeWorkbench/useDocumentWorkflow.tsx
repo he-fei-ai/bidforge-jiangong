@@ -122,6 +122,8 @@ export interface DocumentWorkflowDeps {
   maxUploadFiles: number | undefined;
   uploadAbortRef: MutableRefObject<AbortController | null>;
   parseAbortRef: MutableRefObject<AbortController | null>;
+  /** 预览请求的中止通道：ref 由页面持有并登记进卸载 cleanup（与上传/解析同口径） */
+  previewAbortRef: MutableRefObject<AbortController | null>;
   parsingDocs: boolean;
   setParsingDocs: (v: boolean) => void;
   parsingDocId: string | null;
@@ -163,6 +165,7 @@ export function useDocumentWorkflow(deps: DocumentWorkflowDeps) {
     maxUploadFiles,
     uploadAbortRef,
     parseAbortRef,
+    previewAbortRef,
     parsingDocs,
     setParsingDocs,
     parsingDocId,
@@ -193,8 +196,9 @@ export function useDocumentWorkflow(deps: DocumentWorkflowDeps) {
   const previewReqIdRef = useRef(0);
   const pipelineReqIdRef = useRef(0);
   const pipelineDocIdRef = useRef<string | null>(null);
-  // ✅ 真正的取消通道：关闭弹窗 / 切换文档时中断在途预览（不只是丢弃结果）
-  const previewAbortRef = useRef<AbortController | null>(null);
+  // ✅ 真正的取消通道（ref 由页面持有，见 DocumentWorkflowDeps.previewAbortRef）：
+  //    关闭弹窗 / 切换文档时中断在途预览（不只是丢弃结果）；页面卸载时由
+  //    SchemeWorkbenchPage 的卸载 cleanup 统一 abort。
 
   // ✅ 分步工作流 ①：上传保存（仅存文件，不解析不提取）
   const handleUploadDocuments = async (files: File[]) => {
@@ -490,6 +494,9 @@ export function useDocumentWorkflow(deps: DocumentWorkflowDeps) {
       if (previewAbortRef.current === ac) previewAbortRef.current = null;
       if (reqId === previewReqIdRef.current) setPreviewLoading(false);
     }
+    // ✅ 页面卸载等「只 abort、不递增序号」的取消路径：不再追拉管线状态，
+    //    否则会在已卸载组件上发起第二次请求并 setState。
+    if (ac.signal.aborted) return;
     if (reqId !== previewReqIdRef.current) return;
     loadPipelineStatus(doc.id);
   };

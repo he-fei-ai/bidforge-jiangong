@@ -1080,6 +1080,8 @@ export default function SchemeWorkbenchPage() {
   const uploadAbortRef = useRef<AbortController | null>(null);
   // ✅ 文档解析取消控制器：解析（尤其 OCR）耗时可达数分钟，卸载/切方案时中断请求
   const parseAbortRef = useRef<AbortController | null>(null);
+  // ✅ 文档解析内容预览的取消控制器：预览可能等满 60s，卸载/切方案时中断在途请求
+  const previewAbortRef = useRef<AbortController | null>(null);
   // 列表请求独立取消通道：切方案时必须同时中止 SSE、上传、解析与普通 GET。
   const factsListAbortRef = useRef<AbortController | null>(null);
   const factsDocsListAbortRef = useRef<AbortController | null>(null);
@@ -1519,6 +1521,7 @@ export default function SchemeWorkbenchPage() {
       abortControllerRef.current?.abort();
       uploadAbortRef.current?.abort();
       parseAbortRef.current?.abort();
+      previewAbortRef.current?.abort();
       factsListAbortRef.current?.abort();
       factsDocsListAbortRef.current?.abort();
       baSseAbortRef.current?.abort();
@@ -1601,6 +1604,7 @@ export default function SchemeWorkbenchPage() {
       abortControllerRef.current?.abort();
       uploadAbortRef.current?.abort();
       parseAbortRef.current?.abort();
+      previewAbortRef.current?.abort();
       presetListAbortRef.current?.abort();
       exportCheckAbortRef.current?.abort();
       cacheAbortRef.current?.abort();
@@ -2666,6 +2670,7 @@ export default function SchemeWorkbenchPage() {
     maxUploadFiles,
     uploadAbortRef,
     parseAbortRef,
+    previewAbortRef,
     parsingDocs,
     setParsingDocs,
     parsingDocId,

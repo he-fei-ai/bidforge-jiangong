@@ -81,6 +81,7 @@ function setup(previewDocNow: DocRecord | null = null, docListNow: DocRecord[] =
     maxUploadFiles: undefined,
     uploadAbortRef: { current: null },
     parseAbortRef: { current: null },
+    previewAbortRef: { current: null },
     parsingDocs: false,
     setParsingDocs: vi.fn(),
     parsingDocId: null,
