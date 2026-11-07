@@ -326,6 +326,19 @@ async def lifespan(app: FastAPI):
     except Exception as e:
         logger.warning("启动期孤儿导出 GC 跳过（不影响服务）: %s", e)
 
+    # ✅ R184（2026-11-07 · 方案 B）：目录父子关系完整性扫描 —— **只扫描不修复**。
+    #    `sections.parent_id` 在 schema 层无 CHECK/FK，历史脏数据（环检测上线前的
+    #    写入、外部脚本直改库、旧快照回退）会留下 SELF_PARENT / ORPHAN / CYCLE_NODE
+    #    三类坏链。结果写入日志 + 进程内登记（GET /api/v1/system/outline-integrity
+    #    可查询）；扫描异常由服务自身登记 status=failed（counts=null），绝不折叠成
+    #    「0 条」。此处 fail-soft：不阻断启动。
+    try:
+        from app.services.outline_integrity import run_startup_scan
+
+        await run_startup_scan()
+    except Exception as e:
+        logger.warning("启动目录完整性扫描异常（不影响服务）: %s", e)
+
     # ✅ 统一并发体系：启动时应用活跃 AI 配置的并发数作为全局默认并发
     try:
         from app.services.ai.provider_factory import apply_config_concurrency

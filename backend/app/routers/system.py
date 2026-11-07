@@ -672,3 +672,16 @@ async def governance_posture_get():
         "persisted": persisted,
         "redaction_notice": ("" if redaction_enabled else _pmg.governance_posture()["redaction_notice"]),
     }
+
+
+@router.get("/outline-integrity")
+async def outline_integrity_get():
+    """最近一次目录父子关系完整性扫描结果（R184 方案 B：启动时扫描、只报不修）。
+
+    ``status`` 三态：``not_scanned``（本进程尚未扫描）/ ``completed`` / ``failed``。
+    ``failed`` 时 ``counts`` 为 ``null`` —— 扫描未完成绝不折算成「0 条」。
+    本端点只读进程内登记，**不会触发扫描**（扫描只在 lifespan 启动段执行一次）。
+    """
+    from app.services.outline_integrity import get_last_scan
+
+    return get_last_scan()
