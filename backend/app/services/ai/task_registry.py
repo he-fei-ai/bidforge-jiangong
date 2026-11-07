@@ -32,6 +32,18 @@ _tasks: dict[str, dict] = {}
 #    例如 mark_stream_ended 的宽限回收任务）。这类任务无人 await，关闭段必须显式
 #    取消并有限等待，否则会在 close_db() 之后醒来、撞上已关闭的连接池。
 _detached_tasks: set[asyncio.Task] = set()
+
+# ✅ 2026-11-08（关闭收口可观测）：shutdown_inflight 在取回已结束任务的异常时，
+#    若 exception() 自身抛错只能吞掉 —— 关闭收尾必须保证后续 close_db() 一定
+#    执行，不能因单个任务收尾失败阻断整体关闭。静默宽异常必须留痕：本计数使
+#    「零错误」与「没发生」可区分（同 clip_text_logged / clip_ledger_failures 口径）。
+_shutdown_exception_retrieval_failures = 0
+
+
+def get_shutdown_exception_retrieval_failures() -> int:
+    """关闭收口里「取回任务异常」自身失败的累计次数（区分「没发生」与「发生但被吞」）。"""
+    return _shutdown_exception_retrieval_failures
+
 # ✅ 并发注册互斥锁：防止两个并发请求同时通过防僵尸检查后各自 INSERT running 任务
 _register_lock = asyncio.Lock()
 
@@ -511,6 +523,7 @@ async def shutdown_inflight(reason: str = "服务关闭，任务中断", cancel_
     Returns:
         成功落 failed 终态的任务数。
     """
+    global _shutdown_exception_retrieval_failures
     loop = asyncio.get_running_loop()
     snapshot = list(_tasks.items())
 
@@ -553,8 +566,8 @@ async def shutdown_inflight(reason: str = "服务关闭，任务中断", cancel_
                 # 取回异常，避免 asyncio「Task exception was never retrieved」
                 try:
                     t.exception()
-                except Exception:
-                    pass
+                except Exception:  # noqa: BLE001 - 关闭收尾：单个任务异常取回失败不得阻断后续任务与 close_db()（整体关闭必须走完，否则库连接/线程残留）；失败次数落 _shutdown_exception_retrieval_failures，使「没发生」与「发生但被吞」可区分
+                    _shutdown_exception_retrieval_failures += 1
         if pending:
             logger.warning(
                 "关闭收口：%d 个后台任务在 %.1fs 内未退出（交由事件循环结束阶段处理）",

@@ -7,13 +7,24 @@
   ``running``，而且很难联想到是那次改动干的。
 """
 
+import ast
 import asyncio
+import io
+import os
 import sqlite3
 import threading
 
 import app.db as db
 import pytest
 from app.services.ai import task_registry as tr
+
+_REGISTRY_SRC = os.path.join(
+    os.path.dirname(os.path.dirname(os.path.abspath(__file__))),
+    "app",
+    "services",
+    "ai",
+    "task_registry.py",
+)
 
 
 def _read_row(db_path, task_id: str) -> dict:
@@ -130,3 +141,93 @@ async def test_close_db_cancels_integrity_probe_task(tmp_path, monkeypatch):
             probe.cancel()
             await asyncio.gather(probe, return_exceptions=True)
         await db.close_db()
+
+
+class _BadExceptionTask:
+    """假任务：cancelled() 为 False、exception() 抛错。
+
+    真实 asyncio.Task 的 exception() 只会在「已取消」时抛 CancelledError，
+    而该分支已被 ``if not t.cancelled()`` 挡掉 —— 走不到关闭收口的静默兜底，
+    因此必须用假任务才能覆盖「取回异常自身失败」这条路径。
+    """
+
+    def __init__(self):
+        self._loop = asyncio.get_running_loop()
+
+    def done(self) -> bool:
+        return False
+
+    def get_loop(self):
+        return self._loop
+
+    def cancel(self):
+        pass
+
+    def cancelled(self) -> bool:
+        return False
+
+    def exception(self):
+        raise RuntimeError("取回任务异常失败（模拟）")
+
+
+@pytest.mark.asyncio
+async def test_shutdown_inflight_counts_exception_retrieval_failure(tmp_path, monkeypatch):
+    """关闭收口吞掉「取回异常」失败时必须计数：零错误与没发生要可区分。"""
+    monkeypatch.setattr(db, "DB_PATH", tmp_path / "retrieval.db")
+    tr._tasks.clear()
+    tr._detached_tasks.clear()
+    bad = _BadExceptionTask()
+    tr._detached_tasks.add(bad)
+
+    async def fake_wait(tasks, timeout=None):
+        assert bad in tasks
+        return {bad}, set()
+
+    monkeypatch.setattr(asyncio, "wait", fake_wait)
+    before = tr.get_shutdown_exception_retrieval_failures()
+    try:
+        finalized = await tr.shutdown_inflight()
+        assert finalized == 0
+        assert tr.get_shutdown_exception_retrieval_failures() == before + 1
+    finally:
+        tr._tasks.clear()
+        tr._detached_tasks.clear()
+        await db.close_db()
+
+
+class TestShutdownSwallowGuard:
+    """源码护栏：关闭收口吞异常必须带 noqa 且留降级计数。
+
+    变异判据：去掉 ``# noqa: BLE001`` → 本用例红；去掉计数自增 → 本用例红。
+    通用 ``test_silent_broad_except_guard`` 只抓「分支体纯空转」的宽异常，
+    分支体有计数自增后它不再拦截「noqa 缺失」这一半，故需本专用护栏。
+    """
+
+    def test_noqa_and_counter_coexist(self):
+        src = io.open(_REGISTRY_SRC, encoding="utf-8-sig").read()
+        lines = src.splitlines()
+        tree = ast.parse(src, filename=_REGISTRY_SRC)
+        target = None
+        for node in ast.walk(tree):
+            if isinstance(node, ast.AsyncFunctionDef) and node.name == "shutdown_inflight":
+                target = node
+                break
+        assert target is not None, "task_registry.shutdown_inflight 不存在"
+
+        handlers = [
+            h
+            for h in ast.walk(target)
+            if isinstance(h, ast.ExceptHandler)
+            and isinstance(h.type, ast.Name)
+            and h.type.id == "Exception"
+            and any(
+                isinstance(s, ast.AugAssign)
+                and isinstance(s.target, ast.Name)
+                and s.target.id == "_shutdown_exception_retrieval_failures"
+                for s in h.body
+            )
+        ]
+        assert len(handlers) == 1, "shutdown_inflight 中未找到「except Exception + 失败计数自增」分支"
+        header = lines[handlers[0].lineno - 1]
+        assert "# noqa: BLE001" in header, f"关闭收口宽异常缺 noqa: BLE001 标注：{header!r}"
+
