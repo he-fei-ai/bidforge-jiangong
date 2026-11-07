@@ -114,14 +114,22 @@ class TestR13ReadGuardsR166:
         assert ei.value.status_code == 503
 
     def test_read_guard_site_ratchet(self):
-        """棘轮锁：事实半区读游标守卫位点数固定为 22（定义 + 委派 + 20 个读位点）。
+        """棘轮锁：事实半区读游标守卫位点数固定为 24。
 
+        计数口径：**定义 1 + 委派 1 + 读位点 22 = 24** ——
+          定义：``_require_fact_cursor`` 自身；委派：``_require_fact_write_cursor``
+          转发；其余 22 处为「execute 之后、fetchall 之前」的读位点。
         新增读位点时必须同步接守卫并更新本数（漏接会让本数与实际位点数失配，
         有意新增时改这个数即可 —— 锁的目的是强迫「加位点必想守卫」）。
         ✅ R183（2026-11-07）：批量过期解除新增「唯一性闸门预检」读位点，21 → 22。
+        ✅ R186（2026-11-07）：复制后冲突重算新增「副本行 / 共享行」两个读位点，
+           22 → 24；两处均紧接 ``db.execute`` 之后、``fetchall`` 之前接守卫，
+           该函数内不存在未接守卫的读游标。
         """
+        # 构成拆开写，避免裸数字：定义 / 委派 / 读位点
+        definition, delegation, read_sites = 1, 1, 22
         src = _src("app/routers/global_facts.py")
-        assert src.count("_require_fact_cursor(cur") == 22
+        assert src.count("_require_fact_cursor(cur") == definition + delegation + read_sites
 
 
 # ---------------------------------------------------------------------------

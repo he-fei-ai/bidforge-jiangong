@@ -81,13 +81,28 @@ async def test_build_chapter_extraction_map_empty():
 
 
 def test_build_chapter_extraction_text_truncation_is_visible(caplog):
-    """G4 连带项：超限截断必须留日志（不再静默硬切）。"""
+    """G4 连带项：超限截断必须留日志（不再静默硬切）。
+
+    ✅ R180 起本函数改走 ``clip_text_notice``：正文仍按 max_chars 收刀，
+    「模型可见说明」是**额外附加**在正文之后，总长因此超过上限。断言必须
+    区分「内容上限」与「提示开销」—— 只放宽总数等于把截断护栏也放宽；
+    提示长度从被测函数的实际输出取，不把提示文案的长度再硬编码一遍。
+    """
     content = "超长提取内容" * 400
+    raw = f"### 项目基本信息\n{content}"
     with caplog.at_level(logging.WARNING, logger="prompt_material_guard"):
         text = build_chapter_extraction_text(
             [{"label": "项目基本信息", "content": content}], "overview", max_chars=2000
         )
-    assert len(text) == 2000
+    body, sep, notice = text.partition("\n\n[……")
+    assert sep, "超限必须附加模型可见截断说明（不再是静默硬切）"
+    assert len(body) == 2000, "正文部分仍按 max_chars 收刀，不因附加说明而缩水"
+    assert body == raw[:2000], "截断必须保留原文前缀（不得改写正文）"
+    assert notice.startswith("本章专项提取成果已截断：")
+    assert f"原文 {len(raw)} 字" in notice
+    assert f"此处保留前 {len(body)} 字" in notice
+    assert f"已省略 {len(raw) - len(body)} 字" in notice
+    assert len(text) == len(body) + len(sep) + len(notice), "说明是额外附加的，不是从正文里挤出来的"
     assert "上下文截断（本章专项提取成果）" in caplog.text
 
 

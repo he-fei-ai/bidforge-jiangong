@@ -272,6 +272,9 @@ class TestExpectCalibration:
 # D-7：修复提示词紧凑化
 # ============================================================
 class TestCompactOutlineJson:
+    #: ``clip_text_notice`` 超限时附加的「模型可见说明」起始标记。
+    _NOTICE_MARK = "\n\n[……"
+
     @staticmethod
     def _outline(n=10):
         return [
@@ -285,21 +288,55 @@ class TestCompactOutlineJson:
             for i in range(1, n + 1)
         ]
 
+    @classmethod
+    def _split_notice(cls, description: str) -> tuple[str, str]:
+        """拆成「描述正文 / 附加说明」：压缩效果只算正文，不算提示开销。"""
+        body, _sep, notice = description.partition(cls._NOTICE_MARK)
+        return body, (_sep + notice if _sep else "")
+
+    @classmethod
+    def _content_only_len(cls, compact_json: str) -> int:
+        """去掉模型可见截断说明后的字符量（与原始 JSON 同口径量压缩效果）。"""
+        tree = json.loads(compact_json)
+
+        def walk(nodes) -> None:
+            for n in nodes:
+                if not isinstance(n, dict):
+                    continue
+                if "description" in n:
+                    n["description"] = cls._split_notice(n["description"])[0]
+                walk(n.get("children") or [])
+
+        walk(tree.get("outline") or [])
+        return len(json.dumps(tree, ensure_ascii=False))
+
     def test_strips_noise_and_stays_valid_json(self):
         node = json.loads(sh._compact_outline_json(self._outline()))["outline"][0]
         assert "id" not in node and "level" not in node
         assert node["title"] == "第1章"
         assert "children" in node
         assert "children" not in node["children"][0]  # 空 children 不输出
-        assert len(node["description"]) == 80  # 描述被截断
+        body, notice = self._split_notice(node["description"])
+        assert len(body) == 80, "描述正文按 max_desc 收刀（80 是内容上限，不是总长）"
+        assert body == ("说明" * 60)[:80], "截断必须保留原文前缀"
+        assert notice.startswith("\n\n[……目录描述已截断："), "超限必须附加模型可见说明"
+        assert len(node["description"]) == len(body) + len(notice), "说明是额外附加的，不是从正文里挤出来的"
 
     def test_much_smaller_than_raw_dumps(self):
         """✅ D-7：压缩只删「对模型无用的字段」，实测约为原 JSON 的 0.63~0.66。
 
         旧实现把完整目录 JSON 塞进修复提示词，长方案 1200 节点可达十万字符级。
+
+        R181 起超长描述截断会附带「模型可见说明」，它属于**提示开销**而非目录
+        内容：压缩比只对去提示后的内容计算，否则测到的就不是压缩效果。
         """
         raw = self._outline(30)  # 长描述场景（截断收益最大）
-        assert len(sh._compact_outline_json(raw)) < len(json.dumps(raw, ensure_ascii=False)) * 0.7
+        raw_len = len(json.dumps(raw, ensure_ascii=False))
+        compact = sh._compact_outline_json(raw)
+        content_len = self._content_only_len(compact)
+        assert len(compact) > content_len, "长描述场景应存在截断说明（否则本用例测不到「去提示」）"
+        ratio = content_len / raw_len
+        assert ratio < 0.7, f"内容压缩比 {ratio:.3f} 高于预期"
         short = [
             {
                 "id": str(i),
@@ -312,7 +349,7 @@ class TestCompactOutlineJson:
             }
             for i in range(1, 31)
         ]
-        ratio = len(sh._compact_outline_json(short)) / len(json.dumps(short, ensure_ascii=False))
+        ratio = self._content_only_len(sh._compact_outline_json(short)) / len(json.dumps(short, ensure_ascii=False))
         assert ratio < 0.75, f"压缩比 {ratio:.3f} 高于预期"
 
     def test_dirty_nodes_do_not_raise(self):

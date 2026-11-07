@@ -32,6 +32,7 @@ from app.routers.sections import update_section
 from app.routers.sse_handlers import (
     _STAGE_FILL_MAX,
     _STAGE_MODEL,
+    SECTION_NUMBER_MISSING,
     _section_number_for_prompt,
     _section_partial,
 )
@@ -226,8 +227,21 @@ class TestWordBudgetNormalize:
 # ============================================================
 class TestSectionNumberForPrompt:
     def test_valid_dotted_number(self):
-        sec = {"outline_json": json.dumps({"id": "2.1"})}
+        # R182-3 起主键非 str 的节点一律不编号，合法用例必须带真实形态的
+        # 行主键（str），不能只给 outline_json —— 否则测的是已废弃的回退路径。
+        sec = {"id": "sec-2-1", "outline_json": json.dumps({"id": "2.1"})}
         assert _section_number_for_prompt(sec) == "2.1"
+
+    def test_non_str_primary_key_is_not_numbered(self):
+        """R182-3 反向锁定：主键非 str 时不得编号（与权威实现同口径）。
+
+        ``renumber_section_outline_ids`` 只编号 str 非空 id，导出/审核因此
+        不出这些节点；若提示词侧仍回退存储编号，就会出现「正文带编号、
+        导出无编号」的同一节点两侧分叉。
+        """
+        for bad_id in (123, None, 2.1, b"bytes"):
+            sec = {"id": bad_id, "outline_json": json.dumps({"id": "2.1"})}
+            assert _section_number_for_prompt(sec) == SECTION_NUMBER_MISSING
 
     def test_missing_number_returns_explicit_placeholder(self):
         """编号缺失 → 显式兜底文案（不得渲染空串诱导模型编造章号）"""
@@ -237,7 +251,7 @@ class TestSectionNumberForPrompt:
 
     def test_uuid_id_not_leaked(self):
         """UUID 主键不得作为章节编号注入提示词（回归锁定）"""
-        sec = {"outline_json": json.dumps({"id": "550e8400-e29b-41d4-a716-446655440000"})}
+        sec = {"id": "550e8400-e29b-41d4-a716-446655440000", "outline_json": json.dumps({"id": "550e8400-e29b-41d4-a716-446655440000"})}
         assert "550e8400" not in _section_number_for_prompt(sec)
 
 
