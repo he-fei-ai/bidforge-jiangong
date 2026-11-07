@@ -240,6 +240,22 @@ def test_get_prompt_no_missing_when_db_template_var_provided(monkeypatch):
     assert prompt_metrics.get_snapshot()["render_missing_vars"] == {}
 
 
+def test_unknown_prompt_key_returns_empty_and_logs_at_error(monkeypatch, caplog):
+    """裁决：未注册 key 保持 fail-soft（返回空串，不把文案配置错误升级为 500），
+    但日志必须升到 ERROR 且计入 render_errors —— 既不影响可用性，又让运维
+    能在指标/日志里定位「谁在反复读不存在的模板」。"""
+    prompt_metrics.reset()
+    monkeypatch.setattr(prompt_cache, "_get_prompt_cache", lambda: {})
+    monkeypatch.setattr(prompt_cache, "_ALL_PROMPTS", {})
+    with caplog.at_level("ERROR"):
+        rendered = prompt_cache.get_prompt("no_such_prompt_key_for_test")
+    assert rendered == ""  # 行为不变：fail-soft
+    assert prompt_metrics.get_snapshot()["render_errors"].get("no_such_prompt_key_for_test") == 1
+    assert any(
+        r.levelname == "ERROR" and "no_such_prompt_key_for_test" in r.getMessage() for r in caplog.records
+    ), [r.getMessage() for r in caplog.records]
+
+
 # ---------------------------------------------------------------------------
 # 4. G1 同类面：其余「书写形式 ↔ 匹配方式」规则锁
 #
@@ -247,7 +263,7 @@ def test_get_prompt_no_missing_when_db_template_var_provided(monkeypatch):
 # MATERIAL_LABELS 已由上方用例锁住；本节把同一类风险一次锁完：
 #   · CONTEXT_PRIORITY —— 靠**子串**匹配裸标签，未登记的生产段落会落到默认
 #     最低优先级 9（预算开关开启时被最先削减，且没有任何用例会红）；
-#   · SENSITIVE/_MIXED 集合 —— 与 MATERIAL_LABELS 共用 startswith 匹配器；
+#   · _MIXED 集合 —— 与 MATERIAL_LABELS 共用 startswith 匹配器；
 #   · SHARED_* —— 靠大小写敏感的 `startswith("SHARED_")` 识别，注册表键必须
 #     是规范大写形态，否则运行时既不解析也不告警。
 # ---------------------------------------------------------------------------
@@ -313,18 +329,28 @@ def test_material_labels_are_explicitly_registered_in_priority_map():
 
 
 def test_material_label_sets_share_bare_written_form():
-    """规则锁：共用 startswith 匹配器的三个集合书写形式必须一致（裸标签）。"""
-    from app.services.prompt_governance import (
-        _MIXED_MATERIAL_LABELS,
-        SENSITIVE_MATERIAL_LABELS,
-    )
+    """规则锁：共用 startswith 匹配器的两个集合书写形式必须一致（裸标签）。"""
+    from app.services.prompt_governance import _MIXED_MATERIAL_LABELS
 
-    for label in MATERIAL_LABELS + SENSITIVE_MATERIAL_LABELS + _MIXED_MATERIAL_LABELS:
+    for label in MATERIAL_LABELS + _MIXED_MATERIAL_LABELS:
         assert "【" not in label and "】" not in label, label
         assert "：" not in label and ":" not in label, label
-    # 敏感集合是资料集合的子集：新增词条若写成带装饰的形式，前缀匹配会静默失效
-    for label in SENSITIVE_MATERIAL_LABELS + _MIXED_MATERIAL_LABELS:
+    # 混合集合是资料集合的子集：新增词条若写成带装饰的形式，前缀匹配会静默失效
+    for label in _MIXED_MATERIAL_LABELS:
         assert any(label.startswith(pfx) for pfx in MATERIAL_LABELS), label
+
+
+def test_no_parallel_sensitive_label_set():
+    """裁决锁：不得再引入零消费的平行标签集合（SENSITIVE 已并入 MATERIAL_LABELS）。
+
+    ``SENSITIVE_MATERIAL_LABELS`` 曾是 MATERIAL_LABELS 的真子集，且全仓无人读取；
+    「按标签限定脱敏」的差异语义从未实现（脱敏对整段文本无条件生效）。
+    保留即漂移，故删除并锁死：将来若确有「只脱敏不围栏」的需求，应在
+    ``govern_text`` 内按标签分支实现，而不是再挂一个无人读取的常量。
+    """
+    import app.services.prompt_governance as pg
+
+    assert not hasattr(pg, "SENSITIVE_MATERIAL_LABELS")
 
 
 def test_shared_reference_written_form_is_locked():

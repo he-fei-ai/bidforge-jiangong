@@ -371,7 +371,11 @@ def get_prompt(key: str, **kwargs) -> str:
                     logger.warning("惰性补注册失败: %s", _sanitize_error(e))
                 meta = _ALL_PROMPTS.get(key)
             if not meta:
-                logger.warning("Prompt key '%s' not found in registry or cache", key)
+                # ✅ 2026-11-07（裁决）：行为保持 fail-soft（返回空串，不把文案
+                #    配置问题升级为 500），但日志级别从 warning 升到 error：
+                #    空系统提示词会让模型在无约束状态下产文，属于「配置错但
+                #    任务照跑」的高危静默，必须能在 ERROR 级别被检索到。
+                logger.error("Prompt key '%s' not found in registry or cache", key)
                 # ✅ R181（2026-11-06 · N-02 遗留）：未知 key 此前直接 return ""，
                 #    不计入任何指标 —— 调用方传错 key 时只会得到空提示词，
                 #    运维侧也看不到「谁在反复读不存在的模板」。保持返回空串

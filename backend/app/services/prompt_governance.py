@@ -610,10 +610,14 @@ def scan_external_materials(text: str, *, labels: tuple[str, ...] = MATERIAL_LAB
     return scan_prompt_injection("\n".join(bodies)) if bodies else []
 
 
-#: 需要脱敏的外部资料标签（这些来源最可能含账号/密钥等敏感串）。
-#: ✅ 2026-11-07：与 MATERIAL_LABELS 同步补齐正文实际标签「项目知识库素材」，
-#:    避免声明集合与生产标签再次漂移。
-SENSITIVE_MATERIAL_LABELS = ("项目资料摘要", "项目概述", "知识库", "项目知识库素材", "全局事实")
+# ✅ 2026-11-07（裁决·删平行集合）：旧 ``SENSITIVE_MATERIAL_LABELS``
+#    ("项目资料摘要", "项目概述", "知识库", "项目知识库素材", "全局事实")
+#    是 MATERIAL_LABELS 的**真子集**（按前缀语义，「项目资料摘要」被
+#    「项目资料」命中），且全仓零消费。它声称的「按标签限定脱敏」语义并未
+#    实现：``redact_sensitive`` 对整段文本无条件脱敏，围栏也由 MATERIAL_LABELS
+#    统一判定。保留只会让两套集合随产品演化漂移，故删除；若未来确需「只脱敏
+#    不围栏」的差异语义，应在 govern_text 里按标签分支实现，而不是再挂一个
+#    无人读取的常量。
 
 
 #: 高置信度凭据形态（刻意避开标准编号/工程编号类字符串）。
