@@ -89,6 +89,26 @@ async def db_conn(monkeypatch):
     async def fake_get_conn():
         return conn
 
+    # ✅ 2026-11-08（夹具缺口）：`45b697d` 起 `_release_read_conn` 对「非本池借出」
+    #    的连接一律 `close()`，而本夹具只 patch 了 get_read_conn —— 被测代码从
+    #    get_read_conn（已 patch 为本内存连接）拿到 conn 后，finally 里调真实
+    #    release_read_conn，会把本夹具**唯一的**内存连接关掉，后续查询随即
+    #    `ValueError: no active connection`（段一 #1/#2 的确定性根因）。
+    #
+    #    修法选择：补 patch release_read_conn（no-op），而非把夹具连接塞进
+    #    `_read_pool_borrowed`。判断依据（已用 git grep 枚举全仓调用点）：
+    #    生产 `release_read_conn` 的所有调用点
+    #      outline_library.py:78,102 / sse_checkpoint.py:159 /
+    #      sse_handlers.py:7213,7226,7265 / system.py:138,252,313 /
+    #      outline_integrity.py:219
+    #    全部与同函数内的 `conn = await get_read_conn()`（或 read_db 依赖）配对，
+    #    **不存在跨池归还**；即生产入口只有 get_read_conn 这一条。补 patch 与
+    #    生产真实路径等价、可接受。若改为把夹具连接加入 `_read_pool_borrowed`，
+    #    真实 release 会把这条内存连接 append 进真实读池，造成池计数漂移与
+    #    跨事件循环污染（测试结束后连接仍挂在生产池里），反而偏离生产语义。
+    async def fake_release_read_conn(_conn):
+        return None
+
     # ✅ P10 修复配套（2026-09-23）：provider_factory 的审计批量落库、
     #    save_ai_config 多语句事务均走 write_tx_conn（独立写池连接）。若不在
     #    此处一并 patch 为内存连接，这些写操作会落到真实库而非本测试的
@@ -112,6 +132,9 @@ async def db_conn(monkeypatch):
 
     monkeypatch.setattr(app.db, "get_conn", fake_get_conn)
     monkeypatch.setattr(app.db, "write_tx_conn", fake_write_tx_conn)
+    # 函数内局部 `from app.db import release_read_conn`（如 outline_integrity）只认
+    # app.db 模块属性，必须在此处一并 patch。
+    monkeypatch.setattr(app.db, "release_read_conn", fake_release_read_conn)
 
     # patch 各业务模块中 from app.db import get_conn 绑定的引用
     import app.services.ai.provider_factory as _pf
@@ -155,6 +178,10 @@ async def db_conn(monkeypatch):
             monkeypatch.setattr(_mod, "get_conn", fake_get_conn)
         if hasattr(_mod, "get_read_conn"):
             monkeypatch.setattr(_mod, "get_read_conn", fake_get_conn)
+        # `from app.db import release_read_conn` 同为导入期绑定：不 patch 的话，
+        # finally 里的真实 release 会把本夹具的内存连接 close 掉（见上方长注释）。
+        if hasattr(_mod, "release_read_conn"):
+            monkeypatch.setattr(_mod, "release_read_conn", fake_release_read_conn)
 
     yield conn
     await conn.close()
