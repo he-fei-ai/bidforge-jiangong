@@ -519,6 +519,31 @@ class TestRecomputedPromptNumber:
         nodes = {s["id"]: s for s in ordered}
         assert _build_parent_chain(ordered, "B1", nodes) == "第二章 施工部署"
 
+    def test_non_str_id_not_injected_but_same_text_str_id_is(self):
+        """非 str 主键不注入重算编号，提示词侧也不回退存储编号。
+
+        同文本的 str id（"123" 与整数 123）不得互相串号：旧实现按
+        ``str(id)`` 归一，会把字符串节点的编号注入整数节点，形成
+        「正文带编号、导出/审核无编号」的分叉。
+        """
+        from app.routers.sse_handlers import _section_outline_number
+        from app.services.content_utils import order_sections_dfs, select_target_leaves
+
+        flat = [
+            self._row(123, "", 0, 1, "9", "整数主键根"),
+            self._row("A", "", 1, 1, "1", "普通根"),
+            self._row("123", "", 2, 1, "4", "同文本字符串根"),
+        ]
+        ordered = order_sections_dfs(flat)
+        select_target_leaves(ordered, mode="all")
+        int_node = next(s for s in ordered if isinstance(s["id"], int))
+        str_node = next(s for s in ordered if s["id"] == "123")
+        assert "_prompt_number" not in int_node
+        assert _section_outline_number(int_node) == ""
+        # 其余节点编号不受影响：跳过非 str 节点不占同级序号
+        assert str_node.get("_prompt_number") == "2"
+        assert _section_outline_number(str_node) == "2"
+
     def test_recompute_handles_orphan_and_cycle(self):
         """悬空父链按根节点参与编号（与导出口径一致）；环内节点不进入编号表"""
         from app.services.content_utils import recompute_section_numbers
@@ -645,6 +670,23 @@ class TestNumberingParity:
             self._row("c2", "c1", 1),
         ]
         assert self._assert_parity(rows) == {"ok": "1", "ok1": "1.1"}
+
+    def test_non_str_id_parity(self):
+        """非 str 主键：两条路径都不编号，且跳过节点不占同级序号。
+
+        权威实现 ``renumber_section_outline_ids`` 只编号 str 非空 id；适配层
+        若先 ``str(id)`` 归一，就会把整数节点编号进正文，而导出/审核侧仍
+        跳过它 ——「正文带编号、导出无编号」。
+        """
+        rows = [
+            self._row("A", "", 0),
+            self._row(123, "", 1),
+            self._row("B1", 123, 0),
+            self._row("C", "", 2),
+        ]
+        nums = self._assert_parity(rows)
+        assert nums == {"A": "1", "C": "2"}
+        assert 123 not in nums and "B1" not in nums
 
     def test_depth_cap_parity(self):
         """超过 200 级的失控嵌套：两条路径在同一节点截断。"""

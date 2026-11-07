@@ -1013,17 +1013,29 @@ def recompute_section_numbers(all_sections: list[dict]) -> dict[str, str]:
     Returns:
         ``{section_id: "1.2.3"}``。父链悬空视作根节点（与 ``_build_tree``/
         导出口径一致）；环内不可从根到达的节点不返回（调用方回退存储编号，
-        避免把不可达分支硬编进提示词）。
+        避免把不可达分支硬编进提示词）。非 str id 不返回（权威实现只编号
+        str 非空 id；见下方 R182-3）。
     """
     if not all_sections:
         return {}
-    rows: dict[str, dict] = {}
-    order: list[str] = []
+    rows: dict = {}
+    order: list = []
     for s in all_sections:
         if not isinstance(s, dict):
             continue
-        sid = str(s.get("id") or "")
-        if not sid:
+        sid = s.get("id")
+        # ✅ R182-3（2026-11-07 · 与权威实现同口径）：**不**把 id 强转成 str。
+        #    ``renumber_section_outline_ids`` 只编号 str 非空 id；若本侧先
+        #    ``str(id)`` 归一，整数 id 节点会被本侧编号、却在导出/审核侧被
+        #    跳过 ——「正文带编号、导出无编号」。现按原始 id 建树（与
+        #    ``_build_tree`` 的 dict 键同口径），是否编号完全交给权威实现：
+        #    非 str id 节点不编号，其子树随之不可达、同样不编号（与导出/审核
+        #    的 ``renumber_section_outline_ids`` 行为逐节点一致）。
+        if sid is None:
+            continue
+        try:
+            hash(sid)
+        except TypeError:  # 不可哈希的脏 id：无法作为树键，跳过
             continue
         if sid not in rows:
             order.append(sid)
@@ -1032,12 +1044,16 @@ def recompute_section_numbers(all_sections: list[dict]) -> dict[str, str]:
         # 此分支只防御异常调用方）。
         rows[sid] = s
 
-    nodes: dict[str, dict] = {sid: {"id": sid, "outline_json": "", "children": []} for sid in order}
+    nodes: dict = {sid: {"id": sid, "outline_json": "", "children": []} for sid in order}
     roots: list[dict] = []
     for sid in order:
         node = nodes[sid]
-        pid = str(rows[sid].get("parent_id") or "")
-        if pid and pid in nodes and pid != sid:
+        pid = rows[sid].get("parent_id")
+        try:
+            attached = bool(pid) and pid in nodes and pid != sid
+        except TypeError:  # 不可哈希的 parent_id：视作根
+            attached = False
+        if attached:
             nodes[pid]["children"].append(node)
         else:
             roots.append(node)
@@ -1264,7 +1280,12 @@ def select_target_leaves(
     #    工作台、导出的真实树编号分叉。字段名以下划线开头，属生成期内部量。
     numbers = recompute_section_numbers(all_sections)
     for s in all_sections:
-        num = numbers.get(str(s.get("id") or ""))
+        # ✅ R182-3（2026-11-07 · 与权威实现同口径）：编号表只含 str id
+        #    （见 recompute_section_numbers）；注入按**原始 id** 精确匹配，
+        #    不再 ``str()`` 归一 —— 否则整数 id 可能误取同文本 str id 的编号，
+        #    又与导出/审核两侧「非 str id 不编号」分叉。
+        sid = s.get("id")
+        num = numbers.get(sid) if isinstance(sid, str) and sid else None
         if num:
             s["_prompt_number"] = num
     return [s for s in target_sections if s["id"] not in parent_ids_in_target]

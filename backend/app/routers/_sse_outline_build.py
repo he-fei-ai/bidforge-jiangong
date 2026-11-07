@@ -918,9 +918,23 @@ def _preferred_section_number(sec: dict) -> str:
     ``1`` 后，提示词仍注入 ``1``/``1.1``）。
     回退路径保持原语义：存储编号合法点分路径，否则空串（由兜底文案接管）。
     """
+    # ✅ R182-3（2026-11-07 · 与权威实现同口径）：主键非 str 的节点一律不编号。
+    #    ``renumber_section_outline_ids`` 只编号 str 非空 id，导出/审核因此不出
+    #    这些节点；若此处仍回退 ``outline_json.id``，就会出现「正文带编号、
+    #    导出无编号」—— 宁可少编号一个节点，也不让两侧分叉。
+    sid = (sec or {}).get("id")
+    if not isinstance(sid, str) or not sid:
+        return ""
     recomputed = str((sec or {}).get("_prompt_number") or "").strip()
     if recomputed and _SECTION_NUMBER_RE.fullmatch(recomputed):
         return recomputed
+    # 已决议（2026-11-07 · 环内/不可达节点回退存储编号，保持不回退清除）：
+    # 判据是「模型拿到这个编号会不会写出错误章节引用」—— 提示词硬性要求
+    # 不生成章节标题（content.py「不要生成章节标题」），表题编号由导出按
+    # 真实章号重算并覆盖（export.py table_num=_strip_leading_table_number），
+    # 且环内节点不入导出 roots / 审核不产出该节点；相反，空编号会诱发模型
+    # 自行编造「1./1.1」（见 _section_outline_number 历史 UUID 回退缺陷）。
+    # 故给一个不会被引用的旧编号，危害小于让模型自由编号。
     return _sh.stored_outline_id(sec)
 
 
