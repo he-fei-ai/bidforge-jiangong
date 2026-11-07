@@ -83,6 +83,24 @@ async def document_status(doc_id: str, db=Depends(get_db)):
         parsed_md = store.parsed_md_path(doc["project_id"], doc_id)
         if not await asyncio.to_thread(parsed_md.exists):
             layer_errors[store.LAYER_PARSED] = "解析层写入失败或未落盘：parsed.md 缺失，可重新解析重建"
+    # ✅ R187：提取层同理。`_safe_io(store.write_extraction, ...)` 失败时只留一条
+    #    ERROR，DB 的 doc_extractions 行与 extract_status='success' 仍照写 ——
+    #    状态接口的 `extract_status` 读 DB 显示成功，`layers["extracted"]` 读磁盘
+    #    为空，两者自相矛盾却无失败语义。按既有事实派生（不落库、不加列）：
+    #    DB 里每个 status='success' 的类别，磁盘必须有同名归档文件。
+    if (doc.get("extract_status") or "") == "success":
+        cur = await db.execute(
+            "SELECT extract_type FROM doc_extractions" " WHERE doc_id=? AND COALESCE(status,'')='success'",
+            (doc_id,),
+        )
+        # R13：查询返回 None 时无法判定，按不报错处理（避免误报失败态）
+        succ_types = [r["extract_type"] for r in await cur.fetchall()] if cur is not None else []
+        disk_files = set(layers[store.LAYER_EXTRACTED])
+        missing = [t for t in succ_types if f"{doc_id}_{t}.json" not in disk_files]
+        if missing:
+            layer_errors[store.LAYER_EXTRACTED] = (
+                f"提取层写入失败或未落盘：磁盘缺少 {', '.join(missing)}，可重新物化提取层重建"
+            )
     completeness = {}
     try:
         completeness = json.loads(doc.get("completeness_json") or "{}")

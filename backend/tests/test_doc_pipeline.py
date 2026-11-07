@@ -507,6 +507,48 @@ async def test_parent_dir_transient_loss_recovers(ctx, monkeypatch):
     assert "parsed" not in st["layer_errors"]
 
 
+async def test_extract_layer_write_failure_is_visible_in_status(ctx, monkeypatch):
+    """提取层单项落盘失败（被 `_safe_io` 吞掉）→ 状态接口必须给出可见失败态。
+
+    `sync_extract_layer` 先 `_safe_io(store.write_extraction)` 再写 doc_extractions
+    行，故磁盘失败时 DB 仍留有 status='success' 的行、`project_documents.
+    extract_status` 也被写成 success；而状态接口的 `layers["extracted"]` 读磁盘，
+    只是空数组，与「本来没有提取结果」无法区分 —— 又一次「没做成显示成做成了」。
+    """
+    db, pid, docs_root, uploads = ctx
+    doc_id = await _upload_and_parse(ctx)
+    await db.execute(
+        "INSERT INTO bid_analysis_items (id, project_id, item_id, label,"
+        " output_type, required, status, content, sort_order)"
+        " VALUES (?,?,?,?,'json',1,'success',?,1)",
+        (
+            f"{pid}_projectBasicInfo",
+            pid,
+            "projectBasicInfo",
+            "项目级基本信息",
+            json.dumps({"project_info": {"project_name": {"value": "某某工程"}}}, ensure_ascii=False),
+        ),
+    )
+    await db.commit()
+
+    real_write = store.write_extraction
+
+    def _fail_one(project_id, doc_id_, extract_type, payload):
+        if extract_type == "project_info":
+            raise OSError("disk full")
+        return real_write(project_id, doc_id_, extract_type, payload)
+
+    monkeypatch.setattr(store, "write_extraction", _fail_one)
+
+    res = await dp_api.sync_extractions(doc_id, db=db)
+    assert res["extract_status"] == "success", "DB 侧仍报成功（本次修复不放宽该语义）"
+    assert store.read_extraction(pid, doc_id, "project_info") is None
+
+    st = await dp_api.document_status(doc_id, db=db)
+    assert st["layers"]["extracted"] == [], "磁盘提取层确实为空（磁盘事实不变）"
+    assert st["layer_errors"].get("extracted"), f"空数组不得冒充正常，status={st}"
+
+
 # ---------------------------------------------------------------------------
 # 7. 2026-09-20 审计回归：同名替换泄漏 / 解析代次回退 / 分类三侧口径
 # ---------------------------------------------------------------------------
