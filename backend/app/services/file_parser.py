@@ -1379,13 +1379,43 @@ def find_table_header(rows: list) -> tuple[int, int, list[str]]:
     return start, end, merged
 
 
-def render_table_with_header(rows: list) -> list[str]:
+def render_table_with_header(rows: list, caption_rows: set[int] | None = None) -> list[str]:
     """表头智能识别 + Markdown 渲染（CSV / Excel 统一出口）。
 
     - 识别到表头：表头行 + 对齐分隔行 + 数据行；表头之前的说明行
       （项目名称、编制日期等低结构化信息）保留为正文行，不静默丢弃。
     - 未识别到表头：生成「列1..列N」通用表头，全部行按数据输出。
+
+    ``caption_rows``（0-based 行号集合）是**合并语义参数**，仅由确知存在
+    ``<mergeCells>`` 的 Excel 调用方传入（CSV 等保持 None）：
+      · 命中行视为标题行（caption），**不参与表头判定**、也不作为表格数据行；
+      · 标题行独占一行正文输出，其后的行重新走一次表头识别（即「表头取
+        标题行的下一行」）；
+      · 传 None / 空集时走原路径，输出逐字节不变。
     """
+    if not rows:
+        return []
+    if not caption_rows:
+        return _render_table_lines(rows)
+    parts: list[str] = []
+    segment: list = []
+    for i, row in enumerate(rows):
+        if i in caption_rows:
+            if segment:
+                parts.extend(_render_table_lines(segment))
+                segment = []
+            vals = [str(v).strip() for v in row if v is not None and str(v).strip()]
+            if vals:
+                parts.append("；".join(dict.fromkeys(vals)))
+        else:
+            segment.append(list(row))
+    if segment:
+        parts.extend(_render_table_lines(segment))
+    return parts
+
+
+def _render_table_lines(rows: list) -> list[str]:
+    """单段表格渲染（原 `render_table_with_header` 行为，逐字节兼容）。"""
     if not rows:
         return []
     header_start, header_end, header = find_table_header(rows)
@@ -1978,34 +2008,6 @@ def _caption_row_indexes(rows: list, refs: list[str], width: int) -> set[int]:
     return out
 
 
-def _render_sheet_rows(rows: list, caption_rows: set[int]) -> list[str]:
-    """按标题行切分渲染：caption 独占一行，其余行分段走表头识别。
-
-    标题行直接输出为独立正文行（不进入 Markdown 表格、不参与表头判定）；
-    标题行之后的下一段重新调用 `render_table_with_header`，因此「表头取
-    标题行的下一行」这一语义自然成立。无标题行时与旧输出完全一致。
-    """
-    if not rows:
-        return []
-    if not caption_rows:
-        return render_table_with_header(rows)
-    parts: list[str] = []
-    segment: list = []
-    for i, row in enumerate(rows):
-        if i in caption_rows:
-            if segment:
-                parts.extend(render_table_with_header(segment))
-                segment = []
-            vals = [str(v).strip() for v in row if v is not None and str(v).strip()]
-            if vals:
-                parts.append("；".join(dict.fromkeys(vals)))
-        else:
-            segment.append(list(row))
-    if segment:
-        parts.extend(render_table_with_header(segment))
-    return parts
-
-
 def _parse_excel(content: bytes, ftype: str, diag: dict | None = None) -> str:
     """Excel 解析：逐工作表输出 Markdown 表格（保留工作表名与表头）。
 
@@ -2088,7 +2090,7 @@ def _parse_excel(content: bytes, ftype: str, diag: dict | None = None) -> str:
                 _width = max(len(r) for r in rows)
                 _captions = _caption_row_indexes(rows, _meta.get("merges") or [], _width)
                 # ✅ 增强：表头智能识别（与 CSV 同口径，2026-09-17）
-                parts.extend(_render_sheet_rows(rows, _captions))
+                parts.extend(render_table_with_header(rows, _captions))
                 # ✅ 性能修复（2026-09-26，F3）：仅在读满上限（len(rows)==上限）
                 #    时才访问 ws.max_row —— 该属性在缺 <dimension> 元数据的文件里
                 #    会触发整表扫描。小表未读满上限则不触发扫描，避免无谓开销。
