@@ -400,12 +400,33 @@ async def sections_quality(scheme_id: str, db=Depends(get_db)):
 
     Returns:
         items：命中问题的章节；summary：汇总计数；standard_db_*：标准库版本信息。
+        summary.section_total：参与质量检查的章节总数（叶子章节 + 任何已有正文的
+        章节；父章节通常无正文，不因「父节点恒空」被误计为未覆盖）；
+        summary.unchecked：section_total - checked（尚未生成正文、本次无法检查
+        的章节数；checked=0 时等于 section_total，表示「未检查」而非「通过」）。
     """
     cur = await db.execute(
         "SELECT id, title, content FROM sections" " WHERE scheme_id=? AND COALESCE(content,'')!='' ORDER BY sort_order",
         (scheme_id,),
     )
     rows = [dict(r) for r in await cur.fetchall()]
+
+    # ✅ 加法式（2026-11-07 · 审核模块覆盖度）：补 section_total / unchecked。
+    #    分母口径与 preflight content_coverage_stats 一致 —— **叶子章节**才是
+    #    正文承载者；父章节自身无正文属正常结构，若按「全部章节行」当分母，
+    #    会把「父节点恒空」误报成未覆盖（R98 已实证该假象）。父章节若人工补写
+    #    了正文，它确实参与检查，故一并计入分母，保证 checked <= section_total。
+    #    只查 id/parent_id/有无正文，不重复拉取大字段 content。
+    cur_all = await db.execute(
+        "SELECT id, parent_id, CASE WHEN COALESCE(content,'')!='' THEN 1 ELSE 0 END AS has_content"
+        " FROM sections WHERE scheme_id=?",
+        (scheme_id,),
+    )
+    all_rows = [dict(r) for r in await cur_all.fetchall()]
+    _parent_ids = {str(r.get("parent_id") or "") for r in all_rows if str(r.get("parent_id") or "")}
+    section_total = sum(1 for r in all_rows if r.get("has_content") or str(r.get("id") or "") not in _parent_ids)
+    checked = len(rows)
+    unchecked = max(0, section_total - checked)
 
     # ✅ BUG 修复（2026-09-19 · 承接遗留余项「quality /sections 同步扫描阻塞事件循环」）：
     #    quality_issues 是 CPU 密集的正则扫描（口语化规则 × 章节正文逐条匹配），
@@ -434,7 +455,9 @@ async def sections_quality(scheme_id: str, db=Depends(get_db)):
     return {
         "items": items,
         "summary": {
-            "checked": len(rows),
+            "checked": checked,
+            "section_total": section_total,
+            "unchecked": unchecked,
             "problem_sections": len(items),
             "colloquial": sum(len(i["colloquial_hits"]) for i in items),
             "abolished_standards": sum(len(i["abolished_standards"]) for i in items),

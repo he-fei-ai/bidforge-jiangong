@@ -235,3 +235,92 @@ async def test_sections_quality_路由(db_conn):
     assert result["items"][0]["section_id"] == "sec1"
     assert "JGJ 46-2005" in result["items"][0]["abolished_standards"]
     assert result["standard_db_version"]
+
+
+# ---------------------------------------------------------------------------
+# 五、质量自检覆盖度：section_total / unchecked（审核模块「已扫描 X / 共 Y 章」）
+# ---------------------------------------------------------------------------
+async def _seed_quality_tree(db, scheme_id: str, rows: list[tuple]) -> None:
+    """rows = (id, parent_id, level, sort_order, content)"""
+    for sid, pid, level, order, content in rows:
+        await db.execute(
+            "INSERT INTO sections (id, scheme_id, parent_id, title, level, sort_order, content)"
+            " VALUES (?,?,?,?,?,?,?)",
+            (sid, scheme_id, pid, sid, level, order, content),
+        )
+    await db.commit()
+
+
+async def test_quality_unchecked_counts_leaf_chapters_without_body(db_conn):
+    """父章节无正文属正常结构，不得计入「未覆盖」；空叶子计入。"""
+    from app.routers.sections import sections_quality
+
+    await _seed_quality_tree(
+        db_conn,
+        "sc_cov1",
+        [
+            ("A", "", 1, 0, ""),
+            ("A1", "A", 2, 1, ""),
+            ("A1a", "A1", 3, 2, "本工程质量要求应符合现行验收规范。"),
+            ("A1b", "A1", 3, 3, ""),
+            ("A2", "A", 2, 4, ""),
+        ],
+    )
+
+    result = await sections_quality("sc_cov1", db_conn)
+    s = result["summary"]
+    assert s["checked"] == 1
+    # 分母 = 叶子章节（A1a / A1b / A2），父章节 A / A1 不计入
+    assert s["section_total"] == 3
+    assert s["unchecked"] == 2
+    assert s["unchecked"] == s["section_total"] - s["checked"]
+
+
+async def test_quality_all_leaves_checked_unchecked_zero(db_conn):
+    """全部叶子都有正文时，未覆盖归零。"""
+    from app.routers.sections import sections_quality
+
+    await _seed_quality_tree(
+        db_conn,
+        "sc_cov2",
+        [
+            ("B", "", 1, 0, ""),
+            ("B1", "B", 2, 1, ""),
+            ("B1a", "B1", 3, 2, "混凝土强度等级不低于 C30。"),
+            ("B1b", "B1", 3, 3, "接地电阻不应大于 4Ω。"),
+            ("B2", "B", 2, 4, "施工前应完成安全技术交底。"),
+        ],
+    )
+
+    result = await sections_quality("sc_cov2", db_conn)
+    s = result["summary"]
+    assert s["checked"] == 3
+    assert s["section_total"] == 3
+    assert s["unchecked"] == 0
+
+
+async def test_quality_checked_zero_means_unchecked_not_pass(db_conn):
+    """checked=0（没有可检查正文）时 unchecked == section_total，且后端不产出「通过」结论。"""
+    from app.routers.sections import sections_quality
+
+    await _seed_quality_tree(
+        db_conn,
+        "sc_cov3",
+        [
+            ("C", "", 1, 0, ""),
+            ("C1", "C", 2, 1, ""),
+            ("C1a", "C1", 3, 2, ""),
+            ("C1b", "C1", 3, 3, ""),
+            ("C2", "C", 2, 4, ""),
+        ],
+    )
+
+    result = await sections_quality("sc_cov3", db_conn)
+    s = result["summary"]
+    assert s["checked"] == 0
+    assert s["section_total"] == 3
+    assert s["unchecked"] == s["section_total"]
+    # 后端只回计数，不输出 «质量通过» 结论键；checked=0 的「通过」判断由消费方
+    # 依据 checked/unchecked 显式处理（前端 R183 已修）。
+    assert "passed" not in s
+    assert "verdict" not in s
