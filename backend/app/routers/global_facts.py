@@ -100,7 +100,7 @@ from app.services.file_parser import (  # noqa: F401  re-export for tests monkey
     parse_file_content_ex,
     signature_valid,
 )
-from app.services.prompt_governance import serialize_bounded_json_array
+from app.services.prompt_governance import instruction_truncation, serialize_bounded_json_array
 from app.services.prompt_material_guard import (
     INSTRUCTION_PROMPT_MAX_CHARS,
     clip_text_notice_report,
@@ -3847,6 +3847,11 @@ async def adjust_facts(data: AdjustRequest, db=Depends(get_db)):
         if k:
             existing_keys.add(k)
     confirmed_ops = data.operations
+    # ✅ 2026-11-07（第 2 条）：调整指令被削减时的用户可见账面。
+    #    只在「AI 产出预览计划」路径（do_apply=False）计算并回传 ——
+    #    do_apply=True 复用用户已确认的操作计划、根本不渲染提示词，报它等于
+    #    谎称本次下发被裁过。
+    instruction_truncated: dict | None = None
     # ✅ 可观测性补齐（2026-10-08 · F3）：被丢弃的操作不再只进日志。
     #    「AI 给了 3 条、实际只落 2 条」必须有理由回传，否则用户与前端都无法
     #    区分「AI 没产出」与「产出了但被安全校验拦下」—— 与 R48 图表删除
@@ -3879,9 +3884,10 @@ async def adjust_facts(data: AdjustRequest, db=Depends(get_db)):
         #    「调整要求」段若被判削减，逐段账面由下方 instruction_truncation 回传。
         #    延迟导入：routers 间存在 sse_handlers ↔ _sse_outline_review 的既有
         #    循环，模块级导入会改变任一方的首次导入顺序并触发半初始化 ImportError。
-        from app.routers._sse_outline_review import _apply_prompt_context_budget
+        from app.routers._sse_outline_review import _apply_prompt_context_budget_report
 
-        prompt = _apply_prompt_context_budget(prompt)
+        prompt, _budget_info = _apply_prompt_context_budget_report(prompt)
+        instruction_truncated = instruction_truncation(_cap_meta, _budget_info)
         try:
             obj, _ = await asyncio.wait_for(
                 collect_json_response(
@@ -4010,7 +4016,7 @@ async def adjust_facts(data: AdjustRequest, db=Depends(get_db)):
             scheme_scope or f"项目={real_pid}",
             json.dumps(ignored_ops, ensure_ascii=False)[:800],
         )
-    return {
+    result = {
         "ok": True,
         "operations": ops,
         "summary": summary,
@@ -4019,6 +4025,10 @@ async def adjust_facts(data: AdjustRequest, db=Depends(get_db)):
         "ignored": ignored_ops,
         "ignored_count": len(ignored_ops),
     }
+    # ✅ 2026-11-07（第 2 条）：加法式回传（未截断时不出现该键，既有响应逐字节不变）。
+    if instruction_truncated:
+        result["instruction_truncated"] = instruction_truncated
+    return result
 
 
 @router.delete("/{fact_id}")

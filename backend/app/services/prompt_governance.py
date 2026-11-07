@@ -402,6 +402,64 @@ def apply_context_budget(text: str, budget: int) -> str:
     return allocate_context_budget(text, budget)[0]
 
 
+def instruction_truncation(cap_meta: dict | None, info: dict | None) -> dict | None:
+    """合成「调整要求」被削减的**一条**用户可见账面（未削减返回 ``None``）。
+
+    2026-11-07：调整指令有两道刀 —— ①``clip_text_notice_report`` 的 6000 字
+    **物理上限**（与预算开关无关）；②``allocate_context_budget`` 按优先级
+    水填（开关开启时才可能压到 20% 下限）。此前这两处账面各自散落在路由里，
+    ``global_facts`` 干脆只报预算、不报物理上限 —— 用户看到「被压缩」却不知道
+    是哪道刀砍的。现收敛到本函数（纯函数、无路由依赖），``reason`` 只有三种：
+
+    * ``physical_cap``：只被物理上限裁过；
+    * ``budget``：只被预算器压过；
+    * ``both``：两者都发生（``to`` 取更小者，``from`` 取物理上限的原文长度）。
+
+    ``from`` 口径：物理上限的 ``from`` 是**用户原文**长度；预算报告里的
+    ``from`` 是「调整要求」段正文长度（已在上限之后）。两者都有时以原文为准，
+    否则用户的「原文多少字」会被上限后的长度污染。
+
+    只回传账面、**不往提示词插标记**：标记本身会占用被削减的空间本身。
+    """
+    budget_detail = None
+    for d in (info or {}).get("detail") or []:
+        if d.get("cut") and "调整要求" in str(d.get("label") or ""):
+            budget_detail = d
+            break
+    if not cap_meta and not budget_detail:
+        return None
+
+    n_from = int((cap_meta or {}).get("from") or (budget_detail or {}).get("from") or 0)
+    caps = []
+    if cap_meta:
+        caps.append(int(cap_meta.get("to") or 0))
+    if budget_detail:
+        caps.append(int((budget_detail or {}).get("to") or 0))
+    n_to = min(caps)
+    omitted = n_from - n_to
+
+    if cap_meta and budget_detail:
+        reason = "both"
+        notice = (
+            f"调整要求同时超出单条上限（{int(cap_meta.get('limit') or 0)} 字）与上下文预算，"
+            f"仅保留前 {n_to} 字（原文 {n_from} 字，省略 {omitted} 字）"
+        )
+    elif cap_meta:
+        reason = "physical_cap"
+        notice = (
+            f"调整要求超出单条上限（{int(cap_meta.get('limit') or 0)} 字），"
+            f"仅保留前 {n_to} 字（原文 {n_from} 字，省略 {omitted} 字）"
+        )
+    else:
+        reason = "budget"
+        # ⚠️ 这句文案是既有响应契约（`test_prompt_budget_ledger_20261107` 逐字断言），
+        #    改动会破坏前端已消费的提示语。
+        notice = f"调整要求超出上下文预算，仅保留前 {n_to} 字（原文 {n_from} 字，省略 {omitted} 字）"
+
+    logger.debug("调整要求截断账面：reason=%s，%d → %d 字", reason, n_from, n_to)
+    return {"from": n_from, "to": n_to, "omitted": omitted, "notice": notice}
+
+
 # ==========================================================================
 # 二、提示词注入防护（G6）
 # ==========================================================================

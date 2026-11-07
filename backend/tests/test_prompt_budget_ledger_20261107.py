@@ -175,3 +175,152 @@ async def test_adjust_outline_without_budget_has_no_truncation_key(db_conn, monk
     monkeypatch.setattr(sec, "collect_json_response", fake)
     res = await sec.adjust_outline(sid, {"instruction": "改标题"}, db=db_conn)
     assert set(res) == {"ok", "outline", "summary"}
+
+
+# ---------------------------------------------------------------------------
+# 2026-11-07（第 2 条）：物理上限与预算两道刀合并成一条账面
+# ---------------------------------------------------------------------------
+def test_instruction_truncation_reason_physical_cap_only():
+    from app.services.prompt_governance import instruction_truncation
+
+    cap = {"from": 7000, "to": 5999, "omitted": 1001, "limit": 6000}
+    got = instruction_truncation(cap, {"applied": False, "budget": 0, "segments": 0})
+    assert got == {
+        "from": 7000,
+        "to": 5999,
+        "omitted": 1001,
+        "notice": "调整要求超出单条上限（6000 字），仅保留前 5999 字（原文 7000 字，省略 1001 字）",
+    }
+
+
+def test_instruction_truncation_reason_both_uses_original_from_and_smaller_to():
+    from app.services.prompt_governance import instruction_truncation
+
+    cap = {"from": 7000, "to": 5999, "omitted": 1001, "limit": 6000}
+    info = {"detail": [{"label": "调整要求", "priority": 1, "from": 5999, "to": 120, "cut": True}]}
+    got = instruction_truncation(cap, info)
+    assert got["from"] == 7000, "from 必须取用户原文长度，而不是上限后的长度"
+    assert got["to"] == 120, "to 必须取两道刀中更小者"
+    assert got["omitted"] == 7000 - 120
+    assert "同时超出单条上限（6000 字）与上下文预算" in got["notice"]
+
+
+def test_instruction_truncation_none_when_nothing_cut():
+    from app.services.prompt_governance import instruction_truncation
+
+    assert instruction_truncation(None, None) is None
+    assert instruction_truncation(None, {"detail": []}) is None
+    assert (
+        instruction_truncation(None, {"detail": [{"label": "调整要求", "priority": 1, "from": 50, "to": 50, "cut": False}]})
+        is None
+    )
+
+
+@pytest.mark.asyncio
+async def test_adjust_outline_reports_physical_cap_when_budget_off(db_conn, monkeypatch):
+    """预算关闭 + 指令超 6000 字：只报物理上限（不能因为预算没开就静默）。"""
+    import uuid
+
+    import app.routers.sections as sec
+    from app.config import settings
+    from app.services.prompt_material_guard import INSTRUCTION_PROMPT_MAX_CHARS
+
+    pid, sid = uuid.uuid4().hex, uuid.uuid4().hex
+    await db_conn.execute("INSERT INTO projects(id,name) VALUES(?,?)", (pid, "p"))
+    await db_conn.execute(
+        "INSERT INTO schemes(id,project_id,name,status) VALUES(?,?,?,?)", (sid, pid, "深基坑专项方案", "目录已确认")
+    )
+    await db_conn.execute(
+        "INSERT INTO sections (id, scheme_id, parent_id, title, level, status,"
+        " word_count, word_budget, review_status, sort_order)"
+        " VALUES (?,?,?,?,?, 'generated', 100, 1500, 'pending', ?)",
+        ("R1", sid, "", "工程概况", 1, 0),
+    )
+    await db_conn.commit()
+
+    async def fake(messages, validate_fn, **kwargs):
+        obj = {"outline": [{"id": "R1", "title": "工程概况", "children": []}], "summary": "未改动"}
+        return obj, ""
+
+    monkeypatch.setattr(sec, "collect_json_response", fake)
+    monkeypatch.setattr(settings, "prompt_context_budget", 0, raising=False)
+    instruction = "必须完整执行。" * 900
+    assert len(instruction) > INSTRUCTION_PROMPT_MAX_CHARS
+
+    res = await sec.adjust_outline(sid, {"instruction": instruction}, db=db_conn)
+    book = res.get("instruction_truncated")
+    assert book, res
+    assert book["from"] == len(instruction)
+    assert book["to"] <= INSTRUCTION_PROMPT_MAX_CHARS
+    assert "超出单条上限" in book["notice"]
+
+
+@pytest.mark.asyncio
+async def test_adjust_facts_physical_cap_only_on_preview_not_on_apply(db_conn, monkeypatch):
+    """global_facts：预览路径回传物理上限账面；apply=True 不渲染提示词、不得报。"""
+    import uuid
+
+    import app.routers.global_facts as gf
+    from app.config import settings
+    from app.services.prompt_material_guard import INSTRUCTION_PROMPT_MAX_CHARS
+
+    pid, sid = uuid.uuid4().hex, uuid.uuid4().hex
+    await db_conn.execute("INSERT INTO projects(id,name) VALUES(?,?)", (pid, "p"))
+    await db_conn.execute("INSERT INTO schemes(id,project_id,name) VALUES(?,?,?)", (sid, pid, "s"))
+    await db_conn.execute(
+        "INSERT INTO global_facts (id, project_id, scheme_id, group_id, group_title,"
+        " title, content, category, source_ref, is_simulated, confidence, is_resolved,"
+        " has_conflict, conflict_keys, fact_key)"
+        " VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)",
+        (
+            "f1",
+            pid,
+            sid,
+            "g_f1",
+            "基坑深度",
+            "基坑深度",
+            "- **基坑深度**: 5.6m",
+            "tech_param",
+            "[]",
+            0,
+            0.9,
+            1,
+            0,
+            "",
+            "基坑深度",
+        ),
+    )
+    await db_conn.commit()
+
+    long_instruction = "必须完整执行。" * 900
+    assert len(long_instruction) > INSTRUCTION_PROMPT_MAX_CHARS
+
+    async def fake(messages, validate_fn, **kwargs):
+        obj = {"operations": [{"op": "update", "fact_id": "f1", "value": "5.8m"}], "summary": "改值"}
+        issues = validate_fn(obj)
+        if issues:
+            raise ValueError("校验不通过: " + ";".join(issues))
+        return obj, ""
+
+    monkeypatch.setattr(gf, "collect_json_response", fake)
+    monkeypatch.setattr(settings, "prompt_context_budget", 0, raising=False)
+
+    preview = await gf.adjust_facts(
+        gf.AdjustRequest(instruction=long_instruction, scheme_id=sid), db=db_conn
+    )
+    book = preview.get("instruction_truncated")
+    assert book, preview
+    assert book["from"] == len(long_instruction)
+    assert "超出单条上限" in book["notice"]
+
+    applied = await gf.adjust_facts(
+        gf.AdjustRequest(
+            instruction=long_instruction,
+            scheme_id=sid,
+            apply=True,
+            operations=[{"op": "update", "fact_id": "f1", "value": "5.8m"}],
+        ),
+        db=db_conn,
+    )
+    assert "instruction_truncated" not in applied, "apply=True 不渲染提示词，不得虚报截断"
+

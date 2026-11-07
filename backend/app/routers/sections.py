@@ -64,7 +64,7 @@ from app.services.outline_quality import (
     detect_empty_top_chapters as _detect_empty_top_chapters,
 )
 from app.services.outline_utils import MAX_OUTLINE_DEPTH, normalize_outline
-from app.services.prompt_governance import serialize_bounded_json_array
+from app.services.prompt_governance import instruction_truncation, serialize_bounded_json_array
 from app.services.prompt_material_guard import (
     INSTRUCTION_PROMPT_MAX_CHARS,
     clip_text_notice_report,
@@ -1959,26 +1959,14 @@ def _adjust_outline_validate_fn(obj) -> list:
     return [f"存在 {len(bad)} 个缺标题的非法节点"] if bad else []
 
 
-def _adjust_instruction_truncation(info: dict) -> dict | None:
-    """从预算报告里挑出「调整要求」段被削减的逐段账面（未削减返回 None）。
+def _adjust_instruction_truncation(info: dict, cap_meta: dict | None = None) -> dict | None:
+    """薄壳：从预算报告/物理上限账面挑出「调整要求」被削减的那一条。
 
-    ✅ R186（2026-11-07）：调整要求是用户自己写的任务本体（预算优先级 1）。
-    开关开启且预算不足时它可能被压到 20% 下限；此时用户有权知道「原文多少、
-    实际保留多少」。这里只回传账面，**不把标记写进提示词** —— 标记会吃掉
-    被削减的空间本身，得不偿失。
+    ✅ 2026-11-07（第 2 条）：挑选与文案合成已上移到
+    :func:`prompt_governance.instruction_truncation`（纯函数，两路由共用）。
+    保留本函数只为兼容既有单参数调用（``_adjust_instruction_truncation(info)``）。
     """
-    for d in info.get("detail") or []:
-        if d.get("cut") and "调整要求" in str(d.get("label") or ""):
-            n_from = int(d.get("from") or 0)
-            n_to = int(d.get("to") or 0)
-            omitted = n_from - n_to
-            return {
-                "from": n_from,
-                "to": n_to,
-                "omitted": omitted,
-                "notice": f"调整要求超出上下文预算，仅保留前 {n_to} 字（原文 {n_from} 字，省略 {omitted} 字）",
-            }
-    return None
+    return instruction_truncation(cap_meta, info)
 
 
 @router.post("/adjust-outline")
@@ -2039,7 +2027,7 @@ async def adjust_outline(scheme_id: str, body: dict, db=Depends(get_db)):
     prompt, _budget_info = _apply_prompt_context_budget_report(prompt)
     # ✅ R186：预算器削减不写提示词标记（见 _apply_prompt_context_budget_report）；
     #    优先级 1 的「调整要求」若真被压到下限，把逐段账面回传用户。
-    instruction_truncated = _adjust_instruction_truncation(_budget_info)
+    instruction_truncated = _adjust_instruction_truncation(_budget_info, _cap_meta)
     try:
         obj, _ = await asyncio.wait_for(
             collect_json_response(
