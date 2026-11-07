@@ -312,8 +312,9 @@ async def run_fullbook_repair(
                         "authoritative_value": next(
                             (c.get("authoritative_value", "") for c in confs if c["id"] == cid), ""
                         ),
-                        "before": orig[:4000],
-                        "after": orig[:4000],
+                        # ✅ R180（2026-11-07）：审计 items 容量足够，存全文。
+                        "before": orig,
+                        "after": orig,
                         "status": "failed",
                         "problems": ["整卷回包该章无变化，冲突未落改"],
                     }
@@ -334,8 +335,9 @@ async def run_fullbook_repair(
                         "authoritative_value": next(
                             (c.get("authoritative_value", "") for c in confs if c["id"] == cid), ""
                         ),
-                        "before": orig[:4000],
-                        "after": new[:4000],
+                        # ✅ R180（2026-11-07）：审计 items 容量足够，存全文。
+                        "before": orig,
+                        "after": new,
                         "status": "failed",
                         "problems": problems,
                     }
@@ -370,8 +372,10 @@ async def run_fullbook_repair(
                     "authoritative_value": next(
                         (c.get("authoritative_value", "") for c in confs if c["id"] == cid), ""
                     ),
-                    "before": orig[:4000],
-                    "after": persist_content[:4000],
+                    # ✅ R180（2026-11-07）：items 落 ``consistency_repairs.items``
+                    #    （TEXT/JSON）容量足够，审计需要原文全文；不再 :4000 静默硬切。
+                    "before": orig,
+                    "after": persist_content,
                     "status": "repaired",
                     "problems": [],
                 }

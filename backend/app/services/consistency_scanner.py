@@ -42,6 +42,7 @@ from app.services.numeric_topics import (
     topic_object_group,
 )
 from app.services.placeholder_sections import PLACEHOLDER_STATUS
+from app.services.prompt_material_guard import clip_text_notice
 from app.services.standards_registry import get_standards_text
 
 logger = logging.getLogger("consistency_scanner")
@@ -231,11 +232,6 @@ def new_scan_id() -> str:
     return f"scan_{uuid.uuid4().hex[:12]}"
 
 
-def _clip(text: str, limit: int) -> str:
-    text = text or ""
-    return text if len(text) <= limit else text[:limit]
-
-
 def _clip_section_content(text: str, limit: int = LONG_TEXT_SECTION_CAP) -> str:
     """✅ B-19（R176）：章节正文超限截断时**显式标记**，禁止静默丢字。
 
@@ -276,7 +272,8 @@ async def build_project_docs_text(db, project_id: str, *, doc_type: str = "", li
     parts: list[str] = []
     total = 0
     for file_name, dtype, markdown in rows:
-        block = f"### {file_name or '未命名资料'}\n{_clip(markdown or '', 1500)}\n"
+        label = f"项目资料正文（{file_name or '未命名资料'}）"
+        block = f"### {file_name or '未命名资料'}\n{clip_text_notice(markdown or '', 1500, label)}\n"
         if total + len(block) > limit:
             break
         parts.append(block)
@@ -286,7 +283,9 @@ async def build_project_docs_text(db, project_id: str, *, doc_type: str = "", li
 
 def build_standards_text(scheme_name: str, scheme_type: str) -> str:
     try:
-        return _clip(get_standards_text(scheme_name, scheme_type, max_categories=3), 3000)
+        return clip_text_notice(
+            get_standards_text(scheme_name, scheme_type, max_categories=3), 3000, "规范摘要"
+        )
     except Exception as e:
         logger.warning("构建规范摘要失败（降级为空）: %s", e)
         return ""

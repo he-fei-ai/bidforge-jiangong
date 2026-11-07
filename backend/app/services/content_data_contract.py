@@ -42,6 +42,7 @@ import logging
 import re
 
 from .preflight_engine import normalize_unit_text
+from .prompt_material_guard import clip_text_notice
 
 logger = logging.getLogger(__name__)
 
@@ -615,7 +616,10 @@ def render_data_dictionary_block(
             )
     lines.append(DICTIONARY_ABSENT_HINT)
     block = "\n".join(lines)
-    return block[:max_chars]
+    # ✅ R180（2026-11-07）：进模型请求的截断必须留痕（按条目边界收刀 +
+    #    模型可见说明 + 日志/指标），不再静默 block[:max_chars]。
+    label = f"全局数据字典（{chapter_key}）" if chapter_key else "全局数据字典"
+    return clip_text_notice(block, max_chars, label)
 
 
 # ---------------------------------------------------------------------------

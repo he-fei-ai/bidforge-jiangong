@@ -57,6 +57,7 @@ from app.services.content_utils import (
     find_unclosed_fences,
     strip_fenced_code_blocks,
 )
+from app.services.prompt_material_guard import clip_text_notice
 from app.services.repair_record import save_repair
 from app.services.repair_validator import validate_repair
 from app.services.standards_registry import ABOLISHED_STANDARDS
@@ -764,7 +765,11 @@ async def fix_by_ai(
         instruction=cap.instruction,
         must_not_contain="、".join(cap.must_not_contain) or "（无）",
         must_contain="、".join(cap.must_contain) or "（无）",
-        section_content=content[:SECTION_CONTENT_CAP],
+        section_content=clip_text_notice(
+            content,
+            SECTION_CONTENT_CAP,
+            f"待修复正文（{section.get('title') or '未命名章节'}）",
+        ),
     )
     raw = await chat_with_fallback(
         [{"role": "system", "content": system}, {"role": "user", "content": user}],
@@ -932,8 +937,10 @@ async def _fix_each_section(
                 "section_title": section.get("title") or "",
                 "status": "repaired" if changed else "failed",
                 "targets": tgts,
-                "before": before[:4000],
-                "after": (after if changed else before)[:4000],
+                # ✅ R180（2026-11-07）：``after`` 会被 confirm 写回 sections.content，
+                #    截断会静默损坏正文；items 落 TEXT/JSON 列容量足够 —— 必须全文。
+                "before": before,
+                "after": after if changed else before,
                 "problems": problems,
             }
         )
@@ -1052,8 +1059,10 @@ async def _chain_section_fixes(
                     "status": "unsupported",
                     "reason": cap.reason,
                     "targets": [],
-                    "before": content[:4000],
-                    "after": content[:4000],
+                    # ✅ R180（2026-11-07）：items 落 ``consistency_repairs.items``
+                    #    （TEXT/JSON）容量足够，存全文；不再 :4000 静默硬切。
+                    "before": content,
+                    "after": content,
                     "problems": [],
                     "chain_index": idx,
                     "sentence_idx": 0,
@@ -1072,8 +1081,8 @@ async def _chain_section_fixes(
                     "status": "not_located",
                     "reason": "未能在正文中定位到该问题的具体位置，为避免无依据改写正文，" "请按整改建议人工处理。",
                     "targets": [],
-                    "before": content[:4000],
-                    "after": content[:4000],
+                    "before": content,
+                    "after": content,
                     "problems": [],
                     "chain_index": idx,
                     "sentence_idx": 0,
@@ -1094,8 +1103,10 @@ async def _chain_section_fixes(
                 "mode": cap.mode,
                 "status": rec.get("status", "failed"),
                 "targets": targets,
-                "before": content[:4000],
-                "after": after[:4000],
+                # ✅ R180（2026-11-07）：``after`` 会被 confirm 直接写回
+                #    ``sections.content``，截断会静默损坏正文 —— 必须全文。
+                "before": content,
+                "after": after,
                 "problems": rec.get("problems", []),
                 "chain_index": idx,
                 "sentence_idx": targets[0].get("sentence_idx", 0) if targets else 0,

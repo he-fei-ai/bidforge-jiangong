@@ -25,6 +25,7 @@ from app.services.content_utils import (
     text_word_count,
     word_status_for,
 )
+from app.services.prompt_material_guard import clip_text_notice
 from app.services.repair_validator import validate_repair
 
 logger = logging.getLogger("repair_agent")
@@ -62,11 +63,6 @@ REPAIR_RETRY_ON_INVALID = bool(getattr(settings, "consistency_repair_retry_on_in
 REPAIR_RETRY_ON_INVALID_BY_SEVERITY = bool(getattr(settings, "consistency_repair_retry_on_invalid_by_severity", True))
 # 「修复成果仍在」的比对片段长度（取修复后正文开头，兼顾性能与误判）
 REPAIR_MARK_SNIPPET = 200
-
-
-def _clip(text: str, limit: int) -> str:
-    text = text or ""
-    return text if len(text) <= limit else text[:limit]
 
 
 def _clean_repair_output(text: str, section_title: str) -> str:
@@ -139,7 +135,7 @@ def group_by_section(conflicts: list[dict]) -> dict[str, dict]:
                     "authoritative_value": auth,
                     "authoritative_source": c.get("authoritative_source"),
                     "repair_instruction": c.get("repair_instruction"),
-                    "quote": _clip(occ.get("text", ""), 120),
+                    "quote": clip_text_notice(occ.get("text", ""), 120, "冲突引用原文"),
                 }
             )
     return groups
@@ -369,8 +365,10 @@ async def run_repair(
                     "topic": c["topic"],
                     "current_value": c["current_value"],
                     "authoritative_value": c["authoritative_value"],
-                    "before": _clip(before_now, 4000),
-                    "after": _clip(before_now, 4000),
+                    # ✅ R180（2026-11-07）：items 落 ``consistency_repairs.items``
+                    #    （TEXT/JSON）容量足够，审计需要原文全文；不再 4000 静默硬切。
+                    "before": before_now,
+                    "after": before_now,
                     "status": "skipped",
                     "problems": ["该处已修复且修复成果仍在正文中，无需重复修复"],
                 }
@@ -391,8 +389,8 @@ async def run_repair(
                     "topic": c["topic"],
                     "current_value": c["current_value"],
                     "authoritative_value": c["authoritative_value"],
-                    "before": _clip(section_contents.get(sid, ""), 4000),
-                    "after": _clip(section_contents.get(sid, ""), 4000),
+                    "before": section_contents.get(sid, ""),
+                    "after": section_contents.get(sid, ""),
                     "status": "skipped",
                     "problems": ["超出单次修复章节数上限（按严重度排序后本轮跳过，" "可在下一轮继续或人工处理）"],
                 }
@@ -521,8 +519,8 @@ async def run_repair(
                     "topic": c["topic"],
                     "current_value": c["current_value"],
                     "authoritative_value": c["authoritative_value"],
-                    "before": _clip(before, 4000),
-                    "after": _clip(after, 4000) if after else before,
+                    "before": before,
+                    "after": after if after else before,
                     "status": status,
                     "problems": problems if status == "failed" else [],
                 }

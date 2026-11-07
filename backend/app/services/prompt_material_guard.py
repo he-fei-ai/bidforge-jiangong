@@ -294,6 +294,72 @@ def clip_text(text: str, limit: int, label: str = "") -> str:
     return text[:limit]
 
 
+# --------------------------------------------------------------------------
+# 进模型请求的「留痕裁剪」（R180 · 2026-11-07）
+# --------------------------------------------------------------------------
+#: 优先在这些边界处收刀（从强到弱）：段落 → 行 → 句 → 分句 → 词。
+_CLIP_BOUNDARIES = ("\n\n", "\n", "。", "！", "？", "；", ". ", "! ", "? ", "; ", "，", ", ", " ")
+#: 边界离上限太远（不足 60%）时退化为硬切，避免为了「不切断」丢掉过多有效内容。
+_CLIP_BOUNDARY_MIN_RATIO = 0.6
+
+
+def _clip_cut_point(text: str, limit: int) -> int:
+    """返回 ``<= limit`` 的最优切点：尽量落在段落/句子/词边界之后。
+
+    ⚠️ 必须**按 _CLIP_BOUNDARIES 的优先级**逐个尝试，不能取全局最靠后的分隔符：
+    数据字典条目里既有换行又有空格，``max`` 会让条目内的空格（如「置信度 」
+    之后，295 字处）盖过条目换行（252 字处），结果把一条 ``- 关键指标…``
+    切成半截 —— 正是「不切断」要禁止的情形。
+    """
+    head = text[:limit]
+    min_cut = int(limit * _CLIP_BOUNDARY_MIN_RATIO)
+    for sep in _CLIP_BOUNDARIES:
+        idx = head.rfind(sep)
+        if idx >= 0:
+            cand = idx + len(sep)
+            if cand >= min_cut:
+                return cand
+    return limit
+
+
+def clip_text_notice(text: str, limit: int, label: str = "") -> str:
+    """进模型请求的截断：**按边界收刀 + 模型可见说明 + 日志/指标留痕**。
+
+    与 :func:`clip_text` 的区别只在「模型可见」：``clip_text`` 仅写日志，
+    模型收到的仍是半截文本、无从得知后面还有内容（会据此断言「未提及」）。
+    本函数在截断后追加一段说明，显式告知原文长度与省略字数：
+
+        [……{label}已截断：原文 N 字，此处保留前 K 字，已省略 M 字]
+
+    约定：
+    * 未超限时**原样返回**（逐字节一致），``limit <= 0`` 表示不截断；
+    * 切点优先落在段落/换行/句末/分句/词边界，边界离上限太远才硬切；
+    * 留痕（日志/指标）失败一律 fail-soft，绝不阻断生成。
+    """
+    if not text or limit is None or limit <= 0 or len(text) <= limit:
+        return text
+    cut = _clip_cut_point(text, limit)
+    omitted = len(text) - cut
+    name = label or "文本"
+    try:
+        logger.warning(
+            "上下文截断（%s）：%d → %d 字，已省略 %d 字（模型可见说明已附加）",
+            name,
+            len(text),
+            cut,
+            omitted,
+        )
+    except Exception:  # noqa: BLE001 - 留痕失败不得阻断生成
+        pass
+    try:
+        from app.services.ai.prompts._metrics import record_token_budget_truncated
+
+        record_token_budget_truncated(name)
+    except Exception:  # noqa: BLE001 - 指标失败不得阻断生成
+        pass
+    return text[:cut] + f"\n\n[……{name}已截断：原文 {len(text)} 字，此处保留前 {cut} 字，已省略 {omitted} 字]"
+
+
 def _repair_closing_fence(before: str, after: str) -> str:
     """预算截断可能切掉围栏的闭合标记 —— 补回，避免模型把后续内容当作资料。
 

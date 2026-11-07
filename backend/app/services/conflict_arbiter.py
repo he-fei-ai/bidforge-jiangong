@@ -18,6 +18,7 @@ import re
 
 from app.services.ai.json_response import collect_json_response
 from app.services.ai.prompts._registry import render
+from app.services.prompt_material_guard import clip_text_notice
 
 logger = logging.getLogger("conflict_arbiter")
 
@@ -26,11 +27,6 @@ SEVERITY_ORDER = {"high": 3, "medium": 2, "low": 1}
 # 一次性塞入会导致 prompt 超长、超时与 JSON 截断。分批请求，逐批降级
 # （单批失败不影响其他批次走规则仲裁）。
 ARBITRATE_BATCH_SIZE = 20
-
-
-def _clip(text: str, limit: int) -> str:
-    text = text or ""
-    return text if len(text) <= limit else text[:limit]
 
 
 def match_global_facts(conflict: dict, facts: str) -> dict | None:
@@ -87,7 +83,7 @@ async def _arbitrate_batch(
                     "section_id": o.get("section_id"),
                     "section_title": o.get("section_title"),
                     "value": o.get("value"),
-                    "text": _clip(o.get("text", ""), 80),
+                    "text": clip_text_notice(o.get("text", ""), 80, "冲突出现点原文"),
                 }
                 for o in c.get("occurrences", [])
             ],
