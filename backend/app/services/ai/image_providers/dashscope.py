@@ -10,6 +10,8 @@ from typing import Any
 
 import aiohttp
 
+from app.services.redaction import redact_sensitive_text
+
 from ....utils.proxy_config import aiohttp_session_kwargs
 from .base import ImageProviderAdapter, build_endpoint
 
@@ -134,7 +136,7 @@ class DashScopeAdapter(ImageProviderAdapter):
                                 "error": error_msg,
                             }
                     else:
-                        error_text = (await response.text())[:200]
+                        error_text = redact_sensitive_text(await response.text())[:200]
                         error_msg = f"HTTP {response.status}: {error_text}"
                         logger.error(error_msg)
                         return {
