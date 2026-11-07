@@ -1,6 +1,11 @@
 import { useRef, type Dispatch, type MutableRefObject, type SetStateAction } from "react";
 import type { ModalFuncProps } from "antd";
-import { factsApi, docPipelineApi } from "../../api";
+import {
+  factsApi,
+  docPipelineApi,
+  PREVIEW_TIMEOUT_MS,
+  API_GLOBAL_TIMEOUT_MS,
+} from "../../api";
 import { computeDocStats, buildUploadNotice } from "../../utils/workflowDerived";
 import type { DocRecord, PreviewError } from "../../utils/workflowDerived";
 import type { FactsSummary } from "../../types/facts";
@@ -47,6 +52,17 @@ function requestErrorText(e: unknown, label: string, timeoutSeconds: number, fal
   if (isTimeoutError(e)) return `${label}请求超时（${timeoutSeconds} 秒），请稍后重试`;
   return errFields(e)?.message || fallback;
 }
+
+/**
+ * 四层管线动作失败文案的元信息：label + 该动作对应 API 的实际 timeout（秒）。
+ * 秒数与 api/index.ts 各处配置对齐，避免失败时把 axios 英文原文直接抛给用户。
+ */
+const PIPELINE_ACTION_META: Record<PipelineActionKey, { label: string; seconds: number }> = {
+  reparse: { label: "重新解析", seconds: 300 },
+  syncExtractions: { label: "物化提取层", seconds: 60 },
+  crossCheck: { label: "交叉校验", seconds: 120 },
+  refreshQuality: { label: "刷新质量", seconds: Math.round(API_GLOBAL_TIMEOUT_MS / 1000) },
+};
 
 /** 文档预览响应（GET /global-facts/documents/{id}/preview；本域读 is_parsed/message/preview） */
 export interface DocPreviewData {
@@ -444,7 +460,14 @@ export function useDocumentWorkflow(deps: DocumentWorkflowDeps) {
     } catch (e: unknown) {
       // 已切到别的文档 / 用户取消：不弹错误、不写状态（避免「标题是 B、提示是 A」）
       if (reqId !== previewReqIdRef.current || isCanceledError(e)) return;
-      const text = requestErrorText(e, "预览", 60, "获取预览失败");
+      // ✅ 秒数与请求实际 timeout 共用同一常量（api/index.ts PREVIEW_TIMEOUT_MS），
+      //    避免「改接口超时而文案不动」的两处真相源
+      const text = requestErrorText(
+        e,
+        "预览",
+        Math.round(PREVIEW_TIMEOUT_MS / 1000),
+        "获取预览失败",
+      );
       // ✅ 失败状态位：让空态显示「失败/超时」，而不是复用「尚未解析」
       setPreviewError({ kind: isTimeoutError(e) ? "timeout" : "request", message: text });
       msg.error(text);
@@ -471,8 +494,14 @@ export function useDocumentWorkflow(deps: DocumentWorkflowDeps) {
       setPipelineStatus(data);
     } catch (e: unknown) {
       if (reqId !== pipelineReqIdRef.current || pipelineDocIdRef.current !== docId) return;
-      const err = e as { message?: string };
-      setPipelineError(err?.message || "解析质量信息读取失败");
+      setPipelineError(
+        requestErrorText(
+          e,
+          "解析质量信息",
+          Math.round(API_GLOBAL_TIMEOUT_MS / 1000),
+          "解析质量信息读取失败",
+        ),
+      );
     } finally {
       if (reqId === pipelineReqIdRef.current) setPipelineLoading(false);
     }
@@ -534,8 +563,8 @@ export function useDocumentWorkflow(deps: DocumentWorkflowDeps) {
       // 动作可能改变四层产物 → 重新拉取权威状态
       if (action !== "refreshQuality") await loadPipelineStatus(docId);
     } catch (e: unknown) {
-      const err = e as { message?: string };
-      msg.error(err?.message || "操作失败");
+      const meta = PIPELINE_ACTION_META[action];
+      msg.error(requestErrorText(e, meta.label, meta.seconds, "操作失败"));
     } finally {
       setPipelineAction(null);
     }
@@ -552,8 +581,14 @@ export function useDocumentWorkflow(deps: DocumentWorkflowDeps) {
     } catch (e: unknown) {
       // ✅ 2026-09-24 T3：更新失败（超时/网络中断但服务端可能已落库等）时，
       //    重新拉取服务端真值，避免受控 Select 与后端分类发生漂移。
-      const err = e as { message?: string };
-      msg.error(err.message || "分类更新失败");
+      msg.error(
+        requestErrorText(
+          e,
+          "分类更新",
+          Math.round(API_GLOBAL_TIMEOUT_MS / 1000),
+          "分类更新失败",
+        ),
+      );
       loadDocuments();
     }
   };
@@ -596,8 +631,14 @@ export function useDocumentWorkflow(deps: DocumentWorkflowDeps) {
           else msg.success(copy.text);
           await loadFacts();
         } catch (e: unknown) {
-          const err = e as { message?: string };
-          msg.error(err.message || "确认失败");
+          msg.error(
+            requestErrorText(
+              e,
+              "批量确认",
+              Math.round(API_GLOBAL_TIMEOUT_MS / 1000),
+              "确认失败",
+            ),
+          );
         }
       },
     });
@@ -655,8 +696,14 @@ export function useDocumentWorkflow(deps: DocumentWorkflowDeps) {
           }
           await loadFacts();
         } catch (e: unknown) {
-          const err = e as { message?: string };
-          msg.error(err.message || "解除失败");
+          msg.error(
+            requestErrorText(
+              e,
+              "批量解除",
+              Math.round(API_GLOBAL_TIMEOUT_MS / 1000),
+              "解除失败",
+            ),
+          );
         }
       },
     });
@@ -694,7 +741,16 @@ export function useDocumentWorkflow(deps: DocumentWorkflowDeps) {
     } catch (e: unknown) {
       const err = e as { name?: string; message?: string };
       if (err?.name === "AbortError" || ac.signal.aborted) return;
-      if (sid === currentSchemeIdRef.current) msg.error(err.message || "解除失败");
+      if (sid === currentSchemeIdRef.current) {
+        msg.error(
+          requestErrorText(
+            e,
+            "解除过期标记",
+            Math.round(API_GLOBAL_TIMEOUT_MS / 1000),
+            "解除失败",
+          ),
+        );
+      }
     }
   };
 
@@ -710,8 +766,14 @@ export function useDocumentWorkflow(deps: DocumentWorkflowDeps) {
           msg.success("文件已删除");
           loadDocuments();
         } catch (e: unknown) {
-          const err = e as { message?: string };
-          msg.error(err.message || "删除失败");
+          msg.error(
+            requestErrorText(
+              e,
+              "删除文件",
+              Math.round(API_GLOBAL_TIMEOUT_MS / 1000),
+              "删除失败",
+            ),
+          );
         }
       },
     });

@@ -96,17 +96,32 @@ export function clearAuthShortCircuit(): void {
 }
 
 /**
- * 全局 axios 超时（默认 60s）。
+ * 全局 axios 超时（60s）。
  *
  * 本地开发环境下，后端 uvicorn --reload 热重载、SQLite 首次连接、
  * 或短时间内大量并发请求排队时，可能出现 30s 内无响应的情况。
  * 此前默认 30s 会导致页面加载时偶发 "timeout of 30000ms exceeded"（2026-09-25 观察到）。
  * 提至 60s 作为宽容兜底；对明确需要更短或更长的端点，在各 API 定义处单独覆盖。
+ *
+ * ✅ 导出为常量：未单独覆盖 timeout 的端点（如 docPipelineApi.status、
+ *    updateDocumentCategory）超时后，前端文案要显示「超时（N 秒）」，
+ *    秒数必须取自这里，不能在调用方各自写死。
  */
+export const API_GLOBAL_TIMEOUT_MS = 60000;
+
 const api = axios.create({
   baseURL: "/api/v1",
-  timeout: 60000,
+  timeout: API_GLOBAL_TIMEOUT_MS,
 });
+
+/**
+ * 文档预览请求超时（60s）。
+ *
+ * 单列常量而非继承全局 timeout 的原因：控制台空态文案要显示「超时（N 秒）」，
+ * 文案与请求配置必须同源。若继续隐式继承全局值，一旦有人调整全局 timeout，
+ * 文案就会说假话，且没有任何用例会变红。
+ */
+export const PREVIEW_TIMEOUT_MS = 60000;
 
 /**
  * 带重试的只读请求包装器。
@@ -587,10 +602,12 @@ export const factsApi = {
     }),
   deleteDocument: (docId: string) => api.delete(`/global-facts/documents/${docId}`),
   // ✅ 文件导入/解析增强：文件预览（前 N 字）和分类管理
-  // options.signal：预览弹窗关闭/切换文档时中断在途请求（默认走全局 60s 超时）
+  // options.signal：预览弹窗关闭/切换文档时中断在途请求；
+  // timeout 显式取值（与空态文案共用 PREVIEW_TIMEOUT_MS，避免两处真相源）
   previewDocument: (docId: string, maxChars = 5000, options?: { signal?: AbortSignal }) =>
     api.get(`/global-facts/documents/${docId}/preview`, {
       params: { max_chars: maxChars },
+      timeout: PREVIEW_TIMEOUT_MS,
       signal: options?.signal,
     }),
   updateDocumentCategory: (docId: string, docCategory: string) =>

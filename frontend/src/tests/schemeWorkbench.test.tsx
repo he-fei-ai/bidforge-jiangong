@@ -78,6 +78,8 @@ const apiMock = vi.hoisted(() => {
         if (typeof prop !== "string") return undefined;
         if (prop === "__esModule") return true;
         if (prop === "then") return undefined;
+        // 数值导出（页面/hook 会参与算术与文案拼接）：纯动态可调用代理无法参与运算
+        if (prop === "API_GLOBAL_TIMEOUT_MS" || prop === "PREVIEW_TIMEOUT_MS") return 60000;
         return makeCallable([prop]);
       },
       // vitest 会用自己的代理包裹工厂返回值，并校验「导出名是否定义」；

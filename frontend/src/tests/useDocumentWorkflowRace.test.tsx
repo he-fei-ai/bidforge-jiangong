@@ -15,7 +15,7 @@
  */
 import { describe, it, expect, vi, beforeEach, afterEach } from "vitest";
 import { renderHook, act } from "@testing-library/react";
-import { factsApi, docPipelineApi } from "../api";
+import { factsApi, docPipelineApi, PREVIEW_TIMEOUT_MS } from "../api";
 import { useDocumentWorkflow } from "../pages/schemeWorkbench/useDocumentWorkflow";
 import type { DocRecord } from "../utils/workflowDerived";
 
@@ -387,9 +387,11 @@ describe("useDocumentWorkflow · 预览失败状态位", () => {
     expect(msg.error).toHaveBeenCalledWith("网络连接中断");
   });
 
-  it("请求超时：previewError.kind=timeout，中文文案（60 秒）", async () => {
+  it("请求超时：previewError.kind=timeout，文案秒数与预览 timeout 同源", async () => {
     vi.spyOn(factsApi, "previewDocument").mockRejectedValue(
-      Object.assign(new Error("timeout of 60000ms exceeded"), { code: "ECONNABORTED" }),
+      Object.assign(new Error(`timeout of ${PREVIEW_TIMEOUT_MS}ms exceeded`), {
+        code: "ECONNABORTED",
+      }),
     );
     vi.spyOn(docPipelineApi, "status").mockResolvedValue({ data: {} } as never);
 
@@ -398,11 +400,13 @@ describe("useDocumentWorkflow · 预览失败状态位", () => {
       await result.current.handlePreviewDocument(doc("d1", "A.pdf"));
     });
 
+    // 断言按常量推导：文案里的秒数若被写死成别的值（或常量被改而文案没跟），这里必红
+    const expected = `预览请求超时（${Math.round(PREVIEW_TIMEOUT_MS / 1000)} 秒），请稍后重试`;
     expect(rec.previewError[rec.previewError.length - 1]).toEqual({
       kind: "timeout",
-      message: "预览请求超时（60 秒），请稍后重试",
+      message: expected,
     });
-    expect(msg.error).toHaveBeenCalledWith("预览请求超时（60 秒），请稍后重试");
+    expect(msg.error).toHaveBeenCalledWith(expected);
   });
 });
 

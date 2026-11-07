@@ -64,7 +64,7 @@ const h = vi.hoisted(() => {
 
 vi.mock("axios", () => ({ default: { create: () => h.instance } }));
 
-import { factsApi, docPipelineApi } from "../api/index";
+import { factsApi, docPipelineApi, PREVIEW_TIMEOUT_MS } from "../api/index";
 
 const last = () => h.calls[h.calls.length - 1];
 
@@ -278,6 +278,23 @@ describe("factsApi 契约", () => {
     });
     await factsApi.previewDocument("d1", 800);
     expect(last().config.params).toEqual({ max_chars: 800 });
+  });
+
+  it("previewDocument：显式 timeout 与空态文案共用 PREVIEW_TIMEOUT_MS", async () => {
+    // 预览空态会显示「预览请求超时（N 秒）」，N 必须取请求实际 timeout。
+    // 若这里不显式传 timeout（隐式继承全局默认），文案与真实超时就是两处真相源：
+    // 调全局值不会让任何用例变红，但文案会说假话。
+    const ctrl = new AbortController();
+    await factsApi.previewDocument("d1", 3000, { signal: ctrl.signal });
+    expect(last()).toMatchObject({
+      method: "get",
+      url: "/global-facts/documents/d1/preview",
+      config: {
+        params: { max_chars: 3000 },
+        timeout: PREVIEW_TIMEOUT_MS,
+        signal: ctrl.signal,
+      },
+    });
   });
 
   it("updateDocumentCategory：PATCH /documents/{id}/category，doc_category 在 body", async () => {
