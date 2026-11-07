@@ -302,6 +302,13 @@ export function upsertSectionLog(list: SectionLogItem[], item: SectionLogItem): 
   //   列表顺序 = 章节首次出现顺序（即目录 DFS 序），倒序渲染后稳定不跳。
   const idx = list.findIndex((x) => x.section_id === item.section_id);
   if (idx < 0) return [...list, item];
+  // ✅ 乱序事件护栏：终态条目忽略迟到的 running。
+  //    正常「重写单章」在生成入口会先清空日志（SchemeWorkbenchPage setSectionLogs([])），
+  //    因此「success/failed/skipped → running」只可能来自事件乱序 / 重复投递，
+  //    否则会把已完成章节打回转圈，直到整批结束都不消失。
+  //    返回原引用：调用方据此跳过渲染回退。
+  const prev = list[idx];
+  if (item.status === "running" && prev.status !== "running") return list;
   const next = list.slice();
   next[idx] = item;
   return next;

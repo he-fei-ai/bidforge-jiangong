@@ -67,6 +67,34 @@ describe("upsertSectionLog", () => {
     next = upsertSectionLog(next, log({ section_id: "a", status: "failed" }));
     expect(next.map((x) => x.section_id)).toEqual(["a", "b", "c"]);
   });
+
+  // ---- 乱序 / 重复投递（SSE 重连、事件重放、批处理抖动）----
+  it("乱序：done 先到、迟到的 start 不得把已完成章节打回 running", () => {
+    const base = [log({ section_id: "a", status: "success", time: 1000, duration: 5 })];
+    const next = upsertSectionLog(base, log({ section_id: "a", status: "running", time: 9999 }));
+    // 原引用返回 → 调用方不会渲染出「已完成章节又转圈」
+    expect(next).toBe(base);
+    expect(next[0].status).toBe("success");
+    expect(next[0].time).toBe(1000);
+  });
+
+  it("同一章节重复 upsert：原位替换并保留最新字段（不追加第二行）", () => {
+    const base = [log({ section_id: "a", status: "running" }), log({ section_id: "b" })];
+    let next = upsertSectionLog(base, log({ section_id: "a", status: "success", word_count: 100 }));
+    next = upsertSectionLog(next, log({ section_id: "a", status: "success", word_count: 120 }));
+    expect(next.map((x) => x.section_id)).toEqual(["a", "b"]);
+    expect(next[0].word_count).toBe(120);
+  });
+
+  it("终态收尾后迟到的 running 不得复活转圈项", () => {
+    const finalized = finalizeRunningLogsIn(
+      [log({ section_id: "a", status: "running", time: 0 })],
+      "已停止，未生成完成",
+    );
+    const next = upsertSectionLog(finalized, log({ section_id: "a", status: "running" }));
+    expect(next).toBe(finalized);
+    expect(next[0].status).toBe("skipped");
+  });
 });
 
 // ============================================================
