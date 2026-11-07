@@ -26,6 +26,8 @@ from dataclasses import dataclass, field
 from enum import Enum
 from typing import Optional
 
+from app.services.prompt_material_guard import clip_text
+
 # =========================================================================
 # 一、六大类危大工程 + 子类 分类体系
 # =========================================================================
@@ -1429,7 +1431,11 @@ def build_chapter_extraction_text(extraction_items: list[dict], chapter_key: str
         if content:
             parts.append(f"### {label}\n{content}")
     text = "\n\n".join(parts)
-    return text[:max_chars] if max_chars else text
+    # ✅ G4 连带项（2026-11-07）：静默硬切改为可见截断（日志 + 指标）。
+    #    G4 接线后本函数成为生产提示词路径；超 2000 字被腰斩且无痕迹会让
+    #    运维无法判断「没截断」与「截断丢了高优信息」。clip_text 未超限时
+    #    原样返回，行为逐字节不变；limit<=0 也保持「不截断」语义。
+    return clip_text(text, max_chars, label="本章专项提取成果")
 
 
 # =========================================================================

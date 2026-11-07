@@ -46,6 +46,8 @@ def build_chapter_user_content(
     eff_standard: str,
     knowledge_text: str,
     prev_leaf_summary: str = "",
+    chapter_extraction_text: str = "",
+    chart_quota_hint: str = "",
 ) -> str:
     """构造章节生成的首轮 user 上下文（纯字符串拼接，无 IO / 无 AI）。
 
@@ -71,6 +73,11 @@ def build_chapter_user_content(
             （可为空）。与 ``prev_sibling_summary`` 互补：同级摘要只覆盖同父
             兄弟（父下第一个叶子恒为空），本参数补上「文档直接前文」链路。
             缺省空串 → 输出与本参数引入前**逐字一致**。
+        chapter_extraction_text: ✅ G4 本章专项提取成果（
+            ``_build_chapter_extraction_map`` 产物；可为空）。按 config 既定语义
+            「与整份 project_brief 并存、不替换」，追加在标准块之后。
+        chart_quota_hint: ✅ R58/G5 本章图表配额提示（可为空）。逐章变化量，
+            追加在末尾；缺省空串 → 输出与本参数引入前**逐字一致**。
 
     Returns:
         首轮 user 上下文（多段「【标签】：」结构的完整文本）。
@@ -120,6 +127,17 @@ def build_chapter_user_content(
         )
     # F-CONTENT-STANDARD: 生成标准 user 块（DB 定制模板缺占位符时的兜底通道）。
     user_content += "\n\n" + build_user_block(eff_standard)
+    # ✅ G4（2026-11-07）：本章专项提取成果 —— config 既定语义是「与整份
+    #    project_brief 并存、不替换」，故只追加不覆盖；空串时逐字保持旧输出。
+    if chapter_extraction_text:
+        user_content += "\n\n【本章专项提取成果】（本章专属提取，与上方项目概述并存、不替换）：\n" + (
+            chapter_extraction_text
+            if chapter_extraction_text.endswith("\n")
+            else chapter_extraction_text + "\n"
+        )
+    # ✅ G5（2026-11-07 · R167/R169 回归）：非分层路径同样消费图表配额提示。
+    if chart_quota_hint:
+        user_content += "\n\n" + chart_quota_hint
     return user_content
 
 
@@ -193,6 +211,7 @@ def build_chapter_layered_messages(
     chart_quota_hint: str = "",
     chapter_facts_text: str = "",
     prev_leaf_summary: str = "",
+    chapter_extraction_text: str = "",
 ) -> tuple[list[dict], str]:
     """「前缀稳定化」版章节 messages：同一方案各章节共享最长公共前缀。
 
@@ -226,6 +245,8 @@ def build_chapter_layered_messages(
         prev_leaf_summary: ✅ R102（G5）前一章（文档序上一叶子）正文结尾参考。
             逐章变化量 → 追加到任务差异段（紧随前序同级摘要之后），缺省空串
             → 输出与本参数引入前**逐字一致**。
+        chapter_extraction_text: ✅ G4 本章专项提取成果（逐章变化量）。追加到
+            任务差异段（本章专属事实之后、图表配额之前），缺省空串时整段不存在。
         其余参数与 :func:`build_chapter_user_content` 同义同名，便于一一对照。
 
     Returns:
@@ -286,6 +307,14 @@ def build_chapter_layered_messages(
     if chapter_facts_text:
         task += "\n【本章专属事实（仅本章相关；整案通用事实见上方稳定上下文）】：\n" + (
             chapter_facts_text if chapter_facts_text.endswith("\n") else chapter_facts_text + "\n"
+        )
+    # ✅ G4（2026-11-07）：本章专项提取成果为逐章变化量，进任务差异段；
+    #    与 config 的「与整份 project_brief 并存、不替换」语义一致。
+    if chapter_extraction_text:
+        task += "\n【本章专项提取成果】（本章专属提取，与上方项目概述并存、不替换）：\n" + (
+            chapter_extraction_text
+            if chapter_extraction_text.endswith("\n")
+            else chapter_extraction_text + "\n"
         )
     if chart_quota_hint:
         task += chart_quota_hint if chart_quota_hint.endswith("\n") else chart_quota_hint + "\n"

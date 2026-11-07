@@ -1,8 +1,10 @@
 """#10 正文按九大章节字段映射注入：_build_chapter_extraction_map 解析验证。"""
 
 import json
+import logging
 
 from app.routers.sse_handlers import _build_chapter_extraction_map
+from app.services.scheme_classification import build_chapter_extraction_text
 
 
 class _Cur:
@@ -76,3 +78,21 @@ async def test_build_chapter_extraction_map_empty():
         _Db([]), "pid", _sections(), _nodes_map(_sections()), _by_parent(_sections())
     )
     assert result == {}
+
+
+def test_build_chapter_extraction_text_truncation_is_visible(caplog):
+    """G4 连带项：超限截断必须留日志（不再静默硬切）。"""
+    content = "超长提取内容" * 400
+    with caplog.at_level(logging.WARNING, logger="prompt_material_guard"):
+        text = build_chapter_extraction_text(
+            [{"label": "项目基本信息", "content": content}], "overview", max_chars=2000
+        )
+    assert len(text) == 2000
+    assert "上下文截断（本章专项提取成果）" in caplog.text
+
+
+def test_build_chapter_extraction_text_within_limit_is_byte_identical():
+    """未超限时 clip_text 原样返回，不得加省略号/换行。"""
+    items = [{"label": "项目基本信息", "content": "工程名称：某基坑"}]
+    expected = "### 项目基本信息\n工程名称：某基坑"
+    assert build_chapter_extraction_text(items, "overview", max_chars=2000) == expected

@@ -3084,6 +3084,21 @@ async def generate_content(scheme_id: str, request: Request, db=Depends(get_db))
                 by_parent[k].sort(key=lambda x: x.get("sort_order", 0))
             nodes_map: dict[str, dict] = {s["id"]: s for s in all_sections}
 
+            # ✅ G4（2026-11-07）：`scheme_auto_chapter_inject` 真正接线。
+            #    此前 `_build_chapter_extraction_map` 只有定义与导入、零调用点，
+            #    开关是死配置。现开关为真时整批计算一次章节提取映射（只读一次
+            #    bid_analysis_items），逐章取用；失败/关闭时退回原有全局事实注入，
+            #    提示词不带任何新增段落。
+            _chapter_extractions: dict[str, str] = {}
+            if bool(getattr(settings, "scheme_auto_chapter_inject", False)):
+                try:
+                    _chapter_extractions = await _build_chapter_extraction_map(
+                        db, project_id, all_sections, nodes_map, by_parent
+                    )
+                except Exception:  # noqa: BLE001 - 装配失败不得阻断正文生成
+                    logger.warning("本章专项提取成果装配失败（退回原有全局事实注入）", exc_info=True)
+                    _chapter_extractions = {}
+
             # ✅ R105（G5 · 前驱叶子承接摘要接线）：all_sections 已 DFS 重排，
             #    按 _parent_ids（有子节点的 id 集合）筛出文档序叶子序列。
             #    前序同级的姊妹口径是 build_sibling_context；父下第一个叶子
@@ -4230,7 +4245,11 @@ async def generate_content(scheme_id: str, request: Request, db=Depends(get_db))
                 #    避免「画了又被程序按上限删掉」。纯读一次全方案已用计数
                 #    （已排除本章），失败不阻断生成（软提示）。
                 _chart_hint = ""
-                if _stable_prefix and bool(getattr(settings, "content_chart_quota_hint_enabled", True)):
+                # ✅ G5（2026-11-07 · R167/R169 回归修复）：图表配额提示是**逐章**
+                #    软约束，与装配模式无关。此前误挂在 `_stable_prefix` 条件下，
+                #    非分层路径根本没有配额提示，R169 的「双消费」修复也在 Phase F
+                #    合入时被回退。现两条装配路径统一计算并传入。
+                if bool(getattr(settings, "content_chart_quota_hint_enabled", True)):
                     try:
                         _chart_hint = build_chart_quota_hint(
                             await _load_scheme_type_counts(db, scheme_id, str(leaf.get("id") or "")),
@@ -4238,6 +4257,8 @@ async def generate_content(scheme_id: str, request: Request, db=Depends(get_db))
                         )
                     except Exception:  # noqa: BLE001 - 软提示，绝不阻断生成
                         logger.warning("图表配额统计失败（按无提示继续）", exc_info=True)
+                # ✅ G4（2026-11-07）：本章提取映射按原始 id 取用；开关关闭时映射为空。
+                _chapter_extraction_text = _chapter_extractions.get(leaf.get("id"), "")
                 # system 中被清空的逐章变量，在这里**原样**补给模型（保证零信息丢失）：
                 # 两个标量 + 子标题规范 + 本章检查点块，作为「任务差异」的最后一段。
                 _chapter_extras = ""
@@ -4392,6 +4413,8 @@ async def generate_content(scheme_id: str, request: Request, db=Depends(get_db))
                         chapter_extras=_chapter_extras,
                         chart_quota_hint=_chart_hint,
                         chapter_facts_text=_chapter_facts_text,
+                        # ✅ G4（2026-11-07）：开关关闭时为空串，输出逐字不变。
+                        chapter_extraction_text=_chapter_extraction_text,
                         # ✅ R105（G5）：直接前驱叶子结尾片段（开关关闭/无前驱
                         #    → 空串，content_runtime 缺省形态输出逐字一致）
                         prev_leaf_summary=_prev_leaf_tail_for(leaf),
@@ -4412,6 +4435,9 @@ async def generate_content(scheme_id: str, request: Request, db=Depends(get_db))
                         facts_text=facts_text,
                         eff_standard=eff_standard,
                         knowledge_text=knowledge_text,
+                        # ✅ G4/G5（2026-11-07）：与分层分支同口径（两装配函数同形参）。
+                        chapter_extraction_text=_chapter_extraction_text,
+                        chart_quota_hint=_chart_hint,
                         # ✅ R105（G5）：与分层分支同口径（两装配函数同形参）。
                         prev_leaf_summary=_prev_leaf_tail_for(leaf),
                     )
