@@ -244,10 +244,13 @@ def _reject_binary_text_ext(content: bytes) -> None:
 
     ✅ 修复（2026-09-26，F1）：旧实现二进制检测只在「扩展名未知」时执行，
     ``.exe`` 改名 ``.txt`` 会绕过，经 ``utf-8(errors="ignore")`` 兜底解码成
-    乱码入库、污染事实提取。这里对文本扩展名同样做防护：以**原始字节**判定
-    为主（含 NUL / 高比例控制字符即疑似二进制）—— 避免 gbk 把含 0x00 的二进制
-    静默解成带 ``U+0000`` 的"文本"而漏过。仅当严格解码成功且解码结果**不含
-    NUL** 才确为文本放行。
+    乱码入库、污染事实提取。这里对文本扩展名同样做防护，判据分两层：
+
+      · **强文件头**按原始字节识别（PDF/ZIP/OLE/图片等结构唯一特征）；
+      · 其余按**解码后文本**判定 —— UTF-16 先严格解码并过码点质量闸门
+        （见 `_utf16_text_is_plausible`），兜底 ``utf-8-sig``/``gbk`` 严格
+        解码且结果不含 NUL 才算文本。原始字节 NUL/控制字符分布
+        （`_looks_binary`）只用于决定是否进入兜底复核，不用于否掉 UTF-16。
     """
     _binary_kind = _binary_format_for_text_guard(content)
     if _binary_kind:
@@ -1936,6 +1939,73 @@ def _fill_formula_placeholders(rows: list, formula_rows: list) -> list:
     return out
 
 
+def _caption_row_indexes(rows: list, refs: list[str], width: int) -> set[int]:
+    """识别「跨满表宽的单行合并区」为标题行（0-based 行号集合）。
+
+    ✅ R180-补（2026-11-07）：合并表头展开后两列同值，`_is_header_like`
+    要求 ≥2 个不同值，必然判不过 → 表头退化为「列1/列2」，用户报的原始
+    缺陷仍在。这里**只在文件确实存在 `<mergeCells>` 时**把「A1 起、跨满
+    当前表宽、且只占一行」的合并区当作 caption：它不参与表头判定，表头
+    交给它的下一行（无下一行则走通用表头）。
+
+    刻意不动的两类（保持现状）：
+      · 跨行合并（如 A1:A3 竖排）——那是分组列，不是标题；
+      · 单行但只跨部分列（如 4 列表格合并 A1:B1）——可能是真实多级表头
+        的一段，不能吞成 caption，否则会误吞正常表头。
+    """
+    out: set[int] = set()
+    if not rows or not refs or width <= 1:
+        return out
+    try:
+        from openpyxl.utils import range_boundaries
+    except Exception:
+        return out
+    for ref in refs:
+        try:
+            min_col, min_row, max_col, max_row = range_boundaries(ref)
+        except Exception:
+            continue
+        if min_row != max_row or min_col != 1 or max_col != width:
+            continue
+        r0 = min_row - 1
+        if r0 < 0 or r0 >= len(rows):
+            continue
+        row = rows[r0]
+        value = row[0] if row else None
+        if value is None or str(value).strip() == "":
+            continue
+        out.add(r0)
+    return out
+
+
+def _render_sheet_rows(rows: list, caption_rows: set[int]) -> list[str]:
+    """按标题行切分渲染：caption 独占一行，其余行分段走表头识别。
+
+    标题行直接输出为独立正文行（不进入 Markdown 表格、不参与表头判定）；
+    标题行之后的下一段重新调用 `render_table_with_header`，因此「表头取
+    标题行的下一行」这一语义自然成立。无标题行时与旧输出完全一致。
+    """
+    if not rows:
+        return []
+    if not caption_rows:
+        return render_table_with_header(rows)
+    parts: list[str] = []
+    segment: list = []
+    for i, row in enumerate(rows):
+        if i in caption_rows:
+            if segment:
+                parts.extend(render_table_with_header(segment))
+                segment = []
+            vals = [str(v).strip() for v in row if v is not None and str(v).strip()]
+            if vals:
+                parts.append("；".join(dict.fromkeys(vals)))
+        else:
+            segment.append(list(row))
+    if segment:
+        parts.extend(render_table_with_header(segment))
+    return parts
+
+
 def _parse_excel(content: bytes, ftype: str, diag: dict | None = None) -> str:
     """Excel 解析：逐工作表输出 Markdown 表格（保留工作表名与表头）。
 
@@ -2012,8 +2082,13 @@ def _parse_excel(content: bytes, ftype: str, diag: dict | None = None) -> str:
                 if _meta.get("merges"):
                     rows = _expand_merged_cells(rows, _meta["merges"])
                 parts.append(f"【工作表：{ws.title}】")
+                # ✅ R180-补：跨满表宽的单行合并区按 caption 输出，不参与
+                #    表头判定（否则展开后同值行必然被 `_is_header_like` 拒掉，
+                #    表头退化回「列1/列2」）。仅在确有 <mergeCells> 时生效。
+                _width = max(len(r) for r in rows)
+                _captions = _caption_row_indexes(rows, _meta.get("merges") or [], _width)
                 # ✅ 增强：表头智能识别（与 CSV 同口径，2026-09-17）
-                parts.extend(render_table_with_header(rows))
+                parts.extend(_render_sheet_rows(rows, _captions))
                 # ✅ 性能修复（2026-09-26，F3）：仅在读满上限（len(rows)==上限）
                 #    时才访问 ws.max_row —— 该属性在缺 <dimension> 元数据的文件里
                 #    会触发整表扫描。小表未读满上限则不触发扫描，避免无谓开销。

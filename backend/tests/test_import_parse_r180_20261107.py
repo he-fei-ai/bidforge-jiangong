@@ -37,6 +37,7 @@
 
 from __future__ import annotations
 
+import hashlib
 import io
 
 import app.routers.upload_outline as uo
@@ -244,8 +245,8 @@ class TestUploadOutlineInterface:
 # 6 · Excel 合并单元格：左上角值必须展开（表头不得退化）
 # ---------------------------------------------------------------------------
 class TestExcelMergedCells:
-    def test_single_row_merge_expands_header_value(self):
-        """A1:B1 合并：A1 的值必须展开到 B1（旧输出 `| 项目 |  |`）。"""
+    def test_single_row_full_width_merge_rendered_as_caption(self):
+        """A1:B1 跨满表宽的单行合并 → caption（不再输出「列1/列2」当表头）。"""
 
         def setup(ws):
             ws["A1"] = "项目"
@@ -254,11 +255,69 @@ class TestExcelMergedCells:
             ws["B2"] = 2
 
         text, _ = fp.parse_file_content_ex(_xlsx_with(setup), "a.xlsx")
-        assert "| 项目 | 项目 |" in text, f"合并表头未展开:\n{text}"
-        assert "| 项目 |  |" not in text
+        lines = text.splitlines()
+        assert "项目" in lines, f"合并标题未作为独立标题行输出:\n{text}"
+        assert "| 项目 | 项目 |" not in text, f"标题被当成数据行重复展开:\n{text}"
+        assert "| 1 | 2 |" in text
+
+    def test_caption_followed_by_real_header(self):
+        """单行合并大标题 + 紧跟真实表头：表头必须是真实列名。"""
+
+        def setup(ws):
+            ws["A1"] = "工程概况"
+            ws.merge_cells("A1:C1")
+            ws["A2"] = "名称"
+            ws["B2"] = "金额"
+            ws["C2"] = "备注"
+            ws["A3"] = "甲"
+            ws["B3"] = 1
+            ws["C3"] = "无"
+
+        text, _ = fp.parse_file_content_ex(_xlsx_with(setup), "a.xlsx")
+        lines = text.splitlines()
+        assert "工程概况" in lines, f"标题行丢失:\n{text}"
+        assert "| 名称 | 金额 | 备注 |" in text, f"真实表头未被识别:\n{text}"
+        assert "列1" not in text
+
+    def test_caption_in_middle_position(self):
+        """中间位置的跨满表宽单行合并：独立成行，不参与表头判定。"""
+
+        def setup(ws):
+            ws["A1"] = "项目"
+            ws["B1"] = "金额"
+            ws["C1"] = "备注"
+            ws["A2"] = "甲"
+            ws["B2"] = 1
+            ws["C2"] = "无"
+            ws["A3"] = "第二季度"
+            ws.merge_cells("A3:C3")
+            ws["A4"] = "乙"
+            ws["B4"] = 2
+            ws["C4"] = "有"
+
+        text, _ = fp.parse_file_content_ex(_xlsx_with(setup), "a.xlsx")
+        lines = text.splitlines()
+        assert "第二季度" in lines, f"中间标题未独立成行:\n{text}"
+        assert "| 第二季度 | 第二季度 | 第二季度 |" not in text, f"标题被当成数据行:\n{text}"
+        assert "| 项目 | 金额 | 备注 |" in text
+        assert "| 乙 | 2 | 有 |" in text
+
+    def test_partial_width_merge_not_treated_as_caption(self):
+        """4 列表格里合并 A1:B1：只跨部分列，必须保持原状（不得吞成标题）。"""
+
+        def setup(ws):
+            ws["A1"] = "项目"
+            ws.merge_cells("A1:B1")
+            ws["A2"] = 1
+            ws["B2"] = 2
+            ws["C2"] = 3
+            ws["D2"] = 4
+
+        text, _ = fp.parse_file_content_ex(_xlsx_with(setup), "a.xlsx")
+        assert "| 项目 | 项目 |  |  |" in text, f"部分列合并不应作为标题:\n{text}"
 
     def test_cross_row_merge_expands_anchor_downwards(self):
-        """A1:A3 纵向合并：A1 的值必须展开到 A2/A3。"""
+        """A1:A3 纵向合并：A1 的值必须展开到 A2/A3（现状不得改变）。"""
 
         def setup(ws):
             ws["A1"] = "项目"
@@ -270,33 +329,25 @@ class TestExcelMergedCells:
         text, _ = fp.parse_file_content_ex(_xlsx_with(setup), "a.xlsx")
         assert "| 项目 | 1 |" in text and "| 项目 | 2 |" in text, f"纵向合并未展开:\n{text}"
 
-    def test_merged_title_plus_real_header(self):
-        """合并大标题 + 真正的表头行：表头识别必须落在第二行。"""
-
-        def setup(ws):
-            ws["A1"] = "项目"
-            ws.merge_cells("A1:B1")
-            ws["A2"] = "名称"
-            ws["B2"] = "金额"
-            ws["A3"] = "甲"
-            ws["B3"] = 1
-
-        text, _ = fp.parse_file_content_ex(_xlsx_with(setup), "a.xlsx")
-        assert "| 名称 | 金额 |" in text, f"真实表头未被识别:\n{text}"
-        assert "项目" in text, "合并区的标题值被静默丢弃"
-
-    def test_no_merge_output_unchanged(self):
-        """无合并区：输出不得被新逻辑改写（零回归锁）。"""
+    def test_no_merge_output_byte_identical(self):
+        """无合并区：固定样本输出与改动前逐字节一致（sha256 对照）。"""
 
         def setup(ws):
             ws["A1"] = "项目"
             ws["B1"] = "金额"
-            ws["A2"] = 1
-            ws["B2"] = 2
+            ws["C1"] = "备注"
+            ws["A2"] = "甲"
+            ws["B2"] = 1000
+            ws["C2"] = "无"
+            ws["A3"] = "乙"
+            ws["B3"] = 2000
+            ws["C3"] = "有"
 
         text, _ = fp.parse_file_content_ex(_xlsx_with(setup), "a.xlsx")
-        assert "| 项目 | 金额 |" in text
-        assert "列1" not in text
+        # 该 sha256 由改动前（HEAD adc3fec）同一固定样本实测得到。
+        assert hashlib.sha256(text.encode("utf-8")).hexdigest() == (
+            "ce4877fb9d3e3f0b26e75bcc95e97bac7bcd82667a33f1bcddda666070699226"
+        ), f"无合并区输出发生漂移:\n{text}"
 
     def test_read_only_workbook_kept(self, monkeypatch):
         """大文件保护：必须保持 read_only=True（不得整表非只读驻留内存）。"""
