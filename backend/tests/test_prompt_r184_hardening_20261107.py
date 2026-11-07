@@ -238,3 +238,106 @@ def test_get_prompt_no_missing_when_db_template_var_provided(monkeypatch):
     rendered = prompt_cache.get_prompt("audit_scene_system", new_var="已提供")
     assert "已提供" in rendered
     assert prompt_metrics.get_snapshot()["render_missing_vars"] == {}
+
+
+# ---------------------------------------------------------------------------
+# 4. G1 同类面：其余「书写形式 ↔ 匹配方式」规则锁
+#
+# G1 的根因不是「漏了一个词」，而是标签书写形式与匹配器之间没有任何约束。
+# MATERIAL_LABELS 已由上方用例锁住；本节把同一类风险一次锁完：
+#   · CONTEXT_PRIORITY —— 靠**子串**匹配裸标签，未登记的生产段落会落到默认
+#     最低优先级 9（预算开关开启时被最先削减，且没有任何用例会红）；
+#   · SENSITIVE/_MIXED 集合 —— 与 MATERIAL_LABELS 共用 startswith 匹配器；
+#   · SHARED_* —— 靠大小写敏感的 `startswith("SHARED_")` 识别，注册表键必须
+#     是规范大写形态，否则运行时既不解析也不告警。
+# ---------------------------------------------------------------------------
+def _real_content_context_labels() -> list[str]:
+    """真实正文装配器（分层版，可选段全开）产出的段标签（保留生产书写形式）。"""
+    from app.routers._chart_pipeline import build_chart_quota_hint
+    from app.services.content_checkpoint import build_chapter_checkpoint_block
+    from app.services.content_runtime import (
+        build_chapter_extras_block,
+        build_chapter_layered_messages,
+    )
+
+    _messages, user_content = build_chapter_layered_messages(
+        sys_prompt="S",
+        scheme={"name": "某项目专项方案", "type": "施工组织设计"},
+        project_brief="项目位于某市。",
+        content_scope="土方开挖",
+        parent_chain="1 总则",
+        parent_points=["1 总则 — 说明"],
+        sibling_lines="1.2 编制说明",
+        section_number="1.1",
+        leaf={"title": "编制依据", "description": "说明依据"},
+        word_budget=1200,
+        word_budget_hint="约1200字",
+        prev_sibling_summary="上一节结尾。",
+        prev_leaf_summary="前一章结尾。",
+        facts_text="混凝土 C30。",
+        eff_standard="precise",
+        knowledge_text="企业工艺标准。",
+        chapter_extras=build_chapter_extras_block(
+            section_number="1.1",
+            standards_text="GB 50300",
+            subheading_rule="1.1.1",
+            chapter_checkpoint_block=build_chapter_checkpoint_block(
+                "basis", is_hazardous=False, include_elements=True
+            ),
+        ),
+        chart_quota_hint=build_chart_quota_hint({}, word_budget=1200),
+        chapter_facts_text="层高 3.6m。",
+    )
+    _, segs, _ = split_labeled_segments(user_content)
+    return [s["label"] for s in segs]
+
+
+def test_all_production_context_labels_have_explicit_priority():
+    """规则锁：真实正文上下文的每一段都不得落到默认最低优先级。"""
+    from app.services.prompt_governance import _DEFAULT_PRIORITY, segment_priority_of
+
+    labels = _real_content_context_labels()
+    assert {"方案名称", "全局事实变量", "项目知识库素材"} <= {l.split("（")[0].split("：")[0] for l in labels}, labels
+    unresolved = [(l, segment_priority_of(l)) for l in labels if segment_priority_of(l) == _DEFAULT_PRIORITY]
+    assert not unresolved, (
+        "以下生产段落未登记 CONTEXT_PRIORITY（预算开启时被最先削减）：" f"{unresolved}"
+    )
+
+
+def test_material_labels_are_explicitly_registered_in_priority_map():
+    """规则锁：MATERIAL_LABELS 每一项都必须**显式**登记优先级（禁止靠巧合命中）。"""
+    from app.services.prompt_governance import CONTEXT_PRIORITY
+
+    missing = [label for label in MATERIAL_LABELS if label not in CONTEXT_PRIORITY]
+    assert not missing, f"资料标签未显式登记优先级：{missing}"
+
+
+def test_material_label_sets_share_bare_written_form():
+    """规则锁：共用 startswith 匹配器的三个集合书写形式必须一致（裸标签）。"""
+    from app.services.prompt_governance import (
+        _MIXED_MATERIAL_LABELS,
+        SENSITIVE_MATERIAL_LABELS,
+    )
+
+    for label in MATERIAL_LABELS + SENSITIVE_MATERIAL_LABELS + _MIXED_MATERIAL_LABELS:
+        assert "【" not in label and "】" not in label, label
+        assert "：" not in label and ":" not in label, label
+    # 敏感集合是资料集合的子集：新增词条若写成带装饰的形式，前缀匹配会静默失效
+    for label in SENSITIVE_MATERIAL_LABELS + _MIXED_MATERIAL_LABELS:
+        assert any(label.startswith(pfx) for pfx in MATERIAL_LABELS), label
+
+
+def test_shared_reference_written_form_is_locked():
+    """规则锁：SHARED_* 靠大小写敏感前缀识别，注册表键必须是规范大写形态。"""
+    import re
+
+    from app.services.ai.prompts._registry import _ALL_PROMPTS, _is_shared_reference
+
+    shared_keys = sorted(k for k in _ALL_PROMPTS if k.startswith("SHARED_"))
+    assert shared_keys, "注册表中没有任何 SHARED_* 共享片段（前缀识别器已失效？）"
+    for key in shared_keys:
+        assert re.fullmatch(r"SHARED_[A-Z0-9_]+", key), key
+        assert _is_shared_reference(key), key
+    # 反证：非规范书写不会被识别为共享片段（说明「书写形式」确实是硬约束）
+    assert not _is_shared_reference("Shared_SCOPE_RULES")
+    assert not _is_shared_reference("shared_scope_rules")

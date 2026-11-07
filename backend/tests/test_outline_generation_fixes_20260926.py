@@ -150,7 +150,103 @@ class TestSchemeBasisInjection:
 # =========================================================================
 # 2. render 调用点 ↔ 模板变量契约 的漂移护栏（系统性防复发）
 # =========================================================================
-def _resolve_star_expr(expr, tree, visiting: frozenset, depth: int = 0):
+_FUNCTION_INDEX_CACHE: dict | None = None
+
+
+def _function_index() -> dict:
+    """全 app 树函数名 → 函数节点索引（跨模块 helper 解析用，只读、进程内缓存）。
+
+    ✅ 2026-11-07（G7 · 属性访问形态补齐）：``_sh.render(..., **helper(...))``
+    的 helper 可能定义在**另一个模块**（如 ``_outline_review_checkpoint_kwargs``
+    调用 facade 的 ``_outline_checkpoint_kwargs``）。只看单个文件的 AST 无法
+    解析 → 会被登记成盲区，护栏等于漏掉该调用点。此索引按函数名全局收集，
+    仅用于**过近似**解析（宁可多认键，不可漏报）。
+    """
+    global _FUNCTION_INDEX_CACHE
+    if _FUNCTION_INDEX_CACHE is not None:
+        return _FUNCTION_INDEX_CACHE
+    import pathlib
+    import time as _time
+
+    import app as app_pkg
+
+    idx: dict = {}
+    root = pathlib.Path(app_pkg.__file__).parent
+    for p in sorted(root.rglob("*.py")):
+        src = None
+        for _attempt in range(10):
+            try:
+                src = p.read_text(encoding="utf-8")
+                break
+            except FileNotFoundError:
+                break
+            except OSError:
+                _time.sleep(0.1)
+        if src is None:
+            continue
+        try:
+            tree = ast.parse(src)
+        except SyntaxError:
+            continue
+        for n in ast.walk(tree):
+            if isinstance(n, (ast.FunctionDef, ast.AsyncFunctionDef)):
+                idx.setdefault(n.name, n)
+    _FUNCTION_INDEX_CACHE = idx
+    return idx
+
+
+def _dotted_name(node) -> str:
+    if isinstance(node, ast.Name):
+        return node.id
+    if isinstance(node, ast.Attribute):
+        return _dotted_name(node.value) + "." + node.attr
+    return ""
+
+
+def _render_call_forms(tree) -> tuple[set, set]:
+    """识别本文件里「提示词 render」的两种书写形态。
+
+    返回 ``(直接函数名集合, 可再导出 render 的模块别名集合)``：
+      · ``render(...)`` —— 从注册表直接导入（含别名）；
+      · ``_sh.render(...)`` 等 —— 经 ``app.routers.sse_handlers`` /
+        ``sse_checkpoint`` facade 转发（facade 从注册表 re-export）。
+
+    ⚠️ 只认 facade 别名，不认任意对象的 ``.render`` —— 避免把模板引擎
+    等无关方法当成提示词调用点（误报会污染漏传结论）。
+    """
+    direct = {"render"}
+    modules: set = set()
+    facade_modules = {"app.routers.sse_handlers", "app.routers.sse_checkpoint"}
+    for n in ast.walk(tree):
+        if isinstance(n, ast.Import):
+            for a in n.names:
+                if a.name in facade_modules:
+                    modules.add(a.asname or a.name.rsplit(".", 1)[-1])
+        elif isinstance(n, ast.ImportFrom) and (n.module or "").startswith("app.routers"):
+            for a in n.names:
+                if a.name in ("sse_handlers", "sse_checkpoint"):
+                    modules.add(a.asname or a.name)
+        elif isinstance(n, ast.ImportFrom) and (n.module or "").endswith("ai.prompts._registry"):
+            for a in n.names:
+                if a.name == "render":
+                    direct.add(a.asname or "render")
+    return direct, modules
+
+
+def _is_prompt_render(func, forms: tuple[set, set]) -> bool:
+    direct, modules = forms
+    if isinstance(func, ast.Name):
+        return func.id in direct
+    if isinstance(func, ast.Attribute) and func.attr == "render":
+        receiver = func.value
+        if isinstance(receiver, ast.Name):
+            return receiver.id in modules
+        dotted = _dotted_name(receiver)
+        return dotted.endswith("sse_handlers") or dotted.endswith("sse_checkpoint")
+    return False
+
+
+def _resolve_star_expr(expr, tree, visiting: frozenset, depth: int = 0, defs: dict | None = None):
     """✅ R38 D7：静态解析 ``render(..., **expr)`` 展开的键集合。
 
     旧实现（R38 报告 D7）把所有 ``**`` 展开调用点**整体跳过**，造成 5 个
@@ -168,15 +264,19 @@ def _resolve_star_expr(expr, tree, visiting: frozenset, depth: int = 0):
     if isinstance(expr, ast.Dict):
         return {k.value for k in expr.keys if isinstance(k, ast.Constant) and isinstance(k.value, str)}
     if isinstance(expr, ast.IfExp):
-        a = _resolve_star_expr(expr.body, tree, visiting, depth + 1)
-        b = _resolve_star_expr(expr.orelse, tree, visiting, depth + 1)
+        a = _resolve_star_expr(expr.body, tree, visiting, depth + 1, defs=defs)
+        b = _resolve_star_expr(expr.orelse, tree, visiting, depth + 1, defs=defs)
         return None if (a is None or b is None) else (a | b)
-    if isinstance(expr, ast.Call) and isinstance(expr.func, ast.Name):
-        fname = expr.func.id
+    if isinstance(expr, ast.Call) and isinstance(expr.func, (ast.Name, ast.Attribute)):
+        fname = expr.func.id if isinstance(expr.func, ast.Name) else expr.func.attr
         fn = next(
             (n for n in ast.walk(tree) if isinstance(n, (ast.FunctionDef, ast.AsyncFunctionDef)) and n.name == fname),
             None,
         )
+        external = False
+        if fn is None and defs:
+            fn = defs.get(fname)
+            external = fn is not None
         if fn is None or fname in visiting:
             return set() if fname in visiting else None
         keys: set = set()
@@ -192,24 +292,30 @@ def _resolve_star_expr(expr, tree, visiting: frozenset, depth: int = 0):
                     ):
                         keys.add(t.slice.value)
         for sub in ast.walk(fn):
-            if (
-                isinstance(sub, ast.Call)
-                and isinstance(sub.func, ast.Name)
-                and sub.func.id not in visiting
-                and sub.func.id != fname
-            ):
-                # 只展开**同模块有定义**的嵌套调用；getattr/bool 等内建或
-                # 外部调用不产生 kwargs 键，直接跳过（否则 helper 内部任何
-                # 普通函数调用都会把整条解析误判为盲区）
-                if not any(
-                    isinstance(n, (ast.FunctionDef, ast.AsyncFunctionDef)) and n.name == sub.func.id
-                    for n in ast.walk(tree)
-                ):
+            if not isinstance(sub, ast.Call) or not isinstance(sub.func, (ast.Name, ast.Attribute)):
+                continue
+            subname = sub.func.id if isinstance(sub.func, ast.Name) else sub.func.attr
+            if subname in visiting or subname == fname:
+                continue
+            # 只展开**本文件或全局索引里有定义**的嵌套调用；getattr/bool 等
+            # 内建或外部调用不产生 kwargs 键，直接跳过（否则 helper 内部任何
+            # 普通函数调用都会把整条解析误判为盲区）
+            known_local = any(
+                isinstance(n, (ast.FunctionDef, ast.AsyncFunctionDef)) and n.name == subname
+                for n in ast.walk(tree)
+            )
+            known_external = bool(defs and subname in defs)
+            if not (known_local or known_external):
+                continue
+            inner = _resolve_star_expr(sub, tree, visiting | {fname}, depth + 1, defs=defs)
+            if inner is None:
+                if external:
+                    # 当前函数来自**另一个模块**：其内部不可解析的调用属于
+                    # 跨模块黑盒，不代表本调用点的 kwargs 无法判定。过近似
+                    # 跳过（宁可少认键，也不把整条误判为盲区污染快照）。
                     continue
-                inner = _resolve_star_expr(sub, tree, visiting | {fname}, depth + 1)
-                if inner is None:
-                    return None
-                keys |= inner
+                return None
+            keys |= inner
         return keys
     if isinstance(expr, ast.Name):
         var = expr.id
@@ -239,17 +345,33 @@ def _resolve_star_expr(expr, tree, visiting: frozenset, depth: int = 0):
     return None
 
 
-def _scan_missing_render_kwargs(source: str, filename: str, blindspots: list | None = None) -> list[str]:
-    """AST 扫描：render("key", ...) 调用点是否漏传模板声明的用户变量。
+def _scan_missing_render_kwargs(
+    source: str,
+    filename: str,
+    blindspots: list | None = None,
+    defs: dict | None = None,
+    seen: list | None = None,
+) -> list[str]:
+    """AST 扫描：提示词 ``render("key", ...)`` 调用点是否漏传模板声明变量。
+
+    ✅ 2026-11-07（G7）：除 ``render(...)`` 外，同时识别 facade 属性访问
+    形态 ``_sh.render(...)`` / ``sse_handlers.render(...)``（见
+    :func:`_render_call_forms`）；``**helper(...)`` 的 helper 允许跨模块
+    解析（``defs`` 由 :func:`_function_index` 提供），避免把同源 helper
+    误记成盲区。
 
     ✅ R38 D7：``**`` 展开不再整体跳过 —— 先走 :func:`_resolve_star_expr`
     静态解析合并进 supplied；真正解不了的才记入 blindspots（由快照护栏
     ``test_dynamic_blindspots_frozen`` 锁死，新增盲区即红）。
+
+    :param seen: 传入 list 时记录**实际被扫描到的模板 key**（用于证明
+        属性形态调用点确实进入护栏，而非被静默跳过）。
     """
     out: list[str] = []
     tree = ast.parse(source)
+    forms = _render_call_forms(tree)
     for node in ast.walk(tree):
-        if not (isinstance(node, ast.Call) and isinstance(node.func, ast.Name) and node.func.id == "render"):
+        if not (isinstance(node, ast.Call) and _is_prompt_render(node.func, forms)):
             continue
         if not node.args or not isinstance(node.args[0], ast.Constant):
             if blindspots is not None:
@@ -258,11 +380,13 @@ def _scan_missing_render_kwargs(source: str, filename: str, blindspots: list | N
         key = node.args[0].value
         if not isinstance(key, str):
             continue
+        if seen is not None:
+            seen.append(key)
         supplied, dynamic = set(), False
         dynamic_keys: set = set()
         for kw in node.keywords:
             if kw.arg is None:
-                resolved = _resolve_star_expr(kw.value, tree, frozenset())
+                resolved = _resolve_star_expr(kw.value, tree, frozenset(), defs=defs)
                 if resolved is None:
                     dynamic = True  # 确实无法静态判定 → 跳过并登记
                     if blindspots is not None:
@@ -302,6 +426,58 @@ class TestRenderCallSiteContract:
         # 模板需要的真实变量没给全 → 必须报（旧实现遇 ** 展开直接跳过，零覆盖）
         assert _scan_missing_render_kwargs(src, "snippet.py")
 
+    def test_guard_detects_attribute_render_missing_variable(self):
+        """✅ G7 自检：facade 属性形态 `_sh.render` 同样进入漏传判定。"""
+        src = (
+            "import app.routers.sse_handlers as _sh\n"
+            "def f():\n"
+            '    return _sh.render("outline_short_system", scheme_name="x")\n'
+        )
+        missing = _scan_missing_render_kwargs(src, "snippet.py")
+        assert missing and "scheme_basis" in missing[0], missing
+
+    def test_guard_ignores_unrelated_render_method(self):
+        """反向自检：非 facade 对象的 `.render` 不得被当成提示词调用点。"""
+        src = (
+            "class _Panel:\n"
+            "    def render(self, *a, **k):\n"
+            "        return ''\n"
+            "def f(panel):\n"
+            '    return panel.render("outline_short_system", scheme_name="x")\n'
+        )
+        assert _scan_missing_render_kwargs(src, "snippet.py") == []
+
+
+class TestAttributeRenderCoverage:
+    """✅ G7：`_sh.render` 三个真实调用点必须被护栏扫到，注入假调用点必须被抓。
+
+    护栏的价值 = 覆盖面 × 判定力。旧实现只认 ``ast.Name("render")``，
+    `_sse_outline_review.py` 的 3 处 `_sh.render` 因此完全在护栏之外。
+    """
+
+    REL = "routers/_sse_outline_review.py"
+
+    def _source(self) -> str:
+        import pathlib
+
+        import app as app_pkg
+
+        return (pathlib.Path(app_pkg.__file__).parent / "routers" / "_sse_outline_review.py").read_text(
+            encoding="utf-8"
+        )
+
+    def test_real_attribute_sites_are_scanned_and_pass(self):
+        seen: list = []
+        bad = _scan_missing_render_kwargs(self._source(), self.REL, defs=_function_index(), seen=seen)
+        assert {"outline_patch_system", "outline_review_system", "outline_feedback_system"} <= set(seen), seen
+        assert not bad, bad
+
+    def test_injected_attribute_site_is_detected(self):
+        """检测器自检（只读，不写盘）：真实源码副本追加未登记调用点 → 必须报。"""
+        src = self._source() + '\n\n_sh.render("outline_short_system", scheme_name="x")\n'
+        bad = _scan_missing_render_kwargs(src, self.REL, defs=_function_index())
+        assert any("outline_short_system" in b and "scheme_basis" in b for b in bad), bad
+
 
 class TestRenderDynamicBlindspots:
     """✅ R38 D7：动态展开盲区快照锁 —— 存量无法静态判定的 render 调用点
@@ -338,7 +514,7 @@ class TestRenderDynamicBlindspots:
             except (FileNotFoundError, OSError):
                 continue
             try:
-                _scan_missing_render_kwargs(src, rel, blindspots=blind)
+                _scan_missing_render_kwargs(src, rel, blindspots=blind, defs=_function_index())
             except SyntaxError:
                 continue
         return blind
@@ -401,7 +577,7 @@ class TestRenderDynamicBlindspots:
                 continue
             scanned.add(rel)
             try:
-                bad += _scan_missing_render_kwargs(src, rel)
+                bad += _scan_missing_render_kwargs(src, rel, defs=_function_index())
             except SyntaxError:
                 continue
         assert not (required - scanned), "护栏未能扫描到关键模块（会退化为空断言）：" + ", ".join(
