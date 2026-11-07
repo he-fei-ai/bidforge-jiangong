@@ -379,6 +379,62 @@ describe("导出文档 Tab · 失败与降级的可见性", () => {
       expect(b?.disabled ?? false).toBe(false);
     });
   }, 60000);
+
+  /**
+   * ✅ R183-补（2026-11-07）：「没检查」不得长得和「检查通过」一样。
+   * 严格模式结构自检崩溃时后端仍放行导出，只在 X-Numbering-Check 里回传
+   * checked=false + 原因；导出页必须常驻显示该告警（不是转瞬即逝的 toast）。
+   */
+  it("X-Numbering-Check 报 checked=false：导出页常驻提示「自检未执行」", async () => {
+    apiDefaults["exportApi.docx"] = {
+      data: new Blob(["x"]),
+      headers: {
+        "x-export-filename": encodeURIComponent("a.docx"),
+        "x-numbering-check": encodeURIComponent(
+          JSON.stringify({
+            checked: false,
+            consistent: null,
+            mismatched: null,
+            reason: "结构自检执行异常：模拟崩溃",
+          }),
+        ),
+      },
+    };
+    renderPage();
+    await gotoExportTab();
+    fireEvent.click(buttonByText("导出 DOCX")!);
+    await waitFor(() => expect(apiCalls["exportApi.docx"]?.length).toBe(1));
+    await waitFor(() =>
+      expect(screen.getAllByText(/编号结构自检未执行/).length).toBeGreaterThan(0),
+    );
+    expect(screen.getByText(/模拟崩溃/)).toBeTruthy();
+  }, 60000);
+
+  it("X-Numbering-Check 报 checked=true / 头缺失：不得出现「自检未执行」告警", async () => {
+    apiDefaults["exportApi.docx"] = {
+      data: new Blob(["x"]),
+      headers: {
+        "x-export-filename": encodeURIComponent("a.docx"),
+        "x-numbering-check": encodeURIComponent(
+          JSON.stringify({ checked: true, consistent: true, mismatched: 0, chapters: 3 }),
+        ),
+      },
+    };
+    renderPage();
+    await gotoExportTab();
+    fireEvent.click(buttonByText("导出 DOCX")!);
+    await waitFor(() => expect(apiCalls["exportApi.docx"]?.length).toBe(1));
+    expect(screen.queryByText(/编号结构自检未执行/)).toBeNull();
+
+    // 非严格模式：后端不发该头（旧行为零提示不变）
+    apiDefaults["exportApi.docx"] = {
+      data: new Blob(["x"]),
+      headers: { "x-export-filename": encodeURIComponent("b.docx") },
+    };
+    fireEvent.click(buttonByText("导出 DOCX")!);
+    await waitFor(() => expect(apiCalls["exportApi.docx"]?.length).toBe(2));
+    expect(screen.queryByText(/编号结构自检未执行/)).toBeNull();
+  }, 60000);
 });
 
 // =========================================================================

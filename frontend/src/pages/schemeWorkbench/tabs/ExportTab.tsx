@@ -24,6 +24,8 @@ import { ExportOutlined, FilePdfOutlined, ReloadOutlined } from "@ant-design/ico
 import type { ExportPresetItem, ExportCacheStatus } from "../useExportPresets";
 import type { TreeNode } from "../outlineTreeModel";
 import type { ExportGateResult } from "../../../utils/exportCharts";
+import type { NumberingCheckInfo } from "../../../utils/exportResponse";
+import { numberingCheckWarning } from "../../../utils/exportResponse";
 import { EXPORT_STAGE_LABEL, EXPORT_STAGE_ORDER } from "../exportShared";
 
 const { Text } = Typography;
@@ -37,6 +39,8 @@ export interface ExportTabProps {
   exportPct: number;
   exportStage: "idle" | "charts" | "docx" | "pdf";
   exportGate: ExportGateResult;
+  /** ✅ R183-补：严格模式编号结构自检结论；`checked=false` 时常驻告警。 */
+  numberingCheck: NumberingCheckInfo | null;
   handleExport: (format?: "docx" | "pdf") => Promise<void>;
   handleCancelExport: () => void;
   // 格式预设库
@@ -68,6 +72,7 @@ export function ExportTab({
   exportPct,
   exportStage,
   exportGate,
+  numberingCheck,
   handleExport,
   handleCancelExport,
   exportPresets,
@@ -713,6 +718,18 @@ export function ExportTab({
               </div>
             </div>
           }
+          style={{ marginBottom: 12 }}
+        />
+      )}
+      {/* ✅ R183-补（2026-11-07）：严格模式的编号结构自检没跑成时，不能只留
+              「导出成功」一态 —— 该告警常驻在导出按钮上方，与
+              `exportGate.highIssueCount` 的非阻断提示同型（不限制导出）。 */}
+      {numberingCheck && !numberingCheck.checked && (
+        <Alert
+          type="warning"
+          showIcon
+          message="编号结构自检未执行（严格模式）"
+          description={numberingCheckWarning(numberingCheck) ?? undefined}
           style={{ marginBottom: 12 }}
         />
       )}

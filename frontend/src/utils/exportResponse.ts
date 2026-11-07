@@ -515,3 +515,73 @@ export function parseExportOverride(headers: unknown): string | null {
   const signal = raw.trim().toLowerCase();
   return signal || null;
 }
+
+// =========================================================================
+// ✅ R183-补（2026-11-07）：严格模式「编号结构自检未执行」必须对用户可见
+//
+// 后端严格模式本应在导出前做两道校验：正文编号（validate_scheme_numbering_
+// consistency）+ 结构编号（只读复用 sections._outline_structure_report）。
+// 后者崩溃或符号不可用时，后端**不阻断导出**（自检崩了不能让用户导不出），
+// 只在 200 响应头 `X-Numbering-Check` 里回传 `checked=false` + 原因。
+// 若前端不消费该头，界面就只剩「导出成功 / 导出失败」二态 ——
+// 「没检查」与「检查通过」长得一模一样，正是本仓要消除的隐性缺陷。
+//
+// 注意：该头**只在严格模式**下发（非严格模式返回 `{}` → 无头）。因此
+// 「头缺失」= 本来就没承诺检查，**不得**据此发提示；只有头明确说
+// `checked=false` 才提示。这样既满足「没检查必须显性」，也不误报。
+// =========================================================================
+
+/** `X-Numbering-Check` 回传的编号结构自检结论（后端百分号编码 JSON）。 */
+export interface NumberingCheckInfo {
+  /** 自检是否真的执行了。false = 没跑成（崩溃 / 符号不可用），不是「结构一致」。 */
+  checked: boolean;
+  /** 结构是否一致；未执行时为 null（不得当成 true）。 */
+  consistent: boolean | null;
+  /** 存储编号与树位置不一致的章节数；未执行时为 null。 */
+  mismatched?: number | null;
+  /** 未执行原因（checked=false 时后端给出）。 */
+  reason?: string;
+}
+
+/**
+ * 解析 `X-Numbering-Check`；头缺失 / 百分号解码失败 / JSON 非法 /
+ * 缺 `checked` 布尔字段一律返回 null，不抛错、不影响下载。
+ */
+export function parseNumberingCheck(headers: unknown): NumberingCheckInfo | null {
+  const raw = headerValue(headers, "x-numbering-check");
+  if (!raw) return null;
+  let decoded: string;
+  try {
+    decoded = decodeURIComponent(raw);
+  } catch {
+    return null;
+  }
+  let parsed: unknown;
+  try {
+    parsed = JSON.parse(decoded);
+  } catch {
+    return null;
+  }
+  if (typeof parsed !== "object" || parsed === null) return null;
+  const obj = parsed as Record<string, unknown>;
+  if (typeof obj.checked !== "boolean") return null;
+  return {
+    checked: obj.checked,
+    consistent: obj.consistent === true ? true : obj.consistent === false ? false : null,
+    mismatched: typeof obj.mismatched === "number" ? obj.mismatched : null,
+    reason: typeof obj.reason === "string" && obj.reason ? obj.reason : undefined,
+  };
+}
+
+/**
+ * 「编号结构自检未执行」告警文案；自检已执行（`checked=true`）返回 null。
+ *
+ * 只在 `checked === false` 时提示：严格模式声明了结构闸门，闸门没跑成
+ * 就不能让界面停留在「导出成功 = 一切正常」。非严格模式后端不发该头，
+ * 这里同样返回 null —— 不把「本来就没承诺检查」误报成异常。
+ */
+export function numberingCheckWarning(info: NumberingCheckInfo | null): string | null {
+  if (!info || info.checked) return null;
+  const reason = info.reason ? `：${info.reason}` : "";
+  return `编号结构自检未执行${reason}。本次导出已成功，但严格模式的编号结构校验未生效，结论不代表「结构一致」，建议稍后重试或检查服务日志`;
+}

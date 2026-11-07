@@ -22,9 +22,11 @@ import {
   parseExportOverride,
   parseFixStats,
   parseGlobalFactsStatus,
+  parseNumberingCheck,
   resolveExportError,
   resolveExportFilename,
 } from "../../utils/exportResponse";
+import type { NumberingCheckInfo } from "../../utils/exportResponse";
 import type { createSseBatcher } from "../../utils/sseBatcher";
 import { deepMergeExportConfig } from "./exportShared";
 import type { SchemeRecord } from "./workbenchTypes";
@@ -58,6 +60,12 @@ export interface ExportRunDeps {
   setExportPct: (v: number) => void;
   setExportPhase: (v: string) => void;
   loadCacheStatus: () => Promise<void>;
+  /**
+   * ✅ R183-补（2026-11-07）：编号结构自检结论（`X-Numbering-Check`）。
+   * `checked=false` 时必须让导出页显式显示「自检未执行」—— 否则
+   * 「没检查」与「检查通过」在界面上无法区分。非严格模式无该头 → null。
+   */
+  setNumberingCheck: (v: NumberingCheckInfo | null) => void;
 }
 
 export function useExportRun(deps: ExportRunDeps) {
@@ -77,6 +85,7 @@ export function useExportRun(deps: ExportRunDeps) {
     setExportPct,
     setExportPhase,
     loadCacheStatus,
+    setNumberingCheck,
   } = deps;
 
   // ✅ 导出图表渲染进度：上一次已刷新的整数百分比（同百分比内不再排队刷新）
@@ -91,6 +100,8 @@ export function useExportRun(deps: ExportRunDeps) {
     exportAbortRef.current = controller;
     exportingRef.current = true;
     exportPctRef.current = -1;
+    // 新一轮导出开始即撤销上一轮的「自检未执行」结论，避免陈旧告警误导本次判断。
+    setNumberingCheck(null);
     setExporting(true);
     setExportStage("charts");
     setExportPct(0);
@@ -173,6 +184,8 @@ export function useExportRun(deps: ExportRunDeps) {
         currentSchemeIdRef.current !== sid
       )
         return;
+      // ✅ R183-补：严格模式结构自检未执行时必须可见（导出页常驻告警）。
+      setNumberingCheck(parseNumberingCheck(resp.headers));
       const stats = parseChartRenderStats(resp.headers);
       if (stats) {
         const parts = chartRenderStatsParts(stats);

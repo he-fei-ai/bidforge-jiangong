@@ -16,12 +16,14 @@ import {
   globalFactsStatusWarning,
   noHttpFallbackWarning,
   noPilFallbackWarning,
+  numberingCheckWarning,
   parseChartRenderStats,
   parseExportBlock,
   parseExportDegraded,
   parseExportOverride,
   parseFixStats,
   parseGlobalFactsStatus,
+  parseNumberingCheck,
   resolveExportError,
   resolveExportFilename,
 } from "../utils/exportResponse";
@@ -612,5 +614,82 @@ describe("parseExportOverride · 覆写信号（B-15）", () => {
     expect(parseExportOverride({})).toBeNull();
     expect(parseExportOverride({ "X-Export-Override": "" })).toBeNull();
     expect(parseExportOverride(null)).toBeNull();
+  });
+});
+
+/**
+ * ✅ R183-补（2026-11-07）：严格模式「编号结构自检未执行」的头消费。
+ *
+ * 后端在自检崩溃/符号不可用时仍放行导出，只在 `X-Numbering-Check` 里回传
+ * `checked=false` + 原因。前端若不消费，界面就只有「成功/失败」二态 ——
+ * 「没检查」与「检查通过」不可区分。此处锁三件事：
+ *   ① 头可解析；② checked=false 必产警示；③ checked=true / 头缺失 零提示。
+ */
+describe("parseNumberingCheck · 编号结构自检结论（R183-补）", () => {
+  const enc = (obj: unknown) => encodeURIComponent(JSON.stringify(obj));
+
+  it("checked=false：解析出原因，且必产「自检未执行」警示", () => {
+    const info = parseNumberingCheck({
+      "X-Numbering-Check": enc({
+        checked: false,
+        consistent: null,
+        mismatched: null,
+        reason: "结构自检执行异常：模拟崩溃",
+      }),
+    });
+    expect(info).toEqual({
+      checked: false,
+      consistent: null,
+      mismatched: null,
+      reason: "结构自检执行异常：模拟崩溃",
+    });
+    const w = numberingCheckWarning(info);
+    expect(w).toContain("编号结构自检未执行");
+    expect(w).toContain("模拟崩溃");
+    expect(w).toContain("不代表");
+  });
+
+  it("checked=true：解析结论但零提示（检查跑过就不是异常）", () => {
+    const info = parseNumberingCheck({
+      "X-Numbering-Check": enc({ checked: true, consistent: true, mismatched: 0, chapters: 12 }),
+    });
+    expect(info?.checked).toBe(true);
+    expect(info?.consistent).toBe(true);
+    expect(numberingCheckWarning(info)).toBeNull();
+  });
+
+  it("头缺失（非严格模式）→ null 且零提示（不把「没承诺检查」误报成异常）", () => {
+    expect(parseNumberingCheck({})).toBeNull();
+    expect(parseNumberingCheck(null)).toBeNull();
+    expect(numberingCheckWarning(null)).toBeNull();
+  });
+
+  it("解码/JSON 非法、缺 checked 布尔字段 → null，不抛错", () => {
+    expect(parseNumberingCheck({ "X-Numbering-Check": "%%%" })).toBeNull();
+    expect(parseNumberingCheck({ "X-Numbering-Check": "%7B" })).toBeNull();
+    expect(parseNumberingCheck({ "X-Numbering-Check": enc({ consistent: true }) })).toBeNull();
+    expect(parseNumberingCheck({ "X-Numbering-Check": enc([1, 2]) })).toBeNull();
+  });
+});
+
+/** 页面接线锚点：`checked=false` 必须真的进入导出页的常驻告警。 */
+describe("导出页接线 · 编号结构自检未执行（R183-补）", () => {
+  const RAW: Record<string, string> = Object.fromEntries(
+    Object.entries(
+      import.meta.glob("../pages/**/*.{ts,tsx}", {
+        query: "?raw",
+        import: "default",
+        eager: true,
+      }) as Record<string, string>,
+    ).map(([k, v]) => [k.replace(/^\.\.\//, ""), v] as const),
+  );
+
+  it("导出 hook 解析响应头，导出 Tab 据 checked=false 渲染告警", () => {
+    expect(RAW["pages/schemeWorkbench/useExportRun.ts"]).toContain(
+      "parseNumberingCheck(resp.headers)",
+    );
+    const tab = RAW["pages/schemeWorkbench/tabs/ExportTab.tsx"] || "";
+    expect(tab).toContain("numberingCheck && !numberingCheck.checked");
+    expect(tab).toContain("numberingCheckWarning");
   });
 });

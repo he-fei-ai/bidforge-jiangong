@@ -245,6 +245,7 @@ import { FactsSegmentFailuresAlert } from "./schemeWorkbench/FactsSegmentFailure
 import { GenerationProgressCard } from "./schemeWorkbench/GenerationProgressCard.tsx";
 import { ReviewTab } from "./schemeWorkbench/tabs/ReviewTab.tsx";
 import { ExportTab } from "./schemeWorkbench/tabs/ExportTab.tsx";
+import type { NumberingCheckInfo } from "../utils/exportResponse";
 import { FactsTab } from "./schemeWorkbench/tabs/FactsTab.tsx";
 import { OutlineTab } from "./schemeWorkbench/tabs/OutlineTab.tsx";
 import { ImportTab, ImportSidePanel } from "./schemeWorkbench/tabs/ImportTab.tsx";
@@ -737,6 +738,9 @@ export default function SchemeWorkbenchPage() {
   //    旧实现失败后 issues/stats 双双清空，页面只剩「尚未预检」，用户不知道
   //    「有没有问题」；现单独标记「预检不完整」，与「确实无问题」明确区分。
   const [exportCheckIncomplete, setExportCheckIncomplete] = useState(false);
+  // ✅ R183-补（2026-11-07）：严格模式编号结构自检结论 —— `checked=false` 表示
+  //    「自检没跑成」，导出页必须与「检查通过」区分显示（后端 X-Numbering-Check）。
+  const [numberingCheck, setNumberingCheck] = useState<NumberingCheckInfo | null>(null);
   const [exportStats, setExportStats] = useState<ExportStats | null>(null);
   // ✅ G1：就绪度总检摘要（由导出预检接口一并返回，不再需要来回切换页面）
   const [exportPreflight, setExportPreflight] = useState<ExportPreflight | null>(null);
@@ -3016,6 +3020,7 @@ export default function SchemeWorkbenchPage() {
     setExportPct,
     setExportPhase,
     loadCacheStatus,
+    setNumberingCheck,
   });
 
   // ✅ 2026-11-04 拆分（G7）：导出预检 + 质量自检迁至 schemeWorkbench/useExportCheck.ts
@@ -3530,6 +3535,7 @@ export default function SchemeWorkbenchPage() {
           exportPct={exportPct}
           exportStage={exportStage}
           exportGate={exportGate}
+          numberingCheck={numberingCheck}
           handleExport={handleExport}
           handleCancelExport={handleCancelExport}
           exportPresets={exportPresets}
