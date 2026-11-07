@@ -1562,6 +1562,20 @@ async def _setup_connection(conn: aiosqlite.Connection) -> aiosqlite.Connection:
 
 async def close_db():
     global _conn, _conn_path, _db_pool_total, _read_pool_total
+    global _probe_task
+    # ✅ 2026-11-07（关闭顺序）：完整性巡检任务此前从未被取消 —— 关闭后它仍会
+    #    按周期醒来读库（sqlite3/to_thread），既拖住进程退出，也让“已关闭”的
+    #    状态名不副实。先 cancel + await，再关连接；异常一律不阻断关闭。
+    probe = _probe_task
+    _probe_task = None
+    if probe is not None and not probe.done():
+        probe.cancel()
+        try:
+            await probe
+        except asyncio.CancelledError:
+            pass
+        except Exception as e:
+            logger.debug("close_db 等待完整性巡检任务退出失败（忽略）: %s", e)
     if _conn is not None:
         # ✅ 幂等：连接可能已被外部关闭（再 close 会抛），关闭流程不应因
         #    重复关闭而中断 —— 否则启动/关闭竞态下残留的池连接永远不被清理。

@@ -501,6 +501,25 @@ async def lifespan(app: FastAPI):
     except Exception as e:
         logger.warning("关闭 AI HTTP 连接池失败（不影响关闭）: %s", e)
 
+    # ✅ 2026-11-07（关闭语义确定性收口）：在 close_db() **之前**取消 task_registry
+    #    的在途任务并落 failed 终态。终态必须先于 close_db 写入，**不得依赖**
+    #    关闭后 get_conn() 重建连接 —— 那既会留下非守护 aiosqlite 线程，也会让
+    #    “关闭即失败”退化成“关完又偷偷连回来写一行”。钩子自身失败/超时不得阻断
+    #    后续 close_db()。
+    try:
+        from app.services.ai.task_registry import shutdown_inflight
+
+        finalized = await asyncio.wait_for(
+            shutdown_inflight(reason="服务关闭，任务中断", cancel_timeout=2.0),
+            timeout=3.0,
+        )
+        if finalized:
+            logger.warning("关闭期任务收尾：%d 个在途任务已落 failed 终态", finalized)
+    except asyncio.TimeoutError:
+        logger.warning("关闭期任务收尾超时（>3.0s），继续关闭数据库")
+    except Exception as e:
+        logger.warning("关闭期任务收尾失败（不影响关闭）: %s", e)
+
     logger.info("正在关闭数据库...")
     await close_db()
 

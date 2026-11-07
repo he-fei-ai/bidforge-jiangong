@@ -28,6 +28,10 @@ _PROGRESS_DB_MIN_DELTA = 0.005  # 进度最小增量（0.5%）
 
 # task_id -> 运行时控制状态
 _tasks: dict[str, dict] = {}
+# ✅ 2026-11-07（关闭收口）：游离后台任务（不挂在请求/SSE 生成器上的 asyncio.Task，
+#    例如 mark_stream_ended 的宽限回收任务）。这类任务无人 await，关闭段必须显式
+#    取消并有限等待，否则会在 close_db() 之后醒来、撞上已关闭的连接池。
+_detached_tasks: set[asyncio.Task] = set()
 # ✅ 并发注册互斥锁：防止两个并发请求同时通过防僵尸检查后各自 INSERT running 任务
 _register_lock = asyncio.Lock()
 
@@ -475,6 +479,94 @@ async def finish_task(task_id: str, status: str = "completed", message: str = ""
         _ab.notify()
 
 
+def _track_detached_task(task: asyncio.Task) -> asyncio.Task:
+    """登记游离后台任务（完成后自动出集合，关闭段由 shutdown_inflight 统一取消）。"""
+    _detached_tasks.add(task)
+    task.add_done_callback(_detached_tasks.discard)
+    return task
+
+
+async def shutdown_inflight(reason: str = "服务关闭，任务中断", cancel_timeout: float = 2.0) -> int:
+    """进程关闭段：取消在途任务，并在 **close_db() 之前** 落 failed 终态。
+
+    ✅ 2026-11-07（关闭语义确定性收口）：
+      旧实现 lifespan 只关数据库、不管 task_registry 的在途任务。它们随后
+      撞上已关闭的连接池抛 ValueError：没有调用方 catch 就只剩
+      「Task exception was never retrieved」，库内行永远停在 running；
+      即使调用方 catch 后调 finish_task，也是靠 get_conn() 在 close_db()
+      之后**静默重建连接**才写成功的（顺带留下非守护 aiosqlite 线程）。
+      因此本函数必须由 lifespan 在 close_db() **之前**调用 ——
+      **终态必须先于 close_db 写入，不得依赖关闭后重建连接**。
+      终态写受 `status IN (running,paused)` 守卫，与生成器迟到的
+      finish_task 天然幂等，不会把已写好的终态再覆盖一次。
+
+    流程：快照 _tasks → 取消各状态 child_tasks → 对仍 running/paused 的
+    任务 finish_task(failed, reason) → 取消并有限等待受跟踪的游离任务。
+
+    Args:
+        reason: 写入库内的失败原因（固定文案，便于前端与日志聚合）。
+        cancel_timeout: 等待被取消任务真正退出的上限（秒）；超时只告警，
+            不阻塞关闭（剩余任务留给事件循环结束阶段处理）。
+
+    Returns:
+        成功落 failed 终态的任务数。
+    """
+    loop = asyncio.get_running_loop()
+    snapshot = list(_tasks.items())
+
+    cancelled: set[asyncio.Task] = set()
+    for _tid, state in snapshot:
+        for t in list((state or {}).get("child_tasks") or ()):
+            if not t.done():
+                t.cancel()
+                cancelled.add(t)
+
+    for t in list(_detached_tasks):
+        if t.done():
+            _detached_tasks.discard(t)
+            continue
+        # 跨事件循环（测试多 loop）的任务无法在本 loop 等待，直接放弃跟踪
+        if t.get_loop() is not loop or t.get_loop().is_closed():
+            _detached_tasks.discard(t)
+            continue
+        t.cancel()
+        cancelled.add(t)
+
+    finalized = 0
+    for tid, state in snapshot:
+        if (state or {}).get("status") not in ("running", "paused"):
+            continue
+        try:
+            await finish_task(tid, "failed", reason)
+            finalized += 1
+        except asyncio.CancelledError:
+            # 关闭钩子自身被 wait_for 超时取消：原样上抛，内存态已由 finish_task 清理
+            raise
+        except Exception as e:
+            # 单个任务收尾失败不能阻断其余任务与后续 close_db
+            logger.warning("关闭收口：任务 %s 落失败终态失败（不影响关闭）: %s", tid, e)
+
+    if cancelled:
+        done, pending = await asyncio.wait(cancelled, timeout=max(0.0, cancel_timeout))
+        for t in done:
+            if not t.cancelled():
+                # 取回异常，避免 asyncio「Task exception was never retrieved」
+                try:
+                    t.exception()
+                except Exception:
+                    pass
+        if pending:
+            logger.warning(
+                "关闭收口：%d 个后台任务在 %.1fs 内未退出（交由事件循环结束阶段处理）",
+                len(pending),
+                cancel_timeout,
+            )
+
+    if finalized:
+        logger.warning("关闭收口：%d 个在途任务已落 failed 终态（%s）", finalized, reason)
+    return finalized
+
+
 async def _set_task_status_db(task_id: str, status: str) -> int:
     """控制指令落库（幂等单语句，供 retry_db_op 安全重放）。
 
@@ -724,7 +816,11 @@ def mark_stream_ended(task_id: str, grace_seconds: float = 3.0) -> bool:
         loop = asyncio.get_running_loop()
     except RuntimeError:
         return False  # 无运行循环（进程退出中）：交给启动清理
-    loop.create_task(_reap_abandoned_task(task_id, grace_seconds))
+    # ✅ 2026-11-07：登记为受跟踪的游离任务 —— 关闭段 shutdown_inflight 会先取消它，
+    #    避免它在 close_db() 之后醒来补写 DB（那会静默重建连接并留下非守护线程）。
+    _track_detached_task(
+        loop.create_task(_reap_abandoned_task(task_id, grace_seconds), name=f"task-reaper-{task_id[:8]}")
+    )
     return True
 
 
