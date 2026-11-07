@@ -13,8 +13,16 @@ import logging
 import os
 import re
 import tempfile
+import unicodedata
+import zipfile
 
 logger = logging.getLogger(__name__)
+
+#: UTF-16 解码质量闸门的可疑码点类别（控制/代理/私用/未分配）
+_UTF16_SUSPICIOUS_CATEGORIES = ("Cc", "Cs", "Co", "Cn")
+#: 可疑码点占比上限：合法中英文/表格文本实测为 0；
+#: 构造的「可严格解码」二进制样本实测 12.3%–13.9%，阈值留足余量。
+_UTF16_MAX_SUSPICIOUS_RATIO = 0.02
 
 SUPPORTED_EXTENSIONS = {
     "docx",
@@ -139,6 +147,33 @@ def _sniff_type(content: bytes) -> str:
     return ""
 
 
+def _sniff_zip_kind(content: bytes) -> str:
+    """ZIP 容器按目录项细分：``xl/workbook.xml`` → xlsx；``word/document.xml`` → docx。
+
+    ✅ R180 新增（2026-11-07）：OLE 容器此前已有流名细分（xls/doc），但 ZIP
+    容器（OOXML）没有对应能力，扩展名与真实格式不符时只能按扩展名硬走：
+    真实 .xlsx 改名 .xls 会进 xlrd 报「XLS 已损坏」；改名 .doc 会进 Office
+    转换并输出 ZIP 原始字节乱码。这里只读中央目录（不解压），与
+    `_guard_zip_archive` 同阶开销。
+
+    无法识别（损坏 ZIP / 非 OOXML 归档）返回空串，调用方维持原扩展名路由。
+    """
+    if content[:4] != b"PK\x03\x04":
+        return ""
+    import zipfile
+
+    try:
+        with zipfile.ZipFile(io.BytesIO(content)) as z:
+            names = {n.lower() for n in z.namelist()}
+    except Exception:
+        return ""
+    if "xl/workbook.xml" in names or "xl/workbook.bin" in names:
+        return "xlsx"
+    if "word/document.xml" in names:
+        return "docx"
+    return ""
+
+
 def _looks_binary(content: bytes) -> bool:
     """采样前若干字节判断内容是否疑似二进制（用于拒绝无扩展名的二进制文件）。"""
     head = content[:8192]
@@ -148,6 +183,60 @@ def _looks_binary(content: bytes) -> bool:
         return True
     nontext = sum(1 for b in head if b < 0x09 or (0x0E <= b < 0x20))
     return nontext / len(head) > 0.1
+
+
+def _binary_format_for_text_guard(content: bytes) -> str:
+    """文本扩展名（txt/md/csv）下的**强二进制头**识别（返回可读格式名）。
+
+    ✅ R180 修复（2026-11-07）：`_looks_binary` 只按采样窗口的字节分布判定，
+    窗口内没有 NUL 的 PDF（未压缩文本流 / 短小报告）会被漏判 —— 实测
+    ReportLab 生成的 PDF 改名 ``.txt`` 后，整篇 ``%PDF-1.3 ... obj`` 原文
+    被当作正文返回并入库，污染事实提取（旧护栏 `test_file_parser` 只覆盖
+    带 NUL 的 .exe/PNG 样本，未覆盖此形态）。
+
+    只认**结构唯一且 ≥3 字节**的强特征头，避免误杀合法文本：
+    ``BM`` 仅 2 字节（"BMW"/"BMP 说明" 都可能开头），故额外要求 BMP
+    保留字段（偏移 6..9）为 0 才判定。
+    """
+    head = content[:16]
+    if head.startswith(b"%PDF-"):
+        return "PDF"
+    if head[:4] == b"PK\x03\x04":
+        return "ZIP/Office"
+    if head[:8] in OLE_COMPOUND_HEADERS:
+        return "旧版 Office"
+    if head[:8] == b"\x89PNG\r\n\x1a\n":
+        return "PNG 图片"
+    if head[:3] == b"\xff\xd8\xff":
+        return "JPEG 图片"
+    if head[:4] in (b"II*\x00", b"MM\x00*"):
+        return "TIFF 图片"
+    if head[:2] == b"BM" and head[6:10] == b"\x00\x00\x00\x00":
+        return "BMP 图片"
+    return ""
+
+
+def _utf16_text_is_plausible(text: str) -> bool:
+    """UTF-16 解码结果质量闸门：区分「真文本」与「恰好能严格解码的二进制」。
+
+    ✅ R180-补（2026-11-07）：仅判「解码结果无 NUL」不足以证明是文本 ——
+    UTF-16 严格解码对任意偶数长度、且避开代理对（D800-DFFF）与 0x0000 的
+    字节串都会成功。实测 5/5 组「BOM + 随机码元」构造样本被旧判据放行，
+    正文为私用区/未分配码点乱码（可疑码点占比 12.3%–13.9%）；而合法
+    中英文、Markdown、CSV、换行文本的可疑码点占比为 0。故以 2% 为闸门：
+    允许制表符/换行/回车，其余 Cc/Cs/Co/Cn 计入可疑；仅采样前 4096 字符，
+    避免超大文件上的全量 `unicodedata.category` 开销。
+    """
+    sample = text[:4096]
+    if not sample:
+        return False
+    bad = 0
+    for ch in sample:
+        if ch in "\t\r\n":
+            continue
+        if unicodedata.category(ch) in _UTF16_SUSPICIOUS_CATEGORIES:
+            bad += 1
+    return bad / len(sample) <= _UTF16_MAX_SUSPICIOUS_RATIO
 
 
 def _reject_binary_text_ext(content: bytes) -> None:
@@ -160,6 +249,26 @@ def _reject_binary_text_ext(content: bytes) -> None:
     静默解成带 ``U+0000`` 的"文本"而漏过。仅当严格解码成功且解码结果**不含
     NUL** 才确为文本放行。
     """
+    _binary_kind = _binary_format_for_text_guard(content)
+    if _binary_kind:
+        raise ParseError(
+            f"文件内容实际为 {_binary_kind} 格式，与扩展名不符：" "请使用与真实格式一致的正确扩展名重新上传"
+        )
+    # ✅ R180 修复（UTF-16 误杀）：Windows 记事本「Unicode」保存的 txt/md/csv
+    #    天然含 NUL 字节，会被 `_looks_binary` 判成二进制；而 utf-8-sig/gbk
+    #    二次确认对 UTF-16 必然失败 → 合法文件在公开入口直接 400 拒绝，
+    #    R175 已实现的 `_detect_utf16` 能力在生产链路上不可达。
+    #    判据（R180 补强）：必须解码成功**且**解码后的码点质量达标
+    #    （见 `_utf16_text_is_plausible`）—— 只判「解码文本无 NUL」会让
+    #    「BOM + 随机码元」这类恰好能严格解码的二进制蒙混过关（已实测放行）。
+    _utf16 = _detect_utf16(content)
+    if _utf16 is not None:
+        try:
+            _utf16_text = content.decode(_utf16[0])
+        except UnicodeDecodeError:
+            _utf16_text = None
+        if _utf16_text is not None and _utf16_text_is_plausible(_utf16_text):
+            return
     if not _looks_binary(content):
         # 原始字节不像二进制：正常文本（UTF-8/GBK 均无 NUL），直接放行
         return
@@ -351,6 +460,32 @@ def parse_file_content_ex(content: bytes, fname: str) -> tuple[str, dict]:
     elif ftype == "xls" and _ole_content_kind(content) == "doc":
         ftype = "doc"
         _note_info(diag, "文件实际为旧版 Word（OLE 复合文档，含 WordDocument 流），" "已按 .doc 通道转换解析")
+    # ✅ R180 修复（2026-11-07）：OOXML（ZIP）容器扩展名纠错 —— 与上面 OLE
+    #    纠错对称。旧实现只认 OLE 容器，ZIP 容器一律按扩展名硬走，实测：
+    #      · 真实 .xlsx 改名 .xls → xlrd 报「XLS 已损坏」，用户被误导去检查源文件；
+    #      · 真实 .xlsx 改名 .doc → Office 转换通道把 ZIP 原始字节当正文输出乱码；
+    #      · 真实 .docx 改名 .wps → 白跑一次 Office 转换（无组件环境直接失败）；
+    #      · OLE 的 .xls/.doc 改名 .xlsx → ZIP 闸门报「XLSX 文件已损坏」。
+    #    仅在内容能明确细分时纠错，无法识别时维持原路由（零回归）。
+    if ftype == "xlsx" and content[:8] in OLE_COMPOUND_HEADERS:
+        _ole_kind = _ole_content_kind(content)
+        ftype = _ole_kind or "xls"
+        _note_info(
+            diag,
+            f"文件实际为旧版 {'Excel' if ftype == 'xls' else 'Word'}（OLE 复合文档），已按 .{ftype} 通道解析",
+        )
+    elif content[:4] == b"PK\x03\x04":
+        _zip_kind = _sniff_zip_kind(content)
+        if ftype in ("xls", "doc", "wps") and _zip_kind in ("xlsx", "docx"):
+            ftype = _zip_kind
+            _note_info(diag, f"文件实际为 {_zip_kind.upper()}（ZIP 容器），已按 .{_zip_kind} 通道解析")
+        elif ftype == "docx" and _zip_kind == "xlsx":
+            ftype = "xlsx"
+            _note_info(diag, "文件实际为 XLSX（ZIP 容器），已按 .xlsx 通道解析")
+        elif ftype == "xls" and not _zip_kind:
+            # 有 ZIP 头却无法细分：不可能是 OLE 的 .xls，交给 .xlsx 通道做归档校验
+            ftype = "xlsx"
+            _note_info(diag, "文件为 ZIP 容器（无法识别具体 OOXML 类型），已按 .xlsx 通道校验")
 
     # 嗅探/兜底可能改写了 ftype，同步到诊断字典
     diag["file_type"] = ftype
@@ -1680,6 +1815,127 @@ def _xlrd_cell_text(cell, datemode: int) -> str:
         return str(getattr(cell, "value", ""))
 
 
+def _scan_xlsx_sheet_meta(path: str) -> dict[str, dict]:
+    """单遍流式扫描 xlsx 各工作表 XML，收集合并区域与「是否含公式」。
+
+    ✅ R180（2026-11-07）：openpyxl ``read_only=True`` 的 ReadOnlyWorksheet
+    **不暴露 merged_cells**（实测无该属性），且合并区域的非锚点单元格 value
+    恒为 None → A1:B1 合并表头被拆成「项目 | 空」，`find_table_header`
+    降级为「列1/列2」，列名整列丢失；公式在 ``data_only=True`` 且无缓存值时
+    同样返回 None → 静默丢数。这里直接从 OOXML 取事实：
+      · ``<mergeCell ref="A1:B1">`` —— 仅累积 ``mergeCells`` 段（1MB 上限）；
+      · ``<f>`` —— 逐块正则命中即置位，不做全文件驻留。
+    任何异常都返回空字典，调用方按「无合并 / 无公式」保持旧行为（零回归）。
+    """
+    meta: dict[str, dict] = {}
+    try:
+        with zipfile.ZipFile(path) as z:
+            for name in z.namelist():
+                if not (name.startswith("xl/worksheets/") and name.endswith(".xml")):
+                    continue
+                refs: list[str] = []
+                has_formula = False
+                in_merges = False
+                merge_buf = b""
+                try:
+                    with z.open(name) as fh:
+                        while True:
+                            chunk = fh.read(65536)
+                            if not chunk:
+                                break
+                            if not has_formula and re.search(rb"<f[ >/]", chunk):
+                                has_formula = True
+                            if in_merges:
+                                merge_buf += chunk
+                            else:
+                                pos = chunk.find(b"<mergeCells")
+                                if pos < 0:
+                                    continue
+                                merge_buf = chunk[pos:]
+                                in_merges = True
+                            end = merge_buf.find(b"</mergeCells>")
+                            if end >= 0:
+                                refs.extend(
+                                    m.decode("ascii", "ignore")
+                                    for m in re.findall(rb'<mergeCell[^>]*ref="([^"]+)"', merge_buf[:end])
+                                )
+                                merge_buf = b""
+                                in_merges = False
+                            elif len(merge_buf) > 1_048_576:
+                                # 畸形文件：mergeCells 段异常巨大，放弃解析以控制内存
+                                merge_buf = b""
+                                in_merges = False
+                except Exception:
+                    continue
+                meta[name.lstrip("/").lower()] = {"merges": refs, "has_formula": has_formula}
+    except Exception:
+        return {}
+    return meta
+
+
+def _expand_merged_cells(rows: list, refs: list[str]) -> list:
+    """把合并区域左上角的值展开到整个区域（仅填充空单元格）。
+
+    read_only 模式下 openpyxl 对合并区的非锚点单元格一律返回 None；不展开
+    会让「A1:B1 合并的表头」退化成「项目 | 空」，表头识别随即失败。
+    """
+    if not rows or not refs:
+        return rows
+    try:
+        from openpyxl.utils import range_boundaries
+    except Exception:
+        return rows
+    out = [list(r) for r in rows]
+    for ref in refs:
+        try:
+            # ✅ R180：openpyxl 返回顺序是 (min_col, min_row, max_col, max_row)，
+            #    旧写法按 (…, max_row, max_col) 解包会把行列颠倒，导致
+            #    展开区间退化为单列/单行（合并表头实际未被回填）。
+            min_col, min_row, max_col, max_row = range_boundaries(ref)
+        except Exception:
+            continue
+        r0 = min_row - 1
+        if r0 < 0 or r0 >= len(out):
+            continue
+        row0 = out[r0]
+        c0 = min_col - 1
+        if c0 < 0 or c0 >= len(row0):
+            continue
+        value = row0[c0]
+        if value is None or str(value).strip() == "":
+            continue
+        for r in range(r0, min(max_row, len(out))):
+            row = out[r]
+            while len(row) < max_col:
+                row.append(None)
+            for c in range(c0, min(max_col, len(row))):
+                if row[c] is None or str(row[c]).strip() == "":
+                    row[c] = value
+    return out
+
+
+def _fill_formula_placeholders(rows: list, formula_rows: list) -> list:
+    """data_only 取不到值时，用公式原文占位，避免「静默空单元格」。
+
+    ✅ R180（2026-11-07）：`load_workbook(data_only=True)` 对「有公式但没有
+    缓存计算值」的文件（程序生成 / 未在 Excel 中重算保存）返回 None；空单元格
+    无法区分「本来空」与「解析丢了」，属于最坏结果。这里用同坐标的
+    `data_only=False` 行集回填 `[公式无缓存值] =A1+B1`，保证可见、可追溯。
+    """
+    if not rows:
+        return rows
+    out = [list(r) for r in rows]
+    for i, row in enumerate(out):
+        frow = formula_rows[i] if i < len(formula_rows) else ()
+        for j, value in enumerate(row):
+            if value is not None and str(value).strip():
+                continue
+            fval = frow[j] if j < len(frow) else None
+            if isinstance(fval, str) and fval.startswith("="):
+                out[i][j] = f"[公式无缓存值] {fval}"
+    return out
+
+
 def _parse_excel(content: bytes, ftype: str, diag: dict | None = None) -> str:
     """Excel 解析：逐工作表输出 Markdown 表格（保留工作表名与表头）。
 
@@ -1725,9 +1981,16 @@ def _parse_excel(content: bytes, ftype: str, diag: dict | None = None) -> str:
                 )
         from openpyxl import load_workbook
 
+        # ✅ R180（2026-11-07）：先流式扫描 OOXML 元数据（合并区域 / 是否含公式），
+        #    再按需开启第二个 data_only=False 句柄；两者都不整表驻留内存，
+        #    read_only=True 保持不变（大表保护）。
+        _sheet_meta = _scan_xlsx_sheet_meta(tmp.name)
+        _has_formula = any(item.get("has_formula") for item in _sheet_meta.values())
         # ✅ 增强：data_only=True 取公式单元格的缓存计算值，避免正文里出现
         #    "=SUM(...)" 这类公式原文（机械统计表的合计列常为公式）。
         wb = load_workbook(tmp.name, read_only=True, data_only=True)
+        # ✅ R180：仅在存在公式时才二次加载（回填公式原文，避免静默空值）
+        formula_wb = load_workbook(tmp.name, read_only=True, data_only=False) if _has_formula else None
         # ✅ BUG 修复（Windows 致命）：read_only 模式下 openpyxl 会持续持有
         #    文件句柄，必须显式 close()。旧实现从不关闭 → 下方 finally 删除
         #    临时文件时抛 PermissionError（WinError 32），异常从 finally 冒出，
@@ -1738,6 +2001,16 @@ def _parse_excel(content: bytes, ftype: str, diag: dict | None = None) -> str:
                 rows = list(ws.iter_rows(max_row=MAX_EXCEL_ROWS, values_only=True))
                 if not rows:
                     continue
+                # ✅ R180：read_only 句柄的 _worksheet_path 与 ZIP 目录项可能
+                #    带前导 "/" 或大小写差异，按归一化键匹配，避免元数据取不到
+                #    而整块静默跳过（合并展开 / 公式占位失效）。
+                _ws_path = str(getattr(ws, "_worksheet_path", "") or "").lstrip("/").lower()
+                _meta = _sheet_meta.get(_ws_path, {})
+                if formula_wb is not None and _meta.get("has_formula"):
+                    _frows = list(formula_wb[ws.title].iter_rows(max_row=MAX_EXCEL_ROWS, values_only=True))
+                    rows = _fill_formula_placeholders(rows, _frows)
+                if _meta.get("merges"):
+                    rows = _expand_merged_cells(rows, _meta["merges"])
                 parts.append(f"【工作表：{ws.title}】")
                 # ✅ 增强：表头智能识别（与 CSV 同口径，2026-09-17）
                 parts.extend(render_table_with_header(rows))
@@ -1754,6 +2027,8 @@ def _parse_excel(content: bytes, ftype: str, diag: dict | None = None) -> str:
             return "\n".join(parts)
         finally:
             wb.close()
+            if formula_wb is not None:
+                formula_wb.close()
     finally:
         # ✅ 加固：临时文件清理失败（Windows 句柄占用/杀软扫描）不应掩盖
         #    解析结果或抛出 PermissionError。

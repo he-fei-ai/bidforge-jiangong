@@ -140,10 +140,17 @@ def test_csv_only_header_and_empty_rows_no_crash():
     assert "【表格】" in out2
 
 
-def test_csv_utf16le_rejected_as_binary():
-    """UTF-16LE 的 CSV 被二进制防护拒绝（不是静默乱码入库）。"""
-    with pytest.raises(fp.ParseError):
-        fp.parse_file_content_ex("a,b\n1,2\n".encode("utf-16-le"), "x.csv")
+def test_csv_utf16le_decoded_not_rejected():
+    """UTF-16LE 的 CSV 必须正确解码（不是静默乱码，也不再被二进制防护误杀）。
+
+    2026-11-07（R180）：旧用例锁定的「拒绝」行为与 R175·BUG-2 的
+    「UTF-16（含 BOM / 无 BOM）识别」目标冲突 —— UTF-16 的 NUL 字节先命中
+    `_looks_binary`，导致 R175 的 `_detect_utf16` 能力在公开入口不可达。
+    现防护优先识别 UTF-16：可严格解码即放行，内容与告警照常返回。
+    """
+    out, diag = fp.parse_file_content_ex("a,b\n1,2\n".encode("utf-16-le"), "x.csv")
+    assert "a" in out and "1" in out
+    assert any("UTF-16" in w for w in diag["warnings"])
 
 
 # ---------------------------------------------------------------------------
