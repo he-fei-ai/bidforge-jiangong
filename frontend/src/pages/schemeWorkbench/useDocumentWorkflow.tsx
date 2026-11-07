@@ -5,6 +5,9 @@ import {
   docPipelineApi,
   PREVIEW_TIMEOUT_MS,
   API_GLOBAL_TIMEOUT_MS,
+  REPARSE_TIMEOUT_MS,
+  SYNC_EXTRACTIONS_TIMEOUT_MS,
+  CROSS_CHECK_TIMEOUT_MS,
 } from "../../api";
 import { computeDocStats, buildUploadNotice } from "../../utils/workflowDerived";
 import type { DocRecord, PreviewError } from "../../utils/workflowDerived";
@@ -16,7 +19,11 @@ import {
   partitionUploadFiles,
   MAX_UPLOAD_FILES_FALLBACK,
 } from "../../utils/uploadAccept";
-import { buildBatchResolveCopy, buildBatchResolveResultCopy } from "./factsShared.ts";
+import {
+  buildBatchAckStaleResultCopy,
+  buildBatchResolveCopy,
+  buildBatchResolveResultCopy,
+} from "./factsShared.ts";
 import type {
   DocumentPipelineStatusLike,
   PipelineActionKey,
@@ -54,13 +61,21 @@ function requestErrorText(e: unknown, label: string, timeoutSeconds: number, fal
 }
 
 /**
- * 四层管线动作失败文案的元信息：label + 该动作对应 API 的实际 timeout（秒）。
- * 秒数与 api/index.ts 各处配置对齐，避免失败时把 axios 英文原文直接抛给用户。
+ * 四层管线动作失败文案的元信息：label + 秒数。
+ *
+ * 秒数一律由 `api/index.ts` 的请求超时常量 /1000 推导，不写字面量 ——
+ * 与预览超时同一纪律：两处写死的数字，改一处不会有任何用例变红，
+ * 用户看到的就是假话。
+ * 对应关系：reparse→REPARSE_TIMEOUT_MS、syncExtractions→SYNC_EXTRACTIONS_TIMEOUT_MS、
+ * crossCheck→CROSS_CHECK_TIMEOUT_MS、refreshQuality→completeness 的 API_GLOBAL_TIMEOUT_MS。
  */
-const PIPELINE_ACTION_META: Record<PipelineActionKey, { label: string; seconds: number }> = {
-  reparse: { label: "重新解析", seconds: 300 },
-  syncExtractions: { label: "物化提取层", seconds: 60 },
-  crossCheck: { label: "交叉校验", seconds: 120 },
+export const PIPELINE_ACTION_META: Record<
+  PipelineActionKey,
+  { label: string; seconds: number }
+> = {
+  reparse: { label: "重新解析", seconds: Math.round(REPARSE_TIMEOUT_MS / 1000) },
+  syncExtractions: { label: "物化提取层", seconds: Math.round(SYNC_EXTRACTIONS_TIMEOUT_MS / 1000) },
+  crossCheck: { label: "交叉校验", seconds: Math.round(CROSS_CHECK_TIMEOUT_MS / 1000) },
   refreshQuality: { label: "刷新质量", seconds: Math.round(API_GLOBAL_TIMEOUT_MS / 1000) },
 };
 
@@ -685,15 +700,10 @@ export function useDocumentWorkflow(deps: DocumentWorkflowDeps) {
       onOk: async () => {
         try {
           const { data } = await factsApi.batchAckStale(id);
-          const changed = Number(data?.changed) || 0;
-          const gated = Number(data?.gated) || 0;
-          if (changed === 0) {
-            msg.info("没有需要解除的过期标记");
-          } else if (gated > 0) {
-            msg.warning(`已解除 ${changed} 条；其中 ${gated} 条为模拟值/矛盾值，仍需逐条处理`);
-          } else {
-            msg.success(`已解除 ${changed} 条过期标记`);
-          }
+          const copy = buildBatchAckStaleResultCopy(data);
+          if (copy.tone === "success") msg.success(copy.text);
+          else if (copy.tone === "warning") msg.warning(copy.text);
+          else msg.info(copy.text);
           await loadFacts();
         } catch (e: unknown) {
           msg.error(

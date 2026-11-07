@@ -635,6 +635,14 @@ export const factsApi = {
 //    数据流：上传解析（factsApi）→ 解析落库（parsed_markdown + 四层产物）
 //            → 下游（目录生成/事实提取/标前分析）经本组查询溯源与校验。
 // =========================================================================
+// 文档四层管线动作的请求超时（ms）。
+// 失败文案要显示「超时（N 秒）」，秒数必须由这里 /1000 推导 ——
+// 调用方（useDocumentWorkflow）不得再写一份字面量，否则改一侧不会有用例变红。
+// =========================================================================
+export const REPARSE_TIMEOUT_MS = 300000;
+export const SYNC_EXTRACTIONS_TIMEOUT_MS = 60000;
+export const CROSS_CHECK_TIMEOUT_MS = 120000;
+
 export const docPipelineApi = {
   /** 解析状态：DB 时效列 + 磁盘 meta + 各层产物落盘概览 */
   status: (docId: string) => api.get(`/documents/${docId}/status`),
@@ -648,18 +656,23 @@ export const docPipelineApi = {
     api.get(`/documents/${docId}/chunks`, { params: chunkType ? { chunk_type: chunkType } : {} }),
   /** 增量重解析：指纹未变直接跳过（mode=incremental）；force=true 强制重解析并刷新四层产物 */
   reparse: (docId: string, mode: "incremental" | "force" = "incremental") =>
-    api.post(`/documents/${docId}/reparse`, { mode }, { timeout: 300000 }),
+    api.post(`/documents/${docId}/reparse`, { mode }, { timeout: REPARSE_TIMEOUT_MS }),
   /** 完整性校验报告（覆盖率 / 质量分 / 冲突汇总） */
   completeness: (docId: string, refresh = false) =>
-    api.get(`/documents/${docId}/completeness`, { params: refresh ? { refresh: true } : {} }),
+    api.get(`/documents/${docId}/completeness`, {
+      params: refresh ? { refresh: true } : {},
+      timeout: API_GLOBAL_TIMEOUT_MS,
+    }),
   /** 时效性：指纹一致性 / 解析有效期 / 版本信息（file_changed/expired 提示重跑） */
   freshness: (docId: string) => api.get(`/documents/${docId}/freshness`),
   /** 提取层物化：把 AI 提取结果按标准格式落盘到 extracted/*.json + doc_extractions */
   syncExtractions: (docId: string) =>
-    api.post(`/documents/${docId}/sync-extractions`, null, { timeout: 60000 }),
+    api.post(`/documents/${docId}/sync-extractions`, null, {
+      timeout: SYNC_EXTRACTIONS_TIMEOUT_MS,
+    }),
   /** 交叉校验：多文档事实冲突 + 一致性规则跑批 */
   crossCheck: (docId: string) =>
-    api.post(`/documents/${docId}/cross-check`, null, { timeout: 120000 }),
+    api.post(`/documents/${docId}/cross-check`, null, { timeout: CROSS_CHECK_TIMEOUT_MS }),
   /** 项目文档索引：磁盘 documents_index.json 与 DB 档案合并视图 */
   projectIndex: (projectId: string) => api.get(`/projects/${projectId}/documents/index`),
 };

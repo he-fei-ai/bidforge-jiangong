@@ -65,6 +65,7 @@ const h = vi.hoisted(() => {
 vi.mock("axios", () => ({ default: { create: () => h.instance } }));
 
 import { factsApi, docPipelineApi, PREVIEW_TIMEOUT_MS } from "../api/index";
+import { PIPELINE_ACTION_META } from "../pages/schemeWorkbench/useDocumentWorkflow";
 
 const last = () => h.calls[h.calls.length - 1];
 
@@ -295,6 +296,24 @@ describe("factsApi 契约", () => {
         signal: ctrl.signal,
       },
     });
+  });
+
+  it("四层管线动作失败文案秒数与接口 timeout 同源（改任一侧必红）", async () => {
+    // 勾稽关系：hook 里 PIPELINE_ACTION_META[action].seconds × 1000
+    // 必须等于该动作接口在 api/index.ts 实际下发的 timeout。
+    // 两侧各自写死（或只改一侧）时，用户看到的「超时（N 秒）」就是假话。
+    await docPipelineApi.reparse("d1", "force");
+    expect(last().config.timeout).toBe(PIPELINE_ACTION_META.reparse.seconds * 1000);
+
+    await docPipelineApi.syncExtractions("d1");
+    expect(last().config.timeout).toBe(PIPELINE_ACTION_META.syncExtractions.seconds * 1000);
+
+    await docPipelineApi.crossCheck("d1");
+    expect(last().config.timeout).toBe(PIPELINE_ACTION_META.crossCheck.seconds * 1000);
+
+    // refreshQuality 走 completeness（无独立语义超时，取全局默认）
+    await docPipelineApi.completeness("d1", true);
+    expect(last().config.timeout).toBe(PIPELINE_ACTION_META.refreshQuality.seconds * 1000);
   });
 
   it("updateDocumentCategory：PATCH /documents/{id}/category，doc_category 在 body", async () => {
