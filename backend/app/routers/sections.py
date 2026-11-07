@@ -1414,6 +1414,20 @@ async def _save_outline_to_db(
             #    已设置的字数预算全部重置（AI/上传来源的节点本就不含该字段）。
             raw_budget = node.get("word_budget")
             existing = None if is_new else existing_by_id.get(original_id)
+            if not is_new and not preserve_node_meta and existing:
+                # ✅ BUG 修复（2026-11-07 · 跨模块元数据丢失）：普通目录保存此前对已有
+                #    章节也只写 id/level/confidence 三键，把模板/占位章节已落库的
+                #    content_type / placeholder / fact_deps / fact_values 一并抹掉，
+                #    后续占位正文生成与事实依赖读取会静默降级。入站节点未携带的元数据
+                #    在此继承库中已有值；新节点仍是三键，开关关闭时的既有契约不变。
+                try:
+                    _old_meta = json.loads(existing.get("outline_json") or "{}") or {}
+                except Exception:  # noqa: BLE001 — 脏 JSON 不应阻断保存
+                    _old_meta = {}
+                for _k in _OUTLINE_NODE_META_KEYS:
+                    if _k in _old_meta and _k not in _payload:
+                        _payload[_k] = _old_meta[_k]
+                outline_json = json.dumps(_payload, ensure_ascii=False)
             if isinstance(raw_budget, (int, float)) and raw_budget > 0:
                 word_budget = int(raw_budget)
             elif existing and existing.get("word_budget"):
@@ -1928,6 +1942,117 @@ async def renumber_sections_after_reorder(db, scheme_id: str) -> None:
             )
 
 
+async def _outline_structure_report(db, scheme_id: str) -> dict:
+    """结构编号自检：outline_json.id/level 是否与真实树（parent_id+sort_order）同源。
+
+    ✅ BUG 修复（2026-11-07 · 校验盲区）：`validate_scheme_numbering_consistency`
+    只核对「落库正文子标题 vs outline_json.id」，完全不看 outline_json.id 是否等于
+    它在该方案树里的位置。R89 N2 已知的并发回写少行（见 renumber_sections_after_reorder
+    的告警）会让编号陈旧，而正文随后按这份陈旧编号重写 → 校验器仍判绿，导出侧
+    却按结构树重算 → 用户看到「预览/导出与落库正文编号不同」且无任何告警。
+
+    本函数复用与 `renumber_sections_after_reorder` **完全相同**的算法
+    （`renumber_section_outline_ids` + `_build_tree`）得出期望编号，因此
+    「报告说一致」与「修复后的结果」构造上同源，不会各算一套。
+
+    fail-soft：outline_json 缺失/为空的历史章节计入 unverifiable，不判红，
+    与 load_scheme_section_index 「空编号跳过」的既有口径一致。
+    """
+    tree = await _build_tree(db, scheme_id)
+    canonical: dict[str, tuple] = {}
+    for _oj, _lv, _sid in renumber_section_outline_ids(tree):
+        try:
+            _num = (json.loads(_oj) or {}).get("id")
+        except Exception:  # noqa: BLE001 — 脏 JSON 不应让自检整体失败
+            _num = None
+        canonical[_sid] = (str(_num) if _num is not None else "", _lv)
+
+    checked = mismatched = unverifiable = 0
+    samples: list[dict] = []
+
+    def _walk(nodes: list) -> None:
+        nonlocal checked, mismatched, unverifiable
+        for n in nodes:
+            sid = n.get("id")
+            want = canonical.get(sid)
+            if want is None:
+                continue
+            stored: dict = {}
+            try:
+                stored = json.loads(n.get("outline_json") or "{}") or {}
+            except Exception:  # noqa: BLE001
+                stored = {}
+            stored_no = str(stored.get("id") if stored.get("id") is not None else "").strip()
+            if not stored_no:
+                unverifiable += 1
+            else:
+                checked += 1
+                # level 以 sections.level（渲染事实源）为准；outline_json.level 有值时才校对，
+                # 兼容历史行只写 id 不写 level 的旧数据（不误报）。
+                _lv_bad = str(n.get("level")) != str(want[1])
+                _json_lv_bad = "level" in stored and str(stored.get("level")) != str(want[1])
+                if stored_no != str(want[0]) or _lv_bad or _json_lv_bad:
+                    mismatched += 1
+                    if len(samples) < 10:
+                        samples.append(
+                            {
+                                "section_id": sid,
+                                "title": str(n.get("title") or ""),
+                                "stored": stored_no,
+                                "stored_level": n.get("level"),
+                                "expected": str(want[0]),
+                                "expected_level": want[1],
+                            }
+                        )
+            _walk(n.get("children") or [])
+
+    _walk(tree)
+    return {
+        "checked": checked,
+        "mismatched": mismatched,
+        "unverifiable": unverifiable,
+        "consistent": mismatched == 0,
+        "samples": samples,
+    }
+
+
+async def _repair_outline_structure_numbering(db, scheme_id: str) -> int:
+    """按真实树重算并回写 outline_json.id / level，返回实际修正的章节数。
+
+    与 `renumber_sections_after_reorder` 同一算法与同一写入口径，只额外跳过
+    已一致的行（避免无意义写放大），并提交事务——随后正文修复必须读到新编号。
+    """
+    tree = await _build_tree(db, scheme_id)
+    oj_updates = renumber_section_outline_ids(tree)
+    if not oj_updates:
+        return 0
+    cur = await db.execute(
+        "SELECT id, outline_json, level FROM sections WHERE scheme_id=?", (scheme_id,)
+    )
+    current = {r["id"]: (r["outline_json"], r["level"]) for r in await cur.fetchall()}
+    todo: list[tuple] = []
+    for oj, lv, sid in oj_updates:
+        cur_oj, cur_lv = current.get(sid, ("", None))
+        if cur_oj == oj and str(cur_lv) == str(lv):
+            continue
+        todo.append((oj, lv, sid, scheme_id))
+    if not todo:
+        return 0
+    cur = await db.executemany(
+        "UPDATE sections SET outline_json=?, level=? WHERE id=? AND scheme_id=?", todo
+    )
+    _written = safe_rowcount(cur, what=f"结构编号回写 scheme={scheme_id[:8]}")
+    if _written != len(todo):
+        logger.warning(
+            "方案 %s 结构编号修复：期望 %d 行，实际 %d 行（存在并发增删，请重试）",
+            scheme_id[:8],
+            len(todo),
+            _written,
+        )
+    await db.commit()
+    return _written
+
+
 async def _renormalize_all_section_contents(db, scheme_id: str) -> None:
     """结构变更（增/删/重排/移动）后，按重排后的新编号统一重规范化所有含正文章节
     的子标题编号，保证「落库正文 = 导出成稿」同源（修复 D4：重排后仅回写 outline_json，
@@ -2027,8 +2152,16 @@ async def get_numbering_consistency(scheme_id: str, db=Depends(get_db)):
 
     用于「生成后校验目录与正文编号一致 / 导出前校验正文与导出编号一致」的手动或
     CI 触发入口；落库正文子标题编号与当前 outline 不一致（D4 类漂移）的章节会被列出。
+
+    ✅ BUG 修复（2026-11-07）：额外返回 `outline` 结构编号自检结果，并把顶层
+    `consistent` 与结构一致性求与——旧实现只查「正文 vs outline_json」，结构编号
+    陈旧（outline_json.id 不等于树位置）时仍报绿，见 `_outline_structure_report`。
     """
-    return await validate_scheme_numbering_consistency(db, scheme_id)
+    report = await validate_scheme_numbering_consistency(db, scheme_id)
+    outline = await _outline_structure_report(db, scheme_id)
+    report["outline"] = outline
+    report["consistent"] = bool(report.get("consistent")) and bool(outline.get("consistent"))
+    return report
 
 
 @router.post("/numbering-consistency/repair")
@@ -2037,8 +2170,14 @@ async def repair_numbering_consistency(scheme_id: str, db=Depends(get_db)):
 
     ✅ 编号版本管理：修复前自动建 numbering_repair 快照，返回值含 snapshot_id，
     可经 POST /numbering-consistency/rollback/{snapshot_id} 一键回滚。
+
+    ✅ BUG 修复（2026-11-07）：先按真实树回写 outline_json.id/level（结构编号），
+    再修正文——否则结构编号陈旧时，正文会被"修"成旧号，校验仍假绿。
     """
-    return await repair_scheme_numbering_consistency(db, scheme_id)
+    outline_fixed = await _repair_outline_structure_numbering(db, scheme_id)
+    result = await repair_scheme_numbering_consistency(db, scheme_id)
+    result["outline_fixed"] = outline_fixed
+    return result
 
 
 @router.get("/numbering-consistency/versions")

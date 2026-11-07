@@ -486,7 +486,9 @@ async def save_as_outline(upload_id: str, body: dict, db=Depends(get_db)):
     #    与占位标题闸门同位（在标题快照/AI 重写**之前**，拒绝的树不浪费 AI 调用）。
     #    逃生舱与 save-outline 一致：body 传 allow_empty_chapters=true 显式按
     #    部分成果保存，响应加法式回传 empty_top_chapters 明细（不静默）。
-    from app.routers.sections import _detect_empty_top_chapters
+    # ✅ BUG 修复（2026-11-07 · 跨模块元数据丢失）：与 save-outline 共用同一
+    #    元数据白名单（不在此重复定义，避免两份副本漂移）。
+    from app.routers.sections import _OUTLINE_NODE_META_KEYS, _detect_empty_top_chapters
 
     _allow_empty = bool(body.get("allow_empty_chapters"))
     _empty_tops = _detect_empty_top_chapters(outline)
@@ -577,7 +579,12 @@ async def save_as_outline(upload_id: str, body: dict, db=Depends(get_db)):
             #    by_parent_level / by_level 两个结构桶把所有旧章节当作一级节
             #    （2026-10-04 三层索引修复的层级维度实际失效，仅剩路径/标题桶
             #    在真实兜底）。补入该列使结构桶按声明语义生效。
+            # ✅ BUG 修复（2026-11-07 · 跨模块元数据丢失）：补取 outline_json ——
+            #    下方命中已有章节时需从旧记录继承模板/占位元数据（content_type /
+            #    placeholder / fact_deps / fact_values 等），漏列会让这些键被
+            #    三键形态覆盖后永久丢失。
             "SELECT id, title, content, word_count, status, word_budget, parent_id, level"
+            ", outline_json"
             " FROM sections WHERE scheme_id=? ORDER BY sort_order, created_at",
             (scheme_id,),
         ),
@@ -702,9 +709,23 @@ async def save_as_outline(upload_id: str, body: dict, db=Depends(get_db)):
             confidence = node.get("confidence")
             if confidence is None:
                 confidence = 1.0
-            outline_json = json.dumps(
-                {"id": node.get("id"), "level": node.get("level", 1), "confidence": confidence}, ensure_ascii=False
-            )
+            _payload = {"id": node.get("id"), "level": node.get("level", 1), "confidence": confidence}
+            if matched:
+                # ✅ BUG 修复（2026-11-07 · 跨模块元数据丢失）：与
+                #    sections._save_outline_to_db 同一口径 —— 重新上传目录命中已有
+                #    章节时，此前只回写 id/level/confidence 三键，把模板/占位章节
+                #    已落库的 content_type / placeholder / fact_deps / fact_values
+                #    一并抹掉，后续占位正文生成与事实依赖读取会静默降级。
+                #    入站节点未携带的元数据在此继承库中已有值；新插入章节仍是
+                #    三键形态，既有写入口径逐字不变。
+                try:
+                    _old_meta = json.loads(matched.get("outline_json") or "{}") or {}
+                except Exception:  # noqa: BLE001 — 脏 JSON 不应阻断保存
+                    _old_meta = {}
+                for _k in _OUTLINE_NODE_META_KEYS:
+                    if _k in _old_meta and _k not in _payload:
+                        _payload[_k] = _old_meta[_k]
+            outline_json = json.dumps(_payload, ensure_ascii=False)
             # 节点未携带 word_budget 时沿用已有预算（避免重置用户设置）
             raw_budget = node.get("word_budget")
             if isinstance(raw_budget, (int, float)) and raw_budget > 0:

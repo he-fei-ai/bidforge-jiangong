@@ -283,7 +283,20 @@ def renumber_outline_nodes(
         #    「（1）」一起吃掉、损坏目录树标题。tree 档首轮与单轮逐字等价（既有
         #    锁定契约不变），仅在未收敛时多剥，且到子项标记即停。
         if strip_titles and node.get("title"):
-            node["title"] = strip_outline_numbering_tree(str(node["title"]))
+            _raw_title = str(node["title"])
+            _marker = _SUB_ITEM_MARKER_RE.match(_raw_title)
+            if _marker:
+                # ✅ BUG 修复（2026-11-07 · 重复保存标题漂移）：标题以子项标记开头时，
+                #    标记本身是内容；但标记后可能仍残留章节编号（"（1）1.1 质量验收"）。
+                #    旧实现直接对整串再跑 tree 档，把标记当编号剥掉：同一标题
+                #    "第1章 （1）质量验收" 第一次保存得 "（1）质量验收"，第二次保存
+                #    又变成 "质量验收"（跨保存漂移）。现改为「保留标记 + 只剥标记后的
+                #    章节编号」，结果是不动点：任何一次重复保存都稳定。
+                node["title"] = _raw_title[: _marker.end()] + strip_outline_numbering_tree(
+                    _raw_title[_marker.end() :]
+                )
+            else:
+                node["title"] = strip_outline_numbering_tree(_raw_title)
         # 确保 children 是合法列表
         children = node.get("children")
         if not isinstance(children, list):
