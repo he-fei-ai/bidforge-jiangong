@@ -329,3 +329,46 @@ describe("DocumentParseList · compact 展开/收起", () => {
     expect(container.querySelectorAll(".ant-list-item").length).toBe(3);
   });
 });
+
+describe("DocumentParseList · 特殊/超长文件名与重复行", () => {
+  /** 按 title 属性定位文件名节点（props.title 走属性，不经 HTML 解析） */
+  function fileNameNode(container: HTMLElement, name: string): HTMLElement | null {
+    return (Array.from(container.querySelectorAll("div")).find(
+      (el) => el.getAttribute("title") === name,
+    ) as HTMLElement) || null;
+  }
+
+  it("含 HTML 元字符的文件名按纯文本渲染，不注入元素，title 保留原名", () => {
+    const name = `<img src=x onerror=alert(1)>报价&清单".pdf`;
+    const { container } = setup({ docs: [doc({ id: "d1", file_name: name })] });
+    const node = fileNameNode(container, name);
+    expect(node).toBeTruthy();
+    expect(node!.textContent).toBe(name);
+    expect(container.querySelector("img")).toBeNull();
+  });
+
+  it("超长文件名（240 字符）渲染不崩溃，完整名保留在 title", () => {
+    const name = `超长-${"A".repeat(240)}.pdf`;
+    const { container } = setup({ docs: [doc({ id: "d1", file_name: name, text_len: 12 })] });
+    const node = fileNameNode(container, name);
+    expect(node).toBeTruthy();
+    expect(node!.textContent).toBe(name);
+    // 已解析行仍正常渲染状态标签
+    expect(container.textContent || "").toContain("已解析");
+  });
+
+  it("同名文件重复行：两行都渲染，行内操作携带各自 id（不静默去重）", () => {
+    const docs = [
+      doc({ id: "d1", file_name: "重复.pdf", text_len: 10, parse_status: "success" }),
+      doc({ id: "d2", file_name: "重复.pdf", text_len: 10, parse_status: "success" }),
+    ];
+    const { container, onDelete } = setup({ docs });
+    expect(container.querySelectorAll(".ant-list-item").length).toBe(2);
+    const delButtons = Array.from(container.querySelectorAll("button")).filter(
+      (b) => (b.textContent || "").trim() === "删除",
+    ) as HTMLButtonElement[];
+    expect(delButtons.length).toBe(2);
+    fireEvent.click(delButtons[1]);
+    expect(onDelete).toHaveBeenCalledWith("d2", "重复.pdf");
+  });
+});

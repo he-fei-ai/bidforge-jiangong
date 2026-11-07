@@ -1,4 +1,4 @@
-import type { Dispatch, MutableRefObject, SetStateAction } from "react";
+import { useRef, type Dispatch, type MutableRefObject, type SetStateAction } from "react";
 import type { ModalFuncProps } from "antd";
 import { factsApi, docPipelineApi } from "../../api";
 import { computeDocStats, buildUploadNotice } from "../../utils/workflowDerived";
@@ -126,6 +126,13 @@ export function useDocumentWorkflow(deps: DocumentWorkflowDeps) {
     factsListAbortRef,
     currentSchemeIdRef,
   } = deps;
+
+  // ✅ 2026-11-07 竞态守卫：预览 / 四层状态是两次独立异步请求，
+  //    用户快速切换文档时先发请求的慢响应会覆盖后发结果（标题是 B、正文是 A）。
+  //    以「递增请求序号 + 当前预览文档 id」双条件判定，只允许最新请求写回状态。
+  const previewReqIdRef = useRef(0);
+  const pipelineReqIdRef = useRef(0);
+  const pipelineDocIdRef = useRef<string | null>(null);
 
   // ✅ 分步工作流 ①：上传保存（仅存文件，不解析不提取）
   const handleUploadDocuments = async (files: File[]) => {
@@ -359,6 +366,9 @@ export function useDocumentWorkflow(deps: DocumentWorkflowDeps) {
   /** 查看解析内容预览（前 N 字，不下载整份文件） */
   const handlePreviewDocument = async (doc: DocRecord) => {
     if (!doc?.id) return;
+    // ✅ 竞态守卫：本次请求的序号 + 当前预览文档，晚到的旧响应一律丢弃
+    const reqId = ++previewReqIdRef.current;
+    pipelineDocIdRef.current = doc.id;
     setPreviewDoc(doc);
     setPreviewText("");
     setPreviewData(null);
@@ -369,34 +379,43 @@ export function useDocumentWorkflow(deps: DocumentWorkflowDeps) {
     setPipelineLoading(true);
     try {
       const { data } = await factsApi.previewDocument(doc.id);
+      if (reqId !== previewReqIdRef.current) return;
       if (!data.is_parsed) {
         msg.warning(data.message || "该文档尚未解析");
       }
       setPreviewText(data.preview || "");
       setPreviewData(data);
     } catch (e: unknown) {
+      // 已切到别的文档：不弹错误、不写状态（避免「标题是 B、提示是 A」）
+      if (reqId !== previewReqIdRef.current) return;
       const err = e as { message?: string };
       msg.error(err.message || "获取预览失败");
     } finally {
-      setPreviewLoading(false);
+      if (reqId === previewReqIdRef.current) setPreviewLoading(false);
     }
+    if (reqId !== previewReqIdRef.current) return;
     loadPipelineStatus(doc.id);
   };
 
   /** 拉取四层解析质量概览（status + completeness 合并；失败非阻断，仅降级为告警） */
   const loadPipelineStatus = async (docId: string) => {
     if (!docId) return;
+    // 只允许「当前预览文档」的状态写回；同文档重入时以最新序号为准
+    if (pipelineDocIdRef.current !== docId) return;
+    const reqId = ++pipelineReqIdRef.current;
     setPipelineLoading(true);
     setPipelineError(null);
     try {
       const { data } = await docPipelineApi.status(docId);
+      if (reqId !== pipelineReqIdRef.current || pipelineDocIdRef.current !== docId) return;
       // status 已含 completeness 快照；quality_score 缺省时再取一次报告补全
       setPipelineStatus(data);
     } catch (e: unknown) {
+      if (reqId !== pipelineReqIdRef.current || pipelineDocIdRef.current !== docId) return;
       const err = e as { message?: string };
       setPipelineError(err?.message || "解析质量信息读取失败");
     } finally {
-      setPipelineLoading(false);
+      if (reqId === pipelineReqIdRef.current) setPipelineLoading(false);
     }
   };
 
@@ -426,6 +445,19 @@ export function useDocumentWorkflow(deps: DocumentWorkflowDeps) {
       if (action === "reparse") {
         const { data } = await docPipelineApi.reparse(docId, "force");
         msg.success(data?.skipped ? "文件未变更，无需重解析" : "已重新解析并刷新四层产物");
+        // ✅ 2026-11-07 缓存失效修复：重解析会重建 parsed_markdown，
+        //    旧实现只刷新四层状态、不刷新正文 → 弹窗继续显示重解析前的旧内容。
+        try {
+          const { data: fresh } = await factsApi.previewDocument(docId);
+          if (pipelineDocIdRef.current === docId) {
+            setPreviewText(fresh.preview || "");
+            setPreviewData(fresh);
+          }
+        } catch {
+          if (pipelineDocIdRef.current === docId) {
+            msg.warning("重解析已完成，但预览正文刷新失败，请关闭后重新打开");
+          }
+        }
       } else if (action === "syncExtractions") {
         const { data } = await docPipelineApi.syncExtractions(docId);
         msg.success(`提取层已物化（${(data?.written_types || []).length} 类）`);

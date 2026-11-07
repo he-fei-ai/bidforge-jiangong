@@ -692,3 +692,36 @@ describe("UploadParseTab", () => {
     expect(btn(container, "解析全部待解析（1）")).not.toBeNull();
   });
 });
+
+describe("UploadParseTab · 特殊文件名与重复上传", () => {
+  it("含 HTML 元字符的文件名按纯文本渲染，不注入元素（上传进度卡）", () => {
+    const name = `<img src=x onerror=alert(1)>报价&清单.pdf`;
+    const { container } = setup({ uploadingFacts: true, uploadedFiles: [name] });
+    expect(container.textContent || "").toContain(name);
+    expect(container.querySelector("img")).toBeNull();
+  });
+
+  it("同名的两个文件在同一批次出现：一次提交两个实例，不在前端静默丢弃", async () => {
+    const { container, onUploadFiles } = setup();
+    const input = container.querySelector('input[type="file"]') as HTMLInputElement;
+    // 文件选择框允许同名不同内容的文件；前端不得按文件名去重
+    const sameA = new File(["aaa"], "same.pdf", { type: "application/pdf" });
+    const sameB = new File(["bbb"], "same.pdf", { type: "application/pdf" });
+    fireEvent.change(input, { target: { files: [sameA, sameB] } });
+    await waitFor(() => expect(onUploadFiles).toHaveBeenCalledTimes(1));
+    expect((onUploadFiles.mock.calls[0][0] as File[]).map((f) => f.size)).toEqual([3, 3]);
+    expect((onUploadFiles.mock.calls[0][0] as File[]).length).toBe(2);
+  });
+
+  it("同一批次只触发一次 onUploadFiles（多选时逐文件 beforeUpload 不重复提交）", async () => {
+    const { container, onUploadFiles } = setup();
+    const input = container.querySelector('input[type="file"]') as HTMLInputElement;
+    const a = new File(["a"], "a.pdf", { type: "application/pdf" });
+    const b = new File(["b"], "b.docx", {
+      type: "application/vnd.openxmlformats-officedocument.wordprocessingml.document",
+    });
+    fireEvent.change(input, { target: { files: [a, b] } });
+    await waitFor(() => expect(onUploadFiles).toHaveBeenCalledTimes(1));
+    expect((onUploadFiles.mock.calls[0][0] as File[]).map((f) => f.name)).toEqual(["a.pdf", "b.docx"]);
+  });
+});
