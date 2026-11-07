@@ -255,3 +255,14 @@ def test_numbering_check_header_exposes_unchecked_reason():
     # 非严格模式（返回 {}）不发结论头，避免把「未自检」包装成任何结论
     assert _numbering_check_headers({}) == {}
 
+
+def test_docx_and_pdf_all_return_paths_wire_numbering_header():
+    """DOCX/PDF × 缓存命中/未命中 共 4 个返回分支都必须下发自检结论头。
+
+    只测守卫返回值不够 —— 任一返回分支漏 merge，用户侧依旧"看不到结论"。
+    """
+    here = os.path.dirname(os.path.abspath(__file__))
+    with open(os.path.join(os.path.dirname(here), "app", "routers", "export.py"), encoding="utf-8") as fh:
+        src = fh.read()
+    assert src.count("**_numbering_check_headers(_num_check)") == 4
+
