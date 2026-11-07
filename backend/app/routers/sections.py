@@ -3,6 +3,7 @@
 import asyncio
 import json
 import logging
+import time
 import uuid
 from datetime import datetime
 
@@ -1376,6 +1377,38 @@ async def _save_outline_to_db(
     #    **单一出口**（此前这段内联逻辑只此一处，且 create/update/upload 三条
     #    入口零接线）。下方 `result["generic_residual"]` 已改由该出口统一挂载。
 
+    # ✅ R184（2026-11-07 · 并发保存写锁前移）：本函数是「读旧快照 → 内存组装 →
+    #    整表写」的复合写操作。旧实现三步之间没有任何写锁保护（sqlite3 隐式
+    #    autocommit 下 SELECT 不开启事务），两路并发保存各自基于同一旧快照组装，
+    #    写锁只在各自第一条 DML 时串行 —— 实测 S2 重复行、S1 丢更新、S3 并集删除。
+    #    现于**首个决策读之前**显式 BEGIN IMMEDIATE：立即取得 RESERVED 写锁，
+    #    跨进程有效（WAL 下同库写者串行），不需要改 schema；锁在下方唯一一次
+    #    db.commit()（或异常时连接池归还前 rollback）才释放。
+    #    ⚠️ 位置约束：
+    #      1. 必须在全函数**所有 AI 调用之后**（上方占位标题自动重写可能要数十秒，
+    #         持锁期间不得发起 AI 调用，见其注释「AI 调用期间不得持有写事务」）；
+    #      2. 必须在下方 `SELECT existing_rows` 及其它决策读之前（这正是修复点）。
+    _lock_t0 = time.monotonic()
+    if getattr(db, "in_transaction", False):
+        # 例外路径：调用方已开启未提交事务（如 schemes.create_scheme 先
+        # INSERT schemes 再套用目录库）—— 该事务的首个写语句已取得 RESERVED
+        # 写锁，此处再 BEGIN 会抛 "cannot start a transaction within a
+        # transaction"。沿用调用方事务，串行化语义等价（同库同一时刻只有一个
+        # 写者）；下方 db.commit() 的提交范围与旧行为一致（同样是这把事务）。
+        _lock_mode = "inherited"
+    else:
+        await db.execute("BEGIN IMMEDIATE")
+        _lock_mode = "immediate"
+    _lock_wait_ms = (time.monotonic() - _lock_t0) * 1000
+    if _lock_wait_ms >= 200:
+        # 留痕：正常单写者 <1ms；超过 200ms 说明确有并发写者排队（跨进程亦如此）。
+        logger.warning(
+            "目录保存等锁 %.0fms（scheme=%s mode=%s）—— 已串行化执行",
+            _lock_wait_ms,
+            scheme_id,
+            _lock_mode,
+        )
+
     cur = await db.execute(_fe.SCHEME_PROJECT_ID_SQL, (scheme_id,))
     row = await cur.fetchone()
     if not row:
@@ -1587,7 +1620,17 @@ async def _save_outline_to_db(
     #    /numbering-consistency 长期报漂移。此处补齐，同事务提交。
     await _renormalize_all_section_contents(db, scheme_id)
     # ✅ 整表重建（save-outline / 目录库套用共用此入口）→ 作废扫描缓存
+    #    （本函数内部不 commit，DELETE 落在下方同一事务内，随唯一一次提交落库）
     await invalidate_consistency_scan_cache(db, scheme_id)
+    # ✅ R184（2026-11-07 · 事务边界）：本行是本函数**唯一一次**提交。
+    #    此前 `invalidate_export_cache` 在提交之前调用，而它在命中 export_cache
+    #    行时内部会 `await db.commit()`（facts_extractor._delete_cache_once）——
+    #    那会把「整表重建」尚未提交的写操作提前提交，并**提前释放
+    #    BEGIN IMMEDIATE 取得的 RESERVED 写锁**（即"单次提交"并不成立，锁只
+    #    覆盖了事务的前半段：那正是旧实现 S2 重复行能复现的窗口）。
+    #    现将导出缓存失效移到提交之后：写锁完整覆盖「读旧快照 → 组装 → 落库」，
+    #    失效退化为提交后的独立短事务（幂等 DELETE，失败只告警），不再反噬保存事务。
+    await db.commit()
     # ✅ P2（2026-10-04）：补导出缓存失效。
     #    export.py 的写侧失效此前只来自事实链路（global_facts.py 5 处）与提取链路
     #    （bid_analysis._invalidate_downstream_cache），**目录结构变更一条都没有** ——
@@ -1604,7 +1647,6 @@ async def _save_outline_to_db(
         await invalidate_export_cache(db, scheme_id)
     except Exception as _e:  # noqa: BLE001 - 缓存失效不得阻断目录保存
         logger.warning("目录重建：导出缓存失效失败（不影响保存结果）: %s", _e)
-    await db.commit()
     # ✅ 正文丢失量化（见上方 content_ids 说明）：以提交后的实际留存内容为准，
     #    不用「预期集合差集」估算 —— 级联删除/新增/复用同一条形都会影响结果。
     cleared_content = 0
