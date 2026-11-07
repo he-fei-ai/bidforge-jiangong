@@ -262,6 +262,16 @@ MANUAL_INVENTORY: dict[str, tuple[str, str]] = {
         "guard",
         "向上父链 while cur and guard < 20，自父/环最多迭代 20 次即停",
     ),
+    "services/preflight_engine.py::content_coverage_stats": (
+        "gap",
+        "复用 build_section_tree_index 的 parent_ids 判叶子；自父/环节点被当成父节点，"
+        "不计入 leaf_count 分母 → empty_ratio 偏低（覆盖率看起来更好）",
+    ),
+    "routers/export.py::collect_export_issues": (
+        "gap",
+        "parent_ids 集合判 has_children；自父行被误判为父章节，"
+        "「空章节/未生成」判定与父章节承载口径偏移",
+    ),
     "routers/export.py::_build_docx_sync": (
         "gap",
         "成稿正文按 roots/children_map 递归写出；自父/环组件不在 roots，"
