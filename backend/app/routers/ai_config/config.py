@@ -38,6 +38,7 @@ from app.services.ai.provider_factory import (
     upsert_runtime_setting,
 )
 from app.services.crypto import decrypt_api_key
+from app.services.redaction import redact_sensitive_text
 
 from .audit import record_config_audit, sanitize_config_snapshot
 
@@ -93,7 +94,7 @@ async def get_config(db=Depends(read_db)):
     try:
         active_env = await resolve_active_env()
     except ValueError as e:
-        active_env, env_error = "", str(e)
+        active_env, env_error = "", redact_sensitive_text(str(e))
     envs = sorted({r["env"] for r in rows if r["env"]})
     return {
         "items": rows,
@@ -148,7 +149,7 @@ async def save_config(data: AIConfigIn, request: Request = None, db=Depends(get_
     try:
         cid = await save_ai_config(data.model_dump())
     except ValueError as e:
-        raise HTTPException(status_code=400, detail=str(e))
+        raise HTTPException(status_code=400, detail=redact_sensitive_text(str(e)))
     # ✅ R111（P2-1 · 保存去重提示）：新增配置前，按「供应商+模型+Base URL」
     #    三元组（密钥除外）回查库内既有**其它**配置 —— 用户批量添加同一
     #    provider/model 的多个副本（生产实证 5 条 nvidia 死配置）时，逐条
@@ -1191,7 +1192,7 @@ async def set_active_env(body: ActiveEnvIn, request: Request = None, db=Depends(
     try:
         env = normalize_env(body.env)
     except ValueError as e:
-        raise HTTPException(400, str(e))
+        raise HTTPException(400, redact_sensitive_text(str(e)))
     try:
         await upsert_runtime_setting(db, RUNTIME_ACTIVE_ENV_KEY, env)
         await record_config_audit(

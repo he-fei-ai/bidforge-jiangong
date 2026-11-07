@@ -7,6 +7,8 @@ import logging
 import socket
 from urllib.parse import urlparse
 
+from app.services.redaction import redact_sensitive_text
+
 logger = logging.getLogger("ai_config")
 
 
@@ -44,8 +46,15 @@ def _http_status_of(exc: Exception) -> int | None:
 
 
 def _classify_error(exc: Exception) -> dict:
-    """把底层异常分类为可展示的结构 {category, message, suggestion}"""
-    msg = str(exc)
+    """把底层异常分类为可展示的结构 {category, message, suggestion}
+
+    ✅ R183（2026-11-07）：统一在此处对异常原文脱敏。上游错误体可能回显
+      ``Authorization: Bearer sk-...``，原实现只对 ``raw`` 做脱敏，而
+      ``http`` / ``unknown`` 分类的 ``message`` 直接取原文前 N 字符，
+      会经 ``/ai/config/test``、``/ai/config/models`` 明文回给前端。
+      ``Bearer`` 关键字保留（仍能正确归类为 config），密钥本体被掩码。
+    """
+    msg = redact_sensitive_text(str(exc))
     status_code = _http_status_of(exc)
 
     # 参数校验类（api_key 空、Illegal header value 等）
@@ -224,7 +233,7 @@ def _dns_precheck(base_url: str) -> dict:
                 "ok": False,
                 "step": "dns",
                 "message": f"DNS 解析失败：无法找到 {host}",
-                "raw": str(e),
+                "raw": redact_sensitive_text(str(e)),
             }
         # TCP connect
         try:
@@ -235,11 +244,11 @@ def _dns_precheck(base_url: str) -> dict:
                 "ok": False,
                 "step": "tcp",
                 "message": f"TCP 握手失败：{host}:{port} 不可达",
-                "raw": str(e),
+                "raw": redact_sensitive_text(str(e)),
             }
         return {"ok": True, "step": "ok", "host": host, "ip": ip, "port": port}
     except Exception as e:
-        return {"ok": False, "step": "unknown", "message": str(e)}
+        return {"ok": False, "step": "unknown", "message": redact_sensitive_text(str(e))}
 
 
 async def _dns_precheck_async(base_url: str) -> dict:

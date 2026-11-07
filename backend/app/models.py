@@ -290,6 +290,10 @@ class AIConfigTest(BaseModel):
     # 期望的请求方式（normal / stream；空 = 未指定，沿用配置值或默认策略）。
     # 探测时优先用该方式，失败后用另一种方式兜底再探一次，并把实际方式回传。
     request_mode: str = Field("", max_length=16)
+    # ✅ R183（2026-11-07）：探测超时（秒）。0 = 未指定 → 依次沿用「已存配置的
+    #    timeout」→ 默认 900s，与保存/运行时同一套 clamp 出口。仅用于本次探测，
+    #    不落库；新增可选字段不改变既有调用方（不传即 0）。
+    timeout: int = Field(0, ge=0, le=3600)
 
 
 class ProviderModelsIn(BaseModel):

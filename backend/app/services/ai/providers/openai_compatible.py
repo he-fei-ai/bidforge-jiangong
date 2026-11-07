@@ -9,6 +9,7 @@ import httpx
 from app.services.ai.http_pool import get_async_client
 from app.services.ai.json_mode_compat import response_format_rejected
 from app.services.ai.providers.base import BaseProvider, normalize_messages
+from app.services.redaction import redact_sensitive_text
 
 logger = logging.getLogger("ai_provider")
 
@@ -81,7 +82,10 @@ class OpenAICompatibleProvider(BaseProvider):
                 #    编排层据此设置配额冷却（优先于固定 120s），尊重厂商限流窗口。
                 retry_after = resp.headers.get("retry-after")
                 suffix = f"（Retry-After: {retry_after}s）" if retry_after else ""
-                raise RuntimeError(f"HTTP {resp.status_code}: {body_text}{suffix}")
+                # ✅ R183（2026-11-07）：上游错误体可能回显 `Incorrect API key: sk-...`，
+                #    异常文本会被 SSE/接口层 `str(e)` 原样透给前端。在抛出点先脱敏，
+                #    使所有下游（routers、审计、日志）拿到的都是掩码后的文本。
+                raise RuntimeError(f"HTTP {resp.status_code}: {redact_sensitive_text(body_text)}{suffix}")
             resp.raise_for_status()
             break
         data = resp.json()
@@ -89,7 +93,7 @@ class OpenAICompatibleProvider(BaseProvider):
         self._set_usage(data.get("usage"))
         choices = data.get("choices") or []
         if not choices:
-            raise RuntimeError(f"厂商返回空 choices: {str(data)[:200]}")
+            raise RuntimeError(f"厂商返回空 choices: {redact_sensitive_text(str(data))[:200]}")
         self.last_finish_reason = str(choices[0].get("finish_reason") or "")
         # ✅ 修复：content 可能为 None（tool_calls/内容过滤时），避免 None 传给上层
         content = (choices[0].get("message") or {}).get("content")
@@ -111,7 +115,7 @@ class OpenAICompatibleProvider(BaseProvider):
                     f"（finish_reason=length），正文为空：请调大 max_tokens"
                     f" 或改用非推理模型"
                 )
-            raise RuntimeError(f"厂商返回空 content（finish_reason={_finish}）: {str(data)[:200]}")
+            raise RuntimeError(f"厂商返回空 content（finish_reason={_finish}）: {redact_sensitive_text(str(data))[:200]}")
         return content
 
     async def stream(

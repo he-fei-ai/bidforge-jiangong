@@ -136,7 +136,19 @@ def decrypt_api_key(enc: str) -> str:
         return ""
     try:
         return _get_fernet().decrypt(enc.encode()).decode()
-    except (InvalidToken, Exception):
+    except InvalidToken:
+        # 预期内：密文与当前主密钥不匹配（换过 FERNET_KEY / 删过密钥文件）。
+        # 调用方按空串降级（界面显示「密钥失效」），属于业务兜底，不刷日志。
+        return ""
+    except Exception:
+        # ✅ R183（2026-11-07）：原实现是 `except (InvalidToken, Exception)`，
+        #    连加密库故障 / 主密钥初始化异常也一并吞掉，运行时表现为「配置
+        #    明明存了 Key 却像没配」，日志里没有任何痕迹。仍保持 fail-soft
+        #    （绝不把解密失败升级为 500），但非预期故障必须留痕便于排查。
+        logger.warning(
+            "API Key 解密失败（非 InvalidToken，可能是主密钥/加密库异常）",
+            exc_info=True,
+        )
         return ""
 
 

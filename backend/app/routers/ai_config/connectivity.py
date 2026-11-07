@@ -9,6 +9,7 @@ from app.config import settings
 from app.db import read_db
 from app.models import AIConfigTest
 from app.services.ai.provider_factory import (
+    DEFAULT_CONFIG_NUMBERS,
     PROVIDER_PRESETS,
     VALID_REQUEST_MODES,
     clamp_config_numbers,
@@ -29,6 +30,14 @@ router = APIRouter(tags=["ai_config"])
 #: 15s 覆盖系统解析器排队的最坏情况。模块级常量便于单测注入更小值。
 _PRECHECK_PROBE_TIMEOUT_S = 15
 
+#: ✅ R183（2026-11-07）：单条连通性探测的超时上限（秒）。
+#: 前端 ``aiApi.testConfig`` 的 axios 硬超时为 260s，后端最坏路径是
+#: 预检 15s +「首选 + 兜底」两条探测，因此单条探测必须 ≤120s，
+#: 否则后端已完成错误分类，前端却先被 axios 泛化超时截断、拿不到原因。
+#: 配置的 timeout < 120s 时按配置值探测（与实际调用同口径）；大于上限时
+#: 通过响应里的 ``config_timeout_s`` / ``probe_timeout_s`` 如实暴露差异。
+_PROBE_TIMEOUT_CAP_S = 120
+
 
 @router.post("/config/test")
 async def test_config(data: AIConfigTest, db=Depends(read_db)):
@@ -43,17 +52,27 @@ async def test_config(data: AIConfigTest, db=Depends(read_db)):
     config_id = (data.config_id or "").strip()
 
     db_request_mode = ""
+    db_timeout = 0
+    saved_provider_name = ""
     if config_id:
         cur = await db.execute(
-            "SELECT base_url, api_key_encrypted, model, request_mode" " FROM ai_config WHERE id=?", (config_id,)
+            "SELECT provider_name, base_url, api_key_encrypted, model, request_mode, timeout"
+            " FROM ai_config WHERE id=?",
+            (config_id,),
         )
         row = await cur.fetchone()
         if not row:
             return {"ok": False, "error": "配置不存在（可能已被删除）", "suggestion": "请刷新页面后重新选择配置"}
         saved_base_url = (row["base_url"] or "").strip()
+        # ✅ R183：只传 config_id 时（如列表行的快捷测试）表单不带 provider_name，
+        #    原实现按空串当「自定义 OpenAI 兼容」，Anthropic 类配置会被探测到
+        #    错误的接口路径。现回读库里的 provider_name 作为兜底。
+        saved_provider_name = (row["provider_name"] or "").strip()
         # 已保存 Key 与其 Base URL 是一组不可拆分的凭据。地址被改写时若仍从
         # DB 取旧 Key，会把密钥发给任意请求方指定的外部地址，属于密钥外泄。
-        if base_url and not _same_base_url(base_url, saved_base_url) and not api_key:
+        # ✅ R183：仅当库里**确有** Key 时才需要这条拦截；未存 Key 的配置改地址
+        #    再报「必须重新输入 Key」会把真实原因（API Key 为空）掩盖掉。
+        if base_url and not _same_base_url(base_url, saved_base_url) and not api_key and row["api_key_encrypted"]:
             return {
                 "ok": False,
                 "error": "Base URL 已变更，必须重新输入该地址对应的 API Key",
@@ -67,6 +86,10 @@ async def test_config(data: AIConfigTest, db=Depends(read_db)):
             db_request_mode = (row["request_mode"] or "").strip().lower()
         except (IndexError, KeyError):
             db_request_mode = ""
+        try:
+            db_timeout = int(row["timeout"] or 0)
+        except (IndexError, KeyError, TypeError, ValueError):
+            db_timeout = 0
         if not api_key and row["api_key_encrypted"]:
             api_key = decrypt_api_key(row["api_key_encrypted"]).strip()
             if not api_key:
@@ -105,7 +128,11 @@ async def test_config(data: AIConfigTest, db=Depends(read_db)):
     try:
         base_url = normalize_base_url(base_url)
     except ValueError as e:
-        return {"ok": False, "error": str(e), "suggestion": "请填写形如 https://api.example.com/v1 的地址"}
+        return {
+            "ok": False,
+            "error": redact_sensitive_text(str(e)),
+            "suggestion": "请填写形如 https://api.example.com/v1 的地址",
+        }
 
     # Step 1: 网络预检
     pre = await _dns_precheck_async(base_url)
@@ -138,14 +165,22 @@ async def test_config(data: AIConfigTest, db=Depends(read_db)):
     probe_max_tokens = clamp_config_numbers({"max_tokens": int(getattr(data, "max_tokens", 0) or 0) or 8192})[
         "max_tokens"
     ]
+    # ✅ R183：探测超时不再硬编码 120s —— 表单值 → 已存配置 → 默认 900s，
+    #    并走保存/运行时同一套 clamp 出口；再按前端 260s 契约封顶。
+    requested_timeout = int(getattr(data, "timeout", 0) or 0)
+    effective_timeout = clamp_config_numbers(
+        {"timeout": requested_timeout or db_timeout or DEFAULT_CONFIG_NUMBERS["timeout"]}
+    )["timeout"]
+    probe_timeout = min(effective_timeout, _PROBE_TIMEOUT_CAP_S)
+    provider_name = (data.provider_name or "").strip() or saved_provider_name
     try:
         provider = _build_provider(
-            data.provider_name, api_key, base_url, model, max_tokens=probe_max_tokens, timeout=120
+            provider_name, api_key, base_url, model, max_tokens=probe_max_tokens, timeout=probe_timeout
         )
     except ValueError as e:
         return {
             "ok": False,
-            "error": str(e),
+            "error": redact_sensitive_text(str(e)),
             "category": "config",
             "suggestion": "请检查供应商、Base URL 与模型名称是否填写完整",
         }
@@ -154,12 +189,24 @@ async def test_config(data: AIConfigTest, db=Depends(read_db)):
 
     async def _probe_stream() -> str:
         total = ""
-        async for chunk in provider.stream([{"role": "user", "content": "回复ok"}]):
-            if chunk:
-                total += chunk
-                # 凑够一小段响应片段即可收工，不必等全部生成完
-                if len(total) > 80:
-                    break
+        stream = provider.stream([{"role": "user", "content": "回复ok"}])
+        try:
+            async for chunk in stream:
+                if chunk:
+                    total += chunk
+                    # 凑够一小段响应片段即可收工，不必等全部生成完
+                    if len(total) > 80:
+                        break
+        finally:
+            # ✅ R183：提前 break 后 async generator 仍处于挂起态，底层
+            #    httpx 连接要等 GC 才释放；并发探测/频繁点「测试连接」时
+            #    会累积未关闭连接。这里显式 aclose（关闭失败不影响探测结论）。
+            aclose = getattr(stream, "aclose", None)
+            if aclose is not None:
+                try:
+                    await aclose()
+                except Exception:
+                    logger.debug("关闭探测流失败（忽略）", exc_info=True)
         return total
 
     async def _probe_chat() -> str:
@@ -192,13 +239,15 @@ async def test_config(data: AIConfigTest, db=Depends(read_db)):
         payload = {
             "ok": True,
             "response": response_text[:100],
-            "provider": data.provider_name,
+            "provider": provider_name,
             "model": provider.model,
             "base_url": base_url,
             "network": pre,
             "latency_ms": elapsed_ms,
             "mode": f"{used}_probe",
             "request_mode": "stream" if used == "stream" else "normal",
+            "probe_timeout_s": probe_timeout,
+            "config_timeout_s": effective_timeout,
         }
         if used != preferred:
             first_err = probe_errors.get(preferred)
@@ -206,14 +255,14 @@ async def test_config(data: AIConfigTest, db=Depends(read_db)):
                 payload["warning"] = (
                     "该平台的流式接口（stream）未返回内容，已回退为普通对话探测："
                     "正文生成不受影响，但流式输出类功能可能不可用。"
-                    + (f"（流式错误：{str(first_err)[:120]}）" if first_err else "")
+                    + (f"（流式错误：{redact_sensitive_text(str(first_err))[:120]}）" if first_err else "")
                 )
             else:
                 payload["warning"] = (
                     "普通请求探测未返回内容，改用流式请求探测成功："
                     "该平台可能对非流式请求有限制，"
                     "建议把该配置的「请求方式」改为「流式请求」。"
-                    + (f"（普通请求错误：{str(first_err)[:120]}）" if first_err else "")
+                    + (f"（普通请求错误：{redact_sensitive_text(str(first_err))[:120]}）" if first_err else "")
                 )
         return payload
 
@@ -243,12 +292,19 @@ async def test_config(data: AIConfigTest, db=Depends(read_db)):
             classified["raw"] = f"非流式：{classified.get('raw', '')}" f" ｜ 流式：{str(_stream_err)[:150]}"
         else:
             classified["raw"] = f"流式：{classified.get('raw', '')}" f" ｜ 非流式：{str(_chat_err)[:150]}"
+    # ✅ R183：单条探测受前端 260s 契约封顶；配置超时被截断时如实说明，
+    #    避免用户按「增大超时时间」建议改到 900s 后仍看到 120s 处的超时。
+    if classified["category"] == "timeout" and effective_timeout > probe_timeout:
+        classified["suggestion"] += (
+            f"；本次探测按 {probe_timeout}s 上限执行（该配置超时为 {effective_timeout}s）"
+        )
     classified["network"] = pre
     classified["latency_ms"] = elapsed_ms
     return {
         "ok": False,
-        "error": classified["message"],
-        "suggestion": classified["suggestion"],
+        # 兜底脱敏：即使上游文本没走到 _classify_error，也不会明文回显密钥
+        "error": redact_sensitive_text(classified["message"]),
+        "suggestion": redact_sensitive_text(classified["suggestion"]),
         "category": classified["category"],
         "label": classified.get("label", ""),
         "raw": redact_sensitive_text(classified.get("raw", str(err))),
@@ -256,6 +312,8 @@ async def test_config(data: AIConfigTest, db=Depends(read_db)):
         "base_url": base_url,
         "network": pre,
         "latency_ms": elapsed_ms,
+        "probe_timeout_s": probe_timeout,
+        "config_timeout_s": effective_timeout,
     }
 
 
@@ -276,7 +334,7 @@ async def precheck_config(data: AIConfigTest, db=Depends(read_db)):
     try:
         base_url = normalize_base_url(base_url)
     except ValueError as e:
-        return {"ok": False, "step": "url", "message": str(e)}
+        return {"ok": False, "step": "url", "message": redact_sensitive_text(str(e))}
     result = await _dns_precheck_async(base_url)
     result["base_url"] = base_url
     return result
@@ -426,7 +484,7 @@ async def configs_health(db=Depends(read_db)):
             return await _dns_precheck_async(normalize_base_url(url))
         except Exception as e:
             # 地址格式非法 / 预检自身异常都不能让整份体检失败
-            return {"ok": False, "step": "url", "message": str(e)}
+            return {"ok": False, "step": "url", "message": redact_sensitive_text(str(e))}
 
     nets = await asyncio.gather(*[_net((r.get("base_url") or "").strip()) for r in rows])
 
@@ -539,7 +597,7 @@ async def ai_health(db=Depends(read_db)):
     try:
         row = await _load_active_config()
     except ValueError as e:
-        row, env_error = None, str(e)
+        row, env_error = None, redact_sensitive_text(str(e))
 
     # 熔断器状态（per-provider）
     breaker = {}

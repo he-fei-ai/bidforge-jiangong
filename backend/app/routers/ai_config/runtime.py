@@ -32,6 +32,7 @@ from app.services.ai.provider_factory import (
     resolve_disabled_providers,
     upsert_runtime_setting,
 )
+from app.services.redaction import redact_sensitive_text
 
 from .audit import record_config_audit
 
@@ -52,8 +53,8 @@ async def _resolve_disabled_safe() -> tuple[set[str], str]:
     try:
         return await resolve_disabled_providers(), ""
     except ValueError as e:
-        logger.warning("运行时禁用厂商配置损坏，按空集处理以保留恢复入口：%s", e)
-        return set(), str(e)
+        logger.warning("运行时禁用厂商配置损坏，按空集处理以保留恢复入口：%s", redact_sensitive_text(str(e)))
+        return set(), redact_sensitive_text(str(e))
 
 
 async def _configured_providers(db) -> list[str]:
@@ -80,7 +81,7 @@ async def get_runtime(db=Depends(read_db)):
     try:
         active_env = await resolve_active_env()
     except ValueError as e:
-        active_env, env_error = "", str(e)
+        active_env, env_error = "", redact_sensitive_text(str(e))
     return {
         "active_env": active_env,
         "env_error": env_error,

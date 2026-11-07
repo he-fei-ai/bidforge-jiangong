@@ -36,7 +36,9 @@ async def _resolve_conn_credentials(db, data: ProviderModelsIn) -> tuple[str, st
         if not row:
             return "", "", "配置不存在（可能已被删除）"
         saved_base_url = (row["base_url"] or "").strip()
-        if base_url and not _same_base_url(base_url, saved_base_url) and not api_key:
+        # ✅ R183：仅当库里确有 Key 时才拦截「改地址复用旧 Key」；未存 Key 时
+        #    放行到统一的「API Key 不能为空」，避免把真实原因掩盖成地址变更。
+        if base_url and not _same_base_url(base_url, saved_base_url) and not api_key and row["api_key_encrypted"]:
             return (
                 "",
                 "",
@@ -87,7 +89,7 @@ async def _fetch_models_list(base_url: str, api_key: str, timeout: int = 15) -> 
     try:
         base_url = normalize_base_url(base_url)
     except ValueError as e:
-        return {"ok": False, "error": str(e)}
+        return {"ok": False, "error": redact_sensitive_text(str(e))}
     if not api_key:
         return {
             "ok": False,

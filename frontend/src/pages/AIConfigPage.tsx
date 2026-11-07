@@ -535,6 +535,10 @@ export default function AIConfigPage() {
         // ✅ 新增：按表单所选「请求方式」优先探测（失败自动用另一种方式兜底），
         //    否则用户勾了流式、探测却按普通请求走，测出来的结论与真实链路不符。
         request_mode: values.request_mode || "normal",
+        // ✅ R183（2026-11-07）：探测超时与真实调用同口径。原来后端硬编码 120s，
+        //    「测试连接」可能在 120s 处误判超时，而真实生成按表单的 timeout 仍能成功。
+        //    0 = 未填 → 后端沿用已存配置的 timeout / 默认 900s。
+        timeout: values.timeout || 0,
       });
       setTestResult(
         data.ok

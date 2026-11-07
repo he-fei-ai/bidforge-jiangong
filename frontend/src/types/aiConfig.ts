@@ -270,6 +270,12 @@ export interface AIConfigTestResponse {
   request_mode?: RequestMode | string;
   /** 失败时的原始错误信息（双路探测时含两条） */
   raw?: string;
+  /**
+   * ✅ R183（2026-11-07）：本次探测实际使用的超时（秒）与配置超时（秒）。
+   * 前端 260s 硬超时契约下单条探测封顶 120s，二者不等时据此向用户解释。
+   */
+  probe_timeout_s?: number;
+  config_timeout_s?: number;
 }
 
 /** POST /ai/config/precheck 响应 */
@@ -658,6 +664,11 @@ export interface AIConfigTestRequest {
   max_tokens?: number;
   /** 期望的探测方式；失败后后端会自动用另一种方式兜底再探一次 */
   request_mode?: RequestMode | string;
+  /**
+   * ✅ R183（2026-11-07）：探测超时（秒）。
+   * 0/不传 = 沿用已保存配置的 timeout；用于「测试连接」与真实调用同口径。
+   */
+  timeout?: number;
 }
 
 /** AI 调用审计明细（GET /ai/audit-logs 的 items） */

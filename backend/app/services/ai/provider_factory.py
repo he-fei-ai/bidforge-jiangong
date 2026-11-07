@@ -3955,7 +3955,8 @@ async def _attempt_candidate(
                     )
                     if use_json and _json_mode_unsupported(str(e)):
                         # 参数不支持 ≠ Provider 故障：不计入熔断，回退普通模式重试
-                        logger.warning("Provider %s 不支持 JSON 模式，回退普通模式重试: %s", pname, str(e)[:160])
+                        # ✅ R183：异常文本可能含上游回显的 Key；日志统一走脱敏摘要
+                        logger.warning("Provider %s 不支持 JSON 模式，回退普通模式重试: %s", pname, _error_summary(e))
                         circuit_breaker.record_success(pname)
                         break
                     # ✅ 2026-09-22（调用次数优化 O3）：推理模型把 max_tokens 全部

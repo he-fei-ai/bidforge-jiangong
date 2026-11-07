@@ -5,6 +5,7 @@ from typing import AsyncIterator
 
 from app.services.ai.http_pool import get_async_client
 from app.services.ai.providers.base import BaseProvider, normalize_messages
+from app.services.redaction import redact_sensitive_text
 
 
 class AnthropicCompatibleProvider(BaseProvider):
@@ -124,4 +125,7 @@ class AnthropicCompatibleProvider(BaseProvider):
                     if piece := (evt.get("delta") or {}).get("text"):
                         yield piece
                 elif etype == "error":
-                    raise RuntimeError(f"Anthropic 流式返回错误：{str(evt.get('error'))[:200]}")
+                    # ✅ R183：上游 err 事件可能回显鉴权明文，抛出前统一脱敏
+                    raise RuntimeError(
+                        f"Anthropic 流式返回错误：{redact_sensitive_text(str(evt.get('error'))[:200])}"
+                    )
