@@ -18,7 +18,8 @@ export interface ScoringItemRow {
 
 export interface ScoringExtractRun {
   run_id: string;
-  status: "running" | "success" | "partial" | "failed";
+  // empty = 本次解析返回 0 条但已保留上一次活跃快照（与「真的没有评分项」的 success 区分）
+  status: "running" | "success" | "partial" | "failed" | "empty";
   docs_total: number;
   docs_ok: number;
   failed_sources: FailedSource[];
@@ -134,7 +135,7 @@ export interface ScoringCoverageResponse {
 export interface ScoringExtractResponse {
   project_id: string;
   run_id: string;
-  status: "success" | "partial" | "failed";
+  status: "success" | "partial" | "failed" | "empty";
   items: ScoringItemRow[];
   items_count: number;
   docs_total: number;

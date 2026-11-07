@@ -4,6 +4,7 @@ import ast
 import hashlib
 import inspect
 import textwrap
+from datetime import date
 
 import app.routers.export as _sh  # noqa: F401 — facade 命名空间延迟绑定（monkeypatch 兼容）
 from app.services.fence_common import is_fence_close  # ✅ R168：闭合判据唯一事实源（叶子模块，无成环）
@@ -101,6 +102,252 @@ def _count_unclosed_chart_fences(content: str) -> int:
     return n
 
 
+# ---------------------------------------------------------------------------
+# ✅ 2026-10-10（文档质量报告 修复13/14 · 增强12）：三类专项体检（检测型）。
+# 全部**只计数定位、绝不改写正文**（AGENTS.md §3.1.6 红线：改写等于替用户
+# 决定内容）。规范配对/术语混用为全文级（跨章共现单章检不出），空话句式
+# 全文归并计数。sections 字段在此承载命中片段（前 3 条）而非章节标题。
+#
+# ⚠️ 这些检测器原仅存在于历史副本 export_audit.py（生产不可达），
+#    行为测试指向副本因而「绿」，生产导出从未执行 —— 现迁入生产模块。
+# ---------------------------------------------------------------------------
+
+#: 规范编号 → 官方名称（高置信小表：只收常见施工规范，宁缺毋滥；
+#: 键为无空格大写形态，查表前同样归一）
+_STANDARD_TITLES: dict[str, str] = {
+    "GB50202": "建筑地基基础工程施工质量验收标准",
+    "GB50203": "砌体结构工程施工质量验收规范",
+    "GB50204": "混凝土结构工程施工质量验收规范",
+    "GB50208": "地下防水工程质量验收规范",
+    "GB50300": "建筑工程施工质量验收统一标准",
+    "GB50666": "混凝土结构工程施工规范",
+    "GB50720": "建设工程施工现场消防安全技术规范",
+    "GB55034": "建筑与市政施工现场安全卫生与职业健康通用规范",
+    "JGJ18": "钢筋焊接及验收规程",
+    "JGJ33": "建筑机械使用安全技术规程",
+    "JGJ39": "托儿所、幼儿园建筑设计规范",
+    "JGJ46": "施工现场临时用电安全技术规范",
+    "JGJ59": "建筑施工安全检查标准",
+    "JGJ80": "建筑施工高处作业安全技术规范",
+    "JGJ107": "钢筋机械连接技术规程",
+    "JGJ120": "建筑基坑支护技术规程",
+    "JGJ130": "建筑施工扣件式钢管脚手架安全技术规范",
+    "JGJ162": "建筑施工模板安全技术规范",
+    "JGJ311": "建筑深基坑工程施工安全技术规范",
+}
+#: 「编号 + 《名称》」紧跟形态才做配对校验——编号单独出现不校验
+#: （读者自会核对，误报面大）
+_STANDARD_PAIR_RE = _sh.re.compile(r"\b((?:GB|JGJ|CJJ)\s*\d{2,5})\s*[《〈]([^》〉\n]{4,60})[》〉]")
+
+#: 同义术语组（报告实证 4 组；「安全生产」组刻意剔除——正式场合两种
+#: 表述各有语义侧重，不算混用）
+_TERMINOLOGY_MIX_GROUPS: tuple[tuple[str, tuple[str, ...]], ...] = (
+    ("外脚手架", ("外架", "外脚手架", "外脚手架体系")),
+    ("模板支撑架", ("模板支撑架", "模板支架", "模板支撑体系")),
+    ("建设单位", ("建设单位", "业主单位", "业主方")),
+    ("出地面", ("出地面", "出正负零", "出±0.000")),
+)
+
+#: 空话套话句式（info 级：AI 初稿高频，提示精简；「严格按照」刻意剔除——
+#: 工程文档里它是正常表述，检测会满屏误报）
+_FILLER_PATTERNS: tuple[tuple[str, str], ...] = (
+    ("高度重视", r"高度重视[^。；\n]{0,12}(?:工作|落实|管理|安全|质量)"),
+    ("进一步提高", r"进一步(?:提高|加强|完善|强化)[^。；\n]{0,10}" r"(?:水平|能力|管理|工作)"),
+    ("切实做好", r"切实(?:做好|加强|落实)[^。；\n]{0,12}"),
+    ("奠定基础", r"为[^。；\n]{2,20}奠定(?:了)?(?:坚实|良好)?基础"),
+    ("确保万无一失", r"确保[^。；\n]{0,10}万无一失"),
+    ("全面提升", r"全面(?:提升|推进|加强)[^。；\n]{0,10}(?:水平|能力|建设)"),
+)
+
+
+def _norm_ref_text(text: str) -> str:
+    """规范名称归一（去空白/标点、全半角统一），供配对比对。"""
+    s = str(text or "")
+    s = s.replace("（", "(").replace("）", ")").replace("，", ",").replace("、", "").replace("　", "")
+    return _sh.re.sub(r"[\s()（）,，.-]+", "", s)
+
+
+def _detect_standard_pairing(content: str) -> dict | None:
+    """规范编号-名称配对校验（报告实证：JGJ 39 被写成临时用电规范）。
+
+    只在「编号 + 《名称》」紧跟形态下比对注册表；编号在表中而名称双向
+    都不包含 → error（交付文档引用错规范是硬伤）。表中没有的编号不校验
+    （宁漏勿误）。
+    """
+    found: list[str] = []
+    for m in _STANDARD_PAIR_RE.finditer(content):
+        code = _sh.re.sub(r"\s+", "", m.group(1)).upper()
+        expected = _STANDARD_TITLES.get(code)
+        if not expected:
+            continue
+        title = str(m.group(2) or "").strip()
+        tn, en = _norm_ref_text(title), _norm_ref_text(expected)
+        if tn and en and tn not in en and en not in tn:
+            found.append(f"{m.group(1)}《{title}》应为《{expected}》")
+    if not found:
+        return None
+    return {
+        "key": "standard_pairing",
+        "level": "error",
+        "count": len(found),
+        "label": "规范编号与名称不配对（引用错规范，须人工复核）",
+        "sections": found[:3],
+    }
+
+
+def _detect_terminology_mix(content: str) -> dict | None:
+    """术语混用检测（报告实证：同一对象全文出现多种叫法）。info 级。"""
+    mixed: list[str] = []
+    for canonical, variants in _TERMINOLOGY_MIX_GROUPS:
+        used = [v for v in variants if v in content]
+        if len(used) >= 2:
+            mixed.append(f"{canonical}: " + " / ".join(used))
+    if not mixed:
+        return None
+    return {
+        "key": "terminology_mix",
+        "level": "info",
+        "count": len(mixed),
+        "label": "同一对象多种叫法（建议全文统一术语）",
+        "sections": mixed[:3],
+    }
+
+
+def _detect_filler_phrases(content: str) -> dict | None:
+    """空话套话句式检测（报告实证 6 类高频句式）。info 级，提示精简。"""
+    total = 0
+    samples: list[str] = []
+    for label, pattern in _FILLER_PATTERNS:
+        cnt = len(_sh.re.findall(pattern, content))
+        if cnt:
+            total += cnt
+            if len(samples) < 3:
+                samples.append(f"{label}×{cnt}")
+    if not total:
+        return None
+    return {
+        "key": "filler_phrase",
+        "level": "info",
+        "count": total,
+        "label": "空话套话句式（建议精简为具体措施）",
+        "sections": samples,
+    }
+
+
+# ---------------------------------------------------------------------------
+# ✅ 2026-10-10（文档质量报告 修复10/18 · 内容问题5/6）：工期一致性 + 里程碑合理性
+# 检测型（**只体检、不篡改**）：报告实证正文声明 617 日历天、甘特图却显示 718 天，
+# 且里程碑「二次结构及抹灰(9/30)」晚于「外架及塔吊拆除(10/30)」不合常理。此处扫描
+# 正文内部自陈的工期数字与里程碑日期，做一致性/合理性体检，供用户回改源文。
+# 全部仅计数定位，绝不改写正文（AGENTS.md §3.1.6 红线）。
+# ---------------------------------------------------------------------------
+
+#: 工期声明（只吃「工期/日历天」语境，避免「养护 28 天」「龄期 7 天」误命中）。
+_SCHEDULE_TOTAL_RE = _sh.re.compile(r"(?:总工期|建设工期|合同工期|工期)[^，。；\n]{0,8}?(\d{2,4})\s*(?:日历)?天")
+
+#: 里程碑「名称 日期」：名称 ≤16 字（含中文括号/±/斜杠），日期为
+#: 20xx-x-x / 20xx年x月x日 / 20xx.x.x 三种形态。
+_MILESTONE_RE = _sh.re.compile(
+    r"([\u4e00-\u9fa5A-Za-z0-9±（）()\s/、－-]{1,16})" r"(20\d{2}[-年/.]\d{1,2}[-月/.]\d{1,2}日?)"
+)
+#: 二次结构 / 外架拆除 工序逻辑参照（二次结构及抹灰须在外部脚手架拆除前完成）。
+_MILESTONE_SECOND_STRUCTURE = ("二次结构", "砌体", "抹灰")
+_MILESTONE_SCAFFOLD_DOWN = ("外架", "脚手架拆除", "架体拆除", "塔吊拆除")
+#: 外架/塔吊的「安装期」动作词：与拆除共用「外架」关键字，若不排除，
+#: 按正文顺序取到的第一个命中项可能是**搭设**日期 → 合规排期被误报
+#: 「二次结构晚于外架拆除」（正常文档零误报红线）。
+_MILESTONE_SCAFFOLD_UP = ("搭设", "安装", "提升", "爬升", "附着")
+
+
+def _parse_milestone_date(text: str) -> date | None:
+    """解析里程碑日期（20xx-x-x / 20xx年x月x日 / 20xx.x.x），非法返回 None。"""
+    s = str(text or "").strip()
+    m = _sh.re.match(r"^(20\d{2})[-/.](\d{1,2})[-/.](\d{1,2})", s)
+    if not m:
+        m = _sh.re.match(r"^(20\d{2})年(\d{1,2})月(\d{1,2})日?", s)
+    if not m:
+        return None
+    y, mo, d = (int(x) for x in m.groups())
+    if not (1 <= mo <= 12 and 1 <= d <= 31):
+        return None
+    try:
+        return date(y, mo, d)
+    except ValueError:
+        return None
+
+
+def _detect_schedule_conflicts(content: str) -> dict | None:
+    """工期声明自相矛盾检测（报告实证：正文 617 日历天 vs 甘特图 718 天）。
+
+    只扫「工期/日历天」语境下的数字，同一份正文若出现 **2 个及以上不同** 总工期
+    声明即判矛盾（用户须统一为一个权威值）。命中即 error（交付文档工期不可信是硬伤）。
+    """
+    found: set[int] = set()
+    for m in _SCHEDULE_TOTAL_RE.finditer(content):
+        found.add(int(m.group(1)))
+    if len(found) <= 1:
+        return None
+    vals = sorted(found)
+    return {
+        "key": "schedule_conflict",
+        "level": "error",
+        "count": len(vals),
+        "label": "工期声明自相矛盾（正文出现多个不同总工期，须统一为权威值）",
+        "sections": [f"总工期声明：{v}日历天" for v in vals],
+    }
+
+
+def _detect_milestone_issues(content: str) -> dict | None:
+    """里程碑排期合理性检测（报告实证：二次结构晚于外架拆除、间隔过短）。
+
+    提取正文中「名称 + 日期」形态的全部里程碑，校验：
+      ① 相邻里程碑间隔是否过短（<7 天，明显属于漏排/错排）；
+      ② 工序逻辑：二次结构/砌体/抹灰完成时间是否早于外部脚手架/塔吊拆除。
+    全部为 **检测型**（warn 级，提示用户核对），绝不改写正文。
+    ⚠️ 不检「全局日期升序」：正文里程碑常按分组/章节罗列而非严格时间轴，
+    强制升序会大量误报（违背「正常文档零误报」红线），故只保留确定性强的
+    ② 工序逻辑与 ① 相邻过短间隔两类信号。
+    """
+    hits: list[tuple[str, date]] = []
+    for m in _MILESTONE_RE.finditer(content):
+        name = m.group(1).strip(" \t\r\n（）()")
+        d = _parse_milestone_date(m.group(2))
+        if d and name:
+            hits.append((name, d))
+    if len(hits) < 2:
+        return None
+
+    issues: list[str] = []
+    # ① 相邻间隔过短（<7 天）→ 漏排/错排
+    for i in range(len(hits) - 1):
+        gap = (hits[i + 1][1] - hits[i][1]).days
+        if 0 <= gap < 7:
+            issues.append(f"{hits[i][0]}→{hits[i + 1][0]} 间隔仅 {gap} 天，过短")
+    # ② 工序逻辑：二次结构须在外部脚手架拆除前
+    #   拆除项须排除「搭设/安装/提升/爬升/附着」这类安装期里程碑（同样含「外架」）。
+    sec = next((d for n, d in hits if any(k in n for k in _MILESTONE_SECOND_STRUCTURE)), None)
+    demol = next(
+        (
+            d
+            for n, d in hits
+            if any(k in n for k in _MILESTONE_SCAFFOLD_DOWN) and not any(k in n for k in _MILESTONE_SCAFFOLD_UP)
+        ),
+        None,
+    )
+    if sec and demol and sec > demol:
+        issues.append("二次结构/抹灰完成时间晚于外架或塔吊拆除，不合常理" "（应在此之前完成）")
+
+    if not issues:
+        return None
+    return {
+        "key": "milestone_issue",
+        "level": "warn",
+        "count": len(issues),
+        "label": "里程碑排期不合理（间隔/工序逻辑，建议核对）",
+        "sections": issues[:3],
+    }
+
+
 def audit_content(sections: list[dict], *, fences_fixed: int = 0) -> dict:
     """扫描各章正文，产出可交付性问题清单（供导出预检 / 响应头 / 日志）。
 
@@ -158,6 +405,18 @@ def audit_content(sections: list[dict], *, fences_fixed: int = 0) -> dict:
                 "sections": [],
             },
         )
+    # 全文级专项体检（跨章共现，单章检不出）：登记型，不改写正文
+    _full_text = "\n".join(str(sec.get("content") or "") for sec in sections if sec.get("content"))
+    if _full_text:
+        for probe in (
+            _detect_standard_pairing(_full_text),
+            _detect_terminology_mix(_full_text),
+            _detect_filler_phrases(_full_text),
+            _detect_schedule_conflicts(_full_text),
+            _detect_milestone_issues(_full_text),
+        ):
+            if probe:
+                hits[probe["key"]] = probe
     # 级别排序：error → warn，同级按数量降序（用户先看最要命的）
     order = {"error": 0, "warn": 1, "info": 2}
     items = sorted(hits.values(), key=lambda x: (order.get(x["level"], 9), -x["count"]))
@@ -179,12 +438,13 @@ def _format_audit_log(audit: dict) -> str:
 # 此前靠人工 `_AUDIT_SIDECAR_VERSION += 1`，属于"一定会忘"的约定 —— 现改为
 # **对规则本身取指纹**，改规则/改判定代码即自动失效旧旁车。
 #
-# 覆盖面（三者缺一不可，缺任何一个都会让"改规则但指纹不变"成为可能）：
+# 覆盖面（缺一不可，缺任何一个都会让"改规则但指纹不变"成为可能）：
 #   1) 规则表 `_AUDIT_RULES` 的 key / 标签 / 级别 / 正则 pattern / flags；
 #      —— 经 `_sh` 读取，即 `audit_content` 实际使用的那份绑定（运行时替换同样生效）。
 #   2) `audit_content` 的 AST：聚合、去重、排序、`fences_fixed` 分支都在这里。
 #   3) `_count_unclosed_chart_fences` 与 `is_fence_close` 的 AST：未闭合围栏
 #      这条 error 级的全部判定逻辑（含闭合判据唯一事实源）。
+#   4) 全文级专项体检检测器（规范配对/术语混用/空话句式/工期/里程碑）的 AST。
 #
 # 为什么用 AST 而不是源码文本：注释/空行/换行风格不影响判定结果，用 AST 可避免
 # 「纯注释提交导致全量旁车失效」；docstring 仍计入 AST（宁可敏感不可漏）。
@@ -209,6 +469,24 @@ def audit_rules_fingerprint() -> str:
     parts.append("code:" + _ast_digest(audit_content))
     parts.append("code:" + _ast_digest(_count_unclosed_chart_fences))
     parts.append("dep:" + _ast_digest(is_fence_close))
+    # 4) 全文级专项体检：检测器代码 + 规则数据（数据表改动同样必须让旧旁车失效）
+    for _probe in (
+        _detect_standard_pairing,
+        _detect_terminology_mix,
+        _detect_filler_phrases,
+        _detect_schedule_conflicts,
+        _detect_milestone_issues,
+        _parse_milestone_date,
+    ):
+        parts.append("code:" + _ast_digest(_probe))
+    parts.append("data:" + repr(sorted(_STANDARD_TITLES.items())))
+    parts.append("data:" + repr(_TERMINOLOGY_MIX_GROUPS))
+    parts.append("data:" + repr(_FILLER_PATTERNS))
+    parts.append("data:" + repr((_STANDARD_PAIR_RE.pattern, _STANDARD_PAIR_RE.flags)))
+    parts.append("data:" + repr((_SCHEDULE_TOTAL_RE.pattern, _SCHEDULE_TOTAL_RE.flags)))
+    parts.append("data:" + repr((_MILESTONE_RE.pattern, _MILESTONE_RE.flags)))
+    parts.append("data:" + repr((_MILESTONE_SECOND_STRUCTURE, _MILESTONE_SCAFFOLD_DOWN)))
+    parts.append("data:" + repr(_MILESTONE_SCAFFOLD_UP))
     return hashlib.sha256("\n".join(parts).encode("utf-8")).hexdigest()[:16]
 
 

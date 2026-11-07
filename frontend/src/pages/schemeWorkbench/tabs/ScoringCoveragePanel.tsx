@@ -101,6 +101,9 @@ export function ScoringCoveragePanel({
       const { data: res } = await scoringApi.extract(projectId);
       if (res.status === "failed") {
         msg.warning(res.error || "评分项解析失败（未定位到评标办法/评分标准）");
+      } else if (res.status === "empty") {
+        // 0 条结果但已保留旧快照：必须提示，不得报成「解析完成」
+        msg.warning(res.error || "评分项解析返回 0 条，已保留上一次快照");
       } else if (res.status === "partial") {
         msg.warning(`评分项已解析（部分来源失败）：成功 ${res.docs_ok}/${res.docs_total} 个文档`);
       } else {
@@ -156,7 +159,9 @@ export function ScoringCoveragePanel({
               data-testid="scoring-status-tag"
               color={status === "ok" ? "green" : status === "partial" ? "orange" : "default"}
             >
-              {STATUS_LABEL[status] || status}
+              {data?.extraction?.status === "empty"
+                ? "沿用旧快照（未更新）"
+                : STATUS_LABEL[status] || status}
             </Tag>
           )}
           {!undetermined && summary && (
@@ -215,6 +220,20 @@ export function ScoringCoveragePanel({
           description={
             `${UNDETERMINED_TEXT[data?.undetermined_reason || ""] || "评分项数据不可用"}。` +
             "请先点击「解析评分项」，从投标文件的评标办法/评分标准中提取评分项。"
+          }
+        />
+      )}
+
+      {!error && !undetermined && data?.extraction?.status === "empty" && (
+        <Alert
+          type="warning"
+          showIcon
+          data-testid="scoring-empty-run"
+          style={{ marginBottom: 8 }}
+          message="本次解析返回 0 条评分项，已保留上一次快照"
+          description={
+            `当前覆盖结论基于旧快照（共 ${summary?.total_items ?? 0} 项），` +
+            "请复核投标文件的评标办法/评分标准是否变更后再采信。"
           }
         />
       )}

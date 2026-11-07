@@ -131,6 +131,25 @@ class TestReportSummaryEndpoint:
         assert sec2["passed"] is False
         assert sec2["error_count"] == 1
         assert sec2["warning_count"] == 2
+        # 逐章 issue_types 必须只统计本章问题：sec1 无问题、sec3 无问题，
+        # 都不得继承 sec2 的类型计数（旧实现共用同一个 Counter，逐章字段恒为累计值）。
+        sec1 = [s for s in rep["sections"] if s["section_id"] == "sec1"][0]
+        sec3 = [s for s in rep["sections"] if s["section_id"] == "sec3"][0]
+        assert sec1["issue_types"] == {}
+        assert sec2["issue_types"] == {"value_conflict": 1, "fuzzy_expression": 2}
+        assert sec3["issue_types"] == {}
+
+    async def test_summary_never_generated_section_is_not_passed(self, db_conn):
+        """从未生成的章节不得计入「通过」：checked 必须真实返回，passed 不得为 True。"""
+        await _setup_scheme_and_section(db_conn)
+        from app.routers.sections import scheme_report_summary
+
+        rep = await scheme_report_summary("s1", db=db_conn)
+        sec3 = [s for s in rep["sections"] if s["section_id"] == "sec3"][0]
+        assert sec3["passed"] is None, "未检查不得显示成通过"
+        assert sec3["checked"] is False
+        # 只有 sec1/sec2 有可读取的生成报告；sec3（status=empty）从未生成
+        assert rep["checked"] == 2
 
     async def test_summary_empty_scheme(self, db_conn):
         await db_conn.execute("INSERT OR IGNORE INTO projects (id, name) VALUES (?, ?)", ("p2", "p"))

@@ -21,6 +21,7 @@ C. STD-03 装饰装修材料标准库（openstd.samr.gov.cn 实证，2026-10-07�
 from __future__ import annotations
 
 import json
+import logging
 import uuid
 
 import app.db as _appdb
@@ -215,3 +216,21 @@ class TestStandardsRegistryR51:
 
     def test_version_bumped(self):
         assert STANDARD_DB_VERSION == "2026.10.7"
+
+
+# ===========================================================================
+# D. 损坏的 AI 合规结论必须可观测（2026-11-07）
+# ===========================================================================
+class TestCorruptAiResultObservable:
+    async def test_corrupt_ai_result_row_logged(self, ov_db, caplog):
+        """compliance_check.result 非法 JSON：跳过行为不变，但必须留下 warning。"""
+        db, sid = ov_db
+        await db.execute(
+            "INSERT INTO compliance_check(id,scheme_id,check_type,batch_id,result,content_fingerprint)"
+            " VALUES(?,?,?,?,?,?)",
+            (uuid.uuid4().hex, sid, "compliance", "b1", "{broken", ""),
+        )
+        await db.commit()
+        with caplog.at_level(logging.WARNING):
+            await _readiness_overview_compute(db, sid, persist=False)
+        assert "JSON" in caplog.text and "损坏" in caplog.text

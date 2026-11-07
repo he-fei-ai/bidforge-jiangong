@@ -141,14 +141,30 @@ async def _do_extract(db, project_id: str) -> dict:
 
     items = svc.normalize_and_validate(project_id, raw_items, page_index)
 
+    # 「本次返回 0 条」≠「真的没有评分项」，必须可区分：
+    #   此前已有活跃快照 → empty（保留旧快照，不静默清空）；
+    #   此前没有任何快照 → success（确无评分项，覆盖率侧判 empty_items）。
+    prior_active = 0
+    if ok_batches > 0 and not items:
+        cur = await db.execute(
+            "SELECT COUNT(*) FROM scheme_scoring_items WHERE project_id=? AND status='active'",
+            (project_id,),
+        )
+        prior_active = int((await cur.fetchone())[0] or 0)
+
     if items and ok_batches > 0 and not failed_sources:
         run_status = "success"
     elif items and ok_batches > 0:
         run_status = "partial"
+    elif ok_batches > 0 and prior_active > 0:
+        run_status = "empty"
     elif ok_batches > 0:
-        run_status = "success"  # 解析成功但 0 条 → success（empty_items 由覆盖率侧判定）
+        run_status = "success"
     else:
         run_status = "failed"
+
+    if run_status == "empty":
+        errors.append(f"本次解析返回 0 条评分项，已保留上一次快照（{prior_active} 条），请复核评标办法是否变更")
 
     run_id = uuid.uuid4().hex
     run = {
@@ -295,6 +311,9 @@ async def scoring_coverage(scheme_id: str, thresholds: str | None = None, db=Dep
 
     extraction_status = "success"
     if run and run.get("status") == "partial":
+        extraction_status = "partial"
+    elif run and run.get("status") == "empty":
+        # 本次抽取 0 条、沿用旧快照：结论可用但不是本次最新结果，不得标注为 ok
         extraction_status = "partial"
 
     report = svc.build_coverage_report(

@@ -354,3 +354,79 @@ def _async(value):
         return value
 
     return _inner()
+
+
+# ---------------------------------------- 12. 0 条抽取不得静默清空活跃快照
+async def test_r179_extract_zero_items_keeps_existing_snapshot(ctx, monkeypatch):
+    """此前有活跃快照 + 本次抽取返回 0 条 → status=empty，旧快照必须保持 active。
+
+    旧实现把「解析成功但 0 条」判成 success，persist_items 随即把该项目全部
+    status='active' 行改成 stale：数据还在但等于不可用，且记录成成功。
+    """
+    db, pid, sid = ctx
+    for iid, no, name in (("old1", "1", "施工组织设计"), ("old2", "2", "质量验收")):
+        await db.execute(
+            "INSERT INTO scheme_scoring_items(id,project_id,item_no,item_name,score,status)"
+            " VALUES(?,?,?,?,?, 'active')",
+            (iid, pid, no, name, 10.0),
+        )
+    await db.commit()
+
+    monkeypatch.setattr(
+        svc,
+        "select_scoring_sources",
+        lambda *a, **k: _async(
+            [
+                {
+                    "doc_id": "d1",
+                    "name": "评标办法.pdf",
+                    "text": "评分标准",
+                    "page_nums": [1],
+                    "pages": [],
+                    "keyword_hits": 3,
+                }
+            ]
+        ),
+    )
+    monkeypatch.setattr(svc, "extract_batch", lambda batch, timeout=120: _async([]))
+
+    res = await scoring_router.extract_scoring_items(pid, None, db=db)
+    assert res["status"] == "empty", "0 条结果不得判 success（会清空活跃快照）"
+    assert res["items_count"] == 0
+    assert "保留" in res["error"]
+    # 旧快照必须仍然 active（数据还在、仍可用）
+    assert [r["id"] for r in await svc.load_active_items(db, pid)] == ["old1", "old2"]
+    # 覆盖率结论沿用旧快照，但必须标注为 partial：不得显示成 ok
+    cov = await scoring_router.scoring_coverage(sid, None, db=db)
+    assert cov["status"] == "partial"
+    assert cov["extraction"]["status"] == "empty"
+
+
+async def test_r179_extract_zero_items_without_snapshot_is_success(ctx, monkeypatch):
+    """无旧快照 + 0 条 = 真的没有评分项 → success（与 empty 可区分）。"""
+    db, pid, sid = ctx
+    monkeypatch.setattr(
+        svc,
+        "select_scoring_sources",
+        lambda *a, **k: _async(
+            [
+                {
+                    "doc_id": "d1",
+                    "name": "评标办法.pdf",
+                    "text": "评分标准",
+                    "page_nums": [1],
+                    "pages": [],
+                    "keyword_hits": 3,
+                }
+            ]
+        ),
+    )
+    monkeypatch.setattr(svc, "extract_batch", lambda batch, timeout=120: _async([]))
+
+    res = await scoring_router.extract_scoring_items(pid, None, db=db)
+    assert res["status"] == "success"
+    assert res["items_count"] == 0
+
+    cov = await scoring_router.scoring_coverage(sid, None, db=db)
+    assert cov["status"] == "undetermined"
+    assert cov["undetermined_reason"] == "empty_items"

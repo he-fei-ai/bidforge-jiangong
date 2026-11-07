@@ -333,6 +333,45 @@ async def test_comment_change_does_not_invalidate_sidecar(tmp_path):
     assert S.audit_rules_fingerprint() == before
 
 
+def _fake_probe(content: str):
+    return None
+
+
+@pytest.mark.parametrize(
+    "name",
+    [
+        "_detect_standard_pairing",
+        "_detect_terminology_mix",
+        "_detect_filler_phrases",
+        "_detect_schedule_conflicts",
+        "_detect_milestone_issues",
+    ],
+)
+def test_each_detector_code_in_fingerprint(name, monkeypatch):
+    """逐个替换检测器实现（等价于改判定代码）：指纹必须变化；漏收即本用例红。"""
+    import app.routers._export_issue_scan as S
+
+    before = E.audit_rules_fingerprint()
+    monkeypatch.setattr(S, name, _fake_probe)
+    assert E.audit_rules_fingerprint() != before, f"{name} 未纳入旁车指纹"
+
+
+@pytest.mark.asyncio
+async def test_probe_rule_data_change_invalidates_sidecar(tmp_path, monkeypatch):
+    """检测器规则数据（AST 抓不到）改动也必须让旧旁车失效。"""
+    import app.routers._export_issue_scan as S
+
+    artifact = _make_docx(tmp_path / "fp4.docx")
+    prep = _prep()
+    await E._write_audit_sidecar(artifact, {**prep, "content_audit": _audit_of(prep)}, "hd")
+    assert await E._read_audit_sidecar(artifact, prep, "hd") is not None
+
+    before = E.audit_rules_fingerprint()
+    monkeypatch.setitem(S._STANDARD_TITLES, "GB50999", "临时规范名称")
+    assert E.audit_rules_fingerprint() != before, "规则数据改动未进入指纹"
+    assert await E._read_audit_sidecar(artifact, prep, "hd") is None
+
+
 def _prep_for_route(content_hash: str):
     async def _fake_prep(scheme_id, body, db, cancel_event=None, defer_audit=False):
         return {

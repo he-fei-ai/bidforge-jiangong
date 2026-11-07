@@ -1824,7 +1824,14 @@ async def _readiness_overview_compute(
                     continue
                 try:
                     rows.append(json.loads(r["result"] or "{}"))
-                except json.JSONDecodeError:
+                except json.JSONDecodeError as _exc:
+                    # 仅跳过该行、不降级整段（行为不变）；但损坏必须可观测，
+                    # 否则该结论静默消失、总检分数无声偏高
+                    logger.warning(
+                        "overview: AI 合规结论 JSON 损坏（已跳过该行，不计分） scheme=%s err=%s",
+                        scheme_id,
+                        _exc,
+                    )
                     continue
             if _stale_n:
                 stale_ai_sources.append("compliance")

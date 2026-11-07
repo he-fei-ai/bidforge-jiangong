@@ -5,19 +5,23 @@
 - P0-A 修复5：Markdown 字面转义残留还原（docx_math.unescape_markdown_literals）
 - P0-B 修复1/17：页眉/封面模板残留清洗 + 项目名兜底（export.py）
 - P0-C 修复7：重复标题尾部（N）计数后缀整组剥除（outline_quality._norm）
-- P1-D 修复14：规范编号-名称配对校验（export_audit._detect_standard_pairing）
-- P1-E 修复13：术语混用检测（export_audit._detect_terminology_mix）
-- P2-F 增强12：空话套话句式检测（export_audit._detect_filler_phrases）
+- P1-D 修复14：规范编号-名称配对校验（_export_issue_scan._detect_standard_pairing）
+- P1-E 修复13：术语混用检测（_export_issue_scan._detect_terminology_mix）
+- P2-F 增强12：空话套话句式检测（_export_issue_scan._detect_filler_phrases）
 
 全部为行为断言：正样例零误报、坏样例必命中（含报告实证形态）。
+
+⚠️ 被测对象指向**生产实际使用**的 `app.routers._export_issue_scan`
+（export.py 的审核出口），不得指向已不可达的历史副本 export_audit.py。
 """
 
+import app.routers.export  # noqa: F401 — 须先初始化 facade：_export_issue_scan 顶部 `import ... as _sh` 依赖它
+from app.routers._export_issue_scan import audit_content
 from app.routers.export import (
     _display_scheme_name,
     _project_name_from_facts,
     _sanitize_template_residue_title,
 )
-from app.routers.export_audit import audit_content
 from app.services.docx_math import (
     clean_text,
     scan_issues,
@@ -188,6 +192,15 @@ class TestScheduleAndMilestone:
             "竣工 2028-05-30。"
         )
         r = audit_content([{"id": "s5", "title": "里程碑", "level": 2, "content": content}])
+        assert "milestone_issue" not in {it["key"] for it in r["items"]}
+
+    def test_milestone_erection_not_mistaken_for_demolition(self):
+        # 合规排期：外架搭设(3/1) → 二次结构及抹灰(9/30) → 外架拆除(10/30)。
+        # 「外架搭设」也含关键字「外架」，旧实现按正文顺序取**第一个**命中项当拆除
+        # 日期 → 拿搭设日期(3/1) 与二次结构(9/30) 比 → 合规方案被误报
+        # 「二次结构晚于外架拆除」。正常排期必须零误报。
+        content = "外架搭设 2027-03-01；二次结构及抹灰 2027-09-30；" "外架拆除 2027-10-30；竣工 2028-05-30。"
+        r = audit_content([{"id": "s8", "title": "里程碑", "level": 2, "content": content}])
         assert "milestone_issue" not in {it["key"] for it in r["items"]}
 
     def test_milestone_too_short_gap(self):

@@ -442,7 +442,11 @@ def normalize_and_validate(
 
 
 async def persist_items(db, project_id: str, items: list[dict], *, run_status: str) -> None:
-    """按 id UPSERT；仅当本次 run 为 success 才把未覆盖的旧行标 stale（不删数据）。"""
+    """按 id UPSERT；仅当本次 run 为 success **且有评分项** 才把未覆盖的旧行标 stale（不删数据）。
+
+    空结果一律不标 stale：模型偶发返回 0 条时，活跃快照必须原样保留，
+    否则数据还在但等于不可用（0 条由路由侧判 empty，与「真的没有评分项」区分）。
+    """
     for it in items:
         await db.execute(
             "INSERT INTO scheme_scoring_items ("
@@ -471,20 +475,14 @@ async def persist_items(db, project_id: str, items: list[dict], *, run_status: s
                 it["source_quote"],
             ),
         )
-    if run_status == "success":
+    if run_status == "success" and items:
         ids = [it["id"] for it in items]
-        if ids:
-            placeholders = ",".join("?" for _ in ids)
-            await db.execute(
-                f"UPDATE scheme_scoring_items SET status='stale'"
-                f" WHERE project_id=? AND status='active' AND id NOT IN ({placeholders})",
-                (project_id, *ids),
-            )
-        else:
-            await db.execute(
-                "UPDATE scheme_scoring_items SET status='stale' WHERE project_id=? AND status='active'",
-                (project_id,),
-            )
+        placeholders = ",".join("?" for _ in ids)
+        await db.execute(
+            f"UPDATE scheme_scoring_items SET status='stale'"
+            f" WHERE project_id=? AND status='active' AND id NOT IN ({placeholders})",
+            (project_id, *ids),
+        )
 
 
 async def insert_run(db, run: dict) -> None:

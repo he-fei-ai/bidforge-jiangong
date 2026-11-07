@@ -499,11 +499,13 @@ async def scheme_report_summary(scheme_id: str, db=Depends(get_db)):
     """获取方案所有章节的生成标准校验汇总。
 
     Returns:
-        total: 章节总数 / checked: 有生成记录的章节数
+        total: 章节总数 / checked: 有可读生成报告的章节数（其余为「未检查」）
         by_standard: {precise: n, fuzzy: n}
         total_errors / total_warnings / total_issues
         issue_type_counts: {type: count}
-        sections: [{section_id, title, standard, passed, errors, warnings}]
+        sections: [{section_id, title, standard, checked, passed, errors, warnings}]
+            checked=false 的章节从未生成（或报告不可解析）：passed=null，
+            **不得**记为通过（前端按 checked 区分「未检查」与「已检查」）。
     """
     import json as _json
     from collections import Counter
@@ -521,21 +523,29 @@ async def scheme_report_summary(scheme_id: str, db=Depends(get_db)):
     by_std: Counter = Counter()
     issue_types: Counter = Counter()
     total_errors = total_warnings = total_issues = 0
+    checked = 0
     sections_out: list = []
 
     for r in rows:
         std = r["last_generation_standard"] or r["generation_standard"] or "precise"
         by_std[std] += 1
         rep_json = r["last_generation_report"] or ""
+        checked_section = False
         if rep_json:
             try:
                 rep = _json.loads(rep_json)
+                checked_section = isinstance(rep, dict)
             except Exception:
                 rep = _empty_report(std)
         else:
             rep = _empty_report(std)
+        if checked_section:
+            checked += 1
+        section_issue_types: Counter = Counter()
         for it in rep.get("issues", []) or []:
-            issue_types[it.get("type", "unknown")] += 1
+            _type = it.get("type", "unknown")
+            issue_types[_type] += 1
+            section_issue_types[_type] += 1
         errs = rep.get("error_count", 0) or 0
         warns = rep.get("warning_count", 0) or 0
         total_errors += errs
@@ -548,16 +558,19 @@ async def scheme_report_summary(scheme_id: str, db=Depends(get_db)):
                 "status": r.get("status", ""),
                 "generation_standard": r["generation_standard"],
                 "last_generation_standard": r["last_generation_standard"],
-                "passed": (errs + warns) == 0,
+                "checked": checked_section,
+                # 未检查（从未生成 / 报告不可解析）→ passed=null，不得显示成通过
+                "passed": ((errs + warns) == 0) if checked_section else None,
                 "error_count": errs,
                 "warning_count": warns,
-                "issue_types": dict(issue_types),
+                "issue_types": dict(section_issue_types),
             }
         )
 
     return {
         "scheme_id": scheme_id,
         "total": len(rows),
+        "checked": checked,
         "by_standard": dict(by_std),
         "total_errors": total_errors,
         "total_warnings": total_warnings,
