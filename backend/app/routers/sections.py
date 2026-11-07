@@ -171,7 +171,16 @@ async def _build_tree(db, scheme_id: str, include_content: bool = False) -> list
     roots = []
     for nid, n in nodes.items():
         pid = n.get("parent_id")
-        if pid and pid in nodes:
+        # ✅ BUG 修复（2026-11-07 · R184 自父节点静默消失）：自父（parent_id == id）
+        #    在此前会被挂进自己的 children，于是它不再是根，_sort_children 从 roots
+        #    出发**遍历不到** —— 实测不抛 RecursionError，但该节点及其子节点从目录
+        #    树里静默消失（正文侧 content_utils 适配层带 pid != sid 守卫，把自父当
+        #    根，两侧编号口径分叉）。现与适配层同口径：自父视作根。
+        #    这类脏数据的现实来源：update_section 环检测 2026-09-18 才加（此前任意
+        #    parent_id 可入库）、外部脚本直改库、旧快照回退/方案复制原样搬运。
+        #    两点/三点环（A→B→A）不走此分支：环内节点均非根，roots 为空时
+        #    _sort_children 不会进入环，实测不递归，环内组件与适配层一致地不出现。
+        if pid and pid in nodes and pid != nid:
             nodes[pid]["children"].append(n)
         else:
             roots.append(n)
@@ -405,8 +414,18 @@ async def sections_quality(scheme_id: str, db=Depends(get_db)):
         summary.unchecked：section_total - checked（尚未生成正文、本次无法检查
         的章节数；checked=0 时等于 section_total，表示「未检查」而非「通过」）。
     """
+    # ✅ R184（2026-11-07 · 空白正文边界，与目录模块协同修复）：`COALESCE(content,'')!=''`
+    #    会把「只有空格 / 换行 / 制表符 / 全角空格 / NBSP」的章节算成「已有正文」，
+    #    质量自检把它计入 checked 却一个字都没扫到问题 → 界面把空章节报成「已覆盖」，
+    #    正是「没检查显示成没问题」。改用与 Python `str.strip()` 对齐的 SQL 判定
+    #    （去掉两端空白字符后再看是否非空），同时用于 checked 过滤与 has_content。
+    #    这与 preflight_engine.content_coverage_stats 的 `.strip()` 口径一致。
+    _has_text = (
+        "COALESCE(TRIM(REPLACE(REPLACE(content, CHAR(12288), ''), CHAR(160), ''), "
+        "' ' || CHAR(9) || CHAR(10) || CHAR(13)), '') <> ''"
+    )
     cur = await db.execute(
-        "SELECT id, title, content FROM sections" " WHERE scheme_id=? AND COALESCE(content,'')!='' ORDER BY sort_order",
+        f"SELECT id, title, content FROM sections WHERE scheme_id=? AND {_has_text} ORDER BY sort_order",
         (scheme_id,),
     )
     rows = [dict(r) for r in await cur.fetchall()]
@@ -418,7 +437,7 @@ async def sections_quality(scheme_id: str, db=Depends(get_db)):
     #    了正文，它确实参与检查，故一并计入分母，保证 checked <= section_total。
     #    只查 id/parent_id/有无正文，不重复拉取大字段 content。
     cur_all = await db.execute(
-        "SELECT id, parent_id, CASE WHEN COALESCE(content,'')!='' THEN 1 ELSE 0 END AS has_content"
+        f"SELECT id, parent_id, CASE WHEN {_has_text} THEN 1 ELSE 0 END AS has_content"
         " FROM sections WHERE scheme_id=?",
         (scheme_id,),
     )

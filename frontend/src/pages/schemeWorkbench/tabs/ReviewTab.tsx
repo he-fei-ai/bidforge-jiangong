@@ -149,6 +149,13 @@ export function ReviewTab({
   checkingQuality,
   handleQualityCheck,
 }: ReviewTabProps) {
+  // ✅ R184（2026-11-07）：覆盖度分母统一取后端 `summary.section_total`
+  //    （叶子章节 ∪ 已有正文章节），前端**不另算分母**，避免两边口径分叉；
+  //    `unchecked` 同样直接消费后端值。
+  const qChecked = qualityResult?.summary?.checked ?? 0;
+  const qUnchecked = qualityResult?.summary?.unchecked ?? 0;
+  const qTotal = qualityResult?.summary?.section_total;
+  const qTotalSuffix = qTotal != null ? ` / 共 ${qTotal} 章` : "";
   return (
     // ✅ 修复：审核与预检内容（两张大卡片 + 检查结果表格 + 历史记录）较长，
     //    容器必须可滚动，避免低视口下底部内容被裁剪
@@ -866,9 +873,13 @@ export function ReviewTab({
         {qualityResult && (
           <Row gutter={[12, 8]} style={{ marginTop: 12 }}>
             <Col span={6}>
-              <div style={{ fontSize: 11, color: "#888" }}>已扫描章节</div>
+              <div style={{ fontSize: 11, color: "#888" }}>已扫描 / 共</div>
               <div style={{ fontSize: 16, fontWeight: 600 }}>
+                {/* ✅ R184：分母取后端 section_total，不在前端自行计算 */}
                 {qualityResult.summary?.checked ?? 0}
+                {qualityResult.summary?.section_total != null
+                  ? ` / ${qualityResult.summary.section_total}`
+                  : ""}
               </div>
             </Col>
             <Col span={6}>
@@ -955,16 +966,21 @@ export function ReviewTab({
 
         {/* ✅ R183（2026-11-07 · 三态口径修复）：零问题但有 0 个可检查章节时，
             旧实现照样显示绿色「可直接交付」——把「没检查」显示成「没问题」。
-            现在只有确实扫描过正文（checked > 0）才允许绿色成功态。 */}
+            ✅ R184：分母/未覆盖数直接消费后端 section_total/unchecked —— 只要还有
+            章节没有正文参与检查（unchecked>0），就不得给绿色「可直接交付」。 */}
         {qualityResult &&
           (qualityResult.items?.length || 0) === 0 &&
-          ((qualityResult.summary?.checked ?? 0) > 0 ? (
+          (qChecked > 0 && qUnchecked === 0 ? (
             <div style={{ marginTop: 12, fontSize: 12, color: "#52c41a" }}>
-              ✓ 未检出口语化残留与废止标准，正文可直接交付。
+              ✓ 未检出口语化残留与废止标准（已扫描 {qChecked}
+              {qTotalSuffix}），正文可直接交付。
             </div>
           ) : (
             <div style={{ marginTop: 12, fontSize: 12, color: "#d48806" }}>
-              ⚠️ 没有可检查的正文（已扫描 0 个章节），本次质量自检
+              ⚠️{" "}
+              {qChecked === 0
+                ? `没有可检查的正文（已扫描 0${qTotalSuffix}），本次质量自检`
+                : `已扫描 ${qChecked}${qTotalSuffix}，仍有 ${qUnchecked} 章没有正文、未纳入检查；本次自检`}
               <Text strong>无法判定</Text>——这不代表通过。
             </div>
           ))}

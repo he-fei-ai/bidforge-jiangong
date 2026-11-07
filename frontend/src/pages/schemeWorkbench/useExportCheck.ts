@@ -184,10 +184,19 @@ export function useExportCheck(deps: ExportCheckDeps) {
       // ✅ R183（2026-11-07 · 三态口径修复）：checked=0 表示**没有可检查的正文**
       //    （方案尚未生成 / 全部章节为空），旧实现照样提示「质量自检通过：已扫描
       //    0 个章节」——把「没检查」显示成「没问题」。现单独给出「无法判定」。
-      if ((s.checked ?? 0) === 0) {
-        msg.info("质量自检未执行：没有可检查的正文（无法判定，不代表通过）");
+      // ✅ R184：分母/未覆盖数直接用后端 section_total/unchecked；仍有章节没正文
+      //    参与检查时同样判「无法判定」，不得提示通过。
+      const qChecked = s.checked ?? 0;
+      const qUnchecked = s.unchecked ?? 0;
+      const qTotalSuffix = s.section_total != null ? ` / 共 ${s.section_total} 章` : "";
+      if (qChecked === 0) {
+        msg.info(`质量自检未执行：没有可检查的正文（已扫描 0${qTotalSuffix}，无法判定，不代表通过）`);
+      } else if (!s.problem_sections && qUnchecked > 0) {
+        msg.warning(
+          `已扫描 ${qChecked}${qTotalSuffix}，仍有 ${qUnchecked} 章没有正文、未纳入检查（无法判定，不代表通过）`,
+        );
       } else if (!s.problem_sections) {
-        msg.success(`质量自检通过：已扫描 ${s.checked ?? 0} 个章节，无口语化残留、无废止标准`);
+        msg.success(`质量自检通过：已扫描 ${qChecked}${qTotalSuffix}，无口语化残留、无废止标准`);
       } else {
         msg.warning(`${s.problem_sections} 个章节存在质量问题，详见清单`);
       }

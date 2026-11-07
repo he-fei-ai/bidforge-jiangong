@@ -125,14 +125,44 @@ describe("ReviewTab · 正文质量自检三态", () => {
     expect(text).not.toContain("正文可直接交付");
   });
 
-  it("checked>0 且零问题 → 才允许绿色「可直接交付」", () => {
+  it("checked>0 且 unchecked=0 → 才允许绿色「可直接交付」，并显示 X / 共 Y", () => {
     const { container } = renderTab({
       qualityResult: {
-        summary: { checked: 12, problem_sections: 0, colloquial: 0, deprecated: 0 },
+        summary: {
+          checked: 12,
+          section_total: 12,
+          unchecked: 0,
+          problem_sections: 0,
+          colloquial: 0,
+          deprecated: 0,
+        },
         items: [],
       } as any,
     });
-    expect(container.textContent || "").toContain("正文可直接交付");
+    const text = container.textContent || "";
+    expect(text).toContain("正文可直接交付");
+    // ✅ R184：分母取后端 section_total，不在前端另算
+    expect(text).toContain("12 / 12");
+  });
+
+  it("仍有 unchecked 章节 → 不得绿色通过，必须报「未纳入检查」", () => {
+    const { container } = renderTab({
+      qualityResult: {
+        summary: {
+          checked: 12,
+          section_total: 20,
+          unchecked: 8,
+          problem_sections: 0,
+          colloquial: 0,
+          deprecated: 0,
+        },
+        items: [],
+      } as any,
+    });
+    const text = container.textContent || "";
+    expect(text).not.toContain("正文可直接交付");
+    expect(text).toContain("仍有 8 章没有正文");
+    expect(text).toContain("无法判定");
   });
 });
 

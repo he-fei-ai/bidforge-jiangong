@@ -134,6 +134,44 @@ class TestDlv13SeesOutlineStructureDrift:
         assert findings == [], "结构一致时不得误报 DLV-13"
 
 
+class TestQualityWhitespaceBoundary:
+    """✅ R184（2026-11-07）：纯空白正文不得算「已有正文 / 已扫描」。
+
+    旧谓词 `COALESCE(content,'')!=''` 把「空格 / 换行 / 制表符 / 全角空格 / NBSP」
+    算成有正文：质量自检 checked 虚高、空章节被报成「已覆盖」，正是「没检查显示成
+    没问题」。现与 preflight_engine.content_coverage_stats 的 `.strip()` 对齐。
+    """
+
+    async def test_whitespace_only_is_not_checked(self, db_conn):
+        from app.routers.sections import sections_quality
+
+        sid = "r184-q"
+        rows = [
+            ("a", "A 纯空白", "   \n\t ", "", 1),
+            ("a2", "A2 全角空格", "\u3000\u3000", "", 2),
+            ("b", "B 父节点空白", "\n", "", 3),
+            ("c", "C 叶子有正文", "正常正文。", "b", 4),
+            ("d", "D 空字符串", "", "b", 5),
+        ]
+        for rid, title, content, parent, sort in rows:
+            await db_conn.execute(
+                "INSERT INTO sections(id,scheme_id,project_id,title,content,word_count,"
+                "word_status,word_budget,status,level,sort_order,parent_id,review_status) "
+                "VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?)",
+                (rid, sid, PROJ, title, content, len((content or "").strip()), "ok", 100,
+                 "generated", 1, sort, parent, "pending"),
+            )
+        await db_conn.commit()
+
+        result = await sections_quality(sid, db=db_conn)
+        summary = result["summary"]
+        # 只有 C 有真实正文；a/a2 是叶子但无正文，故计入分母不计数
+        assert summary["checked"] == 1
+        assert summary["section_total"] == 4  # 叶子 a/a2/c/d
+        assert summary["unchecked"] == 3
+        assert result["items"] == []
+
+
 class TestProgramCheckerCrashIsUndetermined:
     """缺陷 3：检查项异常 = 没检查，不得放行。"""
 

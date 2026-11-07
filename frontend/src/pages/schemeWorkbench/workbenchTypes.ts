@@ -170,6 +170,10 @@ export type ExportPreflightSummary = ExportPreflight & { has_run?: boolean };
 export interface QualityCheckResult {
   summary?: {
     checked?: number;
+    // ✅ R184（2026-11-07）：分母由后端给出（叶子章节 ∪ 已有正文章节），
+    //    前端不得自行用「全部章节行」另算一套；unchecked = section_total - checked。
+    section_total?: number;
+    unchecked?: number;
     problem_sections?: number;
     colloquial?: number;
     abolished_standards?: number;
