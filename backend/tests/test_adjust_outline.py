@@ -48,6 +48,19 @@ def _patch_ai(monkeypatch, obj):
     monkeypatch.setattr(sec, "collect_json_response", fake)
 
 
+def _capture_ai(monkeypatch, obj, captured):
+    """同 `_patch_ai`，但把实际发给模型的 system 提示词记进 ``captured["prompt"]``。"""
+
+    async def fake(messages, validate_fn, **kwargs):
+        captured["prompt"] = messages[0]["content"]
+        issues = validate_fn(obj)
+        if issues:
+            raise ValueError("校验不通过: " + ";".join(issues))
+        return obj, ""
+
+    monkeypatch.setattr(sec, "collect_json_response", fake)
+
+
 @pytest.mark.asyncio
 async def test_adjust_outline_requires_instruction(db_conn):
     with pytest.raises(HTTPException) as ei:
@@ -125,6 +138,62 @@ async def test_adjust_outline_clamps_depth_to_three(db_conn, monkeypatch):
     l2 = node["children"][0]
     l3 = l2["children"][0]
     assert l3["children"] == []  # 四级被裁剪并入三级 description
+
+
+# ============================================================
+# 2026-11-07（第 1 条）：调整指令的物理上限（与预算开关无关）
+# ------------------------------------------------------------
+# prompt_context_budget=0（默认）时预算器直通，指令没有上限 → 粘贴整篇文档
+# 会直接超模型窗口（502）。这里在端点层锁住：
+#   * 预算关闭 + 指令 ≤6000 字 → 提示词原样含指令一次、无截断说明，
+#     响应体键集合不变（不新增 instruction_truncated）；
+#   * 指令 >6000 字 → 提示词出现「调整要求已截断」的模型可见说明，
+#     且尾部独有标记没有进入提示词（确实被裁掉）。
+# ============================================================
+
+
+@pytest.mark.asyncio
+async def test_adjust_outline_short_instruction_byte_identical(db_conn, monkeypatch):
+    from app.config import settings
+
+    monkeypatch.setattr(settings, "prompt_context_budget", 0, raising=False)
+    sid = await _seed_scheme(db_conn)
+    await _seed_section(db_conn, sid, "R1", "工程概况", level=1, sort=0)
+    captured: dict = {}
+    _capture_ai(
+        monkeypatch,
+        {"outline": [{"id": "R1", "title": "工程概况"}], "summary": "无变化"},
+        captured,
+    )
+    instruction = "把第一章标题改成“工程概况（改）”"
+    res = await sec.adjust_outline(sid, {"instruction": instruction}, db=db_conn)
+    prompt = captured["prompt"]
+    assert prompt.count(instruction) == 1, "指令应原样、仅出现一次"
+    assert "已截断" not in prompt, "未超物理上限不得出现截断说明"
+    assert set(res.keys()) == {"ok", "outline", "summary"}, "不得新增键"
+
+
+@pytest.mark.asyncio
+async def test_adjust_outline_oversized_instruction_has_visible_notice(db_conn, monkeypatch):
+    from app.config import settings
+    from app.services.prompt_material_guard import INSTRUCTION_PROMPT_MAX_CHARS
+
+    monkeypatch.setattr(settings, "prompt_context_budget", 0, raising=False)
+    sid = await _seed_scheme(db_conn)
+    await _seed_section(db_conn, sid, "R1", "工程概况", level=1, sort=0)
+    captured: dict = {}
+    _capture_ai(
+        monkeypatch,
+        {"outline": [{"id": "R1", "title": "工程概况"}], "summary": "x"},
+        captured,
+    )
+    tail_marker = "TAIL_MARKER_SHOULD_BE_CUT"
+    instruction = "必须完整执行。" * 900 + tail_marker  # > 6000 字
+    assert len(instruction) > INSTRUCTION_PROMPT_MAX_CHARS
+    await sec.adjust_outline(sid, {"instruction": instruction}, db=db_conn)
+    prompt = captured["prompt"]
+    assert "调整要求已截断" in prompt, "超物理上限必须给模型可见说明"
+    assert tail_marker not in prompt, "超限部分确实应被裁掉"
 
 
 @pytest.mark.asyncio

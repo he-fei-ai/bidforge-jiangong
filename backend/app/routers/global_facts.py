@@ -101,6 +101,10 @@ from app.services.file_parser import (  # noqa: F401  re-export for tests monkey
     signature_valid,
 )
 from app.services.prompt_governance import serialize_bounded_json_array
+from app.services.prompt_material_guard import (
+    INSTRUCTION_PROMPT_MAX_CHARS,
+    clip_text_notice_report,
+)
 
 # ✅ R184（2026-11-07）：本模块所有异常文本回显统一走脱敏单一出口。
 #    上游厂商 401/403 错误体可能回显 `Authorization: Bearer sk-…`；
@@ -3855,6 +3859,14 @@ async def adjust_facts(data: AdjustRequest, db=Depends(get_db)):
             {"operations": confirmed_ops}, valid_ids, existing_keys=existing_keys, ignored_out=ignored_ops
         )
     else:
+        # ✅ 2026-11-07（物理上限）：调整指令是任务本体，但不能无界 ——
+        #    prompt_context_budget 默认关闭时预算器直通，粘贴整篇文档会直接
+        #    超模型窗口（502）。6000 字是与开关无关的物理兜底（推导见
+        #    prompt_material_guard.INSTRUCTION_PROMPT_MAX_CHARS）；超限附加
+        #    模型可见说明。顺序：物理上限先收，预算器再按优先级分配。
+        instruction, _cap_meta = clip_text_notice_report(
+            instruction, INSTRUCTION_PROMPT_MAX_CHARS, "调整要求"
+        )
         prompt = render(
             "global_facts_adjust_system",
             # ✅ 2026-11-07（G-STRUCT）：原 ``json.dumps(...)[:30000]`` 会切在 JSON
@@ -3863,9 +3875,8 @@ async def adjust_facts(data: AdjustRequest, db=Depends(get_db)):
             current_facts=_facts_adjust_current_text(_facts_for_adjust_prompt(rows)),
             instruction=instruction,
         )
-        # ✅ R186 清零：调整指令是用户任务本体，3000 字硬切会让模型按半句执行
-        #    且无任何提示；下游无硬性窗口约束 → 去掉任意上限，交给预算器
-        #    （「调整要求」优先级 1，开启预算时才按优先级裁剪）。
+        # ✅ R186：预算器削减不写提示词标记（见 _apply_prompt_context_budget_report）；
+        #    「调整要求」段若被判削减，逐段账面由下方 instruction_truncation 回传。
         #    延迟导入：routers 间存在 sse_handlers ↔ _sse_outline_review 的既有
         #    循环，模块级导入会改变任一方的首次导入顺序并触发半初始化 ImportError。
         from app.routers._sse_outline_review import _apply_prompt_context_budget

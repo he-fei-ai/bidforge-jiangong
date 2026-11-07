@@ -70,6 +70,19 @@ def _patch_ai(monkeypatch, obj):
     monkeypatch.setattr(gf, "collect_json_response", fake)
 
 
+def _capture_ai(monkeypatch, obj, captured):
+    """同 `_patch_ai`，但把实际发给模型的 system 提示词记进 ``captured["prompt"]``。"""
+
+    async def fake(messages, validate_fn, **kwargs):
+        captured["prompt"] = messages[0]["content"]
+        issues = validate_fn(obj)
+        if issues:
+            raise ValueError("校验不通过: " + ";".join(issues))
+        return obj, ""
+
+    monkeypatch.setattr(gf, "collect_json_response", fake)
+
+
 # ---------------------------------------------------------------------------
 # 1. 操作计划校验单元
 # ---------------------------------------------------------------------------
@@ -247,3 +260,67 @@ async def test_adjust_facts_ai_failure_maps_502(db_conn, monkeypatch):
     with pytest.raises(HTTPException) as ei:
         await gf.adjust_facts(gf.AdjustRequest(instruction="改值", scheme_id=sid), db=db_conn)
     assert ei.value.status_code == 502
+
+
+# ============================================================
+# 2026-11-07（第 1 条）：调整指令的物理上限（与预算开关无关）
+# ------------------------------------------------------------
+# prompt_context_budget=0（默认）时预算器直通，指令没有上限 → 粘贴整篇文档
+# 会直接超模型窗口（502）。这里在端点层锁住：
+#   * 预算关闭 + 指令 ≤6000 字 → 提示词原样含指令一次、无截断说明，
+#     预览响应体键集合不变（不新增 instruction_truncated —— 只有 AI 产出
+#     预览计划这一路径才回传该键，见后续第 2 条）；
+#   * 指令 >6000 字 → 提示词出现「调整要求已截断」的模型可见说明，
+#     且尾部独有标记没有进入提示词（确实被裁掉）。
+# ============================================================
+
+
+@pytest.mark.asyncio
+async def test_adjust_facts_short_instruction_byte_identical(db_conn, monkeypatch):
+    from app.config import settings
+
+    monkeypatch.setattr(settings, "prompt_context_budget", 0, raising=False)
+    pid, sid = await _seed_scheme(db_conn)
+    await _seed_fact(db_conn, pid, sid, "f1", "基坑深度", "5.6m")
+    captured: dict = {}
+    _capture_ai(
+        monkeypatch,
+        {"operations": [{"op": "update", "fact_id": "f1", "value": "5.8m"}], "summary": "改值"},
+        captured,
+    )
+    instruction = "把基坑深度改成5.8m"
+    res = await gf.adjust_facts(gf.AdjustRequest(instruction=instruction, scheme_id=sid), db=db_conn)
+    prompt = captured["prompt"]
+    assert prompt.count(instruction) == 1, "指令应原样、仅出现一次"
+    assert "已截断" not in prompt, "未超物理上限不得出现截断说明"
+    assert set(res.keys()) == {
+        "ok",
+        "operations",
+        "summary",
+        "applied",
+        "ignored",
+        "ignored_count",
+    }, "不得新增键"
+
+
+@pytest.mark.asyncio
+async def test_adjust_facts_oversized_instruction_has_visible_notice(db_conn, monkeypatch):
+    from app.config import settings
+    from app.services.prompt_material_guard import INSTRUCTION_PROMPT_MAX_CHARS
+
+    monkeypatch.setattr(settings, "prompt_context_budget", 0, raising=False)
+    pid, sid = await _seed_scheme(db_conn)
+    await _seed_fact(db_conn, pid, sid, "f1", "基坑深度", "5.6m")
+    captured: dict = {}
+    _capture_ai(
+        monkeypatch,
+        {"operations": [{"op": "update", "fact_id": "f1", "value": "5.8m"}], "summary": "改值"},
+        captured,
+    )
+    tail_marker = "TAIL_MARKER_SHOULD_BE_CUT"
+    instruction = "必须完整执行。" * 900 + tail_marker  # > 6000 字
+    assert len(instruction) > INSTRUCTION_PROMPT_MAX_CHARS
+    await gf.adjust_facts(gf.AdjustRequest(instruction=instruction, scheme_id=sid), db=db_conn)
+    prompt = captured["prompt"]
+    assert "调整要求已截断" in prompt, "超物理上限必须给模型可见说明"
+    assert tail_marker not in prompt, "超限部分确实应被裁掉"

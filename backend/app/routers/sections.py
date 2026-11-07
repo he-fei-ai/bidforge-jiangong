@@ -65,6 +65,10 @@ from app.services.outline_quality import (
 )
 from app.services.outline_utils import MAX_OUTLINE_DEPTH, normalize_outline
 from app.services.prompt_governance import serialize_bounded_json_array
+from app.services.prompt_material_guard import (
+    INSTRUCTION_PROMPT_MAX_CHARS,
+    clip_text_notice_report,
+)
 
 # ✅ 2026-09-30 深度上限文案单一来源：create_section 与 update_section（移动路径）
 # 共用同一条错误文案，避免两处各自硬编码后再次分叉（本仓反复出现的根因模式）。
@@ -2013,6 +2017,14 @@ async def adjust_outline(scheme_id: str, body: dict, db=Depends(get_db)):
     #    模型收到非法输入。现未超预算逐字节不变；超预算按一级章节边界裁剪，
     #    并在结构内显式标注省略条目数/字符数/原因。
     current_outline_text = _outline_adjust_current_text(slim)
+    # ✅ 2026-11-07（物理上限）：调整指令是任务本体，但不能无界 ——
+    #    prompt_context_budget 默认关闭时预算器直通，用户粘贴整篇文档会直接
+    #    超模型窗口（502）。6000 字是**与开关无关的物理兜底**（推导见
+    #    prompt_material_guard.INSTRUCTION_PROMPT_MAX_CHARS）；超限附加模型
+    #    可见说明。顺序：物理上限先收，预算器再按优先级分配。
+    instruction, _cap_meta = clip_text_notice_report(
+        instruction, INSTRUCTION_PROMPT_MAX_CHARS, "调整要求"
+    )
     prompt = render(
         "outline_adjust_system",
         scheme_name=str(scheme.get("name") or ""),
@@ -2020,9 +2032,6 @@ async def adjust_outline(scheme_id: str, body: dict, db=Depends(get_db)):
         current_outline=current_outline_text,
         instruction=instruction,
     )
-    # ✅ R186 清零：调整指令是用户自己写的任务本体，3000 字硬切会让模型按
-    #    前段半句话就动手，且用户完全无感。下游没有硬性窗口约束 → 去掉任意
-    #    上限，交给预算器（「调整要求」优先级 1，开启预算时才按优先级裁剪）。
     #    延迟导入：routers 间存在 sse_handlers ↔ _sse_outline_review 的既有
     #    循环，模块级导入会改变任一方的首次导入顺序并触发半初始化 ImportError。
     from app.routers._sse_outline_review import _apply_prompt_context_budget_report

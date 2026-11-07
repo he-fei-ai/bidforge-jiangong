@@ -352,22 +352,29 @@ def clip_text_logged(text: str, limit: int, label: str = "") -> str:
     return text[:limit]
 
 
-def clip_text_notice(text: str, limit: int, label: str = "") -> str:
-    """进模型请求的截断：**按边界收刀 + 模型可见说明 + 日志/指标留痕**。
+#: 调整指令（用户下达的本次任务本体）的物理上限（字），**与预算开关无关**。
+#: 2026-11-07：R186 删除 ``instruction[:3000]`` 时漏掉了「开关默认关闭时
+#: ``prompt_context_budget=0``，预算器直通」这一事实 —— 用户粘贴整篇文档会
+#: 直接超模型窗口（502）。6000 的推导：编辑对象 JSON 上限 30000 字 +
+#: system 模板约 3000 字，按仓库既有口径 1.5 字/token 保守折算约 22k tokens；
+#: 32k token 窗口扣掉输出预留 4k token 后指令最多约 9k 字，再留 3k 字余量
+#: （截断说明本身、tokenizer 偏差、模板增长）→ 6000。
+INSTRUCTION_PROMPT_MAX_CHARS = 6000
 
-    与 :func:`clip_text` 的区别只在「模型可见」：``clip_text`` 仅写日志，
-    模型收到的仍是半截文本、无从得知后面还有内容（会据此断言「未提及」）。
-    本函数在截断后追加一段说明，显式告知原文长度与省略字数：
 
-        [……{label}已截断：原文 N 字，此处保留前 K 字，已省略 M 字]
+def clip_text_notice_report(
+    text: str, limit: int, label: str = ""
+) -> tuple[str, dict | None]:
+    """:func:`clip_text_notice` 的带账面版本：``(新文本, 账面 | None)``。
 
-    约定：
-    * 未超限时**原样返回**（逐字节一致），``limit <= 0`` 表示不截断；
-    * 切点优先落在段落/换行/句末/分句/词边界，边界离上限太远才硬切；
-    * 留痕（日志/指标）失败一律 fail-soft，绝不阻断生成。
+    账面字段：``from``（原文长度）、``to``（保留长度）、``omitted``（省略字数）、
+    ``limit``（本次上限）。未超限时返回 ``(原文, None)``，供调用方据此判断
+    「是否真的截断过」并在响应里加法式回传。
+
+    约定与 :func:`clip_text_notice` 完全一致（同一实现，字节输出不变）。
     """
     if not text or limit is None or limit <= 0 or len(text) <= limit:
-        return text
+        return text, None
     cut = _clip_cut_point(text, limit)
     omitted = len(text) - cut
     name = label or "文本"
@@ -387,7 +394,28 @@ def clip_text_notice(text: str, limit: int, label: str = "") -> str:
         record_token_budget_truncated(name)
     except Exception:  # noqa: BLE001 - 指标失败不得阻断生成
         pass
-    return text[:cut] + f"\n\n[……{name}已截断：原文 {len(text)} 字，此处保留前 {cut} 字，已省略 {omitted} 字]"
+    out = text[:cut] + f"\n\n[……{name}已截断：原文 {len(text)} 字，此处保留前 {cut} 字，已省略 {omitted} 字]"
+    return out, {"from": len(text), "to": cut, "omitted": omitted, "limit": int(limit)}
+
+
+def clip_text_notice(text: str, limit: int, label: str = "") -> str:
+    """进模型请求的截断：**按边界收刀 + 模型可见说明 + 日志/指标留痕**。
+
+    与 :func:`clip_text` 的区别只在「模型可见」：``clip_text`` 仅写日志，
+    模型收到的仍是半截文本、无从得知后面还有内容（会据此断言「未提及」）。
+    本函数在截断后追加一段说明，显式告知原文长度与省略字数：
+
+        [……{label}已截断：原文 N 字，此处保留前 K 字，已省略 M 字]
+
+    约定：
+    * 未超限时**原样返回**（逐字节一致），``limit <= 0`` 表示不截断；
+    * 切点优先落在段落/换行/句末/分句/词边界，边界离上限太远才硬切；
+    * 留痕（日志/指标）失败一律 fail-soft，绝不阻断生成。
+
+    2026-11-07 起改为 :func:`clip_text_notice_report` 的薄包装（取新文本），
+    返回值逐字节不变；需要账面（from/to/omitted）的调用方改用 report 版本。
+    """
+    return clip_text_notice_report(text, limit, label)[0]
 
 
 def _repair_closing_fence(before: str, after: str) -> str:
