@@ -73,6 +73,7 @@ from app.services.facts_extractor import (
     #    避免 routers→services 反向依赖造成的第二份回解）。本文件
     #    _fact_name_value 保留为薄包装（既有调用点与护栏锚点不动）。
     fact_name_value,
+    get_facts_inject_where,
     invalidate_export_cache,
     is_safety_critical_name,
     is_simulated_marked,
@@ -828,7 +829,10 @@ async def _load_injectable_peers_for_gate(db, sid: str, pid: str) -> list[dict]:
             return []
         raise
     except Exception as exc:  # noqa: BLE001 - 闸门读失败必须 fail-closed
-        logger.warning("事实唯一性闸门读取失败（拒绝写入，fail-closed）: %s", exc)
+        logger.warning(
+            "事实唯一性闸门读取失败（拒绝写入，fail-closed）: %s",
+            redact_sensitive_text(str(exc)),
+        )
         raise HTTPException(503, "事实校验暂时不可用，请稍后重试") from exc
 
 
@@ -930,6 +934,139 @@ async def _assert_no_conflicting_injectable_duplicate(
             dup_ids,
         )
         raise HTTPException(409, _duplicate_injectable_detail(name, dup_ids))
+
+
+def _fact_row_is_injectable(row: dict) -> bool:
+    """行级可注入判定 —— 与 :data:`facts_extractor._FACTS_INJECT_WHERE` 逐项同源。"""
+    return (
+        bool(row.get("is_resolved"))
+        and not bool(row.get("is_simulated"))
+        and not bool(row.get("has_conflict"))
+        and not bool(row.get("is_stale"))
+    )
+
+
+def _fact_row_key(row: dict) -> str:
+    """事实身份键：优先落库的 ``fact_key``，legacy 空值时按 title 归一兜底。"""
+    return str(row.get("fact_key") or "").strip() or normalize_key(str(row.get("title") or ""))
+
+
+def _merge_conflict_candidates(raw: str, extra: dict) -> str:
+    """把一条冲突候选并入既有 ``conflict_keys``（保留旧候选，不覆盖）。"""
+    try:
+        parsed = json.loads(raw) if raw else []
+    except (json.JSONDecodeError, TypeError):
+        parsed = []
+    if not isinstance(parsed, list):
+        parsed = []
+    parsed = [c for c in parsed if isinstance(c, dict)]
+    parsed.append(extra)
+    return json.dumps(parsed, ensure_ascii=False)
+
+
+async def _recompute_inherited_fact_conflicts(
+    db, scheme_id: str, project_id: str, *, source_scheme_id: str = ""
+) -> int:
+    """方案复制后按**副本自身作用域**重跑「同名异值可注入」冲突检测（R186）。
+
+    判据：副本的可注入结果只应由副本自身数据决定。``duplicate_scheme`` 把源
+    方案私有层逐行原样复制，历史脏源里「同 fact_key 两个取值都
+    ``is_resolved=1 / has_conflict=0``」的旧病灶会被原样带进新方案 —— 复制动作
+    没有制造冲突，却把一段与副本无因果关系的脏状态搬了过去。
+
+    本函数在复制落库后按「副本私有行 + 同项目共享行」重建 T-01 唯一性语义：
+    同一身份键按 ``rowid`` 先出现者保留可注入资格，后出现且取值不同者置
+    ``has_conflict=1 / is_resolved=0``，并把前者的取值写入 ``conflict_keys``
+    候选（``source`` 标注「复制自方案 xxx」/「项目共享事实」，供界面区分来源）。
+
+    两条安全边界：
+      · 只**新增**阻塞标记，绝不清除源方案已有的任何标记 —— 清标记会让从未
+        确认/曾矛盾的行重新可注入，方向不安全；
+      · **不改任何溯源列**（``source_ref`` / ``chunk_hash`` / ``page_ref`` /
+        ``group_id`` / ``fact_key`` 等保持复制值），重算只写冲突状态位。
+
+    失败即异常上抛：调用方与复制写入共用同一事务，绝不静默产出脏副本。
+    """
+    if not scheme_id:
+        return 0
+    cur = await db.execute(
+        "SELECT id, title, content, fact_key, is_simulated, is_resolved, "
+        "has_conflict, is_stale, is_shared, confidence, source_ref "
+        "FROM global_facts WHERE scheme_id=? ORDER BY rowid",
+        (scheme_id,),
+    )
+    _require_fact_cursor(cur, "复制后冲突重算·副本行")
+    private_rows = [dict(r) for r in await cur.fetchall()]
+
+    seen: dict[str, dict] = {}
+    shared_ids: set[str] = set()
+    if project_id:
+        cur = await db.execute(
+            "SELECT id, title, content, fact_key, is_simulated, is_resolved, "
+            f"has_conflict, is_stale, confidence, source_ref FROM global_facts "
+            f"WHERE {FACT_SCOPE_SHARED_FRAGMENT} AND {get_facts_inject_where()}",
+            (project_id,),
+        )
+        _require_fact_cursor(cur, "复制后冲突重算·共享行")
+        for row in [dict(r) for r in await cur.fetchall()]:
+            if not _fact_row_is_injectable(row):
+                continue
+            key = _fact_row_key(row)
+            if key and key not in seen:
+                seen[key] = row
+                shared_ids.add(str(row.get("id") or ""))
+
+    updates: list[tuple] = []
+    for row in private_rows:
+        # 非可注入行（模拟值/待确认/已矛盾/过期）原样保留：复制是忠实草稿，
+        # 不把源方案的既有状态改写成另一种状态。
+        if not _fact_row_is_injectable(row):
+            continue
+        key = _fact_row_key(row)
+        if not key:
+            continue
+        value = _norm_dup_value(str(row.get("title") or ""), str(row.get("content") or ""))
+        peer = seen.get(key)
+        if peer is None:
+            seen[key] = row
+            continue
+        peer_value = _norm_dup_value(str(peer.get("title") or ""), str(peer.get("content") or ""))
+        if value == peer_value:
+            # 同键同值是冗余而非矛盾（T-01 口径），保持原样。
+            continue
+        peer_is_shared = str(peer.get("id") or "") in shared_ids
+        if peer_is_shared:
+            origin = "项目共享事实"
+        elif source_scheme_id:
+            origin = f"复制自方案 {source_scheme_id}"
+        else:
+            origin = "副本内同名事实"
+        candidate = {
+            "value": _fact_name_value(peer)[1],
+            "source": origin,
+            "confidence": _safe_confidence(peer.get("confidence"), 1.0),
+            "is_simulated": False,
+        }
+        updates.append(
+            (
+                _merge_conflict_candidates(str(row.get("conflict_keys") or ""), candidate),
+                str(row.get("id") or ""),
+            )
+        )
+        # 被标记行不再进入 seen：它已不可注入，不能继续作为后续行的「既有多值」。
+    if updates:
+        await db.executemany(
+            "UPDATE global_facts SET has_conflict=1, is_resolved=0, conflict_keys=?, "
+            "updated_at=datetime('now','localtime') WHERE id=?",
+            updates,
+        )
+        logger.warning(
+            "方案复制冲突重算：scheme=%s 复制自 %s 有 %d 行同名异值被标记为矛盾待裁决（不进入正文注入）",
+            scheme_id,
+            source_scheme_id or "-",
+            len(updates),
+        )
+    return len(updates)
 
 
 @router.get("")

@@ -361,8 +361,8 @@ async def duplicate_scheme(project_id: str, scheme_id: str, db=Depends(get_db)):
 
     cur = await db.execute("SELECT * FROM global_facts WHERE scheme_id=?", (scheme_id,))
     fact_group_map: dict[str, str] = {}
-    for r in await cur.fetchall():
-        s = dict(r)
+    fact_rows = [dict(r) for r in await cur.fetchall()]
+    for s in fact_rows:
         old_group = s.get("group_id") or s.get("id")
         new_group = fact_group_map.setdefault(old_group, str(uuid.uuid4()))
         # 复制方案必须重映射 group_id。该列不是全局唯一约束，直接复用原值会导致
@@ -415,6 +415,25 @@ async def duplicate_scheme(project_id: str, scheme_id: str, db=Depends(get_db)):
             ),
         )
 
+    # ✅ R186（2026-11-07）：复制后的冲突重算 —— 副本的注入结果不得因源方案的
+    #    历史脏状态而改变。旧实现把 `is_resolved/has_conflict/conflict_keys`
+    #    逐字复制：干净源复制零变化（说明复制本身不制造冲突），但历史脏源里
+    #    「同一 fact_key 两个取值都可注入」的旧病灶会原样扩散进新方案，新方案
+    #    一落库就违反 T-01（同作用域同名不同值不得同时可注入）。
+    #    修法：按副本自身作用域（私有行 + 同项目共享行）重跑唯一性判定，把后
+    #    出现的异值行标为 `has_conflict=1/is_resolved=0` 并写冲突候选；只新增
+    #    阻塞、不清除任何既有标记、不改任何溯源列（source_ref/chunk_hash/page_ref/
+    #    group_id/fact_key 均保持复制值）。失败上抛 → 与复制同一事务回滚，
+    #    绝不静默产出脏副本。规则实现集中在 global_facts 模块（读口径与写闸门
+    #    同源），本函数只负责接线。
+    conflicts_marked = 0
+    if fact_rows:
+        from app.routers.global_facts import _recompute_inherited_fact_conflicts
+
+        conflicts_marked = await _recompute_inherited_fact_conflicts(
+            db, new_id, project_id, source_scheme_id=scheme_id
+        )
+
     # ✅ R85 BUG-C：副本落库后**按副本自身的位置重排章节编号**。
     #
     # 缺陷：`sections.outline_json.id` 是「章节编号」的唯一权威（前端树、正文
@@ -444,7 +463,7 @@ async def duplicate_scheme(project_id: str, scheme_id: str, db=Depends(get_db)):
     except Exception as e:  # noqa: BLE001
         logger.warning("方案复制后章节编号重排失败（副本编号可能与源方案不一致，scheme=%s）: %s", new_id, e)
     await db.commit()
-    return {"id": new_id}
+    return {"id": new_id, "conflicts_marked": conflicts_marked}
 
 
 @router.post("/{scheme_id}/archive")

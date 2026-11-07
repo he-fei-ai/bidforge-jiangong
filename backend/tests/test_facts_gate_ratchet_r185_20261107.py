@@ -188,9 +188,21 @@ _ENTRIES = [
         "count": 1,
         "mode": "cross_module",
         "reason": (
-            "跨模块登记（方案复制）：写入全新 scheme_id 作用域；若源作用域本就不变量，"
-            "复制后不变。风险：同项目共享层若已存在同名异值可注入事实，复制行可能与其并存 —— "
-            "不在本模块修复范围，登记待方案模块评估"
+            "跨模块登记（方案复制）：写入全新 scheme_id 作用域；插入后**必须**调用"
+            " global_facts._recompute_inherited_fact_conflicts 按副本自身作用域"
+            "（私有行 + 同项目共享行）重跑同名异值判定，后出现的异值行标矛盾，"
+            "使副本不继承源方案的历史冲突（R186）"
+        ),
+    },
+    {
+        "file": "app/routers/global_facts.py",
+        "func": "_recompute_inherited_fact_conflicts",
+        "kind": "UPDATE",
+        "count": 1,
+        "mode": "state",
+        "reason": (
+            "方案复制后的冲突重算：只把同键异值可注入行的 has_conflict/is_resolved "
+            "翻为阻塞并写 conflict_keys 候选，不改 key/value，也不清除任何既有标记"
         ),
     },
     {

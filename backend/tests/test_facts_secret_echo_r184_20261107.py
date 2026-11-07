@@ -113,3 +113,25 @@ def test_no_unredacted_exception_echo_left_in_router_source():
     ]
     for item in forbidden:
         assert item not in src, f"发现未脱敏的异常回显：{item}"
+
+
+async def test_gate_load_failure_log_is_masked(db_conn, monkeypatch, caplog):
+    """R186 自查补漏：闸门读失败（fail-closed）的日志也不得原样写异常文本。
+
+    该分支当前只会收到 sqlite 错误 / 静态 404，**尚无带凭据的可达路径**；
+    但它是本模块最后一个未过脱敏出口的异常日志，按 R184 的统一标准补齐。
+    响应体本身已是静态 503 文案，修复前也只有日志泄露。
+    """
+    import logging
+
+    async def _boom(*_args, **_kwargs):
+        raise RuntimeError(f"db read failed: Authorization: Bearer {SECRET}")
+
+    monkeypatch.setattr(gf, "_load_fact_rows", _boom)
+    with caplog.at_level(logging.WARNING, logger="global_facts"):
+        with pytest.raises(HTTPException) as ei:
+            await gf._load_injectable_peers_for_gate(db_conn, SID, PID)
+    assert ei.value.status_code == 503
+    log_text = "\n".join(r.getMessage() for r in caplog.records)
+    assert SECRET not in log_text, "闸门读失败日志泄露了异常原文中的密钥"
+    assert "sk-****" in log_text or "Bearer ****" in log_text, "掩码后仍应保留可诊断上下文"
