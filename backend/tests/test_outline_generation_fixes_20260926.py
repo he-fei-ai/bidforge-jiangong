@@ -203,20 +203,51 @@ def _dotted_name(node) -> str:
     return ""
 
 
-def _render_call_forms(tree) -> tuple[set, set]:
-    """识别本文件里「提示词 render」的两种书写形态。
+def _facade_proxy_classes(tree) -> set:
+    """识别模块内「延迟代理 facade」的类名（R186 起的 ``_LazySseHandlers`` 形态）。
 
-    返回 ``(直接函数名集合, 可再导出 render 的模块别名集合)``：
+    判定依据不靠类名硬编码：类的体内（``__getattr__`` / ``__setattr__``）
+    必须用 ``importlib.import_module("app.routers.sse_handlers" |
+    "app.routers.sse_checkpoint")`` 动态取 facade —— 这正是延迟代理的定义性
+    特征。据此，``_sh = <该类>()`` 的变量视同 facade 别名。
+    """
+    facade_modules = {"app.routers.sse_handlers", "app.routers.sse_checkpoint"}
+    names: set = set()
+    for n in ast.walk(tree):
+        if not isinstance(n, ast.ClassDef):
+            continue
+        for sub in ast.walk(n):
+            if (
+                isinstance(sub, ast.Call)
+                and _dotted_name(sub.func).endswith("import_module")
+                and sub.args
+                and isinstance(sub.args[0], ast.Constant)
+                and isinstance(sub.args[0].value, str)
+                and sub.args[0].value in facade_modules
+            ):
+                names.add(n.name)
+                break
+    return names
+
+
+def _render_call_forms(tree) -> tuple[set, set]:
+    """识别本文件里「提示词 render」的三种书写形态。
+
+    返回 ``(直接函数名集合, 可再导出 render 的 facade 变量集合)``：
       · ``render(...)`` —— 从注册表直接导入（含别名）；
       · ``_sh.render(...)`` 等 —— 经 ``app.routers.sse_handlers`` /
-        ``sse_checkpoint`` facade 转发（facade 从注册表 re-export）。
+        ``sse_checkpoint`` facade 转发（facade 从注册表 re-export）；
+      · ``_sh = _LazySseHandlers(); _sh.render(...)`` —— R186 起的延迟代理
+        实例形态（见 :func:`_facade_proxy_classes`）。旧实现只认
+        ``ast.Import/ImportFrom``，此形态会让整文件调用点零覆盖。
 
-    ⚠️ 只认 facade 别名，不认任意对象的 ``.render`` —— 避免把模板引擎
-    等无关方法当成提示词调用点（误报会污染漏传结论）。
+    ⚠️ 只认 facade 别名/延迟代理，不认任意对象的 ``.render`` —— 避免把
+    模板引擎等无关方法当成提示词调用点（误报会污染漏传结论）。
     """
     direct = {"render"}
     modules: set = set()
     facade_modules = {"app.routers.sse_handlers", "app.routers.sse_checkpoint"}
+    proxy_classes = _facade_proxy_classes(tree)
     for n in ast.walk(tree):
         if isinstance(n, ast.Import):
             for a in n.names:
@@ -230,6 +261,17 @@ def _render_call_forms(tree) -> tuple[set, set]:
             for a in n.names:
                 if a.name == "render":
                     direct.add(a.asname or "render")
+        elif isinstance(n, (ast.Assign, ast.AnnAssign)):
+            targets = n.targets if isinstance(n, ast.Assign) else [n.target]
+            value = n.value
+            if not isinstance(value, ast.Call):
+                continue
+            cname = _dotted_name(value.func).rsplit(".", 1)[-1]
+            if cname not in proxy_classes:
+                continue
+            for t in targets:
+                if isinstance(t, ast.Name):
+                    modules.add(t.id)
     return direct, modules
 
 
