@@ -1030,7 +1030,7 @@ async def _try_outline_patch(
     try:
         # ✅ R179：硬切片改为带留痕的截断（超限时写日志 + 计入截断指标），
         #    避免 project_brief/project_facts 被悄悄丢弃且无人可查。
-        from app.services.prompt_material_guard import clip_text
+        from app.services.prompt_material_guard import clip_text, clip_text_notice
 
         prompt = _sh.render(
             "outline_patch_system",
@@ -1038,7 +1038,13 @@ async def _try_outline_patch(
             scheme_type=scheme_type,
             project_brief=clip_text(project_brief or "", 1500, "目录补齐-project_brief"),
             project_facts=clip_text(project_facts or "", _sh.PROJECT_FACTS_LIMIT_OUTLINE, "目录补齐-project_facts"),
-            chapter_titles="; ".join(str(n.get("title") or "") for n in (outline or []) if isinstance(n, dict))[:2000],
+            # ✅ R186 清零：章节标题串 2000 字硬切改为留痕裁剪（未超限逐字节
+            #    原样；超限按边界收刀并附「原文/保留/省略」账面，模型可见）。
+            chapter_titles=clip_text_notice(
+                "; ".join(str(n.get("title") or "") for n in (outline or []) if isinstance(n, dict)),
+                2000,
+                "现有一级章节",
+            ),
             missing_items="; ".join(missing[:20]),
         )
         # ✅ G6（2026-11-07）：补齐链路的 system 提示词此前裸奔（项目资料/事实未围栏、

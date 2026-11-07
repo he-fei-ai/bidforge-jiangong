@@ -10,11 +10,10 @@
   会把 SSE 预览、诊断输出、图表标题等无关限长一起卷进来，只能靠大名单豁免。
 * **合规留痕点自动通过**：切片只要位于 ``_LEDGER_WRAPPERS`` 任一调用的实参内
   （例如 ``clip_text_notice(x, 3000, ...)``），即视为已留痕，无需白名单。
-* **例外必须写理由**：白名单分两类 ——
-  ``_IRRELEVANT_LIMITS``（与方案文本完整性无关的限长）与
-  ``_BASELINE_DEBT``（存量真实静默截断，本轮只加锁、不动业务代码）。
-  空理由不被接受；白名单条目必须命中当前源码，失效条目会让测试红，
-  以此强制"修好后删条目"。
+* **例外必须写理由**：白名单只剩 ``_IRRELEVANT_LIMITS``（与方案文本完整性
+  无关的限长）。R186 清零轮已把原 ``_BASELINE_DEBT`` 三条存量真实截断修掉，
+  条目随之删除 —— 白名单只允许变短。空理由不被接受；白名单条目必须命中
+  当前源码，失效条目会让测试红，以此强制"修好后删条目"。
 * **新增裸切片必须红**：见 ``test_ratchet_catches_new_bare_slice``（在真实源码
   内存副本里注入裸切片）与 ``test_ratchet_ignores_non_prompt_paths``（证明
   范围没有外溢到非模型请求路径）。
@@ -55,28 +54,6 @@ _IRRELEVANT_LIMITS: dict[tuple[str, str, str], str] = {
         "missing[:20]",
     ): "清单条数上限（最多列 20 条缺失项），不是字符截断；超过 20 条时穷举清单本身"
     "会让提示词失去可执行性，且缺失项由审核链路另行持有。",
-}
-
-#: 存量真实静默截断：本轮只加锁，不改业务代码；修好后删除条目（否则红）。
-_BASELINE_DEBT: dict[tuple[str, str, str], str] = {
-    (
-        "app/routers/_sse_outline_review.py",
-        "_try_outline_patch",
-        '"; ".join(str(n.get("title") or "") for n in (outline or []) if isinstance(n, dict))[:2000]',
-    ): "存量：章节标题串按 2000 字静默硬切，真实丢字；属 A 类存量，本轮只加锁，"
-    "后续接入 clip_text_notice 后删除本条目（棘轮会因条目失活而提醒）。",
-    (
-        "app/routers/global_facts.py",
-        "adjust_facts",
-        "instruction[:3000]",
-    ): "存量：事实调整指令按 3000 字静默硬切。调整指令是任务本体（G6 表优先级 1），"
-    "截断与表冲突；本轮不改业务代码，登记待后续批次收敛。",
-    (
-        "app/routers/sections.py",
-        "adjust_outline",
-        "instruction[:3000]",
-    ): "存量：目录调整指令按 3000 字静默硬切。同上，属任务本体（优先级 1），"
-    "登记待后续批次收敛；修好后删除本条目。",
 }
 
 
@@ -193,13 +170,13 @@ def _describe(hits: list[dict]) -> str:
 # ---------------------------------------------------------------------------
 def test_no_unlisted_bare_slice_in_model_requests():
     hits = _scan_sources(_real_sources())
-    allowed = set(_IRRELEVANT_LIMITS) | set(_BASELINE_DEBT)
+    allowed = set(_IRRELEVANT_LIMITS)
     violations = [h for h in hits if h["key"] not in allowed]
     assert not violations, (
         "发现未登记的「进模型请求的裸切片」：\n"
         + _describe(violations)
         + "\n请改用 clip_text_notice / clip_text_logged / serialize_bounded_json_array，"
-        "或在 _IRRELEVANT_LIMITS / _BASELINE_DEBT 中写明理由。"
+        "或在 _IRRELEVANT_LIMITS 中写明理由。"
     )
 
 
@@ -207,15 +184,11 @@ def test_no_unlisted_bare_slice_in_model_requests():
 # 2. 白名单必须"活"：修好后要删条目，不能留僵尸豁免
 # ---------------------------------------------------------------------------
 def test_allowlist_entries_are_live():
-    reasons = list(_IRRELEVANT_LIMITS.values()) + list(_BASELINE_DEBT.values())
+    reasons = list(_IRRELEVANT_LIMITS.values())
     assert all(isinstance(r, str) and len(r.strip()) >= 20 for r in reasons), "白名单理由不得为空或敷衍"
     hits = _scan_sources(_real_sources())
     live = {h["key"] for h in hits}
-    stale = [
-        key
-        for key in set(_IRRELEVANT_LIMITS) | set(_BASELINE_DEBT)
-        if key not in live
-    ]
+    stale = [key for key in set(_IRRELEVANT_LIMITS) if key not in live]
     assert not stale, (
         "以下白名单条目已失效（源码里不再有该切片）：\n"
         + "\n".join(f"  {k[0]} [{k[1]}] {k[2]}" for k in stale)

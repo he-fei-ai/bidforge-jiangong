@@ -3861,8 +3861,16 @@ async def adjust_facts(data: AdjustRequest, db=Depends(get_db)):
             #    中间，模型收到非法输入。现未超预算逐字节不变；超预算按整条事实
             #    裁剪，并在结构内显式标注省略条目数/字符数/原因。
             current_facts=_facts_adjust_current_text(_facts_for_adjust_prompt(rows)),
-            instruction=instruction[:3000],
+            instruction=instruction,
         )
+        # ✅ R186 清零：调整指令是用户任务本体，3000 字硬切会让模型按半句执行
+        #    且无任何提示；下游无硬性窗口约束 → 去掉任意上限，交给预算器
+        #    （「调整要求」优先级 1，开启预算时才按优先级裁剪）。
+        #    延迟导入：routers 间存在 sse_handlers ↔ _sse_outline_review 的既有
+        #    循环，模块级导入会改变任一方的首次导入顺序并触发半初始化 ImportError。
+        from app.routers._sse_outline_review import _apply_prompt_context_budget
+
+        prompt = _apply_prompt_context_budget(prompt)
         try:
             obj, _ = await asyncio.wait_for(
                 collect_json_response(
