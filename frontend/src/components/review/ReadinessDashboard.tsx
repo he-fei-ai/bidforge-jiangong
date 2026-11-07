@@ -667,6 +667,22 @@ function ReadinessDashboard({
               description="这属于系统故障而非内容问题：请重试「一键总检」；若持续失败请联系运维查看后端日志（该维度下的问题暂不会出现在清单里，评分可能不完整）。"
             />
           )}
+          {/* ✅ R183（2026-11-07 · 三态口径）：部分检查来源提示。B-01（R175）后端
+              已回传 partial_sources（跑成但只覆盖部分正文），前端此前类型未声明、
+              UI 零消费 —— 存在部分检查时总分仍可能很高，用户会把「只查了一半」
+              当成「全查过了、没问题」。与 failed_sources 分开提示，处置方式不同。 */}
+          {(overview.partial_sources?.length ?? 0) > 0 && (
+            <Alert
+              type="warning"
+              showIcon
+              icon={<ExclamationCircleOutlined />}
+              style={{ marginTop: 12 }}
+              message={`以下数据来源本次只在部分正文上完成检查：${(overview.partial_sources || [])
+                .map((s) => SOURCE_LABEL[s] || s)
+                .join("、")}`}
+              description="这些维度的问题清单可能不完整，未覆盖的部分既未确认通过也未确认不通过（无法判定）；请补齐检查范围后重新总检，在此之前结论不得据此放行。"
+            />
+          )}
           {(overview.findings || []).length > 0 && (
             <div style={{ marginTop: 12 }}>
               <Space style={{ marginBottom: 6 }} wrap>
@@ -856,15 +872,37 @@ function ReadinessDashboard({
             </div>
           )}
 
-          {(overview.findings || []).length === 0 && (
-            <Alert
-              type="success"
-              showIcon
-              icon={<CheckCircleOutlined />}
-              style={{ marginTop: 12 }}
-              message="未检出任何问题，方案已具备交付条件"
-            />
-          )}
+          {/* ✅ R183（2026-11-07 · 三态口径修复）：零发现 ≠ 通过。
+              旧实现只要 findings 为空就绿色「已具备交付条件」，完全忽略
+              released=false（检查不完整 → 后端强制不放行）与结论过期 ——
+              这正是「报告把没检查显示成没问题」的典型形状。现在只有
+              「已放行 + 检查完整 + 未过期」才允许绿色成功态；其余一律
+              warning 并明确标注「无法判定」。 */}
+          {(overview.findings || []).length === 0 &&
+            (overview.released && !overview.incomplete && !isStale ? (
+              <Alert
+                type="success"
+                showIcon
+                icon={<CheckCircleOutlined />}
+                style={{ marginTop: 12 }}
+                message="未检出任何问题，方案已具备交付条件"
+              />
+            ) : (
+              <Alert
+                type="warning"
+                showIcon
+                icon={<ExclamationCircleOutlined />}
+                style={{ marginTop: 12 }}
+                message="未检出任何问题，但本次结论无法判定为「通过」"
+                description={
+                  overview.incomplete
+                    ? "存在未完成或未覆盖全文的检查来源（见上方告警），未检查的部分既不能确认通过也不能确认不通过；请补齐检查后重新总检。"
+                    : isStale
+                      ? "本次评分对应的正文或图表已发生变化，结论已过期；请先重新总检。"
+                      : "当前放行结论为否（未达到放行条件），请查看上方评分与阻断项。"
+                }
+              />
+            ))}
         </>
       )}
 

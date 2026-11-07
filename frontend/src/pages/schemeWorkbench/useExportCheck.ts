@@ -127,7 +127,15 @@ export function useExportCheck(deps: ExportCheckDeps) {
       if (!data.issues?.length) {
         if (crossrefUndetermined) {
           // ✅ B-17：无图表集合时交叉引用「无法判定」，不得提示成「预检通过」。
-          msg.info("预检完成：方案无图表，交叉引用无法判定（不代表通过）");
+          // ✅ R183：区分「全书无图表」与「只有表/只有图」两种无法判定原因。
+          const _reason = String(data.crossref_check?.reason || "");
+          const _why =
+            _reason === "no_fig_set"
+              ? "方案无图（仅有表），正文「图 X-X」引用"
+              : _reason === "no_tbl_set"
+                ? "方案无表（仅有图），正文「表 X-X」引用"
+                : "方案无图表，交叉引用";
+          msg.info(`预检完成：${_why}无法判定（不代表通过）`);
         } else {
           msg.success(`预检通过：${data.section_count} 个章节均无异常`);
         }
@@ -173,7 +181,12 @@ export function useExportCheck(deps: ExportCheckDeps) {
       const { data } = await sectionsApi.quality(id);
       setQualityResult(data);
       const s = data.summary || {};
-      if (!s.problem_sections) {
+      // ✅ R183（2026-11-07 · 三态口径修复）：checked=0 表示**没有可检查的正文**
+      //    （方案尚未生成 / 全部章节为空），旧实现照样提示「质量自检通过：已扫描
+      //    0 个章节」——把「没检查」显示成「没问题」。现单独给出「无法判定」。
+      if ((s.checked ?? 0) === 0) {
+        msg.info("质量自检未执行：没有可检查的正文（无法判定，不代表通过）");
+      } else if (!s.problem_sections) {
         msg.success(`质量自检通过：已扫描 ${s.checked ?? 0} 个章节，无口语化残留、无废止标准`);
       } else {
         msg.warning(`${s.problem_sections} 个章节存在质量问题，详见清单`);

@@ -1101,6 +1101,61 @@ describe("ReadinessDashboard · 过期恢复与告警链路", () => {
     await waitFor(() => expect(container.textContent || "").toContain("未检出任何问题"));
   });
 
+  // ✅ R183（2026-11-07 · 三态口径）：零发现 ≠ 通过。后端检查不完整时会
+  //    强制 released=false，旧 UI 仍显示绿色「已具备交付条件」——把
+  //    「没检查」折叠成「通过」。以下两条锁定修复。
+  it("零发现但检查不完整 / 未放行 → 不得声称「已具备交付条件」", async () => {
+    (complianceApi.overview as any).mockResolvedValue({
+      data: {
+        ...mocks.OVERVIEW,
+        findings: [],
+        counts: { block: 0, high: 0, medium: 0, low: 0, total: 0 },
+        blocked: false,
+        released: false,
+        incomplete: true,
+        partial_sources: ["program"],
+        blockers: [],
+      },
+    });
+    const { container } = render(
+      <App>
+        <ReadinessDashboard schemeId="s1" />
+      </App>,
+    );
+    await waitFor(() => expect(container.textContent || "").toContain("尚未总检"));
+    await renderAndRunOverview(container);
+    await waitFor(() =>
+      expect(container.textContent || "").toContain("本次结论无法判定为「通过」"),
+    );
+    expect(container.textContent || "").not.toContain("方案已具备交付条件");
+  });
+
+  it("partial_sources 非空 → 必须提示「只在部分正文上完成检查」", async () => {
+    (complianceApi.overview as any).mockResolvedValue({
+      data: {
+        ...mocks.OVERVIEW,
+        findings: [],
+        counts: { block: 0, high: 0, medium: 0, low: 0, total: 0 },
+        blocked: false,
+        released: false,
+        incomplete: true,
+        partial_sources: ["ai_content"],
+        blockers: [],
+      },
+    });
+    const { container } = render(
+      <App>
+        <ReadinessDashboard schemeId="s1" />
+      </App>,
+    );
+    await waitFor(() => expect(container.textContent || "").toContain("尚未总检"));
+    await renderAndRunOverview(container);
+    await waitFor(() =>
+      expect(container.textContent || "").toContain("只在部分正文上完成检查"),
+    );
+    expect(container.textContent || "").toContain("无法判定");
+  });
+
   it("规则目录加载失败 → 报错（不得静默给一个空抽屉）", async () => {
     (complianceApi.rules as any).mockRejectedValue(new Error("规则目录接口异常"));
     const { container } = render(

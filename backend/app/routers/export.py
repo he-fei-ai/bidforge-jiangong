@@ -887,8 +887,29 @@ async def collect_export_issues(
             _fig_n = len(_real_nums.get("fig") or ())
             _tbl_n = len(_real_nums.get("tbl") or ())
             crossref_check.update({"fig_count": _fig_n, "tbl_count": _tbl_n})
+            # ✅ R183（2026-11-07 · 三态口径补齐）：旧实现只在「图、表集合都为空」
+            #    时判 undetermined，遗漏「只有表 / 只有图」的中间态 —— 例如方案
+            #    只有表格、正文却引用「图9-9」时，图号分支被 `if real_nums["fig"]`
+            #    直接跳过，预检返回 0 问题并显示为「通过」，实际是**无法判定**。
+            #    现按引用类型分别判定：正文存在该类型引用而真实集合为空 →
+            #    undetermined（不产生 finding、不扣分，仅回传展示）。
+            _ref_has_fig = any(
+                bool(_STALE_FIG_REF_RE.search(s.get("content") or "")) for s in sections
+            )
+            _ref_has_tbl = any(
+                bool(_STALE_TBL_REF_RE.search(s.get("content") or "")) for s in sections
+            )
+            _und_fig = _fig_n == 0 and _ref_has_fig
+            _und_tbl = _tbl_n == 0 and _ref_has_tbl
             if _fig_n == 0 and _tbl_n == 0:
+                # 保持 B-17 既有语义与 reason 取值（前端/测试已按此消费）
                 crossref_check.update({"undetermined": True, "reason": "no_chart_set"})
+            elif _und_fig and _und_tbl:
+                crossref_check.update({"undetermined": True, "reason": "no_fig_and_tbl_set"})
+            elif _und_fig:
+                crossref_check.update({"undetermined": True, "reason": "no_fig_set"})
+            elif _und_tbl:
+                crossref_check.update({"undetermined": True, "reason": "no_tbl_set"})
             issues.extend(_detect_stale_cross_references(sections, real_nums=_real_nums))
     except Exception:
         # 配置缺失 / 函数签名变更等异常 → 静默降级（不阻断预检主流程）

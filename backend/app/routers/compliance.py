@@ -1690,6 +1690,84 @@ def _ai_row_is_stale(row: dict, current_fingerprint: str) -> bool:
     return fp != current_fingerprint
 
 
+async def _numbering_consistency_findings(db, scheme_id: str) -> tuple[list, bool]:
+    """DLV-13：编号一致性（正文↔目录 + 目录结构↔真实树）。
+
+    ✅ R183（2026-11-07 · 结构漂移盲区修复）：旧实现只调
+    :func:`validate_scheme_numbering_consistency` —— 它只解析落库正文，不看
+    ``outline_json.id`` 是否等于该章节在真实树（parent_id + sort_order）里的位置。
+    于是「第 2 章存储编号被改成 1」这类结构漂移：正文与陈旧编号仍自洽 → 校验器
+    报绿 → DLV-13 报绿，而 ``/sections/numbering-consistency``（已并入结构自检）
+    与导出侧却能看到问题 —— 同一方案两个相反结论。
+
+    现**只读复用** ``routers/sections.py::_outline_structure_report``（目录模块
+    已提交 ``aac9955``），与路由层同一份实现、同一口径，不在本文件复制第二份。
+
+    Returns:
+        (findings, checked_any)
+        · findings：0 或 1 条 DLV-13（正文漂移与结构漂移合并为同一条，避免
+          同 rule_id 在 merge_findings 里被去重丢掉其中一半证据）；
+        · checked_any：是否确有章节参与校验（为 False 时不得把 numbering 计为
+          「已检查来源」，避免「没检查」被显示成「通过」）。
+    """
+    from app.routers.sections import _outline_structure_report
+    from app.services.numbering import validate_scheme_numbering_consistency
+
+    num = await validate_scheme_numbering_consistency(db, scheme_id)
+    if num.get("error"):
+        raise RuntimeError(str(num["error"]))
+    num_bad = [s for s in (num.get("sections") or []) if not s.get("consistent")]
+    outline = await _outline_structure_report(db, scheme_id)
+    outline_bad = int(outline.get("mismatched") or 0)
+    checked_any = bool(num.get("checked")) or bool(outline.get("checked"))
+    if not num_bad and not outline_bad:
+        return [], checked_any
+
+    parts: list[str] = []
+    evidence: list[str] = []
+    section_ids: list[str] = []
+    if num_bad:
+        parts.append(f"{len(num_bad)} 个章节的正文子标题编号与当前目录编号不一致（D4 类漂移）")
+        evidence.extend(
+            f"{s.get('section_id')}: {len(s.get('diffs') or [])} 处差异" for s in num_bad[:10]
+        )
+        section_ids.extend(s.get("section_id") for s in num_bad if s.get("section_id"))
+    if outline_bad:
+        parts.append(
+            f"{outline_bad} 个章节的目录结构编号（outline_json.id）与真实树位置不一致（结构漂移）"
+        )
+        for s in (outline.get("samples") or [])[:10]:
+            evidence.append(
+                f"{s.get('title')}: 存储 {s.get('stored')}（level {s.get('stored_level')}）"
+                f" → 期望 {s.get('expected')}（level {s.get('expected_level')}）"
+            )
+            if s.get("section_id"):
+                section_ids.append(str(s.get("section_id")))
+
+    return (
+        [
+            {
+                "rule_id": "DLV-13",
+                "dimension": "deliverability",
+                "severity": "high",
+                "title": "正文子标题编号与目录/导出编号不一致",
+                "detail": "；".join(parts) + "，导出后目录与标题会错位",
+                "evidence": evidence[:10],
+                "section_id": "",
+                "section_ids": section_ids,
+                "section_title": "",
+                "suggestion": (
+                    "调用 POST /api/v1/schemes/{id}/sections/"
+                    "numbering-consistency/repair 按当前目录重新编号（含结构编号回写）"
+                ),
+                "basis": "目录 / 正文编号一致性校验",
+                "mode": "program",
+            }
+        ],
+        checked_any,
+    )
+
+
 async def _readiness_overview_compute(
     db,
     scheme_id: str,
@@ -1744,6 +1822,15 @@ async def _readiness_overview_compute(
     #    只覆盖了正文的一部分（如 /check 6000 字硬上限外的章节根本没进模型）。
     #    前端/消费方据此显示「部分检查」，避免把 partial 当完整通过。
     partial_sources: list[str] = []
+    # ✅ R183（2026-11-07 · 三态口径修复）：程序化检查项异常 = 该维度**没检查**。
+    #    旧实现把 check_* 抛错降级为一条 low 级 engine_error finding（-3 分），
+    #    总分仍可能 ≥75、grade 仍为 A/B，released 仍为 True —— 用户看到
+    #    「建议放行」，实际有体检项根本没跑（「没检查」被折叠成「通过」）。
+    #    现把异常计入 partial_sources，交给 score_findings 统一置 incomplete，
+    #    released 必为 False、verdict 追加「检查不完整，不得据此放行」。
+    #    注：单条 low finding 仍保留（用户可见具体是哪个 checker 崩了）。
+    if any(bool(f.get("engine_error")) for f in program_findings):
+        partial_sources.append("program")
 
     # --- ✅ G1：导出预检问题并入评分（与程序化预检共用同一套规则词表）---
     # 此前导出预检是独立体系，其问题既不进 preflight_runs 也不进本聚合，
@@ -1901,43 +1988,19 @@ async def _readiness_overview_compute(
     # 此前 /numbering-consistency 是独立体系：它报「正文子标题编号与目录不一致」，
     # 总检却完全不知情，用户在两处看到互相矛盾的结论（一处说漂移、一处说可交付）。
     # 现把同一校验器的结果以 DLV-13（交付物编号一致性）并入评分，口径单一。
+    # ✅ R183（2026-11-07 · 结构漂移盲区）：正文校验器只解析正文、不读提纲结构，
+    #    而 /sections/numbering-consistency 已把「目录结构编号 vs 真实树位置」并入
+    #    结论。总检若只调正文校验器，结构漂移时 DLV-13 报绿、路由层报不通过 ——
+    #    同一方案两个相反结论。现**只读复用** sections.py::_outline_structure_report
+    #    （目录模块已提交 aac9955），不复制第二份实现。
     try:
-        from app.services.numbering import validate_scheme_numbering_consistency
-
-        _num = await validate_scheme_numbering_consistency(db, scheme_id)
-        if _num.get("error"):
-            failed_sources.append("numbering")
-            logger.warning("overview: 编号一致性校验失败（跳过）: %s", _num["error"])
-        else:
-            _num_bad = [s for s in (_num.get("sections") or []) if not s.get("consistent")]
-            if _num_bad:
-                ai_findings.append(
-                    {
-                        "rule_id": "DLV-13",
-                        "dimension": "deliverability",
-                        "severity": "high",
-                        "title": "正文子标题编号与目录/导出编号不一致",
-                        "detail": (
-                            f"{len(_num_bad)} 个章节的正文子标题编号与当前目录编号"
-                            f"不一致（D4 类漂移），导出后目录与标题会错位"
-                        ),
-                        "evidence": [f"{s.get('section_id')}: {len(s.get('diffs') or [])} 处差异" for s in _num_bad][
-                            :10
-                        ],
-                        "section_id": "",
-                        "section_ids": [s.get("section_id") for s in _num_bad if s.get("section_id")],
-                        "section_title": "",
-                        "suggestion": (
-                            "调用 POST /api/v1/schemes/{id}/sections/" "numbering-consistency/repair 按当前目录重新编号"
-                        ),
-                        "basis": "目录 / 正文编号一致性校验",
-                        "mode": "program",
-                    }
-                )
-            if _num.get("checked"):
-                sources.append("numbering")
+        _num_findings, _num_checked = await _numbering_consistency_findings(db, scheme_id)
+        ai_findings.extend(_num_findings)
+        if _num_checked:
+            sources.append("numbering")
     except Exception as e:
-        failed_sources.append("numbering")
+        if "numbering" not in failed_sources:
+            failed_sources.append("numbering")
         logger.warning("overview: 编号一致性校验异常（跳过）: %s", e, exc_info=True)
 
     # --- ✅ 新增（2026-09-17）：最近一次全文一致性扫描（规则 + 仲裁）未解决冲突 ---

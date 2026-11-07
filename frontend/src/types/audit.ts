@@ -285,6 +285,14 @@ export interface ReadinessOverview {
   //    此前类型未声明、UI 零消费 —— 某一路来源读取失败时总分 / 放行结论可能
   //    失真且用户毫无感知。为空即表示六路来源全部正常参与。
   failed_sources?: string[];
+  // ✅ R183（2026-11-07 · 三态口径）：检查是否完整。后端 audit_scoring 在
+  //    失败/部分来源存在时置 true 并强制 released=false；此前前端类型未声明、
+  //    UI 零消费，导致「检查不完整」与「零问题通过」在界面上无法区分。
+  incomplete?: boolean;
+  // ✅ R183：跑成但只覆盖部分正文的来源（如 AI 检查 6000 字上限外未入模型、
+  //    程序化检查项异常）。失败源走 failed_sources，部分源走本字段，两者
+  //    都不得折叠成「通过」。
+  partial_sources?: string[];
 }
 
 /** 预检历史（分数趋势） */

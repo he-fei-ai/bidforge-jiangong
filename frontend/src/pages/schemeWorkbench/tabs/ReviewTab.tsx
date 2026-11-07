@@ -728,9 +728,13 @@ export function ReviewTab({
                 data-testid="export-crossref-undetermined"
                 style={{ marginTop: 8, fontSize: 12, color: "#d48806" }}
               >
-                ⚠️ 因方案中没有任何图表（图/表），交叉引用检查
+                {exportStats.crossref_check?.reason === "no_fig_set"
+                  ? "方案无图（仅有表），正文「图 X-X」引用"
+                  : exportStats.crossref_check?.reason === "no_tbl_set"
+                    ? "方案无表（仅有图），正文「表 X-X」引用"
+                    : "因方案中没有任何图表（图/表），交叉引用检查"}
                 <Text strong>无法判定</Text>
-                ——这不代表通过；补充图表并重新预检后可核对正文「图 X-X / 表 X-X」引用是否失效。
+                ——这不代表通过；补充对应图表并重新预检后可核对正文引用是否失效。
               </div>
             )}
             {/* 无法判定只额外提示，不吞掉「空章节 / 未完成图表」的原有提示 */}
@@ -742,9 +746,21 @@ export function ReviewTab({
                 未完成图表：可回「正文生成」页用「补全生成」，或在章节正文中手动补图后重新预检。
               </div>
             ) : !exportStats.crossref_check?.undetermined ? (
-              <div style={{ marginTop: 8, fontSize: 12, color: "#52c41a" }}>
-                ✓ 章节与图表均已就绪，可前往「导出」页生成文档。
-              </div>
+              // ✅ R183（2026-11-07）：此前只要「章节/图表」就绪就显示绿色
+              //    「可前往导出页生成文档」，完全无视同一次预检已发现的
+              //    其他问题（低字数、失效引用、命名空间冲突…）——零问题与
+              //    「有问题但章节齐全」在界面上无法区分。现在有 issue 时
+              //    改为警示并给出数量。
+              (exportIssues?.length || 0) > 0 ? (
+                <div style={{ marginTop: 8, fontSize: 12, color: "#d48806" }}>
+                  ⚠️ 章节与图表齐全，但本次预检仍发现 {exportIssues.length} 个问题；
+                  请先按上方清单处理后再导出。
+                </div>
+              ) : (
+                <div style={{ marginTop: 8, fontSize: 12, color: "#52c41a" }}>
+                  ✓ 章节与图表均已就绪，未检出其他问题，可前往「导出」页生成文档。
+                </div>
+              )
             ) : null}
           </Card>
         )}
@@ -937,11 +953,21 @@ export function ReviewTab({
           />
         )}
 
-        {qualityResult && (qualityResult.items?.length || 0) === 0 && (
-          <div style={{ marginTop: 12, fontSize: 12, color: "#52c41a" }}>
-            ✓ 未检出口语化残留与废止标准，正文可直接交付。
-          </div>
-        )}
+        {/* ✅ R183（2026-11-07 · 三态口径修复）：零问题但有 0 个可检查章节时，
+            旧实现照样显示绿色「可直接交付」——把「没检查」显示成「没问题」。
+            现在只有确实扫描过正文（checked > 0）才允许绿色成功态。 */}
+        {qualityResult &&
+          (qualityResult.items?.length || 0) === 0 &&
+          ((qualityResult.summary?.checked ?? 0) > 0 ? (
+            <div style={{ marginTop: 12, fontSize: 12, color: "#52c41a" }}>
+              ✓ 未检出口语化残留与废止标准，正文可直接交付。
+            </div>
+          ) : (
+            <div style={{ marginTop: 12, fontSize: 12, color: "#d48806" }}>
+              ⚠️ 没有可检查的正文（已扫描 0 个章节），本次质量自检
+              <Text strong>无法判定</Text>——这不代表通过。
+            </div>
+          ))}
 
         {qualityResult && (
           <div style={{ marginTop: 8, fontSize: 12, color: "#999" }}>
