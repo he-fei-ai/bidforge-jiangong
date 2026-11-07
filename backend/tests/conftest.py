@@ -235,3 +235,41 @@ def reset_task_registry_state():
     import app.services.ai.task_registry as tr
 
     tr._tasks.clear()
+
+
+def pytest_sessionfinish(session, exitstatus):
+    """会话结束统一关闭 app.db 的进程级 aiosqlite 连接（2026-11-07）。
+
+    背景：`app.db.init_db()` 会把全局单连接 `_conn` 建出来并常驻模块全局；
+    生产由 lifespan 的 `close_db()` 收尾（main.py），但 pytest 会话没有对应
+    的关闭点。测试文件（约 78 个）直接 `await init_db()` 后即结束，`_conn`
+    一直被模块引用，aiosqlite 的 `_connection_worker_thread` 是**非守护线程**，
+    用例全绿后解释器会卡在 `threading._shutdown` 等待它 —— 表现为「测试通过
+    但命令永远不退出」，长跑还会累积僵死进程。
+
+    这里在会话结束（所有 fixture teardown 之后）补上与生产一致的
+    `close_db()`，关闭 `_conn` + 写池 + 读池；并断言没有残留的 aiosqlite
+    工作线程，残留时把会话置为失败（避免下一次又静默挂死）。
+    """
+    import asyncio
+    import threading
+
+    try:
+        import app.db as _appdb
+    except Exception:  # 收集失败等场景下模块可能不可用，不能因此掩盖原始失败
+        return
+
+    try:
+        asyncio.run(_appdb.close_db())
+    except Exception as e:  # 清理路径失败仅告警，不覆盖既有用例结果
+        print(f"[conftest] 会话结束关闭 app.db 连接失败（忽略）: {e}")
+
+    leaked = [
+        t
+        for t in threading.enumerate()
+        if t is not threading.main_thread() and not t.daemon and t.is_alive() and "_connection_worker_thread" in t.name
+    ]
+    if leaked:
+        print(f"[conftest] 会话结束后仍有残留 aiosqlite 工作线程: {[t.name for t in leaked]}")
+        # 会话级断言：用例可能全绿，但进程无法正常退出，必须让 CI 可见地失败。
+        session.exitstatus = 1
