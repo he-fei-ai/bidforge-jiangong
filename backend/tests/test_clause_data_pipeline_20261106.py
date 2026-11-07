@@ -358,31 +358,31 @@ async def test_template_endpoint_returns_json_template(monkeypatch):
 
 _E2E_CLAUSE_A = {
     "clause_uid": "e2e-a",
-    "standard_code": "GB 50007-2011",
-    "standard_name": "建筑地基基础设计规范",
-    "version": "2011",
+    "standard_code": "GB 50202-2018",
+    "standard_name": "建筑地基基础工程施工质量验收标准",
+    "version": "2018",
     "clause_no": "第5.2.1条",
     "excerpt": "基础底面压力应符合设计要求，立杆间距不应大于 1.2m。",
     "excerpt_type": "summary",
     "mandatory": 1,
     "applicability": "天然地基",
     "license_note": "仅摘录要点，禁止全文转载",
-    "source_url": "https://example.com/gb50007/5.2.1",
+    "source_url": "https://example.com/gb50202/5.2.1",
     "source_kind": "public",
 }
 
 _E2E_CLAUSE_B = {
     "clause_uid": "e2e-b",
-    "standard_code": "GB 50007-2011",
-    "standard_name": "建筑地基基础设计规范",
-    "version": "2011",
+    "standard_code": "GB 50202-2018",
+    "standard_name": "建筑地基基础工程施工质量验收标准",
+    "version": "2018",
     "clause_no": "第5.2.2条",
     "excerpt": "基础底面压力应符合设计要求，剪刀撑间距不应大于 6m。",
     "excerpt_type": "summary",
     "mandatory": 0,
     "applicability": "天然地基",
     "license_note": "仅摘录要点，禁止全文转载",
-    "source_url": "https://example.com/gb50007/5.2.2",
+    "source_url": "https://example.com/gb50202/5.2.2",
     "source_kind": "public",
 }
 
@@ -397,7 +397,7 @@ async def test_e2e_import_search_section_and_numeric_lock_grouping(db_conn):
     assert found.status == "ok" and found.degraded is True
     assert {hit.clause_uid for hit in found.hits} == {"e2e-a", "e2e-b"}
 
-    section = await section_router.search_for_section(db_conn, "基础底面压力")
+    section = await section_router.search_for_section(db_conn, "基础底面压力", category_ids=("foundation_pit",))
     assert section.status == "ok" and len(section.hits) == 2
 
     route = section_router.SectionRoute(

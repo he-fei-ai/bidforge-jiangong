@@ -190,6 +190,29 @@ async def lifespan(app: FastAPI):
     await init_db()
     logger.info("数据库初始化完成")
 
+    # ✅ R179 Phase F（2026-11-07）：开关打开但条款库不可用时，启动必须留 WARNING。
+    #    「查过了、没问题」与「没查」必须在日志里可区分；每节报告另写「本节未经规范校验」。
+    try:
+        if bool(getattr(settings, "hybrid_generation_enabled", False)):
+            from app.db import get_conn as _clause_get_conn
+            from app.services import clause_store as _clause_store
+
+            _clause_db = await _clause_get_conn()
+            _clause_count = await _clause_store.count_active_clauses(_clause_db)
+            if _clause_count is None:
+                logger.warning(
+                    "R179 Phase F 混合生成已开启，但条款库不可用（standard_clauses 表缺失）；"
+                    "规范驱动章节将逐节标记「本节未经规范校验」"
+                )
+            elif _clause_count == 0:
+                logger.warning(
+                    "R179 Phase F 混合生成已开启，但条款库为空（0 条）；" "规范驱动章节将逐节标记「本节未经规范校验」"
+                )
+            else:
+                logger.info("R179 Phase F 条款库可用：%d 条", _clause_count)
+    except Exception as e:  # noqa: BLE001 - 探测失败不影响启动
+        logger.warning("R179 Phase F 条款库可用性探测失败（不影响服务）: %s", e)
+
     # ✅ 启动即声明鉴权状态：避免"以为开了鉴权其实没开"（API_AUTH_TOKEN 为空时告警）
     try:
         from app.middleware import log_auth_configuration

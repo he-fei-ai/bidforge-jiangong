@@ -223,11 +223,14 @@ from app.services.placeholder_sections import (
     split_placeholder_leaves,
 )
 from app.services.section_router import (
+    ClauseSearchBudget,
     allowed_numbers_for,
     blacklist_from_settings,
     build_hybrid_block,
     route_node,
     search_for_section,
+    search_report_fields,
+    search_skip_note,
     verify_experience_text,
 )
 from app.services.standards_registry import get_standards_text
@@ -2474,6 +2477,37 @@ async def generate_content(scheme_id: str, request: Request, db=Depends(get_db))
         # ✅ R179 Phase F（2026-11-06）：开关打开时逐章记录混合生成状态
         #    （路由 / 允许数值集合 / 检索结果），供生成后置校验与终态报告使用。
         _hybrid_by_leaf: dict = {}
+        # ✅ 2026-11-07 检索重做：文种上下文只算一次，逐节复用；
+        #    检索预算按方案维度记账（超限进报告，不静默丢弃）。
+        _hybrid_category_ids: tuple[str, ...] = ()
+        _hybrid_template_key: str = ""
+        _hybrid_search_budget: ClauseSearchBudget | None = None
+        if bool(getattr(settings, "hybrid_generation_enabled", False)):
+            try:
+                _raw_cls = scheme.get("scheme_classification_json")
+                _parsed_cls = json.loads(_raw_cls) if isinstance(_raw_cls, str) and _raw_cls.strip() else _raw_cls
+                if not isinstance(_parsed_cls, dict):
+                    _parsed_cls = {}
+                _hybrid_category_ids = tuple(
+                    str(cid) for cid in (_parsed_cls.get("category_ids") or ()) if str(cid or "").strip()
+                )
+                _hybrid_template_key = str(_parsed_cls.get("template_key") or "")
+                if not _hybrid_category_ids and not _hybrid_template_key:
+                    from app.services.scheme_classification import build_genre_tag
+
+                    _genre = build_genre_tag(str(scheme.get("name") or ""))
+                    _hybrid_category_ids = tuple(_genre.category_ids)
+                    _hybrid_template_key = str(_genre.template_key or "")
+                _hybrid_search_budget = ClauseSearchBudget(
+                    limit=int(getattr(settings, "hybrid_clause_search_budget", 500) or 500)
+                )
+            except Exception:  # noqa: BLE001 - 文种解析失败不得阻断生成，后续逐节落 no_standard_code
+                logger.warning("Phase F 文种上下文解析失败（后续章节按 no_standard_code 记录）", exc_info=True)
+                _hybrid_category_ids = ()
+                _hybrid_template_key = ""
+                _hybrid_search_budget = ClauseSearchBudget(
+                    limit=int(getattr(settings, "hybrid_clause_search_budget", 500) or 500)
+                )
         _order_warned: dict = {"flag": False}
 
         # ✅ B1 拆分（2026-11-03）：三个终态拼装点已下沉到
@@ -4299,15 +4333,27 @@ async def generate_content(scheme_id: str, request: Request, db=Depends(get_db))
                     _hroute = None
                     try:
                         _hroute = route_node(leaf)
-                        _hresult = await search_for_section(db, _hroute.title)
-                        _hallowed = allowed_numbers_for(_hroute, _hresult.hits)
+                        # ✅ 2026-11-07：只对规范驱动节点检索（经验驱动节点不查库，省预算）。
+                        #    检索键是「文种收敛出的候选标准号」，不是章节标题。
+                        _hresult = None
+                        if _hroute.strategy == "rag":
+                            _hresult = await search_for_section(
+                                db,
+                                _hroute.title,
+                                content_type=_hroute.content_type,
+                                category_ids=_hybrid_category_ids,
+                                template_key=_hybrid_template_key,
+                                budget=_hybrid_search_budget,
+                            )
+                        _hallowed = allowed_numbers_for(_hroute, _hresult.hits if _hresult else [])
                         _hblock = build_hybrid_block(_hroute, _hresult, _hallowed, blacklist=blacklist_from_settings())
                         _hybrid_by_leaf[str(leaf.get("id") or "")] = {
                             "route": _hroute,
                             "allowed": _hallowed,
-                            "hits": len(_hresult.hits),
-                            "search_status": _hresult.status,
-                            "search_message": _hresult.message,
+                            "result": _hresult,
+                            "hits": len(_hresult.hits) if _hresult else 0,
+                            "search_status": _hresult.status if _hresult else "ok",
+                            "search_message": _hresult.message if _hresult else "",
                         }
                         if _stable_prefix:
                             _chapter_extras = (_chapter_extras + "\n" + _hblock).strip("\n")
@@ -5024,12 +5070,35 @@ async def generate_content(scheme_id: str, request: Request, db=Depends(get_db))
                                     _hybrid_report = {
                                         "strategy": "rag",
                                         "content_type": _hroute.content_type,
-                                        "search_status": _hstate["search_status"],
                                         "search_message": _hstate["search_message"],
                                         "hits": _hstate["hits"],
                                         "numeric_lock_status": _hstatus,
                                         "numeric_lock": _hlock.as_dict() if _hlock else None,
                                     }
+                                    # 三态原因码 + 「本节未经规范校验」由同一处生成，
+                                    # 避免报告与提示词措辞分叉。
+                                    _search_result = _hstate.get("result")
+                                    if _search_result is not None:
+                                        _hybrid_report.update(
+                                            search_report_fields(_search_result, budget=_hybrid_search_budget)
+                                        )
+                                    else:
+                                        _hskip = search_skip_note(_hstate["search_status"])
+                                        _hybrid_report.update(
+                                            {
+                                                "search_status": _hstate["search_status"],
+                                                "search_reason_code": _hstate["search_status"],
+                                                "standard_candidates": [],
+                                                "query_terms": [],
+                                                "skipped_checks": _hskip,
+                                                "section_unverified": True,
+                                                "section_unverified_note": "本节未经规范校验：" + _hskip,
+                                                "budget_exceeded": False,
+                                                "budget": (
+                                                    _hybrid_search_budget.as_dict() if _hybrid_search_budget else None
+                                                ),
+                                            }
+                                        )
                                 else:
                                     _hdefects = verify_experience_text(result, _hroute, blacklist_from_settings())
                                     _hybrid_report = {
@@ -5050,8 +5119,16 @@ async def generate_content(scheme_id: str, request: Request, db=Depends(get_db))
                                     "strategy": _hroute.strategy,
                                     "content_type": _hroute.content_type,
                                     "search_status": "error",
+                                    "search_reason_code": "error",
                                     "search_message": f"混合生成后置校验失败：{exc}",
                                     "hits": _hstate["hits"],
+                                    "standard_candidates": [],
+                                    "query_terms": [],
+                                    "skipped_checks": search_skip_note("error"),
+                                    "section_unverified": True,
+                                    "section_unverified_note": "本节未经规范校验：" + search_skip_note("error"),
+                                    "budget_exceeded": False,
+                                    "budget": _hybrid_search_budget.as_dict() if _hybrid_search_budget else None,
                                     "numeric_lock_status": "undetermined" if _hroute.strategy == "rag" else None,
                                     "numeric_lock": None,
                                 }

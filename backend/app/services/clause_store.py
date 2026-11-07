@@ -49,6 +49,46 @@ _CLAUSE_RE = re.compile(r"^第?\s*(\d+(?:\.\d+)+)\s*(?:条|款|节)?$")
 _APPENDIX_RE = re.compile(r"^附\s*录\s*([A-Za-z])\s*[.．]\s*(\d+(?:\.\d+)*)$")
 _LIKE_SPLIT_RE = re.compile(r"[\s,，;；、。]+")
 
+#: 候选内重排的预筛窗口：候选标准内先取这么多行再做覆盖率排序（有界）。
+_RERANK_WINDOW = 64
+
+#: 查询词项上限：标题 3-gram + 内容类型词 + 事实依赖别名。
+_MAX_QUERY_TERMS = 12
+_MAX_TITLE_TERMS = 8
+
+_CJK_RE = re.compile(r"[\u4e00-\u9fff]+")
+_ASCII_TERM_RE = re.compile(r"[A-Za-z0-9][A-Za-z0-9./-]*")
+_CLAUSE_IN_TEXT_RE = re.compile(r"第\s*([0-9]+(?:\.[0-9]+){1,4})\s*条")
+_CLAUSE_NUM_ONLY_RE = re.compile(r"^\s*([0-9]+(?:\.[0-9]+){1,4})\s*$")
+
+#: 高共现但无区分度的词：不作为独立词项（避免整库 LIKE 被泛词带偏）。
+_STOP_TERMS = frozenset(
+    {
+        "施工",
+        "工程",
+        "方案",
+        "要求",
+        "规定",
+        "措施",
+        "技术",
+        "标准",
+        "质量",
+        "安全",
+        "管理",
+        "内容",
+        "情况",
+        "作业",
+        "工作",
+    }
+)
+
+#: 内容类型 → 补充词项（只扩大第二段匹配面，不改变候选标准集）。
+_CONTENT_TYPE_TERMS: dict[str, tuple[str, ...]] = {
+    "verification": ("验收", "检验", "允许偏差", "检查"),
+    "calculation": ("计算", "验算", "稳定性", "承载力", "荷载"),
+    "standard": ("构造", "防护", "设置"),
+}
+
 
 class ClauseValidationError(ValueError):
     """导入校验失败（整批拒绝）；``errors`` 逐行给出字段与原因。"""
@@ -79,12 +119,28 @@ class ClauseRef:
 
 @dataclass(frozen=True)
 class ClauseSearchResult:
-    """三态检索结果；``status`` 非 ``ok`` 时不得据此认定「无问题」。"""
+    """三态检索结果；``status`` 非 ``ok`` 时不得据此认定「无问题」。
+
+    ``status`` 是**原因码**，不是二元成败：
+
+    * ``ok``：候选范围内命中；
+    * ``no_corpus``：条款库为空或 ``standard_clauses`` 表缺失；
+    * ``no_standard_code``：文种无法收敛出候选标准号；
+    * ``no_match``：候选标准范围内没有匹配条款；
+    * ``error``：检索异常、超时或预算超限。
+
+    ``reason_code`` 与 ``status`` 同值（保留字段便于报告直取）；``candidates`` /
+    ``terms`` / ``budget_exceeded`` 只用于报告与审计，不参与命中判定。
+    """
 
     status: str
     hits: list[ClauseRef] = field(default_factory=list)
     degraded: bool = False
     message: str = ""
+    reason_code: str = ""
+    candidates: tuple[str, ...] = ()
+    terms: tuple[str, ...] = ()
+    budget_exceeded: bool = False
 
 
 def normalize_clause_no(clause_no: str) -> tuple[str, str]:
@@ -350,6 +406,224 @@ def _escape_like(token: str) -> str:
 def _like_tokens(query: str) -> list[str]:
     tokens = [t.strip() for t in _LIKE_SPLIT_RE.split(str(query or "")) if t.strip()]
     return tokens[:_MAX_LIKE_TOKENS]
+
+
+async def count_active_clauses(db) -> int | None:
+    """条款库可用性探测：表缺 / 不可用返回 ``None``，空库返回 ``0``。
+
+    表缺失是环境事实（``no_corpus``），不是检索异常（``error``）——启动告警与
+    每节报告都依赖这个区分。
+    """
+    try:
+        cur = await db.execute("SELECT COUNT(*) AS c FROM standard_clauses WHERE status='active'")
+        row = await cur.fetchone()
+    except (sqlite3.Error, AttributeError):
+        return None
+    return int((row[0] if row else 0) or 0)
+
+
+def extract_clause_no(text: str) -> str:
+    """从查询文本抽条文号：只认「第 X.Y 条」或整串就是 ``X.Y``（避免误吞日期/尺寸）。"""
+    raw = unicodedata.normalize("NFKC", str(text or "")).strip()
+    matched = _CLAUSE_IN_TEXT_RE.search(raw) or _CLAUSE_NUM_ONLY_RE.match(raw)
+    return matched.group(1) if matched else ""
+
+
+def build_query_terms(
+    query: str,
+    *,
+    content_type: str = "",
+    extra_terms: Iterable[str] = (),
+) -> tuple[tuple[str, float], ...]:
+    """构造第二段匹配词项：``(词项, 权重)``。
+
+    不用 FTS5 分词：``unicode61`` 把连续汉字当一个 token、``trigram`` 只对
+    ≥3 字符生效 —— 对「验收标准」这类短标题两种分词都不可靠。这里用 CJK
+    3-gram 滑窗把长标题拆成可匹配片段，2 字词降权保留，内容类型与事实依赖
+    作为补充词项。
+    """
+    weighted: list[tuple[str, float]] = []
+
+    def push(term, weight: float) -> None:
+        text = unicodedata.normalize("NFKC", str(term or "")).strip()
+        if len(text) < 2 or text in _STOP_TERMS:
+            return
+        for index, (existing, existing_weight) in enumerate(weighted):
+            if existing == text:
+                if existing_weight < weight:
+                    weighted[index] = (text, weight)
+                return
+        weighted.append((text, weight))
+
+    text = str(query or "")
+    title_count = 0
+    for run in _CJK_RE.findall(text):
+        if len(run) >= 3:
+            for index in range(len(run) - 2):
+                if title_count >= _MAX_TITLE_TERMS:
+                    break
+                push(run[index : index + 3], 1.0)
+                title_count += 1
+        elif len(run) == 2 and title_count < _MAX_TITLE_TERMS:
+            push(run, 0.7)
+            title_count += 1
+    for token in _ASCII_TERM_RE.findall(text):
+        if title_count >= _MAX_TITLE_TERMS:
+            break
+        push(token, 0.8)
+        title_count += 1
+    for term in _CONTENT_TYPE_TERMS.get(str(content_type or ""), ()):
+        push(term, 0.6)
+    for term in extra_terms or ():
+        push(term, 0.5)
+    return tuple(weighted[:_MAX_QUERY_TERMS])
+
+
+_RERANK_COLUMNS = _SELECT_COLUMNS + ", clause_title, mandatory, clause_no_norm"
+
+
+def _coverage(terms: tuple[tuple[str, float], ...], row: dict, *, title_only: bool = False) -> float:
+    """加权覆盖率：命中词项权重 / 全部词项权重。"""
+    total = sum(weight for _, weight in terms)
+    if total <= 0:
+        return 0.0
+    if title_only:
+        haystack = str(row.get("clause_title") or "").lower()
+    else:
+        haystack = (str(row.get("clause_title") or "") + " " + str(row.get("excerpt") or "")).lower()
+    matched = sum(weight for term, weight in terms if term.lower() in haystack)
+    return matched / total
+
+
+async def search_clauses_in_candidates(
+    db,
+    *,
+    standard_bases: tuple[str, ...] | None,
+    query: str,
+    content_type: str = "",
+    extra_terms: Iterable[str] = (),
+    clause_no: str = "",
+    limit: int = _DEFAULT_LIMIT,
+) -> ClauseSearchResult:
+    """两段式检索：候选标准号收敛 → 候选内词项匹配重排。
+
+    ``standard_bases=()`` 直接落 ``no_standard_code``（生产调用点绝不传空集合
+    退回全库）；``standard_bases=None`` 表示**不做标准号约束**，仅供评测对照 /
+    变异验证使用，生产路径不得走这一支。
+    """
+    bases = tuple(sorted({strip_standard_year(code) for code in (standard_bases or ()) if str(code or "").strip()}))
+    if standard_bases is not None and not bases:
+        return ClauseSearchResult(
+            status="no_standard_code",
+            reason_code="no_standard_code",
+            message="无法判定：未能从文种收敛出候选标准号",
+            candidates=(),
+        )
+
+    corpus = await count_active_clauses(db)
+    if corpus is None:
+        return ClauseSearchResult(
+            status="no_corpus",
+            reason_code="no_corpus",
+            message="无法判定：条款库不可用（standard_clauses 表缺失）",
+            candidates=bases,
+        )
+    if corpus == 0:
+        return ClauseSearchResult(
+            status="no_corpus",
+            reason_code="no_corpus",
+            message="无法判定：条款库未收录",
+            candidates=bases,
+        )
+
+    scope_sql = ""
+    scope_params: list = []
+    if standard_bases is not None:
+        scope_sql = " AND standard_base_norm IN (" + ",".join("?" for _ in bases) + ")"
+        scope_params = list(bases)
+        cur = await db.execute(
+            "SELECT COUNT(*) FROM standard_clauses WHERE status='active'" + scope_sql,
+            tuple(scope_params),
+        )
+        row = await cur.fetchone()
+        if int((row[0] if row else 0) or 0) == 0:
+            return ClauseSearchResult(
+                status="no_match",
+                reason_code="no_match",
+                message="无法判定：候选标准范围内无条款",
+                candidates=bases,
+            )
+
+    clause_norm = normalize_clause_no(clause_no)[0] if clause_no else extract_clause_no(query)
+    if clause_norm:
+        cur = await db.execute(
+            f"SELECT {_SELECT_COLUMNS} FROM standard_clauses"
+            " WHERE status='active'" + scope_sql + " AND clause_no_norm=? LIMIT ?",
+            tuple(scope_params + [clause_norm, max(1, int(limit))]),
+        )
+        rows = [dict(r) for r in await cur.fetchall()]
+        if rows:
+            return ClauseSearchResult(
+                status="ok",
+                hits=[_to_ref(r, "exact_scoped") for r in rows],
+                message="候选标准内精确条文号命中",
+                reason_code="ok",
+                candidates=bases,
+            )
+
+    terms = build_query_terms(query, content_type=content_type, extra_terms=extra_terms)
+    display_terms = tuple(term for term, _ in terms)
+    if not terms:
+        return ClauseSearchResult(
+            status="no_match",
+            reason_code="no_match",
+            message="未检索到相关条款，不能作为合规依据",
+            candidates=bases,
+            terms=display_terms,
+        )
+
+    conditions = " OR ".join("(clause_title LIKE ? ESCAPE '\\' OR excerpt LIKE ? ESCAPE '\\')" for _ in terms)
+    sql = (
+        f"SELECT {_RERANK_COLUMNS} FROM standard_clauses"
+        " WHERE status='active'" + scope_sql + " AND (" + conditions + ")"
+        " ORDER BY mandatory DESC, clause_no_norm, standard_code LIMIT ?"
+    )
+    params = list(scope_params)
+    for term, _ in terms:
+        pattern = f"%{_escape_like(term)}%"
+        params.extend([pattern, pattern])
+    params.append(_RERANK_WINDOW)
+    cur = await db.execute(sql, tuple(params))
+    rows = [dict(r) for r in await cur.fetchall()]
+    if not rows:
+        return ClauseSearchResult(
+            status="no_match",
+            reason_code="no_match",
+            message="未检索到相关条款，不能作为合规依据",
+            candidates=bases,
+            terms=display_terms,
+        )
+
+    # 先看条文标题覆盖率（标题比摘录更具区分度），再看全文覆盖率；
+    # 否则「立杆间距与步距」会被摘录里恰好提到该短语的相邻条款抢走第 1 位。
+    ranked = sorted(
+        rows,
+        key=lambda r: (
+            -_coverage(terms, r, title_only=True),
+            -_coverage(terms, r),
+            -int(r.get("mandatory") or 0),
+            str(r.get("clause_no_norm") or ""),
+            str(r.get("standard_code") or ""),
+        ),
+    )
+    return ClauseSearchResult(
+        status="ok",
+        hits=[_to_ref(r, "candidate_ranked") for r in ranked[: max(1, int(limit))]],
+        message="候选标准内词项匹配（标准号收敛后重排）",
+        reason_code="ok",
+        candidates=bases,
+        terms=display_terms,
+    )
 
 
 async def search_clauses(

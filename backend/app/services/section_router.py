@@ -21,13 +21,15 @@
 
 from __future__ import annotations
 
+import asyncio
 import json
 import logging
 import re
+from collections import OrderedDict
 from dataclasses import dataclass, field
 
 from app.config import settings
-from app.services import clause_store
+from app.services import clause_candidates, clause_store
 from app.services.numeric_lock import (
     AllowedNumbers,
     NumericLockResult,
@@ -36,7 +38,12 @@ from app.services.numeric_lock import (
     check_text,
     extract_numbers,
 )
-from app.services.outline_templates import CONTENT_TYPES, content_type_of
+from app.services.outline_templates import (
+    CONTENT_TYPES,
+    FACT_DEP_ALIASES,
+    content_type_of,
+    fact_deps_of,
+)
 
 #: 规范驱动型内容类型（RAG 主导）。
 RAG_CONTENT_TYPES: tuple[str, ...] = ("standard", "calculation", "verification")
@@ -140,32 +147,187 @@ def route_node(node: dict) -> SectionRoute:
     )
 
 
+#: 单节检索默认超时（秒）与单方案总检索次数上限（可由 config 覆盖）。
+_DEFAULT_SEARCH_TIMEOUT = 3.0
+_DEFAULT_SEARCH_BUDGET = 500
+
+#: 进程内结果复用上界：命中与空结果都缓存，但绝不做无界内存表。
+_SEARCH_CACHE_MAX = 256
+_SEARCH_CACHE: "OrderedDict[tuple, clause_store.ClauseSearchResult]" = OrderedDict()
+
+#: 原因码 → 「因此跳过了什么校验」（报告与提示词共用，避免两处措辞分叉）。
+_SKIP_NOTES: dict[str, str] = {
+    "no_corpus": "条款库为空或 standard_clauses 表缺失，未做条款符合性校验；数值锁按 undetermined 处理",
+    "no_standard_code": (
+        "无法从文种收敛出候选标准号，未做条款符合性校验" "（不退回全库标题模糊匹配）；数值锁按 undetermined 处理"
+    ),
+    "no_match": "候选标准范围内无匹配条款，未做条款符合性校验；数值锁按 undetermined 处理",
+    "error": "条款检索异常、超时或预算超限，未做条款符合性校验；数值锁按 undetermined 处理",
+}
+
+_CJK_ONLY_RE = re.compile(r"[\u4e00-\u9fff]")
+
+
+def reset_clause_search_cache() -> None:
+    """清空进程内检索缓存（测试隔离用；生产由每次生成自然累积并受上界约束）。"""
+    _SEARCH_CACHE.clear()
+
+
+def clause_search_cache_size() -> int:
+    """当前缓存条目数（用于断言「空结果缓存有上界」）。"""
+    return len(_SEARCH_CACHE)
+
+
+@dataclass
+class ClauseSearchBudget:
+    """单方案检索预算：次数上限 + 超限计数（超限必须进报告，不静默丢弃）。"""
+
+    limit: int = _DEFAULT_SEARCH_BUDGET
+    used: int = 0
+    skipped: int = 0
+
+    def consume(self) -> bool:
+        if self.limit > 0 and self.used >= self.limit:
+            self.skipped += 1
+            return False
+        self.used += 1
+        return True
+
+    def as_dict(self) -> dict:
+        return {
+            "limit": self.limit,
+            "used": self.used,
+            "skipped": self.skipped,
+            "exhausted": self.skipped > 0,
+        }
+
+
+def search_skip_note(status: str) -> str:
+    """原因码 → 跳过校验说明。"""
+    return _SKIP_NOTES.get(status, "检索未成功，未做条款符合性校验；数值锁按 undetermined 处理")
+
+
+def search_report_fields(
+    result: clause_store.ClauseSearchResult,
+    *,
+    budget: ClauseSearchBudget | None = None,
+) -> dict:
+    """三态检索结果 → hybrid_report 字段（「本节未经规范校验」由此强制落地）。"""
+    verified = result.status == "ok" and bool(result.hits)
+    note = "" if verified else search_skip_note(result.status)
+    return {
+        "search_status": result.status,
+        "search_reason_code": result.reason_code or result.status,
+        "standard_candidates": list(result.candidates),
+        "query_terms": list(result.terms),
+        "skipped_checks": note,
+        "section_unverified": not verified,
+        "section_unverified_note": "" if verified else f"本节未经规范校验：{note}",
+        "budget_exceeded": bool(result.budget_exceeded),
+        "budget": budget.as_dict() if budget is not None else None,
+    }
+
+
+def _fact_query_terms(title: str) -> tuple[str, ...]:
+    """标题事实依赖 → 中文别名词项（ASCII 别名易与单位/字段名混淆，过滤掉）。"""
+    terms: list[str] = []
+    for dep in fact_deps_of(title):
+        for alias in FACT_DEP_ALIASES.get(dep, ()):
+            if len(alias) >= 2 and _CJK_ONLY_RE.search(alias) and alias not in terms:
+                terms.append(alias)
+    return tuple(terms[:4])
+
+
 async def search_for_section(
     db,
     title: str,
     *,
+    content_type: str = "",
+    category_ids=(),
+    template_key: str = "",
     limit: int = 8,
     search_fn=None,
+    budget: ClauseSearchBudget | None = None,
+    timeout: float | None = None,
 ) -> clause_store.ClauseSearchResult:
-    """检索与章节标题相关的条款。
+    """检索与章节内容相关的条款（文种收敛 → 候选内词项匹配）。
 
-    ``search_fn`` 可注入（测试用假实现）；默认复用 E 阶段唯一检索实现，
-    即 ``GET /api/v1/clause-library/search`` 的后端函数 —— **不新增检索**。
+    与旧实现的区别：**不再拿章节标题直接查全库**。先由 ``category_ids`` /
+    ``template_key`` 收敛出候选标准号基号，再在候选范围内做条文号/词项匹配；
+    候选集为空直接落 ``no_standard_code``，绝不退回全库模糊匹配。
 
-    条款库不可用（表未初始化 / 库不存在 / 检索报错）时返回 ``status="error"``
-    的**显式失败结果**，而不是抛异常让调用点静默跳过：RAG 节点必须据此记
-    ``undetermined`` 并出现在报告里，不能把「没检查」显示成「没问题」。
+    ``search_fn`` 可注入（测试用假实现），签名与
+    :func:`app.services.clause_store.search_clauses_in_candidates` 一致。
+
+    返回的 ``status`` 是原因码（``no_corpus`` / ``no_standard_code`` /
+    ``no_match`` / ``error``），调用点必须据此记 ``undetermined`` 并写进报告，
+    不能把「没检查」显示成「没问题」。
     """
-    fn = search_fn or clause_store.search_clauses
+    fn = search_fn or clause_store.search_clauses_in_candidates
+    candidates = clause_candidates.candidate_standard_bases(category_ids, template_key)
+    if not candidates:
+        return clause_store.ClauseSearchResult(
+            status="no_standard_code",
+            reason_code="no_standard_code",
+            message="无法判定：未能从文种收敛出候选标准号",
+        )
+
+    extra_terms = _fact_query_terms(title)
+    cache_key = (candidates, str(title), str(content_type), extra_terms, int(limit))
+    cached = _SEARCH_CACHE.get(cache_key)
+    if cached is not None:
+        _SEARCH_CACHE.move_to_end(cache_key)
+        return cached
+
+    if budget is not None and not budget.consume():
+        return clause_store.ClauseSearchResult(
+            status="error",
+            reason_code="error",
+            message=f"检索预算超限（本节未检索；已跳过 {budget.skipped} 节）",
+            candidates=candidates,
+            budget_exceeded=True,
+        )
+
+    wait_seconds = timeout
+    if wait_seconds is None:
+        wait_seconds = float(
+            getattr(settings, "hybrid_clause_search_timeout_seconds", _DEFAULT_SEARCH_TIMEOUT)
+            or _DEFAULT_SEARCH_TIMEOUT
+        )
     try:
-        return await fn(db, query=title, limit=limit)
+        result = await asyncio.wait_for(
+            fn(
+                db,
+                standard_bases=candidates,
+                query=title,
+                content_type=str(content_type),
+                extra_terms=extra_terms,
+                limit=int(limit),
+            ),
+            timeout=max(0.001, wait_seconds),
+        )
+    except (asyncio.TimeoutError, TimeoutError):
+        logger.warning("条款检索超时（章节 %s，%.2fs）", title, wait_seconds)
+        return clause_store.ClauseSearchResult(
+            status="error",
+            reason_code="error",
+            message=f"无法判定：条款检索超时（{wait_seconds:.2f}s）",
+            candidates=candidates,
+        )
     except Exception as exc:  # noqa: BLE001 - 任何检索失败都要变成可见的三态结果
         logger.warning("条款检索失败（章节 %s）：%s", title, exc, exc_info=True)
         return clause_store.ClauseSearchResult(
             status="error",
-            hits=[],
-            message=f"条款库不可用：{exc}",
+            reason_code="error",
+            message=f"无法判定：条款库检索异常（{exc}）",
+            candidates=candidates,
         )
+
+    if result.status in ("ok", "no_match"):
+        _SEARCH_CACHE[cache_key] = result
+        while len(_SEARCH_CACHE) > _SEARCH_CACHE_MAX:
+            _SEARCH_CACHE.popitem(last=False)
+    return result
 
 
 def _clause_label(hit: clause_store.ClauseRef) -> str:
@@ -183,7 +345,13 @@ def clause_context_block(result: clause_store.ClauseSearchResult) -> str:
         for prefix in ("无法判定：", "无法判定:"):
             if message.startswith(prefix):
                 message = message[len(prefix) :].strip()
-        return "【条款检索结果】无法判定：" + message + "。" "不得据此编造条文号、数值、阈值或强制性表述。"
+        return (
+            "【条款检索结果】无法判定："
+            + message
+            + "。\n【未经规范校验】本节未经规范校验（"
+            + search_skip_note(result.status)
+            + "）。不得据此编造条文号、数值、阈值或强制性表述。"
+        )
     lines = ["【条款检索上下文】（来源：GET /api/v1/clause-library/search，仅摘录要点）"]
     for hit in result.hits:
         source = str(hit.source_url or "").strip() or (

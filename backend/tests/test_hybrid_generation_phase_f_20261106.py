@@ -17,7 +17,7 @@ from __future__ import annotations
 
 import pytest
 from app.config import settings
-from app.services import clause_store, section_router
+from app.services import clause_candidates, clause_store, section_router
 from app.services.numeric_lock import (
     build_allowed_numbers,
     check_text,
@@ -330,29 +330,46 @@ async def test_search_is_injectable_and_never_touches_real_service(db_conn):
     """检索函数可注入假实现：F 不新写检索、不依赖外部服务。"""
     calls: list[dict] = []
 
-    async def fake_search(db, *, query="", limit=10, **kwargs):
-        calls.append({"query": query, "limit": limit})
+    async def fake_search(db, *, standard_bases=(), query="", limit=10, **kwargs):
+        calls.append({"query": query, "limit": limit, "standard_bases": tuple(standard_bases)})
         return _result(_clause())
 
-    res = await section_router.search_for_section(db_conn, "验收标准", search_fn=fake_search)
+    res = await section_router.search_for_section(
+        db_conn, "验收标准", category_ids=("formwork",), search_fn=fake_search
+    )
     assert res.status == "ok" and len(res.hits) == 1
-    assert calls == [{"query": "验收标准", "limit": 8}]
+    assert calls == [
+        {
+            "query": "验收标准",
+            "limit": 8,
+            "standard_bases": ("GB50204", "GB50666", "GB55023", "JGJ162", "JGJ300"),
+        }
+    ]
 
 
 @pytest.mark.asyncio
-async def test_clause_library_unavailable_is_explicit_error_not_silent_skip(db_conn):
-    """条款库不可用（如 ``standard_clauses`` 不存在）必须显式报错，不得静默跳过。"""
-    import sqlite3
-
-    async def broken_search(db, *, query="", limit=10, **kwargs):
-        raise sqlite3.OperationalError("no such table: standard_clauses")
-
-    res = await section_router.search_for_section(db_conn, "验收标准", search_fn=broken_search)
-    assert res.status == "error"
-    assert "standard_clauses" in res.message
+async def test_empty_corpus_is_no_corpus_reason_not_silent_skip(db_conn):
+    """库空（有表、0 条）必须落 ``no_corpus``，不得静默跳过，也不得记成命中。"""
+    section_router.reset_clause_search_cache()
+    res = await section_router.search_for_section(db_conn, "验收标准", category_ids=("formwork",))
+    assert res.status == "no_corpus"
+    assert res.reason_code == "no_corpus"
     block = section_router.clause_context_block(res)
     assert "无法判定" in block
-    assert "standard_clauses" in block
+    assert "本节未经规范校验" in block
+
+
+@pytest.mark.asyncio
+async def test_missing_table_is_no_corpus_not_error():
+    """``standard_clauses`` 表缺失属于 ``no_corpus``（环境事实），不是检索异常。"""
+    import aiosqlite
+
+    section_router.reset_clause_search_cache()
+    async with aiosqlite.connect(":memory:") as conn:
+        res = await section_router.search_for_section(conn, "验收标准", category_ids=("formwork",))
+    assert res.status == "no_corpus"
+    assert res.reason_code == "no_corpus"
+    assert "表缺失" in res.message
 
 
 def test_clause_library_unavailable_must_show_undetermined_in_report():
@@ -368,6 +385,21 @@ def test_clause_library_unavailable_must_show_undetermined_in_report():
     assert '"numeric_lock_status": _hstatus' in src
     # 后置校验自身异常时同样必须留下 undetermined 记录
     assert '"numeric_lock_status": "undetermined" if _hroute.strategy == "rag" else None' in src
+    # 原因码与「本节未经规范校验」必须由同一处生成并写进报告
+    assert "search_report_fields(" in src
+    assert "本节未经规范校验" in src
+    # 只对 RAG 节点检索（经验驱动不查库，预算不浪费）
+    assert '_hroute.strategy == "rag"' in src
+
+
+def test_startup_warns_when_hybrid_on_but_clause_library_unavailable():
+    """开关打开 + 条款库不可用：启动路径必须留 WARNING，不能静默。"""
+    from pathlib import Path
+
+    src = (Path(__file__).resolve().parents[1] / "app" / "main.py").read_text(encoding="utf-8")
+    assert "R179 Phase F 混合生成已开启，但条款库不可用" in src
+    assert "R179 Phase F 混合生成已开启，但条款库为空" in src
+    assert "count_active_clauses" in src
 
 
 def test_hybrid_flag_defaults_off_and_blacklist_configured():
@@ -379,3 +411,576 @@ def test_hybrid_flag_defaults_off_and_blacklist_configured():
 def test_blacklist_from_settings_is_overridable(monkeypatch):
     monkeypatch.setattr(settings, "hybrid_vague_blacklist", "另行研究；专题论证")
     assert section_router.blacklist_from_settings() == ("另行研究", "专题论证")
+
+
+# ------------------------------------------------ 2026-11-07 检索重做加固
+
+
+@pytest.fixture(autouse=True)
+def _isolate_clause_cache():
+    """检索缓存是进程内复用，测试之间必须隔离（否则同 query 会读到上一库结果）。"""
+    section_router.reset_clause_search_cache()
+    yield
+    section_router.reset_clause_search_cache()
+
+
+def test_clause_candidate_table_matches_csv():
+    """代码常量是 CSV 的派生副本：逐行比对，禁止手工分叉。"""
+    import csv
+    from pathlib import Path
+
+    csv_path = Path(__file__).resolve().parents[2] / "docs" / "条款库_17类核心规范清单_R179_20261106.csv"
+    lines = csv_path.read_text(encoding="utf-8-sig").splitlines()
+    rows = list(csv.DictReader(lines[1:]))
+    actual: dict[str, list[str]] = {}
+    for row in rows:
+        actual.setdefault(row["template_key"], []).append(row["standard_code"])
+    assert set(actual) == set(clause_candidates.CATEGORY_STANDARD_BASES)
+    for key, expected in clause_candidates.CATEGORY_STANDARD_BASES.items():
+        assert actual[key] == list(expected), key
+
+
+def test_candidate_resolution_and_unmapped_vocab():
+    """文种收敛：命中的类别给出基号；17 类之外不得臆造候选。"""
+    formwork = clause_candidates.candidate_standard_bases(("formwork",), "formwork_tall")
+    assert "GB55023" in formwork and "JGJ162" in formwork
+    foundation = clause_candidates.candidate_standard_bases(("foundation_pit",), "earthwork")
+    assert "GB55003" in foundation and "GB50497" in foundation
+    # 顶管 / 暗挖不在 17 类清单 → 空集合（由调用方落 no_standard_code）
+    assert clause_candidates.candidate_standard_bases((), "pipe_jacking") == ()
+    assert clause_candidates.candidate_standard_bases(("other",), "underground_excavation") == ()
+
+
+# ---- 夹具：51 条条款（45 目标 + 6 干扰项），只存在于测试内，不写生产库 ----
+
+_STANDARD_NAMES = {
+    "GB 55023": "施工脚手架通用规范",
+    "JGJ 162": "建筑施工模板安全技术规范",
+    "GB 50666": "混凝土结构工程施工规范",
+    "GB 50204": "混凝土结构工程施工质量验收规范",
+    "JGJ 300": "建筑施工临时支撑结构技术规范",
+    "GB 55003": "建筑与市政地基基础通用规范",
+    "JGJ 120": "建筑基坑支护技术规程",
+    "JGJ 311": "建筑深基坑工程施工安全技术规范",
+    "GB 50497": "建筑基坑工程监测技术标准",
+    "GB 50202": "建筑地基基础工程施工质量验收标准",
+    "JGJ 130": "建筑施工扣件式钢管脚手架安全技术规范",
+    "JGJ/T 231": "建筑施工承插型盘扣式钢管脚手架安全技术标准",
+    "JGJ 202": "建筑施工工具式脚手架安全技术规范",
+    "JGJ 80": "建筑施工高处作业安全技术规范",
+    "GB 50300": "建筑工程施工质量验收统一标准",
+    "GB 55032": "建筑与市政工程施工质量控制通用规范",
+    "JGJ 59": "建筑施工安全检查标准",
+    "GB 55034": "建筑与市政施工现场安全卫生与职业健康通用规范",
+    "GB 50720": "建设工程施工现场消防安全技术规范",
+    "JGJ 146": "建设工程施工现场环境与卫生标准",
+}
+
+_FIXTURE_ROWS: list[tuple[str, str, str, str, str, str, int]] = [
+    # (uid, standard_code, version, clause_no, clause_title, excerpt, mandatory)
+    # --- formwork 目标（9）
+    (
+        "u-fw-1",
+        "JGJ 162",
+        "2008",
+        "6.1.1",
+        "模板支撑架搭设",
+        "模板支撑架搭设应按专项施工方案执行，立杆间距与步距应符合设计要求。",
+        0,
+    ),
+    (
+        "u-fw-2",
+        "JGJ 162",
+        "2008",
+        "6.4.1",
+        "支撑架拆除",
+        "模板支撑架拆除应经项目技术负责人确认，混凝土强度达到拆模要求后方可拆除。",
+        0,
+    ),
+    (
+        "u-fw-3",
+        "JGJ 162",
+        "2008",
+        "6.1.3",
+        "立杆间距与步距",
+        "立杆间距与步距不得超过方案规定值，立杆接长应采用对接扣件连接。",
+        0,
+    ),
+    (
+        "u-fw-4",
+        "GB 50204",
+        "2015",
+        "4.2.1",
+        "模板安装允许偏差",
+        "模板安装允许偏差应符合规范要求，轴线位置允许偏差 5mm。",
+        0,
+    ),
+    (
+        "u-fw-5",
+        "GB 50666",
+        "2011",
+        "7.1.1",
+        "混凝土浇筑与振捣",
+        "混凝土浇筑与振捣应分层连续进行，振捣棒插入下层混凝土 50mm至100mm。",
+        0,
+    ),
+    (
+        "u-fw-6",
+        "GB 55023",
+        "2022",
+        "4.1.1",
+        "支撑体系构造要求",
+        "模板支撑体系构造应保证整体稳定，水平剪刀撑与竖向剪刀撑应按规范设置。",
+        0,
+    ),
+    (
+        "u-fw-7",
+        "JGJ 300",
+        "2013",
+        "5.1.1",
+        "承插型盘扣式支架",
+        "承插型盘扣式支架搭设应检查盘扣节点连接与可调托撑伸出长度。",
+        0,
+    ),
+    ("u-fw-8", "JGJ 162", "2008", "5.2.1", "荷载计算", "模板支撑架荷载计算应包括模板自重、混凝土自重与施工荷载。", 0),
+    (
+        "u-fw-9",
+        "GB 50204",
+        "2015",
+        "4.3.1",
+        "模板拆除条件",
+        "模板拆除条件应根据同条件养护试块强度确定，大跨度梁达到设计强度后方可拆除。",
+        0,
+    ),
+    # --- foundation 目标（9）
+    ("u-fp-1", "JGJ 311", "2013", "4.1.2", "基坑开挖分层", "基坑开挖应分层分段进行，每层开挖深度不宜超过 2m。", 0),
+    (
+        "u-fp-2",
+        "GB 50497",
+        "2019",
+        "3.0.1",
+        "基坑支护变形监测",
+        "基坑支护变形监测应覆盖支护结构水平位移、周边地表沉降与地下水位。",
+        0,
+    ),
+    (
+        "u-fp-3",
+        "JGJ 120",
+        "2012",
+        "8.1.1",
+        "降水与排水措施",
+        "基坑降水与排水措施应连续运行，降水井停抽应经设计确认。",
+        0,
+    ),
+    (
+        "u-fp-4",
+        "GB 50202",
+        "2018",
+        "5.1.1",
+        "基坑土方开挖验收",
+        "基坑土方开挖验收应检查标高、长度、宽度与边坡坡度。",
+        0,
+    ),
+    (
+        "u-fp-5",
+        "GB 55003",
+        "2021",
+        "3.1.1",
+        "地基基础施工安全",
+        "地基基础施工应查明地下管线与周边环境，边坡失稳风险应提前控制。",
+        0,
+    ),
+    (
+        "u-fp-6",
+        "JGJ 120",
+        "2012",
+        "4.1.2",
+        "支护结构选型",
+        "基坑支护结构选型应根据开挖深度、土层条件与周边环境确定。",
+        0,
+    ),
+    (
+        "u-fp-7",
+        "GB 50497",
+        "2019",
+        "4.0.2",
+        "监测频率",
+        "基坑监测频率应根据开挖阶段与变形速率调整，出现预警时应加密监测。",
+        0,
+    ),
+    ("u-fp-8", "JGJ 311", "2013", "3.1.1", "地下水控制", "地下水控制应结合土层渗透性与降水影响半径设计。", 0),
+    ("u-fp-9", "GB 50202", "2018", "6.1.1", "基坑回填", "基坑回填应分层夯实，压实系数应符合设计要求。", 0),
+    # --- scaffold 目标（9）
+    ("u-sc-1", "JGJ 130", "2011", "6.2.1", "脚手架连墙件设置", "脚手架连墙件应按三步三跨设置，连墙件应靠近主节点。", 0),
+    ("u-sc-2", "JGJ 130", "2011", "6.10.1", "悬挑脚手架卸荷", "悬挑脚手架卸荷钢丝绳应张紧，悬挑梁锚固应可靠。", 0),
+    ("u-sc-3", "JGJ/T 231", "2021", "5.1.1", "盘扣式脚手架搭设", "盘扣式脚手架搭设应检查立杆垂直度与水平杆步距。", 0),
+    (
+        "u-sc-4",
+        "JGJ 202",
+        "2010",
+        "4.1.1",
+        "附着式升降脚手架",
+        "附着式升降脚手架升降前应检查防坠装置与同步控制系统。",
+        0,
+    ),
+    ("u-sc-5", "JGJ 80", "2016", "4.1.2", "高处作业临边防护", "高处作业临边防护栏杆高度不应低于 1.2m。", 0),
+    ("u-sc-6", "GB 55023", "2022", "3.2.1", "脚手架基础", "脚手架基础应平整坚实，立杆底部应设置垫板与可调底座。", 0),
+    ("u-sc-7", "JGJ 130", "2011", "4.2.1", "脚手架荷载", "脚手架荷载应包括施工荷载、风荷载与构配件自重。", 0),
+    ("u-sc-8", "JGJ 202", "2010", "5.1.1", "脚手架验收", "脚手架搭设完成后应分段验收，验收合格后方可使用。", 0),
+    ("u-sc-9", "JGJ 80", "2016", "5.1.1", "安全网设置", "高处作业安全网设置应封闭严密，网绳连接应牢固。", 0),
+    # --- quality 目标（9）
+    (
+        "u-qu-1",
+        "GB 50300",
+        "2013",
+        "5.0.1",
+        "检验批质量验收",
+        "检验批质量验收应按主控项目与一般项目划分，主控项目必须全部合格。",
+        0,
+    ),
+    (
+        "u-qu-2",
+        "GB 50300",
+        "2013",
+        "3.0.1",
+        "质量验收划分",
+        "建筑工程质量验收应划分为单位工程、分部工程、分项工程与检验批。",
+        0,
+    ),
+    (
+        "u-qu-3",
+        "GB 55032",
+        "2022",
+        "4.1.1",
+        "混凝土结构验收",
+        "混凝土结构验收应检查强度、钢筋保护层厚度与外观质量。",
+        0,
+    ),
+    (
+        "u-qu-4",
+        "GB 50300",
+        "2013",
+        "6.0.1",
+        "分部工程验收",
+        "分部工程验收应由总监理工程师组织，地基与基础分部应验收合格。",
+        0,
+    ),
+    (
+        "u-qu-5",
+        "GB 50204",
+        "2015",
+        "8.1.1",
+        "现浇结构外观质量",
+        "现浇结构外观质量不应有严重缺陷，严重缺陷应经技术处理。",
+        0,
+    ),
+    (
+        "u-qu-6",
+        "GB 50204",
+        "2015",
+        "9.1.1",
+        "结构实体检验",
+        "结构实体检验应包括混凝土强度、钢筋保护层厚度与结构位置尺寸。",
+        0,
+    ),
+    ("u-qu-7", "GB 55032", "2022", "2.1.1", "施工质量通用要求", "建筑工程施工质量应满足设计文件与验收规范要求。", 0),
+    ("u-qu-8", "GB 50300", "2013", "4.0.1", "检验批抽样方案", "检验批抽样方案应根据生产控制水平与检验项目确定。", 0),
+    (
+        "u-qu-9",
+        "GB 55032",
+        "2022",
+        "3.0.1",
+        "质量验收程序",
+        "施工质量验收应按检验批、分项、分部与单位工程逐级进行。",
+        0,
+    ),
+    # --- safety_management 目标（9）
+    (
+        "u-sf-1",
+        "JGJ 59",
+        "2011",
+        "3.2.1",
+        "安全检查评分",
+        "安全检查评分应按安全管理、文明施工、脚手架与高处作业等分项打分。",
+        0,
+    ),
+    (
+        "u-sf-2",
+        "GB 50720",
+        "2011",
+        "3.1.1",
+        "现场临时消防设施",
+        "施工现场临时消防设施应与在建工程同步设置，消防水源应充足。",
+        0,
+    ),
+    (
+        "u-sf-3",
+        "GB 55034",
+        "2022",
+        "3.1.1",
+        "施工现场安全防护",
+        "施工现场安全防护应设置安全通道、防护棚与临边防护。",
+        0,
+    ),
+    ("u-sf-4", "JGJ 146", "2013", "4.1.1", "文明施工管理", "文明施工管理应包括围挡、道路硬化、材料堆放与噪声控制。", 0),
+    (
+        "u-sf-5",
+        "JGJ 59",
+        "2011",
+        "4.1.1",
+        "安全管理检查",
+        "安全管理检查应核查安全生产责任制、专项方案与安全技术交底。",
+        0,
+    ),
+    ("u-sf-6", "GB 50720", "2011", "4.2.1", "消防通道", "施工现场消防通道应保持畅通，宽度不应小于 4m。", 0),
+    (
+        "u-sf-7",
+        "GB 55034",
+        "2022",
+        "5.1.1",
+        "危险性较大工程监控",
+        "危险性较大的分部分项工程应编制专项方案并实施旁站监控。",
+        0,
+    ),
+    (
+        "u-sf-8",
+        "JGJ 146",
+        "2013",
+        "3.1.1",
+        "现场围挡",
+        "施工现场围挡应连续设置，市区主要路段围挡高度不应低于 2.5m。",
+        0,
+    ),
+    ("u-sf-9", "JGJ 59", "2011", "5.1.1", "施工用电检查", "施工用电检查应核查接地接零、漏电保护与配电箱设置。", 0),
+    # --- 干扰项（6）：跨类别同词，mandatory=1 + 早条文号，全库匹配时会抢到第 1 位
+    (
+        "d-1",
+        "GB 50300",
+        "2013",
+        "1.0.1",
+        "模板支撑架搭设",
+        "模板支撑架搭设应按专项施工方案执行，立杆间距与步距应符合设计要求。",
+        1,
+    ),
+    ("d-2", "JGJ 162", "2008", "1.0.1", "基坑开挖分层", "基坑开挖应分层分段进行，每层开挖深度不宜超过 2m。", 1),
+    ("d-3", "JGJ 59", "2011", "1.0.1", "脚手架连墙件设置", "脚手架连墙件应按三步三跨设置，连墙件应靠近主节点。", 1),
+    (
+        "d-4",
+        "JGJ 120",
+        "2012",
+        "1.0.1",
+        "检验批质量验收",
+        "检验批质量验收应按主控项目与一般项目划分，主控项目必须全部合格。",
+        1,
+    ),
+    (
+        "d-5",
+        "GB 55032",
+        "2022",
+        "1.0.1",
+        "安全检查评分",
+        "安全检查评分应按安全管理、文明施工、脚手架与高处作业等分项打分。",
+        1,
+    ),
+    (
+        "d-6",
+        "GB 50666",
+        "2011",
+        "1.0.1",
+        "基坑支护变形监测",
+        "基坑支护变形监测应覆盖支护结构水平位移、周边地表沉降与地下水位。",
+        1,
+    ),
+]
+
+#: 查询 → (文种上下文, 期望命中的 clause_uid)。
+_EVAL_QUERIES: list[tuple[str, dict, str]] = [
+    ("模板支撑架搭设", {"category_ids": ("formwork",), "template_key": "formwork_tall"}, "u-fw-1"),
+    ("支撑架拆除", {"category_ids": ("formwork",), "template_key": "formwork"}, "u-fw-2"),
+    ("立杆间距与步距", {"category_ids": ("formwork",), "template_key": "formwork"}, "u-fw-3"),
+    ("模板安装允许偏差", {"category_ids": ("formwork",), "template_key": "formwork"}, "u-fw-4"),
+    ("混凝土浇筑与振捣", {"category_ids": ("formwork",), "template_key": "formwork"}, "u-fw-5"),
+    ("基坑开挖分层", {"category_ids": ("foundation_pit",), "template_key": "earthwork"}, "u-fp-1"),
+    ("基坑支护变形监测", {"category_ids": ("foundation_pit",), "template_key": "monitoring"}, "u-fp-2"),
+    ("降水与排水措施", {"category_ids": ("foundation_pit",), "template_key": "foundation_pit"}, "u-fp-3"),
+    ("脚手架连墙件设置", {"category_ids": ("scaffold",), "template_key": "scaffold_cantilever"}, "u-sc-1"),
+    ("悬挑脚手架卸荷", {"category_ids": ("scaffold",), "template_key": "scaffold_cantilever"}, "u-sc-2"),
+    ("高处作业临边防护", {"category_ids": ("scaffold",), "template_key": "scaffold_ground"}, "u-sc-5"),
+    ("检验批质量验收", {"category_ids": (), "template_key": "quality"}, "u-qu-1"),
+    ("安全检查评分", {"category_ids": (), "template_key": "safety_management"}, "u-sf-1"),
+    ("现场临时消防设施", {"category_ids": (), "template_key": "safety_management"}, "u-sf-2"),
+]
+
+
+async def _seed_fixture(db) -> None:
+    rows = [
+        {
+            "clause_uid": uid,
+            "standard_code": code,
+            "standard_name": _STANDARD_NAMES.get(code, code),
+            "version": version,
+            "clause_no": clause_no,
+            "clause_title": title,
+            "excerpt": excerpt,
+            "excerpt_type": "key_sentence",
+            "mandatory": mandatory,
+            "applicability": "通用",
+            "license_note": "仅摘录要点，禁止全文转载",
+            "source_url": f"https://example.com/{code.replace(' ', '')}/{clause_no}",
+            "page_ref": "",
+            "source_kind": "public",
+            "verification_status": "unverified",
+            "status": "active",
+        }
+        for uid, code, version, clause_no, title, excerpt, mandatory in _FIXTURE_ROWS
+    ]
+    await clause_store.import_clauses(db, rows, confirm_license=True, batch_id="fixture-phase-f")
+
+
+def _hit_metrics(results) -> tuple[float, float]:
+    count = len(results)
+    hit1 = sum(1 for hits, uid in results if hits and hits[0].clause_uid == uid) / count
+    recall5 = sum(1 for hits, uid in results if any(h.clause_uid == uid for h in hits[:5])) / count
+    return hit1, recall5
+
+
+@pytest.mark.asyncio
+async def test_scoped_retrieval_hit1_and_recall5(db_conn):
+    """改后基线：≥40 条夹具、≥10 查询，候选内检索的 Hit@1 / 召回@5。"""
+    await _seed_fixture(db_conn)
+    assert len(_FIXTURE_ROWS) >= 40 and len(_EVAL_QUERIES) >= 10
+
+    results = []
+    for title, context, expected_uid in _EVAL_QUERIES:
+        res = await section_router.search_for_section(db_conn, title, **context)
+        assert res.status == "ok", (title, res.status, res.message)
+        results.append((res.hits, expected_uid))
+    hit1, recall5 = _hit_metrics(results)
+    assert hit1 >= 0.9, f"scoped Hit@1={hit1:.3f}"
+    assert recall5 >= 0.95, f"scoped Recall@5={recall5:.3f}"
+
+
+@pytest.mark.asyncio
+async def test_unscoped_mutation_lowers_hit1(db_conn):
+    """变异验证（红）：去掉标准号候选约束、退回全库匹配，Hit@1 必须下降。
+
+    若生产实现被改成「忽略候选集」，``test_scoped_retrieval_hit1_and_recall5``
+    会直接变红；本用例同时给出两条路径的量化对照。
+    """
+    await _seed_fixture(db_conn)
+    scoped = []
+    unscoped = []
+    for title, context, expected_uid in _EVAL_QUERIES:
+        res = await section_router.search_for_section(db_conn, title, **context)
+        scoped.append((res.hits, expected_uid))
+        loose = await clause_store.search_clauses_in_candidates(db_conn, standard_bases=None, query=title, limit=8)
+        unscoped.append((loose.hits, expected_uid))
+    scoped_hit1, _ = _hit_metrics(scoped)
+    loose_hit1, _ = _hit_metrics(unscoped)
+    assert scoped_hit1 > loose_hit1, f"scoped={scoped_hit1:.3f} unscoped={loose_hit1:.3f}"
+
+
+@pytest.mark.asyncio
+async def test_reason_codes_are_four_distinct_not_one_undetermined(db_conn):
+    """变异验证（红）：把四种原因码揉成一个 ``undetermined`` 会让本用例失败。"""
+    import aiosqlite
+
+    await _seed_fixture(db_conn)
+
+    no_standard = await section_router.search_for_section(
+        db_conn, "验收标准", category_ids=(), template_key="pipe_jacking"
+    )
+    no_match = await section_router.search_for_section(db_conn, "完全不存在的量子纠缠词组", category_ids=("formwork",))
+    async with aiosqlite.connect(":memory:") as bare:
+        no_corpus = await section_router.search_for_section(bare, "验收标准", category_ids=("formwork",))
+
+    async def boom(db, **kwargs):
+        raise RuntimeError("boom")
+
+    error = await section_router.search_for_section(db_conn, "验收标准", category_ids=("formwork",), search_fn=boom)
+
+    assert no_standard.status == "no_standard_code"
+    assert no_match.status == "no_match"
+    assert no_corpus.status == "no_corpus"
+    assert error.status == "error"
+    assert {
+        no_standard.status,
+        no_match.status,
+        no_corpus.status,
+        error.status,
+    } == {"no_standard_code", "no_match", "no_corpus", "error"}
+
+    for result in (no_standard, no_match, no_corpus, error):
+        fields = section_router.search_report_fields(result)
+        assert fields["search_reason_code"] == result.status
+        assert fields["section_unverified"] is True
+        assert fields["section_unverified_note"].startswith("本节未经规范校验")
+        assert fields["skipped_checks"]
+
+
+@pytest.mark.asyncio
+async def test_budget_exceeded_is_reported_not_silently_dropped(db_conn):
+    budget = section_router.ClauseSearchBudget(limit=2)
+    calls: list[int] = []
+
+    async def fake_search(db, **kwargs):
+        calls.append(1)
+        return _result(_clause())
+
+    for index in range(3):
+        res = await section_router.search_for_section(
+            db_conn,
+            f"预算测试查询{index}",
+            category_ids=("formwork",),
+            search_fn=fake_search,
+            budget=budget,
+        )
+    assert len(calls) == 2
+    assert res.status == "error" and res.budget_exceeded
+    assert "预算超限" in res.message
+    assert budget.as_dict()["skipped"] == 1
+    fields = section_router.search_report_fields(res, budget=budget)
+    assert fields["budget"]["exhausted"] is True
+
+
+@pytest.mark.asyncio
+async def test_same_candidates_and_query_reuses_cached_result(db_conn):
+    calls: list[dict] = []
+
+    async def fake_search(db, **kwargs):
+        calls.append(kwargs)
+        return _result(_clause())
+
+    for _ in range(2):
+        await section_router.search_for_section(db_conn, "验收标准", category_ids=("formwork",), search_fn=fake_search)
+    assert len(calls) == 1
+
+
+@pytest.mark.asyncio
+async def test_empty_result_cache_has_upper_bound(db_conn):
+    async def empty_search(db, **kwargs):
+        return clause_store.ClauseSearchResult(status="no_match", reason_code="no_match")
+
+    for index in range(300):
+        await section_router.search_for_section(
+            db_conn,
+            f"空结果缓存{index}",
+            category_ids=("formwork",),
+            search_fn=empty_search,
+        )
+    assert section_router.clause_search_cache_size() <= 256
+
+
+@pytest.mark.asyncio
+async def test_search_timeout_is_error_reason(db_conn):
+    import asyncio
+
+    async def slow_search(db, **kwargs):
+        await asyncio.sleep(0.05)
+        return _result(_clause())
+
+    res = await section_router.search_for_section(
+        db_conn, "验收标准", category_ids=("formwork",), search_fn=slow_search, timeout=0.001
+    )
+    assert res.status == "error"
+    assert "超时" in res.message
