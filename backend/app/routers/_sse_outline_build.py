@@ -6,6 +6,7 @@ import re
 import time
 
 import app.routers.sse_handlers as _sh  # noqa: F401 — facade 命名空间延迟绑定（monkeypatch 兼容）
+from app.services.outline_utils import MAX_OUTLINE_DEPTH
 
 
 def _section_partial(rec: dict, now: float, expect_overrides: dict | None = None) -> float:
@@ -849,7 +850,25 @@ def _build_parent_chain(
     parts: list[str] = []
     cur = nodes.get(section_id)
     parent_id = cur.get("parent_id") if cur else None
+    # ✅ R184（2026-11-07）：向上父链双上限守卫（seen + MAX_OUTLINE_DEPTH）。
+    #    旧实现只靠 `parent_id in nodes` 终止：库里一旦存在环（A→B→A 或自父），
+    #    链永远走不到 ""，本函数**无限循环挂死**（不抛错、任务不终态、重试仍挂）。
+    #    SQL 层无任何约束（schema_sql.py 中 parent_id 仅 `TEXT DEFAULT ''`），
+    #    该不变量全靠应用代码守。正常三级目录最多 2 个祖先，双上限对合法数据
+    #    是恒等变换；父节点不在 nodes 时 while 条件立即终止（与旧行为一致）。
+    _seen: set[str] = set()
+    _hops = 0
     while parent_id and parent_id in nodes:
+        if parent_id in _seen or _hops >= MAX_OUTLINE_DEPTH:
+            _sh.logger.warning(
+                "目录父链异常：section=%s 在 %d 步内未到达根（重复节点=%s），已截断",
+                section_id,
+                _hops,
+                parent_id,
+            )
+            break
+        _seen.add(parent_id)
+        _hops += 1
         p = nodes[parent_id]
         title = p.get("title", "")
         # ✅ 编号统一（2026-09-25）：一律由**存储态编号**折算**展示态编号**，

@@ -215,6 +215,7 @@ from app.services.outline_title_fix import (  # noqa: F401
     _try_outline_title_fix,
 )
 from app.services.outline_utils import (
+    MAX_OUTLINE_DEPTH,
     normalize_outline,
 )
 from app.services.placeholder_sections import (
@@ -2677,7 +2678,26 @@ async def generate_content(scheme_id: str, request: Request, db=Depends(get_db))
                     if int(sec.get("level") or 1) <= 2:
                         return sec
                     pid = sec.get("parent_id", "")
+                    # ✅ R184（2026-11-07）：向上寻祖双上限（seen + MAX_OUTLINE_DEPTH）。
+                    #    旧实现只有 `if not p: return None` 一个出口：父节点不在 by_id
+                    #    时会退出，但**库内成环时 pid 永远有值且始终在 by_id**，
+                    #    while 永不结束 —— 字数预算分配阶段挂死，整个生成任务卡住。
+                    #    父节点不在 map 的分支保持原样（立即返回 None，不抛错）。
+                    _seen: set[str] = set()
+                    _hops = 0
                     while pid:
+                        if pid in _seen or _hops >= MAX_OUTLINE_DEPTH:
+                            logger.warning(
+                                "预算单元向上寻祖异常：scheme=%s section=%s 在 %d 步内未终止"
+                                "（重复节点=%s），按无单元处理",
+                                scheme_id,
+                                sec.get("id", ""),
+                                _hops,
+                                pid,
+                            )
+                            return None
+                        _seen.add(pid)
+                        _hops += 1
                         p = by_id.get(pid)
                         if not p:
                             return None
@@ -4073,7 +4093,25 @@ async def generate_content(scheme_id: str, request: Request, db=Depends(get_db))
                 # ✅ 增强：上级章节的标题 + 描述（旧实现只给标题链，AI 难以判断父级职责边界）
                 parent_points: list[str] = []
                 _pid = leaf.get("parent_id", "")
+                # ✅ R184（2026-11-07）：父级要点收集双上限（seen + MAX_OUTLINE_DEPTH）。
+                #    与 _build_parent_chain / _find_unit 同一类挂死点：环使 `_pid`
+                #    始终存在且始终命中 nodes_map，while 永不结束。父节点不在 map
+                #    时 while 条件立即终止（与旧行为一致）。
+                _seen_pid: set[str] = set()
+                _hops_pid = 0
                 while _pid and _pid in nodes_map:
+                    if _pid in _seen_pid or _hops_pid >= MAX_OUTLINE_DEPTH:
+                        logger.warning(
+                            "父级要点向上遍历异常：scheme=%s section=%s 在 %d 步内未终止"
+                            "（重复节点=%s），已截断",
+                            scheme_id,
+                            leaf.get("id", ""),
+                            _hops_pid,
+                            _pid,
+                        )
+                        break
+                    _seen_pid.add(_pid)
+                    _hops_pid += 1
                     _p = nodes_map[_pid]
                     _pd = (_p.get("description") or "").strip()
                     if _pd:
