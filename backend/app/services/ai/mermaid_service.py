@@ -25,6 +25,12 @@ from io import BytesIO
 
 import httpx
 
+# ✅ R184（2026-11-07）：上游错误体脱敏。Docker / Railway 非 200 分支把
+#    ``resp.text[:200]`` 拼进 MermaidRenderError，而该异常会经
+#    ``mermaid_renderer`` 的 warning 日志与 ``/charts`` 的 error 字段回到前端；
+#    上游代理/厂商 401/403 错误体可能回显 ``Authorization: Bearer sk-…``。
+from app.services.redaction import redact_sensitive_text
+
 
 def build_httpx_proxy_settings():
     """代理配置（简化版，无外部依赖）"""
@@ -506,7 +512,7 @@ class MermaidServiceClient:
             )
             if resp.status_code != 200:
                 raise MermaidRenderError(
-                    f"Docker 服务返回 HTTP {resp.status_code}: {resp.text[:200]}",
+                    f"Docker 服务返回 HTTP {resp.status_code}: {redact_sensitive_text(resp.text)[:200]}",
                     backend="docker",
                     status_code=resp.status_code,
                 )
@@ -557,7 +563,7 @@ class MermaidServiceClient:
             )
             if resp.status_code != 200:
                 raise MermaidRenderError(
-                    f"Railway 服务返回 HTTP {resp.status_code}: {resp.text[:200]}",
+                    f"Railway 服务返回 HTTP {resp.status_code}: {redact_sensitive_text(resp.text)[:200]}",
                     backend="railway",
                     status_code=resp.status_code,
                 )
