@@ -23,8 +23,9 @@ __pycache__/
 *.egg
 *.egg-info/
 .eggs/
-build/
-dist/
+# 构建输出：锚定到仓库根，避免无锚点规则吞掉任意层级的同名源码/夹具目录
+/build/
+/dist/
 .tox/
 .pytest_cache/
 .ruff_cache/
@@ -79,8 +80,8 @@ backend/check_db.py
 !backend/requirements.txt
 !backend/requirements-*.txt
 !backend/.env.example
-# pytest 自定义临时根目录（.t 前缀，生成测试夹具数据，不入库）
-backend/.t*
+# pytest 自定义临时根目录（.tmp_ 前缀，生成测试夹具数据，不入库）
+backend/.tmp_*
 # 测试分类工具的生成报告（随时可重建，不入库）
 scripts/source_lock_report.csv
 backend/tools/source_lock_report.csv
@@ -145,7 +146,8 @@ artifacts/
 patch_preview_pipeline_summary.py
 patch_preview_pipeline_summary.py.bak*
 kill_port_selftest.ps1.log
-*.lock
+# 锁文件（uv.lock / poetry.lock 等）必须入库；只忽略 pytest 临时根里的锁
+backend/tests/.tmp_*/**/*.lock
 # AI Agent 批量回归临时产物（_rNN_*.log/.err）
 _r[0-9]*_*.log
 _r[0-9]*_*.err
@@ -182,13 +184,9 @@ desktop.ini
 *.temp
 
 # ---------------- 导出/截图产物 ----------------
-*.docx
-!docs/**/*.docx
+# 只忽略仓库根目录下生成的交付物，不改全仓扩展名（避免图片/文档夹具被静默忽略）
+/*.docx
 _tmp_screenshot.png
-*.png
-!docs/**/*.png
-!examples/**/*.png
-!backend/app/**/*.png
 
 # ---------------- 归档目录 ----------------
 # backend/legacy_scripts/ 的忽略规则已迁至 backend/.gitignore（原因同上：跨根解析歧义）。
