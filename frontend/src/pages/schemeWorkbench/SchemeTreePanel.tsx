@@ -87,6 +87,7 @@ export const SchemeTreePanel = memo(function SchemeTreePanel(p: SchemeTreePanelP
   };
   return (
     <div
+      className="swb-side-panel"
       style={{
         width: 300,
         flexShrink: 0,

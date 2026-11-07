@@ -1311,6 +1311,17 @@ pre,
   .bp-hero {
     padding: 14px 12px !important;
   }
+  /* ✅ 方案工作台窄屏布局：左栏（目录树 / 解析分类 / 事实分类）固定 300px 且
+     不收缩，390px 下右侧内容区只剩 20–40px。窄屏改为上下堆叠：左栏占满宽度、
+     限高并内部滚动，右侧 Tab 内容恢复整行可用宽度。 */
+  .swb-workbench-main {
+    flex-direction: column !important;
+  }
+  .swb-workbench-main > .swb-side-panel {
+    width: 100% !important;
+    max-height: 38vh;
+    flex: 0 0 auto !important;
+  }
 }
 
 /* 手机专属：xs/sm 断点进一步收敛 */

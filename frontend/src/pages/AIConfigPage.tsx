@@ -2324,7 +2324,7 @@ export default function AIConfigPage() {
                           <Select
                             mode="multiple"
                             size="small"
-                            style={{ minWidth: 420 }}
+                            style={{ minWidth: 0, maxWidth: 420, width: "100%" }}
                             placeholder="选择要临时禁用的厂商（留空 = 全部可用）"
                             value={runtimeDraft}
                             onChange={(v) => setRuntimeDraft(v as string[])}

@@ -18,6 +18,7 @@ export function FactsCategoryPanel({
 }) {
   return (
     <div
+      className="swb-side-panel"
       style={{
         width: 300,
         flexShrink: 0,

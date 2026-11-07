@@ -3651,7 +3651,7 @@ export default function SchemeWorkbenchPage() {
       {/* 2026-09-23：import（解析提取）模块隐藏目录树——此时还没生成目录，章节树无意义；
           全局事实（facts）模块同样隐藏目录树，改为左侧「事实分类」面板（点击分类
           在右侧项目资料下方显示该分类提取结果） */}
-      <div style={{ display: "flex", gap: 12, flex: 1, minHeight: 0 }}>
+      <div className="swb-workbench-main" style={{ display: "flex", gap: 12, flex: 1, minHeight: 0 }}>
         {/* 左侧固定目录树（P0-5 memo 组件）—— 仅在有目录依赖的模块显示，import/facts 模块隐藏 */}
         {activeTab !== "import" && activeTab !== "facts" && (
           <SchemeTreePanel

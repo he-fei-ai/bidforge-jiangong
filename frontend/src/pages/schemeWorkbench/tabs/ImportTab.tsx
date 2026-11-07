@@ -125,6 +125,7 @@ export function ImportSidePanel({
 }: ImportSidePanelProps) {
   return (
     <div
+      className="swb-side-panel"
       style={{
         width: 300,
         flexShrink: 0,

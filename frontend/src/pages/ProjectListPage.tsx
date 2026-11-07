@@ -1,5 +1,5 @@
 import { useEffect, useState } from "react";
-import { App, Card, Table, Button, Modal, Form, Input, Select, Space, Tag, Typography } from "antd";
+import { App, Card, Table, Button, Modal, Form, Input, Select, Space, Tag } from "antd";
 import type { TableColumnsType } from "antd";
 import {
   PlusOutlined,
@@ -13,9 +13,8 @@ import {
 import { useNavigate } from "react-router-dom";
 import { useAntdMessageHub } from "../utils/activityCenter";
 import { notifySidebarTreeRefresh } from "../utils/sidebarEvents";
+import { PageHero } from "../utils/ui";
 import { projectsApi } from "../api";
-
-const { Title, Text } = Typography;
 
 const ENGINEERING_TYPES = [
   "房建",
@@ -222,67 +221,11 @@ export default function ProjectListPage() {
 
   return (
     <div style={{ display: "flex", flexDirection: "column", gap: 16, height: "100%" }}>
-      {/* ========== Hero 区域 ========== */}
-      <div
-        style={{
-          position: "relative",
-          padding: "24px 28px",
-          background: "linear-gradient(135deg, #0F2B4F 0%, #16395F 60%, #1A4D7A 100%)",
-          borderRadius: 4,
-          overflow: "hidden",
-          flexShrink: 0,
-        }}
-      >
-        {/* 蓝图网格 */}
-        <div
-          style={{
-            position: "absolute",
-            inset: 0,
-            backgroundImage:
-              "linear-gradient(rgba(0, 212, 255, 0.12) 1px, transparent 1px)," +
-              "linear-gradient(90deg, rgba(0, 212, 255, 0.12) 1px, transparent 1px)",
-            backgroundSize: "24px 24px",
-            pointerEvents: "none",
-          }}
-        />
-        {/* 装饰光效 */}
-        <div
-          style={{
-            position: "absolute",
-            top: -60,
-            right: -40,
-            width: 200,
-            height: 200,
-            borderRadius: "50%",
-            background: "radial-gradient(circle, rgba(0, 212, 255, 0.25), transparent 70%)",
-            pointerEvents: "none",
-          }}
-        />
-        <div
-          style={{
-            position: "relative",
-            display: "flex",
-            justifyContent: "space-between",
-            alignItems: "center",
-          }}
-        >
-          <div>
-            <Title level={3} style={{ color: "#FFFFFF", margin: 0, fontSize: 22, fontWeight: 700 }}>
-              项目列表
-            </Title>
-            <Text
-              style={{
-                color: "rgba(0, 212, 255, 0.75)",
-                fontSize: 12,
-                letterSpacing: "1.5px",
-                fontFamily: "'JetBrains Mono', monospace",
-                marginTop: 4,
-                display: "block",
-              }}
-            >
-              BLUEPRINT ENGINEERING · PROJECTS
-            </Text>
-          </div>
+      {/* ========== Hero 区域（统一走 PageHero：内置手机单列布局） ========== */}
+      <PageHero
+        title="项目列表"
+        subtitle="BLUEPRINT ENGINEERING · PROJECTS"
+        accent={
           <Button
             type="primary"
             icon={<PlusOutlined />}
@@ -303,12 +246,12 @@ export default function ProjectListPage() {
           >
             新建项目
           </Button>
-        </div>
-      </div>
+        }
+      />
 
       {/* ========== 统计卡片 ========== */}
       <div
-        className="bp-project-stats"
+        className="bp-stat-cards"
         style={{
           display: "grid",
           gridTemplateColumns: "repeat(3, minmax(0, 1fr))",
