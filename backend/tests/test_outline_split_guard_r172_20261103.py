@@ -12,6 +12,8 @@
 """
 
 import ast
+import subprocess
+import sys
 from pathlib import Path
 
 BACKEND = Path(__file__).resolve().parent.parent
@@ -92,3 +94,21 @@ class TestSplitIntegrity:
             for n in tree.body:  # 只看模块顶层，不看函数内局部导入
                 if isinstance(n, ast.ImportFrom) and n.module == "app.routers.sse_handlers":
                     raise AssertionError(f"{p.name} 顶层 from-import sse_handlers（应改用 `import ... as _sh`）")
+
+    def test_review_import_succeeds_regardless_of_import_order(self):
+        """回归：直接导入 _sse_outline_review 不得触发循环导入（独立解释器验证）。
+
+        该模块曾顶层 ``import app.routers.sse_handlers as _sh``，与 sse_handlers
+        末尾的拆分转发（``from _sse_outline_review import ...``）构成环：先导入
+        本模块时，sse_handlers 会在转发处向半初始化的本模块取
+        ``_DANGEROUS_REQUIRED_KEYWORDS``（定义在更靠后的位置）而 ImportError。
+        全仓 ``--collect-only`` 未必走到这个导入顺序，故用独立进程直接验证；
+        ``c6bb8de`` 就是靠"只跑自己那几个文件"漏掉了这条。
+        """
+        proc = subprocess.run(
+            [sys.executable, "-c", "import app.routers._sse_outline_review"],
+            cwd=str(BACKEND),
+            capture_output=True,
+            text=True,
+        )
+        assert proc.returncode == 0, proc.stderr

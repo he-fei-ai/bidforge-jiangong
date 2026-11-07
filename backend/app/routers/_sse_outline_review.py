@@ -1,12 +1,41 @@
 """目录审核与修复层（纯结构拆分自 sse_handlers.py）：提示词治理薄封装/截断/大纲审核修复轮/结构化简报/需求覆盖检查/补丁合并等。零行为变更：所有 facade 命名空间引用经 _sh 延迟绑定，保持 monkeypatch 语义不变。"""
 
 import asyncio
+import importlib
 import json
 import re
 
-import app.routers.sse_handlers as _sh  # noqa: F401 — facade 命名空间延迟绑定（monkeypatch 兼容）
 from app.services.ai.task_registry import TaskTypeConflict  # noqa: F401 — 字符串注解引用
 from app.services.prompt_material_guard import clip_text_notice
+
+
+class _LazySseHandlers:
+    """``sse_handlers`` 的延迟代理：导入期不拉起 facade，结构性消除循环导入。
+
+    环的两条边：本模块顶层 ``import app.routers.sse_handlers as _sh``，
+    以及 ``sse_handlers`` 文件末尾的 ``from app.routers._sse_outline_review
+    import (...)``（40 个符号的拆分兼容转发）。若先导入本模块，真模块
+    ``sse_handlers`` 会在 L813 转发时向**半初始化的本模块**取
+    ``_DANGEROUS_REQUIRED_KEYWORDS``（定义在本模块更靠后的位置）→
+    ``ImportError: cannot import name ... from partially initialized module``。
+
+    本代理只在属性访问时导入真模块：读转发 ``getattr``、写转发 ``setattr``，
+    因此 ``monkeypatch.setattr(sse_handlers, ...)`` 的 facade 语义完全不变。
+    选它而非「下沉共享符号」：那 40 个符号里多数是本模块自身定义的函数，
+    下沉等于整体搬迁；也不同于函数内局部 import（那只是把失败点挪走，
+    环仍在）。
+    """
+
+    __slots__ = ()
+
+    def __getattr__(self, name: str):
+        return getattr(importlib.import_module("app.routers.sse_handlers"), name)
+
+    def __setattr__(self, name: str, value) -> None:
+        setattr(importlib.import_module("app.routers.sse_handlers"), name, value)
+
+
+_sh = _LazySseHandlers()
 
 # ---------- 提示词治理 · SSE 侧薄封装（2026-09-24 · G5 / G6） ----------
 
