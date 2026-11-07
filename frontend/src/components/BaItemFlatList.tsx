@@ -137,14 +137,17 @@ export default memo(function BaItemFlatList({
               margin: "4px 0",
               borderRadius: 6,
               cursor: "pointer",
-              border: "1px solid " + (selected ? "#1677ff" : "#f0f0f0"),
-              background: selected ? "#e6f4ff" : "#fff",
+              // ✅ 暗色实测：此前写死 #fff/#e6f4ff，暗色主题下整列白底卡片。
+              //    改走主题令牌：普通行跟随容器底色，选中行用主色淡染，描边跟随主题。
+              border: `1px solid ${selected ? "var(--bp-primary)" : "var(--bp-border)"}`,
+              background: selected ? "rgba(0, 212, 255, 0.14)" : "var(--bp-bg-container)",
+              color: "var(--bp-text)",
               display: "flex",
               alignItems: "center",
               gap: 6,
             }}
           >
-            <Text strong style={{ color: "#999", fontSize: 12, minWidth: 22, flexShrink: 0 }}>
+            <Text strong style={{ color: "var(--bp-text-tertiary)", fontSize: 12, minWidth: 22, flexShrink: 0 }}>
               {idx + 1}.
             </Text>
             <Text ellipsis style={{ flex: 1, fontSize: 13, fontWeight: 500 }}>

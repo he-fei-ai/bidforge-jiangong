@@ -1196,6 +1196,14 @@ pre,
 /* ================================================================
    暗色模式 · 主区域覆盖
    ================================================================ */
+/* html/body/#root 的亮色底（#f4f6fa）也必须跟随主题，否则暗色下滚动越界
+   区、安全区、内容卡之间的缝隙会露出白底。 */
+[data-bp-mode="dark"],
+[data-bp-mode="dark"] body,
+[data-bp-mode="dark"] #root {
+  background: var(--bp-bg-layout);
+  color: var(--bp-text);
+}
 [data-bp-mode="dark"] .bp-content {
   background: var(--bp-bg-layout) !important;
 }
@@ -1353,8 +1361,12 @@ pre,
   }
   .swb-workbench-main > .swb-side-panel {
     width: 100% !important;
+    /* 必须给确定高度：面板内滚动区是 flex:1（flex-basis:0%），在"高度 auto
+       + max-height"的父级里不会被内容撑开，实测会塌成只剩标题栏（62px）。
+       固定 38vh 后内层 flex 子项才有可分配空间，目录树正常滚动。 */
+    height: 38vh !important;
     max-height: 38vh;
-    flex: 0 0 auto !important;
+    flex: 0 0 38vh !important;
   }
 }
 

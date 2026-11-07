@@ -173,17 +173,21 @@ describe("BaItemFlatList", () => {
     expect(merged.content).toBe("工期 120 天");
   });
 
-  it("选中项高亮（蓝边 + 浅蓝底）；非选项保持默认", () => {
+  // ✅ 2026-11-07 视觉验收：行底色/描边由写死亮色改为主题令牌（暗色下不再白底），
+  //    断言同步改为校验令牌引用，而不是旧的 rgb 字面值。
+  it("选中项高亮（主题主色描边 + 主色淡染底）；非选项跟随容器底色", () => {
     const defs = [
       def({ item_id: "a", label: "第一项" }),
       def({ item_id: "b", label: "第二项", required: 0 }),
     ];
     const { container } = setup({ defs, selectedItemId: "b" });
     const selected = rowByText(container, "第二项");
-    expect(selected.style.borderColor).toContain("22, 119, 255");
-    expect(selected.style.background).toBe("rgb(230, 244, 255)");
+    // jsdom 无法把 `border: 1px solid var(--x)` 反解成 borderColor，改断言 style 属性文本
+    expect(selected.getAttribute("style")).toContain("var(--bp-primary)");
+    expect(selected.style.background).toBe("rgba(0, 212, 255, 0.14)");
     const other = rowByText(container, "第一项");
-    expect(other.style.background).toBe("rgb(255, 255, 255)");
+    expect(other.style.background).toBe("var(--bp-bg-container)");
+    expect(other.getAttribute("style")).toContain("var(--bp-border)");
   });
 
   it("加载中（无定义）：显示 Spin；定义加载失败：显示 Alert；无定义：Empty", () => {

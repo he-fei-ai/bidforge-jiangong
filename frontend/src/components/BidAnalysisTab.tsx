@@ -690,7 +690,7 @@ function BidAnalysisTab({
           ? {
               width: 150,
               flexShrink: 0,
-              border: "1px solid #f0f0f0",
+              border: "1px solid var(--bp-border)",
               borderRadius: 6,
               padding: "6px 0",
               overflowY: "auto" as const,
@@ -728,7 +728,7 @@ function BidAnalysisTab({
               color:
                 active && !vertical ? "#fff" : active ? (vertical ? "#1677ff" : "#fff") : "var(--bp-text-secondary)",
               fontWeight: active ? 600 : 400,
-              border: vertical ? "none" : `1px solid ${active ? "#1677ff" : "#d9d9d9"}`,
+              border: vertical ? "none" : `1px solid ${active ? "#1677ff" : "var(--bp-border-strong)"}`,
               display: "flex",
               alignItems: "center",
               gap: 6,
@@ -977,7 +977,7 @@ function BidAnalysisTab({
                   style={{
                     flex: 1,
                     minWidth: 0,
-                    border: "1px solid #f0f0f0",
+                    border: "1px solid var(--bp-border)",
                     borderRadius: 6,
                     overflow: "hidden",
                   }}
@@ -986,7 +986,7 @@ function BidAnalysisTab({
                     style={{
                       padding: "4px 8px",
                       background: "var(--bp-panel-bg)",
-                      borderBottom: "1px solid #f0f0f0",
+                      borderBottom: "1px solid var(--bp-border)",
                       fontSize: 13,
                       fontWeight: 500,
                     }}
@@ -1142,7 +1142,7 @@ function BidAnalysisTab({
             style={{
               flex: contentOnly ? 1 : 1.2,
               minWidth: 0,
-              border: "1px solid #f0f0f0",
+              border: "1px solid var(--bp-border)",
               borderRadius: 6,
               overflow: "hidden",
               display: "flex",
@@ -1153,7 +1153,7 @@ function BidAnalysisTab({
               style={{
                 padding: "4px 8px",
                 background: "var(--bp-panel-bg)",
-                borderBottom: "1px solid #f0f0f0",
+                borderBottom: "1px solid var(--bp-border)",
                 fontSize: 13,
                 fontWeight: 500,
                 display: "flex",

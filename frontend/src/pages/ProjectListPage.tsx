@@ -292,6 +292,10 @@ export default function ProjectListPage() {
             loading={loading}
             pagination={{ pageSize: 20, showSizeChanger: false }}
             style={{ flex: 1 }}
+            // ✅ 390px 实测：不设 scroll.x 时 6 列被压到每列 60px 左右，表头/单元格
+            //    逐字竖排、项目名一列一字，页面虽无横向滚动但内容不可读。
+            //    给表格一个内容最小宽度，窄屏改为表格内部横向滚动。
+            scroll={{ x: 760 }}
           />
         </div>
       </Card>

@@ -2147,6 +2147,9 @@ export default function AIConfigPage() {
                     rowKey="id"
                     pagination={false}
                     size="small"
+                    // ✅ 390px 实测：不设 scroll.x 时表格内容 770px 被卡片裁切，
+                    //    右侧列无法访问且无滚动条。改为表格内部横向滚动。
+                    scroll={{ x: 760 }}
                   />
                 )}
 
@@ -2331,12 +2334,25 @@ export default function AIConfigPage() {
                             </Text>
                           }
                         />
-                        <Space wrap>
-                          <Text style={{ fontSize: "var(--bp-font-md)" }}>禁用厂商：</Text>
+                        {/* ✅ 窄屏实测：antd Space 是 inline-flex，子项宽度由内容决定，
+                            Select 的 width:100% 无参照可依 → 390px 下实测被压到 34px。
+                            改为普通 flex 容器并给 Select 明确 flex 基准（220px 起），
+                            窄屏独占一行、宽屏最多 420px，不再固定 minWidth:420 撑破卡片。 */}
+                        <div
+                          style={{
+                            display: "flex",
+                            flexWrap: "wrap",
+                            alignItems: "center",
+                            gap: 8,
+                          }}
+                        >
+                          <Text style={{ fontSize: "var(--bp-font-md)", flex: "0 0 auto" }}>
+                            禁用厂商：
+                          </Text>
                           <Select
                             mode="multiple"
                             size="small"
-                            style={{ minWidth: 0, maxWidth: 420, width: "100%" }}
+                            style={{ flex: "1 1 220px", minWidth: 0, maxWidth: 420 }}
                             placeholder="选择要临时禁用的厂商（留空 = 全部可用）"
                             value={runtimeDraft}
                             onChange={(v) => setRuntimeDraft(v as string[])}
@@ -2347,11 +2363,14 @@ export default function AIConfigPage() {
                                 : `${providers[p]?.label || p}（未配置）`,
                             }))}
                           />
-                          <Text type="secondary" style={{ fontSize: "var(--bp-font-sm)" }}>
+                          <Text
+                            type="secondary"
+                            style={{ fontSize: "var(--bp-font-sm)", flex: "0 0 auto" }}
+                          >
                             已配置厂商仍可用：{runtime.effective_provider_count} /{" "}
-                            {runtime.configured_providers.length}
+                             {runtime.configured_providers.length}
                           </Text>
-                        </Space>
+                        </div>
                       </>
                     ) : (
                       <Text type="secondary" style={{ fontSize: "var(--bp-font-sm)" }}>

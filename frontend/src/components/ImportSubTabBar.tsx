@@ -54,7 +54,7 @@ export default function ImportSubTabBar({ activeKey, onChange, summary }: Import
       tabPosition="top"
       className="swb-sub-tabs-bar-only"
       tabBarStyle={{ margin: 0 }}
-      style={{ flexShrink: 0, borderBottom: "1px solid #f0f0f0" }}
+      style={{ flexShrink: 0, borderBottom: "1px solid var(--bp-border)" }}
     />
   );
 }
