@@ -1571,24 +1571,36 @@ async def close_db():
             logger.debug("close_db 关闭全局连接失败（可能已关闭，忽略）: %s", e)
         _conn = None
         _conn_path = None
-    # P1-3：关闭连接池中全部空闲连接
+    # P1-3：关闭连接池中的空闲连接，以及借出未归还的在途连接。
+    # 在途连接若不回收，其 aiosqlite 非守护工作线程会阻塞进程退出；而且关闭后
+    # 后台任务再归还时会把仍然存活的连接重新塞回池里（_release_* 已拒绝回池）。
+    to_close: list[aiosqlite.Connection] = []
     async with _db_pool_cv:
         while _db_pool:
-            c = _db_pool.pop()
+            to_close.append(_db_pool.pop())
             _db_pool_total -= 1
-            try:
-                await c.close()
-            except Exception as e:
-                logger.debug("close_db 关闭写池连接失败（忽略）: %s", e)
-    # Phase 3：关闭只读连接池
+        while _db_pool_borrowed:
+            to_close.append(_db_pool_borrowed.pop())
+            _db_pool_total -= 1
+    for c in to_close:
+        try:
+            await c.close()
+        except Exception as e:
+            logger.debug("close_db 关闭写池连接失败（忽略）: %s", e)
+    # Phase 3：关闭只读连接池（同样包含在途借出的读连接）
+    to_close = []
     async with _read_pool_cv:
         while _read_pool:
-            c = _read_pool.pop()
+            to_close.append(_read_pool.pop())
             _read_pool_total -= 1
-            try:
-                await c.close()
-            except Exception as e:
-                logger.debug("close_db 关闭读池连接失败（忽略）: %s", e)
+        while _read_pool_borrowed:
+            to_close.append(_read_pool_borrowed.pop())
+            _read_pool_total -= 1
+    for c in to_close:
+        try:
+            await c.close()
+        except Exception as e:
+            logger.debug("close_db 关闭读池连接失败（忽略）: %s", e)
 
 
 # P1-3 性能优化：FastAPI 依赖连接池（有界、请求结束归还）
@@ -1596,6 +1608,7 @@ async def close_db():
 # （与旧"每请求独立连接"的并发语义一致），池化仅消除连接建立与
 # PRAGMA 初始化开销；连接异常时自动重建。
 _db_pool: list[aiosqlite.Connection] = []
+_db_pool_borrowed: set[aiosqlite.Connection] = set()  # 已借出未归还（关闭时须一并回收）
 _db_pool_total = 0  # 已创建未关闭的连接数（池内 + 在途）
 _db_pool_path: Path | None = None  # 池连接绑定的 DB_PATH（切换后整池失效）
 _db_pool_cv = asyncio.Condition()
@@ -1661,6 +1674,7 @@ async def _acquire_pool_conn() -> aiosqlite.Connection:
             continue
         # PRAGMA wal_checkpoint 探针：真实 IO 往返，覆盖"写入才抖"场景
         if await _probe_conn(conn):
+            _db_pool_borrowed.add(conn)
             return conn
         # 探活失败：回锁归还计数并唤醒等待者（缺 notify 会让等待者永久睡死）
         async with _db_pool_cv:
@@ -1694,6 +1708,7 @@ async def _acquire_pool_conn() -> aiosqlite.Connection:
                 if attempt + 1 < _PROBE_MAX_ATTEMPTS:
                     continue  # 保留预留，直接重试
                 break
+            _db_pool_borrowed.add(conn)
             return conn
         except Exception as e:
             if conn is not None:
@@ -1720,6 +1735,16 @@ async def _acquire_pool_conn() -> aiosqlite.Connection:
 async def _release_pool_conn(conn: aiosqlite.Connection) -> None:
     """归还连接；poisoned / 已关闭 / 探活失败的连接直接关闭"""
     global _db_pool_total
+    tracked = conn in _db_pool_borrowed
+    _db_pool_borrowed.discard(conn)
+    if not tracked:
+        # close_db 已关闭并在途集合已清空（关闭期间才归还），或调用方传入非本池连接：
+        # 一律关闭、绝不回池 —— 否则关闭后重新入池的连接会留下非守护工作线程。
+        try:
+            await conn.close()
+        except Exception as e:
+            logger.debug("关闭非在途写池连接失败（清理路径，忽略）: %s", e)
+        return
     # 写路径标记了 disk I/O error、或连接已被关闭：不再归还，直接剔除
     # ✅ 2026-09-26：死连接**绝不能回到池里** —— 那正是「池里躺着已关闭连接、
     #    业务深处抛 no active connection」的传播路径。
@@ -1804,6 +1829,7 @@ async def write_tx_conn():
 #    这类隐性排队，并把轮询类热点读（任务状态 3s 轮询等）的 IO 与写路径完全隔离。
 
 _read_pool: list[aiosqlite.Connection] = []
+_read_pool_borrowed: set[aiosqlite.Connection] = set()  # 已借出未归还（关闭时须一并回收）
 _read_pool_total = 0
 _read_pool_path: Path | None = None
 _read_pool_cv = asyncio.Condition()
@@ -1877,6 +1903,7 @@ async def _acquire_read_conn() -> aiosqlite.Connection:
             continue
         # 用 PRAGMA wal_checkpoint(NOOP) 走 IO 层，覆盖"读取时抖"场景
         if await _read_probe(conn):
+            _read_pool_borrowed.add(conn)
             return conn
         async with _read_pool_cv:
             _read_pool_total -= 1
@@ -1909,6 +1936,7 @@ async def _acquire_read_conn() -> aiosqlite.Connection:
                 if attempt + 1 < _PROBE_MAX_ATTEMPTS:
                     continue  # 保留预留，直接重试
                 break
+            _read_pool_borrowed.add(conn)
             return conn
         except Exception as e:
             if conn is not None:
@@ -1934,6 +1962,16 @@ async def _acquire_read_conn() -> aiosqlite.Connection:
 async def _release_read_conn(conn: aiosqlite.Connection) -> None:
     """归还只读连接；poisoned / 已关闭 / 探活失败的连接直接关闭"""
     global _read_pool_total
+    tracked = conn in _read_pool_borrowed
+    _read_pool_borrowed.discard(conn)
+    if not tracked:
+        # close_db 已关闭并在途集合已清空（关闭期间才归还），或调用方传入非本池连接：
+        # 一律关闭、绝不回池，避免关闭后重新入池留下非守护工作线程。
+        try:
+            await conn.close()
+        except Exception as e:
+            logger.debug("关闭非在途读池连接失败（清理路径，忽略）: %s", e)
+        return
     # 读路径标记了 disk I/O error、或连接已被关闭：不再归还，直接剔除
     if _is_poisoned(conn) or _is_dead_conn(conn):
         async with _read_pool_cv:
