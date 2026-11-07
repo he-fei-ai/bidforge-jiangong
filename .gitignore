@@ -83,6 +83,7 @@ backend/check_db.py
 backend/.t*
 # 测试分类工具的生成报告（随时可重建，不入库）
 scripts/source_lock_report.csv
+backend/tools/source_lock_report.csv
 # backend/tests/ 下调试输出（保留 test_*.py / conftest.py / TEST_REPORT.md / .bak-*）
 backend/tests/_*.txt
 backend/tests/_*.log

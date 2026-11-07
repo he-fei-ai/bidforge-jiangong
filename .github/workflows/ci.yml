@@ -186,6 +186,23 @@ jobs:
             tests/test_review_status_decouple.py \
             tests/test_export_docx_smoke.py
 
+  # perf 脚本存在性护栏：独立 job，不带 continue-on-error，缺失即红。
+  # 不能放在 perf-micro 内部：该 job 的 job 级 continue-on-error 会把
+  # 「脚本不在 checkout」也吞成绿色，正是本护栏要暴露的问题。
+  perf-scripts-present:
+    name: Perf scripts present
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Verify benchmark files exist
+        run: |
+          test -f backend/tools/perf/bench_micro.py
+          test -f backend/tools/perf/bench_e2e.py
+          test -f backend/tools/perf/README.md
+          test -f backend/tools/perf/dataset/generate_dataset.py
+          test -f backend/tools/perf/dataset/__init__.py
+
   # 性能回归门禁（第一版非阻断）：纯函数微基准，不触数据库、不联网、不起服务，
   # 用 backend/tools/perf/bench_micro.py 产出 JSON 并固化到 artifact，
   # 目的是积累跨 run 的 median 趋势数据，暂不拦截合并（CI runner 性能波动大）。
