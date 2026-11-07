@@ -11,6 +11,7 @@ from app.config import APP_VERSION, settings
 from app.db import close_db, init_db
 from app.middleware import setup_middleware
 from app.routers import (
+    agent_runs,
     ai_config,
     bid_analysis,
     charts,
@@ -525,6 +526,7 @@ for r in (
     export_dossier,
     defects,
     standards_admin,
+    agent_runs,
     ai_config,
     charts,
     scheme_catalog,

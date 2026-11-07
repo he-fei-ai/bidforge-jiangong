@@ -464,6 +464,10 @@ class Settings(BaseSettings):
     # 单节检索超时（秒）与单方案总检索次数上限。超限计入报告，不静默丢弃。
     hybrid_clause_search_timeout_seconds: float = 3.0
     hybrid_clause_search_budget: int = 500
+    # ✅ R179 Phase G（2026-11-07）：编排状态机总开关。
+    #    默认关闭 —— 关闭时 /agent/runs 全部入口 404；状态机只读写自己的
+    #    两张新表与 ai_audit_logs，不接管既有目录/正文/导出执行链路。
+    agent_runs_enabled: bool = False
 
     # ---------- 正文生成·全文一致性扫描优化（2026-09-22，P0-1） ----------
     # 扫描的「单次调用合并章数」：1 = 逐章一次调用（旧行为，质量最稳）；
