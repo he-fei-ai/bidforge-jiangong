@@ -342,9 +342,8 @@ async def parse_outline(
     if is_image:
         confidence = max(0.4, confidence - 0.1)  # OCR 噪声惩罚
 
-    # 保存记录（raw_text 限 5000 字符，超长时记录截断标记）
+    # 保存记录（raw_text 列为 TEXT，SQLite 容量足够 → 存全文，不再静默截到 5000）
     rid = str(uuid.uuid4())
-    raw_truncated = len(raw_text) > 5000
     # ✅ R13 写路径（2026-10-08）：INSERT 返回 None = 识别记录根本没落库，
     #    而响应照常回 {"id": rid} —— 前端拿着这个不存在的 id 去
     #    save-as-outline / save-as-library 一律 404「上传记录不存在」，
@@ -361,7 +360,7 @@ async def parse_outline(
                 _pid,
                 fname,
                 ftype,
-                raw_text[:5000],
+                raw_text,
                 json.dumps({"outline": outline}, ensure_ascii=False),
                 confidence,
                 "parsed",
@@ -399,10 +398,7 @@ async def parse_outline(
         hint = detect_bid_sections(raw_text)
         if hint.get("has_multiple"):
             result["multi_section_hint"] = hint
-    if raw_truncated:
-        result["raw_text_truncated"] = True
-        result["warning"] = f"原文 {len(raw_text)} 字，保存记录时截断至 5000 字（不影响目录识别结果）"
-    elif not raw_text.strip():
+    if not raw_text.strip():
         # ✅ 增强（可操作性）：解析结果为空时必须明确告知原因。旧实现只返回
         #    outline=[]，前端提示"识别完成：共 0 个章节"，用户会误以为是
         #    格式不支持而来回换文件重试；实际多为扫描件缺 OCR 引擎或文件损坏。

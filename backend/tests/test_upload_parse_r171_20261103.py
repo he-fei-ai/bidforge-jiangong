@@ -3,9 +3,10 @@
 背景：R171 对上传目录识别链路做深度审计，定稿两处真实缺陷：
 
   PARSE-3（P1）：截断诊断三态。
-    - 截断时：raw_text[:5000] 落库 + parse_truncated=True 回传 + parse_warnings 回传；
-    - 未截断：不得回传 parse_truncated 键，parse_warnings 空时也不回传；
-    - raw_truncated 独立于 parse_truncated（前者是原文长度 >5000，后者是解析器诊断）。
+    - R181 起 raw_text 列（TEXT）容量足够 → **存全文**，不再裁到 5000 字，
+      也不再回传 raw_text_truncated / 「截断至 5000 字」warning；
+    - 解析器自身诊断（PDF 截页等）仍走 parse_truncated + parse_warnings；
+    - 原文未超长时同样不回传截断键。
     根因：旧实现 parse_truncated / parse_warnings 从未随响应回传，
     用户看到「识别成功」却收不到「内容可能不完整」告警（与 global_facts 口径不一致）。
 
@@ -42,40 +43,37 @@ def _upload(name: str = "outline.txt", text: str | bytes = "") -> UploadFile:
 
 
 def _long_text(n_chars: int = 6000) -> str:
-    """构造超长原文（>5000 字）用于触发 raw_truncated 分支。"""
+    """构造超长原文（>5000 字），用于验证 TEXT 列存全文（R181）。"""
     return ("第一章 工程概况\n" + "内容填充行用于构造超长原文。\n") * (n_chars // 20 + 1)
 
 
 # ===========================================================================
-# PARSE-3 · 截断诊断三态
+# PARSE-3 · 截断诊断三态（R181：raw_text 落 TEXT 列 → 存全文，不再 5000 硬切）
 # ===========================================================================
 
 
 class TestParseTruncatedDiagnosis:
-    """截断诊断三态：截断回传 / 未截断不回传 / warning 形态。"""
+    """截断诊断三态：长原文存全文 / 不回传 raw_text_truncated / warning 形态。"""
 
-    async def test_truncated_returns_parse_truncated_flag(self, db_conn):
-        """原文 >5000 字：响应必须回传 raw_text_truncated=True + warning 文案。"""
+    async def test_long_raw_text_stored_full(self, db_conn):
+        """原文 >5000 字：raw_text 列 TEXT 容量足够 → 落库全文，响应无截断标记。"""
         text = _long_text(6000)
         assert len(text) > 5000
         res = await uo.parse_outline(file=_upload("long.txt", text), db=db_conn, scheme_name="", reorganize=False)
-        assert res.get("raw_text_truncated") is True
-        assert "raw_text_truncated" in res
-        assert "warning" in res
-        assert "5000 字" in res["warning"]
-
-    async def test_truncated_stores_raw_text_sliced(self, db_conn):
-        """原文 >5000 字：落库 raw_text 必须是[:5000] 切片（非全文）。"""
-        text = _long_text(6000)
-        assert len(text) > 5000
-        res = await uo.parse_outline(file=_upload("long.txt", text), db=db_conn, scheme_name="", reorganize=False)
+        assert "raw_text_truncated" not in res
         cur = await db_conn.execute("SELECT raw_text FROM uploaded_outlines WHERE id=?", (res["id"],))
         row = await cur.fetchone()
         assert row is not None
-        stored = row["raw_text"]
-        assert len(stored) <= 5000, f"落库 raw_text 应被截断，实际 {len(stored)} 字"
-        # 前 5000 字应与原文一致（切片不是乱码）
-        assert stored == text[:5000]
+        assert row["raw_text"] == text, f"落库 raw_text 应存全文，实际 {len(row['raw_text'])} 字"
+
+    async def test_long_raw_text_warning_not_5000(self, db_conn):
+        """原文 >5000 字：不得再出现「保存记录时截断至 5000 字」的旧 warning。"""
+        text = _long_text(6000)
+        res = await uo.parse_outline(file=_upload("long.txt", text), db=db_conn, scheme_name="", reorganize=False)
+        assert "5000 字" not in (res.get("warning") or "")
+        cur = await db_conn.execute("SELECT raw_text FROM uploaded_outlines WHERE id=?", (res["id"],))
+        row = await cur.fetchone()
+        assert row is not None and row["raw_text"] == text
 
     async def test_non_truncated_no_parse_truncated_key(self, db_conn):
         """原文 ≤5000 字：响应不得出现 raw_text_truncated 键。"""
@@ -135,11 +133,14 @@ class TestParseTruncatedDiagnosis:
         assert res.get("parse_warnings") == ["OCR 兜底"]
         assert "parse_warnings" in res
 
-    async def test_warning_content_mentions_5000(self, db_conn):
-        """raw_text_truncated=True 时 warning 文案必须提到 5000 字。"""
+    async def test_long_raw_text_no_legacy_5000_warning(self, db_conn):
+        """R181：原文 >5000 字存全文，不得再出现「截断至 5000 字」的旧 warning。"""
         text = _long_text(6000)
         res = await uo.parse_outline(file=_upload("long.txt", text), db=db_conn, scheme_name="", reorganize=False)
-        assert "5000" in res.get("warning", "")
+        assert "5000" not in (res.get("warning") or "")
+        cur = await db_conn.execute("SELECT raw_text FROM uploaded_outlines WHERE id=?", (res["id"],))
+        row = await cur.fetchone()
+        assert row is not None and row["raw_text"] == text
 
 
 # ===========================================================================
@@ -205,18 +206,16 @@ class TestOutlinePatternsOrder:
 class TestAbortPoints:
     """A/B 反向验证锚点（变异后必红，还原后必绿）。"""
 
-    def test_raw_text_slice_at_5000(self):
-        """锚点：raw_text[:5000] 切片形态必须存在（仅 1 处）。"""
+    def test_raw_text_slice_at_5000_removed(self):
+        """反向锚点：R181 起 raw_text[:5000] 裸切片必须不存在。"""
         src = Path(uo.__file__).read_text(encoding="utf-8")
-        # 按行归一化后计数
         norm = src.replace("\r\n", "\n")
-        count = norm.count("raw_text[:5000]")
-        assert count == 1, f"raw_text[:5000] 应恰好 1 处，实际 {count} 处"
+        assert norm.count("raw_text[:5000]") == 0, "raw_text[:5000] 裸切片回流"
 
-    def test_raw_truncated_guard_present(self):
-        """锚点：raw_truncated = len(raw_text) > 5000 必须存在。"""
+    def test_raw_truncated_guard_removed(self):
+        """反向锚点：R181 起 raw_truncated = len(raw_text) > 5000 必须不存在。"""
         src = Path(uo.__file__).read_text(encoding="utf-8")
-        assert "raw_truncated = len(raw_text) > 5000" in src
+        assert "raw_truncated = len(raw_text) > 5000" not in src
 
     def test_parse_truncated_key_assignment(self):
         """锚点：parse_truncated 键赋值必须存在（if diag.get("truncated"): result["parse_truncated"] = True）。"""

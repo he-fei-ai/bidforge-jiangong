@@ -24,6 +24,7 @@ from app.services.chart_payload import build_chart_envelope, extract_chart_paylo
 from app.services.chart_validators import CHART_TYPE_LABELS as _CHART_LABELS
 from app.services.chart_validators import infer_chart_type_from_payload
 from app.services.content_blocks import chart_type_tags
+from app.services.prompt_material_guard import clip_text_notice
 
 logger = logging.getLogger("charts")
 router = APIRouter(prefix="/api/v1/charts", tags=["charts"])
@@ -483,14 +484,19 @@ async def fix_mermaid(body: dict, db=Depends(get_db)):
             if is_json_fix:
                 sys_prompt = render(
                     _fix_key,
-                    error=last_error[:500],
+                    error=clip_text_notice(last_error or "", 500, "图表修复错误信息"),
                     code=code,
                     scheme_type=scheme_type_text,
                     chart_type=chart_type or "comparison",
                 )
                 user_hint = _fix_hint
             else:
-                sys_prompt = render(_fix_key, error=last_error[:500], code=code, scheme_type=scheme_type_text)
+                sys_prompt = render(
+                    _fix_key,
+                    error=clip_text_notice(last_error or "", 500, "图表修复错误信息"),
+                    code=code,
+                    scheme_type=scheme_type_text,
+                )
                 user_hint = _fix_hint
             messages = [
                 {"role": "system", "content": sys_prompt},

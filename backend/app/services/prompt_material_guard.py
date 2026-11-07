@@ -322,6 +322,36 @@ def _clip_cut_point(text: str, limit: int) -> int:
     return limit
 
 
+def clip_text_logged(text: str, limit: int, label: str = "") -> str:
+    """内部判定用裁剪：只记日志/指标，**绝不向文本插标记**。
+
+    用于关键词匹配、启发式兜底等「改文本就会改判定结果」的场景 —— 往这类
+    字符串里加截断说明会改变匹配/正则结果，等于用可观测性换另一种静默错误。
+    返回值与旧 ``text[:limit]`` 逐字节一致，仅新增日志账目。
+    """
+    if not text or limit is None or limit <= 0 or len(text) <= limit:
+        return text
+    omitted = len(text) - limit
+    name = label or "文本"
+    try:
+        logger.warning(
+            "上下文截断（仅日志，%s）：%d → %d 字，已省略 %d 字（文本保持原样，未插标记）",
+            name,
+            len(text),
+            limit,
+            omitted,
+        )
+    except Exception:
+        pass
+    try:
+        from app.services.ai.prompts._metrics import record_token_budget_truncated
+
+        record_token_budget_truncated(name)
+    except Exception:
+        pass
+    return text[:limit]
+
+
 def clip_text_notice(text: str, limit: int, label: str = "") -> str:
     """进模型请求的截断：**按边界收刀 + 模型可见说明 + 日志/指标留痕**。
 

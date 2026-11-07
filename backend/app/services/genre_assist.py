@@ -18,6 +18,8 @@ from __future__ import annotations
 import json
 import logging
 
+from app.services.prompt_material_guard import clip_text_notice
+
 logger = logging.getLogger("genre_assist")
 
 _SYSTEM = (
@@ -59,7 +61,8 @@ async def suggest_category(scheme_name: str, extra_text: str = "", *, chat_fn=No
     if chat_fn is None:
         from app.services.ai.provider_factory import chat_with_fallback as chat_fn
 
-    user = f"方案名称：{scheme_name}\n补充文本：{(extra_text or '')[:800]}"
+    # ✅ R181（2026-11-07）：进模型提示词的补充文本超长时留痕（模型可见 + 日志）。
+    user = f"方案名称：{scheme_name}\n补充文本：{clip_text_notice(extra_text or '', 800, '文种识别补充文本')}"
     messages = [
         {"role": "system", "content": _SYSTEM},
         {"role": "user", "content": user},

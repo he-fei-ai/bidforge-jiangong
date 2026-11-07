@@ -669,8 +669,14 @@ class TestConfigSnapshot:
             assert "sk-supersecret9999" not in (d["snapshot_json"] or "")
             assert "supersecret" not in (d["snapshot_json"] or "")
 
-    def test_detail_is_truncated(self):
-        assert audit_service._DETAIL_MAX == 500
+    async def test_detail_kept_full_for_text_column(self, db_conn):
+        """detail 列是 TEXT（容量足够）→ 审计详情不再 500 字硬切（R181）。"""
+        long_detail = "变更说明" * 200
+        assert len(long_detail) > 500
+        await audit_service.record_config_audit(db_conn, "update", detail=long_detail)
+        cur = await db_conn.execute("SELECT detail FROM ai_config_audit_logs")
+        row = await cur.fetchone()
+        assert row is not None and row["detail"] == long_detail
 
 
 def _ai_config_columns(schema_sql_text: str) -> set[str]:

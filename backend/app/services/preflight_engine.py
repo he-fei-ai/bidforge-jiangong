@@ -79,6 +79,7 @@ from app.services.fence_common import classify_fence_defects
 #    本模块与 consistency_scanner 都从这里派生，杜绝两套正则分叉。
 from app.services.numeric_topics import compiled_num_topics
 from app.services.placeholder_sections import is_placeholder_section
+from app.services.prompt_material_guard import clip_text_logged
 from app.services.scheme_classification import is_hazardous_by_keywords
 from app.services.standards_registry import (
     ABOLISHED_STANDARDS,
@@ -649,9 +650,13 @@ def check_hazard_params(ctx: PreflightContext) -> list:
         return []
     # 事实名+值兼作类目匹配文本（与 danger-check 的 extra_text 同参数语义：
     # 名称信息不足时由事实内容兜底命中子类，如「基坑开挖深度 16m」命中基坑类）。
-    extra_text = " ".join(f"{f.get('name') or ''} {f.get('value') or ''}" for f in ctx.facts if isinstance(f, dict))[
-        :2000
-    ]
+    # ✅ R181（2026-11-07）：此文本只用于危大分类关键词/正则匹配，
+    #    截断只记日志、不插标记 —— 插说明会改变匹配结果（换一种静默错误）。
+    extra_text = clip_text_logged(
+        " ".join(f"{f.get('name') or ''} {f.get('value') or ''}" for f in ctx.facts if isinstance(f, dict)),
+        2000,
+        "危大判定匹配文本",
+    )
     try:
         out = facts_danger_check(ctx.scheme_name or "", ctx.facts, extra_text=extra_text)
     except Exception as exc:  # pragma: no cover - 判定异常不阻断预检主流程

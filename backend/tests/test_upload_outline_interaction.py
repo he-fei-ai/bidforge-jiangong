@@ -149,15 +149,17 @@ class TestParseOutlineRejections:
         assert e.value.status_code == 413
         assert "2MB" in e.value.detail
 
-    async def test_raw_text_truncated_warning(self, db_conn):
-        """原文超过 5000 字落库截断，响应如实回传 raw_text_truncated + 提示。"""
+    async def test_raw_text_stored_full(self, db_conn):
+        """R181：raw_text 列为 TEXT（容量足够）→ 超长原文存全文，不再静默截到 5000。"""
         text = ("第一章 工程概况\n" + "内容填充行用于构造超长原文。\n") * 400
         assert len(text) > 5000
         res = await uo.parse_outline(
             file=_upload("long.txt", text.encode("utf-8")), db=db_conn, scheme_name="", reorganize=False
         )
-        assert res.get("raw_text_truncated") is True
-        assert "raw_text_truncated" in res
+        assert "raw_text_truncated" not in res
+        cur = await db_conn.execute("SELECT raw_text FROM uploaded_outlines WHERE id=?", (res["id"],))
+        row = await cur.fetchone()
+        assert row is not None and row["raw_text"] == text
 
     async def test_empty_text_warning_not_400(self, db_conn):
         """非空文件但无有效文本（仅空白）不抛 400，而是回传 empty_text 提示。"""

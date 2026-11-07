@@ -641,7 +641,8 @@ def _classify_import_item(raw, existing: set, overwrite: bool) -> dict:
     except ValueError:
         out.update({"action": "skip", "reason": f"{provider_name}/{model}：环境标签非法"})
         return out
-    out["remark"] = str(raw.get("remark") or "").strip()[:2000]
+    # ✅ R181（2026-11-07）：remark 落 ai_configs.remark（TEXT，容量足够）→ 存全文。
+    out["remark"] = str(raw.get("remark") or "").strip()
     # ✅ R179（2026-11-05）：导出文件已包含 enabled，但旧导入逻辑完全忽略它 ——
     #    停用配置迁移后会被静默启用（与「降级链不参与的配置」预期相反）。
     out["enabled"] = coerce_enabled_flag(raw.get("enabled"))

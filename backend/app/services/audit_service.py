@@ -44,8 +44,8 @@ CONFIG_ACTIONS: dict[str, str] = {
     "consistency_repair": "归一矛盾配置",
 }
 
-#: detail 字段最大长度（防超长内容把审计表撑大）。
-_DETAIL_MAX = 500
+#: detail 落 ``ai_config_audit_logs.detail``（TEXT，SQLite 容量足够）——
+#: ✅ R181（2026-11-07）：不再 500 字硬切，审计详情必须可查完整。
 
 #: 允许进快照的字段白名单 —— **不含任何密钥相关列**。
 #:
@@ -214,7 +214,7 @@ async def record_config_audit(
         config_id or "",
         provider_name or "",
         model or "",
-        (detail or "")[:_DETAIL_MAX],
+        detail or "",
         client_ip_of(request),
         datetime.now().isoformat(),
     )

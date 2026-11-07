@@ -6,6 +6,7 @@ import re
 
 import app.routers.sse_handlers as _sh  # noqa: F401 — facade 命名空间延迟绑定（monkeypatch 兼容）
 from app.services.ai.task_registry import TaskTypeConflict  # noqa: F401 — 字符串注解引用
+from app.services.prompt_material_guard import clip_text_notice
 
 # ---------- 提示词治理 · SSE 侧薄封装（2026-09-24 · G5 / G6） ----------
 
@@ -617,7 +618,9 @@ def _compact_outline_json(nodes: list, max_desc: int = 80) -> str:
             item: dict = {"title": str(n.get("title", "")).strip()}
             desc = str(n.get("description", "")).strip()
             if desc and budget[0]:
-                item["description"] = desc[: budget[0]]
+                # ✅ R181（2026-11-07）：该描述进审核修复提示词（模型可见）——
+                #    超长时保留「原文 N 字 / 已省略 M 字」说明，不再静默硬切。
+                item["description"] = clip_text_notice(desc, budget[0], "目录描述")
             children = n.get("children")
             if isinstance(children, list) and children:
                 kids = _walk(children, depth + 1)

@@ -737,7 +737,9 @@ async def save_ai_config(data: dict) -> str:
     plan = normalize_plan(data.get("plan"))
     provider_name = (data.get("provider_name") or "").strip()
     model = (data.get("model") or "").strip()
-    remark = (data.get("remark") or "").strip()[:2000]
+    # ✅ R181（2026-11-07）：remark 落 ai_configs.remark（TEXT，容量足够）→ 存全文，
+    #    与导入路径（routers/ai_config/config.py）同列同口径。
+    remark = (data.get("remark") or "").strip()
 
     if not provider_name:
         raise ValueError("供应商不能为空")

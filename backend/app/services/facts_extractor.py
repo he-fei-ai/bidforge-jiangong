@@ -48,6 +48,7 @@ from app.services.facts_cross_validators import run_cross_validations
 
 # ✅ 2026-09-30 第十三轮：缺值模式值域的单一出口
 from app.services.facts_patches import normalize_missing_value_mode
+from app.services.prompt_material_guard import clip_text_logged, clip_text_notice
 
 logger = logging.getLogger("facts_extractor")
 
@@ -1489,7 +1490,7 @@ async def extract_from_single_chunk(
         sys_prompt = render(
             "facts_extract_system",
             material=prompt_material,
-            summary=context_summary[:500] if context_summary else "（无全文摘要）",
+            summary=clip_text_notice(context_summary, 500, "全文摘要") if context_summary else "（无全文摘要）",
             chunk_index=chunk_index + 1,
             NORM_DICT_BLOCK=norm_dict_block,
             zone_type=zone_type,
@@ -2198,7 +2199,9 @@ def _build_local_summary(chunks: list, max_chars: int = 800) -> str:
             dedup.append(h)
     summary = "\n".join(dedup[:12])
     if len(summary) > max_chars:
-        summary = summary[:max_chars]
+        # ✅ R181（2026-11-07）：本地摘要最终进模型提示词（summary 变量），
+        #    超长必须让模型看到「已省略多少字」，不再静默硬切。
+        summary = clip_text_notice(summary, max_chars, "本地事实摘要")
     return summary
 
 
@@ -2587,7 +2590,9 @@ async def run_extraction_pipeline(
     merged = merge_and_deduplicate(all_items)
 
     # ✅ 后处理增强：category 自动分类 → 启发式兜底 → 必须有工期规则
-    merged = run_post_extract_normalize(merged, fallback_text=full_text[:3000])
+    # ✅ R181（2026-11-07）：此文本只喂内部启发式判定（工期/类目兜底），
+    #    截断只记日志、不向文本插标记 —— 否则会改变正则/关键词匹配结果。
+    merged = run_post_extract_normalize(merged, fallback_text=clip_text_logged(full_text, 3000, "事实启发式兜底原文"))
 
     # ✅ 缺值模式后处理（全局事实三模式，程序级保障 ——
     #    Prompt 约束可能被弱模型忽略，这里按模式做确定性兜底）：
