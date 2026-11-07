@@ -3,7 +3,7 @@ import type { MutableRefObject } from "react";
 import type { ModalFuncProps } from "antd";
 import type { MessageInstance } from "antd/es/message/interface";
 import { tasksApi } from "../../api";
-import { resolveUnknownTaskNext, type TaskTerminalInfo, type UnknownTaskInfo } from "./taskPolling";
+import { resolveUnknownTaskNext, findRecentOutlineTaskImpl, type TaskTerminalInfo, type UnknownTaskInfo } from "./taskPolling";
 
 /**
  * ✅ 2026-11-04 拆分（G10）：重挂放弃后的「任务态未知」状态机自
@@ -85,6 +85,22 @@ export function useUnknownTaskRecovery(deps: UnknownTaskRecoveryDeps) {
     }
     // 世代快照：接管期间用户若发起新生成（bump genSeqRef），本循环到终态时
     // 不得越位复位新任务的状态（与刷新接管同口径）。
+    // ✅ 2026-11-07：未知态可能来自「SSE 断线时尚未收到 task_id」，此时 taskId
+    //    为空串。先按方案检索最近同类型在跑任务，检索不到说明后台确无在跑任务，
+    //    清除未知态并刷新；避免对空 id 轮询 200×3s。
+    let reattachTaskId = ut.taskId;
+    if (!reattachTaskId) {
+      reattachTaskId =
+        (await findRecentOutlineTaskImpl(async () => (await tasksApi.list(id)).data, {
+          typeFilter: `${ut.genType}_generation`,
+        })) || "";
+      if (!reattachTaskId) {
+        clearUnknownTask();
+        msg.info("未发现仍在运行的后台任务，已恢复空闲");
+        load();
+        return;
+      }
+    }
     const mySeq = ++genSeqRef.current;
     setUnknownTask(null); // 横幅先收起；ref 由终态/再次失败分支裁决
     setGenerating(true);
@@ -93,7 +109,7 @@ export function useUnknownTaskRecovery(deps: UnknownTaskRecoveryDeps) {
     setProgress(0);
     setProgressMsg("正在重新接管后台任务...");
     try {
-      const fin = await pollTaskUntilTerminal(ut.taskId);
+      const fin = await pollTaskUntilTerminal(reattachTaskId);
       if (genSeqRef.current !== mySeq) return;
       if (!fin) {
         // 再次耗尽：回到未知态（ref 一直在，只是恢复横幅与提示）

@@ -968,11 +968,14 @@ pre,
   border-bottom-color: #f0f0f0;
 }
 
-/* ✅ 工作流导航栏自适应：窗口较窄（扣除左侧 Sider 后放不下 7 个全标题）时
+/* ✅ 工作流导航栏自适应：窗口过窄（扣除左侧 Sider 后确实放不下全标题）时
    隐藏步骤标题与提示图标，仅保留步骤序号和状态徽标，避免导航标签相互挤压。
    类名 swb-tab-title / swb-tab-hint 由 WorkflowTabLabel 提供（2026-09-20 曾因
-   页面重建丢失类名导致本规则失效，护栏测试 workflowTabsGuard.test.ts 已锁定）。 */
-@media (max-width: 1440px) {
+   页面重建丢失类名导致本规则失效，护栏测试 workflowTabsGuard.test.ts 已锁定）。
+   ✅ 2026-11-07：阈值由 1440 下调到 1100 —— 1280–1440 是笔记本常规档，此前
+   在该档位标题被隐藏，用户看不到「目录生成 / 正文生成 / 审核预检」。1100 以下
+   由 WorkflowTabLabel 的 title 原生提示兜底，仍可悬停查看完整标题。 */
+@media (max-width: 1100px) {
   .ant-tabs.swb-tabs-flex > .ant-tabs-nav .ant-tabs-tab {
     padding: 2px 2px;
   }

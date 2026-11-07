@@ -520,15 +520,21 @@ function WorkflowTabLabel({
   badge,
   badgeColor,
   hint,
+  reconnecting,
 }: {
   step: number;
   title: string;
   badge?: string;
   badgeColor?: string;
   hint?: string;
+  reconnecting?: boolean;
 }) {
   return (
-    <Space size={3} style={{ lineHeight: 1.3 }}>
+    <Space
+      size={3}
+      style={{ lineHeight: 1.3 }}
+      title={hint ? `${title}（${hint}）` : title}
+    >
       <span
         style={{
           display: "inline-flex",
@@ -558,6 +564,14 @@ function WorkflowTabLabel({
           style={{ marginInlineEnd: 0, fontSize: 10, lineHeight: "16px", padding: "0 4px" }}
         >
           {badge}
+        </Tag>
+      )}
+      {reconnecting && (
+        <Tag
+          color="warning"
+          style={{ marginInlineEnd: 0, fontSize: 10, lineHeight: "16px", padding: "0 4px" }}
+        >
+          重连中
         </Tag>
       )}
       {hint && (
@@ -625,6 +639,9 @@ export default function SchemeWorkbenchPage() {
   const [progress, setProgress] = useState(0);
   const [progressMsg, setProgressMsg] = useState("");
   const [generating, setGenerating] = useState(false);
+  // ✅ 可感知重连态：SSE 断线后正在重新挂接后台任务时，进度卡 / 标签徽标 / 控制按钮
+  //    统一进入「重连中」，而不是只有一行 progressMsg 在变。
+  const [sseReconnecting, setSseReconnecting] = useState(false);
   const [genType, setGenType] = useState("");
   // ✅ F3 暂停状态可见：当前活跃任务是否已暂停（暂停/恢复按钮互斥 + 「已暂停」Tag）
   const [taskPaused, setTaskPaused] = useState(false);
@@ -2120,6 +2137,7 @@ export default function SchemeWorkbenchPage() {
     const batcher = createSseBatcher();
     sseBatcherRef.current = batcher;
     setGenerating(true);
+    setSseReconnecting(false);
     setGenType("content");
     setTaskPaused(false);
     setProgress(0);
@@ -2467,18 +2485,35 @@ export default function SchemeWorkbenchPage() {
         // ✅ 收口（2026-10-14）：与目录/事实同源走 reattachTaskImpl
         //    （typeFilter=content_generation）。终态后的逐章失败明细 / 进度摘要
         //    恢复仍由本块处理（content_result 各链语义不同）。
-        const hit = await reattachTaskImpl(
-          async () => (await tasksApi.list(id)).data,
-          pollTaskUntilTerminal,
-          {
+        // ✅ 可感知重连态：进入重挂先置位，进度卡 / 徽标 / 控制按钮同步进入「重连中」。
+        setSseReconnecting(true);
+        let hit: Awaited<ReturnType<typeof reattachTaskImpl>> = null;
+        try {
+          hit = await reattachTaskImpl(
+            async () => (await tasksApi.list(id)).data,
+            pollTaskUntilTerminal,
+            {
+              taskId,
+              typeFilter: "content_generation",
+              onReattach: () =>
+                setProgressMsg(
+                  "连接中断，正在重新挂接后台任务（后台任务可能仍在运行，请勿重复发起）...",
+                ),
+            },
+          );
+        } finally {
+          setSseReconnecting(false);
+        }
+        // ✅ R174 F2 / 本轮加固：轮询耗尽/连续网络失败（final=null）→ 未知态；
+        //    连「可接管任务」都没检索到时同样无法确认后台是否仍在跑（AI 可能照常计费），
+        //    一并进入持久可见的未知态，绝不静默回空闲。
+        if (!hit) {
+          markUnknownTask({
             taskId,
-            typeFilter: "content_generation",
-            onReattach: () => setProgressMsg("连接中断，正在重新挂接后台任务..."),
-          },
-        );
-        // ✅ R174 F2：轮询耗尽/连续网络失败（final=null）→ 显式进入可恢复未知态，
-        //    绝不允许静默回空闲后无提示地重复发起新生成。
-        if (hit && !hit.final) {
+            genType: "content",
+            reason: "SSE 连接中断后未能检索到可接管的正文生成任务，无法确认后台是否仍在运行",
+          });
+        } else if (!hit.final) {
           markUnknownTask({
             taskId: hit.taskId,
             genType: "content",
@@ -2533,6 +2568,7 @@ export default function SchemeWorkbenchPage() {
     // ✅ 世代校验：被重入（abort）的旧协程不得复位新任务的状态
     if (genSeqRef.current === mySeq) {
       setGenerating(false);
+      setSseReconnecting(false);
       setGenType("");
       setTaskPaused(false);
     }
@@ -3389,6 +3425,7 @@ export default function SchemeWorkbenchPage() {
             badge={total > 0 ? `${done}/${total} 章` : ""}
             badgeColor={total > 0 ? (done >= total ? "green" : "blue") : "default"}
             hint="第四步：按目录逐章生成正文，支持一键全文 / 单章 / 补全生成，可设字数与并发模式；开启「全文一致性 Agent 修复」后正文生成结束会自动扫描并修复前后矛盾"
+            reconnecting={sseReconnecting}
           />
         );
       })(),
@@ -3396,6 +3433,7 @@ export default function SchemeWorkbenchPage() {
         <ContentGenerationTab
           generating={generating}
           running={generating && genType === "content"}
+          reconnecting={sseReconnecting}
           taskPaused={taskPaused}
           taskStopping={taskStopping}
           shrinking={shrinking}
@@ -3644,6 +3682,7 @@ export default function SchemeWorkbenchPage() {
           outlineDoneTotal={outlineDoneTotal}
           outlineLogs={outlineLogs}
           stats={genStats}
+          reconnecting={sseReconnecting}
         />
       )}
 

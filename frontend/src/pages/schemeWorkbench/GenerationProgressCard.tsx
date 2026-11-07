@@ -12,7 +12,7 @@ import {
   LoadingOutlined,
   ThunderboltOutlined,
 } from "@ant-design/icons";
-import { Card, List, Progress, Tag } from "antd";
+import { Card, List, Progress, Tag, Alert } from "antd";
 import { memo, useMemo } from "react";
 import { Typography } from "antd";
 const { Title, Text } = Typography;
@@ -27,6 +27,8 @@ export type GenerationProgressProps = {
   outlineLogs: OutlineLogItem[];
   /** ✅ 进度增强：后端下发的运行统计（已耗时 / ETA / 累计字数 / 并发 / 进行中章节） */
   stats?: GenStats;
+  /** ✅ 可感知重连态：SSE 断线后正在重新挂接后台任务 */
+  reconnecting?: boolean;
 };
 
 /** ✅ 实时日志面板的最大渲染行数：仅限制渲染，数据源保持全量。
@@ -46,6 +48,7 @@ export const GenerationProgressCard = memo(function GenerationProgressCard(
     outlineDoneTotal,
     outlineLogs,
     stats,
+    reconnecting,
   } = p;
   // ✅ 性能优化：原实现把 `[...outlineLogs].reverse()` 写在 JSX 里 —— SSE 期间
   //    progress 与日志每条更新都触发重渲，也就意味着每次都全量复制一遍整个数组，
@@ -102,6 +105,15 @@ export const GenerationProgressCard = memo(function GenerationProgressCard(
       <div style={{ display: "flex", gap: 16 }}>
         {/* ---- 左侧：任务标题 + 横向进度条 + 运行统计 + 当前工作内容 ---- */}
         <div style={{ flex: "0 0 420px", display: "flex", flexDirection: "column", gap: 8 }}>
+          {reconnecting && (
+            <Alert
+              type="warning"
+              showIcon
+              message="连接已中断，正在重新挂接后台任务"
+              description="后台任务可能仍在运行（AI 计费继续），请勿重复发起生成；恢复后本页会自动同步进度。"
+              style={{ padding: "6px 10px", fontSize: 12 }}
+            />
+          )}
           <div
             style={{
               display: "flex",
@@ -141,7 +153,7 @@ export const GenerationProgressCard = memo(function GenerationProgressCard(
             }}
           >
             <Text
-              style={{ fontSize: 12, color: "#666", flex: 1, minWidth: 0 }}
+              style={{ fontSize: 12, color: "var(--bp-text-secondary)", flex: 1, minWidth: 0 }}
               ellipsis
               title={progressMsg}
             >
@@ -255,14 +267,14 @@ export const GenerationProgressCard = memo(function GenerationProgressCard(
               minHeight: 0,
               maxHeight: 280,
               overflow: "auto",
-              border: "1px solid #f0f0f0",
+              border: "1px solid var(--bp-border)",
               borderRadius: 6,
               padding: "6px 10px",
-              background: "#fafafa",
+              background: "var(--bp-panel-bg)",
             }}
           >
             {sectionLogs.length === 0 ? (
-              <div style={{ textAlign: "center", padding: 12, color: "#999" }}>
+              <div style={{ textAlign: "center", padding: 12, color: "var(--bp-text-tertiary)" }}>
                 正在连接 AI，等待章节生成...
               </div>
             ) : (
@@ -279,14 +291,14 @@ export const GenerationProgressCard = memo(function GenerationProgressCard(
               minHeight: 0,
               maxHeight: 280,
               overflow: "auto",
-              border: "1px solid #f0f0f0",
+              border: "1px solid var(--bp-border)",
               borderRadius: 6,
               padding: "6px 10px",
-              background: "#fafafa",
+              background: "var(--bp-panel-bg)",
             }}
           >
             {outlineLogs.length === 0 ? (
-              <div style={{ textAlign: "center", padding: 12, color: "#999" }}>
+              <div style={{ textAlign: "center", padding: 12, color: "var(--bp-text-tertiary)" }}>
                 正在连接 AI，准备生成目录...
               </div>
             ) : (

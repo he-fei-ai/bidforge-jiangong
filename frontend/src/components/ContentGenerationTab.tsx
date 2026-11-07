@@ -46,6 +46,8 @@ export type ContentGenerationTabProps = {
   generating: boolean;
   /** 是否正在生成正文（generating && genType === "content"）——按钮 loading 口径 */
   running: boolean;
+  /** ✅ 可感知重连态：SSE 断线后正在重新挂接后台任务（暂停/恢复禁用，停止仍可用） */
+  reconnecting?: boolean;
   /** 当前活跃任务是否已暂停（暂停/恢复按钮互斥 + 「已暂停」Tag） */
   taskPaused: boolean;
   /**
@@ -190,17 +192,22 @@ export function ContentGenerationTab(p: ContentGenerationTabProps) {
         </Tooltip>
         {p.running && (
           <>
+            {p.reconnecting && (
+              <Tag color="warning" style={{ margin: 0 }}>
+                🔄 重连中（后台任务可能仍在运行，请勿重复发起）
+              </Tag>
+            )}
             <Button
               icon={<PauseOutlined />}
               onClick={() => p.onControl("pause")}
-              disabled={p.taskPaused || p.taskStopping}
+              disabled={p.reconnecting || p.taskPaused || p.taskStopping}
             >
               暂停
             </Button>
             <Button
               icon={<PlayCircleOutlined />}
               onClick={() => p.onControl("resume")}
-              disabled={!p.taskPaused || p.taskStopping}
+              disabled={p.reconnecting || !p.taskPaused || p.taskStopping}
             >
               恢复
             </Button>
@@ -239,7 +246,7 @@ export function ContentGenerationTab(p: ContentGenerationTabProps) {
       {/* 第二行：字数设置 / 生成模式 / 全文一致性 Agent 修复 / 超字数章节自动压缩（四列并列水平排列） */}
       <Card
         size="small"
-        style={{ marginBottom: 8, background: "#fafafa" }}
+        style={{ marginBottom: 8, background: "var(--bp-panel-bg)" }}
         styles={{ body: { padding: "12px 18px" } }}
       >
         <div
