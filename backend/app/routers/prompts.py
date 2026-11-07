@@ -51,6 +51,10 @@ from app.services.audit_service import (
     record_prompt_audit,
 )
 
+# ✅ 2026-11-07（错误回显脱敏）：异常原文一律经同一收敛函数再回显/落日志，
+#    防止上游错误体中的凭据（Authorization: Bearer sk-…）与内部路径外泄。
+from app.services.prompt_governance import sanitize_error_text as _safe_error
+
 router = APIRouter(prefix="/api/v1/prompts", tags=["prompts"])
 
 #: 提示词内容上限（防止单条超大内容进入数据库与审计链路）。
@@ -194,7 +198,8 @@ async def prompt_audit_logs(key: str, limit: int = 50, offset: int = 0, db=Depen
     try:
         return await list_prompt_audit_logs(db, key, limit, offset)
     except ValueError as e:
-        raise HTTPException(400, str(e))
+        # ✅ 2026-11-07：不再回显异常原文（仅保留脱敏后的短说明）。
+        raise HTTPException(400, _safe_error(e, max_chars=120))
 
 
 @router.patch("/{key}")
@@ -407,10 +412,10 @@ async def rollback_prompt(key: str, body: dict, db=Depends(get_db), request: Req
 async def get_prompt_metrics(db=Depends(read_db)):
     """提示词运行时指标快照（进程内内存计数器，不持久化、重启清零）。
 
-    顶层固定 6 个键：``render_total`` / ``render_errors`` /
-    ``token_budget_truncated`` / ``repair_triggered`` / ``ai_failure_by_scene``
-    五个维度 dict，外加 ``registered_keys``（注册表全部 key，供运维对照
-    「哪些模板从无人渲染过」）。
+    顶层固定 7 个键：``render_total`` / ``render_errors`` /
+    ``render_missing_vars``（✅ 2026-11-07 新增）/ ``token_budget_truncated`` /
+    ``repair_triggered`` / ``ai_failure_by_scene`` 六个维度 dict，外加
+    ``registered_keys``（注册表全部 key，供运维对照「哪些模板从无人渲染过」）。
 
     ✅ R180（2026-11-05 · 可观测性）：新增 ``today`` 子对象（加法式，不改原有键）：
       · ``version_changes_today``：今日提示词版本变更（覆盖/回滚/恢复默认）次数，
@@ -434,8 +439,10 @@ async def get_prompt_metrics(db=Depends(read_db)):
             if _row is not None:
                 _today_stats["render_calls_today"] = int(_row[0] or 0)
         except Exception as e:  # 指标失败绝不阻断页面
-            logger.warning("prompt-metrics 今日计数查询失败（已降级为 0）: %s", e)
-            _today_stats["error"] = str(e)[:120]
+            # ✅ 2026-11-07：日志与响应都只保留脱敏后的短文本（不落凭据/内部路径明文）。
+            _err = _safe_error(e, max_chars=120)
+            logger.warning("prompt-metrics 今日计数查询失败（已降级为 0）: %s", _err)
+            _today_stats["error"] = _err
     _today_stats["render_basis"] = "ai_audit_logs 调用数（每次 AI 调用渲染一次提示词，近似口径）"
     _snap["today"] = _today_stats
     return _snap
@@ -562,13 +569,15 @@ async def sync_prompts_from_code(force: bool = False, db=Depends(get_db)):
                 )
         except Exception as e:  # noqa: BLE001 - 单 key 失败不阻断其他 key
             summary["errors"] += 1
-            logger.warning("sync-from-code 处理 key=%s 失败（跳过，不阻断）: %s", key, e)
-            details.append({"key": key, "status": "error", "error": str(e)})
+            # ✅ 2026-11-07：批量明细与日志同样走脱敏收敛，避免错误体带出凭据。
+            _err = _safe_error(e, max_chars=160)
+            logger.warning("sync-from-code 处理 key=%s 失败（跳过，不阻断）: %s", key, _err)
+            details.append({"key": key, "status": "error", "error": _err})
 
     try:
         await db.commit()
     except Exception as e:  # noqa: BLE001
-        logger.warning("sync-from-code commit 失败: %s", e)
+        logger.warning("sync-from-code commit 失败: %s", _safe_error(e))
         await db.rollback()
         raise HTTPException(500, "硬编码→DB 同步提交失败")
     reload_prompt_cache()

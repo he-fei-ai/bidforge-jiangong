@@ -25,6 +25,11 @@ logger = logging.getLogger(__name__)
 render_total: Counter = Counter()
 #: 渲染异常次数（变量缺失导致抛错 / 模板解析失败等）。
 render_errors: Counter = Counter()
+#: 渲染时检出「调用方未提供变量」的次数（key = 模板 key）。
+#: ✅ 2026-11-07：此前缺失变量只打 WARNING，端点无法回答「哪些模板正在
+#:   带着未替换的 {占位符} 下发」；DB 定制版新增变量在旧校验基线（出厂内容）
+#:   下更是完全不可观测。现在按**实际下发模板**判定并计数。
+render_missing_vars: Counter = Counter()
 #: token 预算截断触发次数（key = 被截断的资料段标签，如「全局事实」/「知识库」）。
 #: ✅ 2026-10-07：唯一消费点是 `prompt_governance.allocate_context_budget`
 #:   （原先全仓零调用方，端点永远回空 dict —— 运维无法区分「没截断」与「未埋点」）。
@@ -54,6 +59,11 @@ def record_render_error(key: str) -> None:
     _inc(render_errors, key)
 
 
+def record_render_missing_vars(key: str) -> None:
+    """记一次「渲染时变量缺失」（``_cache.get_prompt`` 检出缺失时调用）。"""
+    _inc(render_missing_vars, key)
+
+
 def record_token_budget_truncated(key: str) -> None:
     """记一次 token/长度预算截断（facts/章节正文超预算被切时调用）。"""
     _inc(token_budget_truncated, key)
@@ -72,8 +82,9 @@ def record_ai_failure(scene: str) -> None:
 def get_snapshot() -> dict:
     """导出结构化快照（全部为 dict 拷贝，调用方持有后修改不影响内部计数）。
 
-    顶层固定 6 个键：5 个计数器 dict + ``registered_keys``（注册表全部 key，
+    顶层固定 7 个键：6 个计数器 dict + ``registered_keys``（注册表全部 key，
     供运维对照「哪些模板从无人渲染过」）。
+    2026-11-07 新增 ``render_missing_vars``（加法式，不改动既有键）。
     """
     from app.services.ai.prompts._registry import (
         _ALL_PROMPTS,
@@ -91,6 +102,7 @@ def get_snapshot() -> dict:
     return {
         "render_total": dict(render_total),
         "render_errors": dict(render_errors),
+        "render_missing_vars": dict(render_missing_vars),
         "token_budget_truncated": dict(token_budget_truncated),
         "repair_triggered": dict(repair_triggered),
         "ai_failure_by_scene": dict(ai_failure_by_scene),
@@ -100,7 +112,14 @@ def get_snapshot() -> dict:
 
 def reset() -> None:
     """清零全部内存计数器（运维调试 / 测试隔离用）。"""
-    for c in (render_total, render_errors, token_budget_truncated, repair_triggered, ai_failure_by_scene):
+    for c in (
+        render_total,
+        render_errors,
+        render_missing_vars,
+        token_budget_truncated,
+        repair_triggered,
+        ai_failure_by_scene,
+    ):
         try:
             c.clear()
         except Exception:  # noqa: BLE001 - 计数器清零尽力而为，失败不影响其余计数器

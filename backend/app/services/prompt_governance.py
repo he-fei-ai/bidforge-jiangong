@@ -476,6 +476,12 @@ def guard_material(label: str, material: str, *, warn: bool = True) -> str:
 #: ✅ 2026-09-25（BUG-C · 围栏作用域误用）：只对这些段加边界围栏，
 #:    其余段（方案名称 / 章节 / 字数 / 同级章节……）属于系统自建指令，
 #:    把整份 user 上下文包进围栏会把可信指令也标记成「外部资料」。
+#: ⚠️ 书写形式契约（2026-11-07 · 标签漂移根因）：本元组一律写**裸标签**
+#:    （不含 `【】` 与冒号）。生产文本里的 `【标签】：` 由
+#:    ``_SEG_HEAD_RE``（L71）+ ``split_labeled_segments`` 先剥离装饰、
+#:    再用裸标签做 ``startswith`` 前缀匹配 —— 只补词条不补规则的话，
+#:    下一个新标签仍可能因书写形式不一致而静默失效。
+#:    该规则由 ``test_prompt_r184_hardening_20261107.py`` 的生产标签用例钉住。
 MATERIAL_LABELS: tuple[str, ...] = (
     "项目概述",
     "项目背景",
@@ -483,7 +489,14 @@ MATERIAL_LABELS: tuple[str, ...] = (
     "参考资料",
     "全局事实",
     "知识库",
+    # ✅ 2026-11-07（标签漂移 · 围栏静默失效）：正文上下文的实际标签是
+    #    「项目知识库素材」，前缀「知识库」不足以命中（startswith 判定），
+    #    导致全仓最大的外部资料段既不加围栏、也不参与注入手法扫描。
+    "项目知识库素材",
     "本章专项提取成果",
+    # ✅ 2026-11-07：逐章注入的「本章专属事实」同样来自项目资料提取结果，
+    #    与全局事实同属外部数据，需按资料段隔离（正文由事实表派生）。
+    "本章专属事实",
 )
 
 #: 混合段（「可信指令说明 + 外部数据」）：只围栏正文，保留段头说明。
@@ -576,7 +589,9 @@ def scan_external_materials(text: str, *, labels: tuple[str, ...] = MATERIAL_LAB
 
 
 #: 需要脱敏的外部资料标签（这些来源最可能含账号/密钥等敏感串）。
-SENSITIVE_MATERIAL_LABELS = ("项目资料摘要", "项目概述", "知识库", "全局事实")
+#: ✅ 2026-11-07：与 MATERIAL_LABELS 同步补齐正文实际标签「项目知识库素材」，
+#:    避免声明集合与生产标签再次漂移。
+SENSITIVE_MATERIAL_LABELS = ("项目资料摘要", "项目概述", "知识库", "项目知识库素材", "全局事实")
 
 
 #: 高置信度凭据形态（刻意避开标准编号/工程编号类字符串）。
@@ -620,6 +635,40 @@ def redact_sensitive(text: str) -> tuple[str, int]:
 
         out = pat.sub(_sub, out)
     return out, count
+
+
+#: 错误文本里需要掩码的内部绝对路径（Windows 盘符路径 / UNC 路径）。
+#: 只匹配「盘符:\非空白」形态，避免误伤 URL（https://…）与普通相对路径。
+_INTERNAL_PATH_PATTERN = re.compile(r"(?<![A-Za-z0-9_])[A-Za-z]:\\[^\s\"'<>|]+")
+
+
+def sanitize_error_text(text: object, *, max_chars: int = 160) -> str:
+    """把异常原文收敛为可安全回显/落日志的短文本。
+
+    背景（2026-11-07 · 错误回显泄露）：``/prompts`` 管理端点曾把 ``str(e)``
+    原样塞进 400 detail、统计项与批量明细。上游/数据库错误体经常带
+    ``Authorization: Bearer sk-…`` 这类凭据与 ``C:\\Users\\…`` 内部路径，
+    等于把密钥随响应回给前端、并写进日志明文。
+
+    处理顺序：凭据掩码（复用 :func:`redact_sensitive` 的高置信度规则）
+    → 内部路径掩码 → 折叠空白 → 截断。纯函数、不依赖开关（错误回显必须
+    无条件脱敏），失败时返回类型名而非原文。
+    """
+    if text is None:
+        return ""
+    try:
+        out = str(text)
+    except Exception:  # noqa: BLE001 - object.__str__ 异常时退化为类型名
+        return "[不可读错误]"
+    if not out:
+        return ""
+    try:
+        out, _ = redact_sensitive(out)
+        out = _INTERNAL_PATH_PATTERN.sub("[内部路径]", out)
+    except Exception:  # noqa: BLE001 - 脱敏失败时宁可只回显类型名
+        return "[错误详情已隐藏]"
+    out = " ".join(out.split())
+    return out[:max_chars]
 
 
 # ==========================================================================

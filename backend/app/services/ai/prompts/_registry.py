@@ -343,6 +343,35 @@ def validate_prompt_variables(key: str, **kwargs) -> list[str]:
     return missing
 
 
+def missing_variables_for_template(template: str, kwargs: dict | None = None, *, key: str = "") -> list[str]:
+    """基于**实际模板文本**计算调用方未提供的变量（运行期缺失告警/指标专用）。
+
+    与 :func:`validate_prompt_variables` 的区别：
+      * 后者以注册表「出厂 content + variables」为基线。用户经提示词编辑器
+        改库后，**新增**的 ``{新变量}`` 不在出厂变量表里 → 永远检测不到缺失，
+        渲染后原样把 ``{新变量}`` 下发给模型；**删除**的变量又会被继续误报。
+      * 本函数直接解析**当前实际使用的模板**（已解析 ``SHARED_*``），
+        因此 DB 定制版增删变量都能被检出，告警与指标的口径与「真正下发的
+        那份文本」一致。
+
+    过滤规则与运行期告警保持一致：``SHARED_*`` 引用 / 整行可选区块 /
+    JSON 示例误报 均不计入缺失。
+    """
+    provided = {str(k).lower() for k, v in (kwargs or {}).items() if v is not None}
+    missing: list[str] = []
+    for name in extract_variables(template or ""):
+        if _is_shared_reference(name):
+            continue
+        if name.lower() in provided:
+            continue
+        if _is_optional_block_var(name, template):
+            continue
+        if _is_false_positive(key, name, template):
+            continue
+        missing.append(name)
+    return missing
+
+
 def clean_prompt_text(text: str) -> str:
     """清洗提示词文本：统一换行符、移除零宽字符、去首尾空白。"""
     text = text.replace("\r\n", "\n").replace("\r", "\n")

@@ -1328,6 +1328,8 @@ export interface OutlineAutoConfirmSettings {
 export interface PromptMetricsSnapshot {
   render_total: Record<string, number>;
   render_errors: Record<string, number>;
+  /** 渲染时调用方未提供变量的次数（按模板 key；2026-11-07 新增，加法式）。 */
+  render_missing_vars?: Record<string, number>;
   token_budget_truncated: Record<string, number>;
   repair_triggered: Record<string, number>;
   ai_failure_by_scene: Record<string, number>;

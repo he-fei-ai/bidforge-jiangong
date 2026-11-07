@@ -18,16 +18,21 @@ import threading
 import time
 from pathlib import Path
 
+# ✅ 2026-11-07（日志脱敏）：DB 异常文本可能含内部路径/连接串，落日志前统一收敛。
+#    prompt_governance 是纯函数模块（顶层只依赖 stdlib），不反向 import prompts，无循环依赖。
 # ✅ R48（2026-10-06 · prompts 运行时指标）：热路径渲染计数。
 #    _metrics 顶层只依赖 stdlib（collections.Counter），不反向 import _cache/_registry，
 #    故此处顶层 import 无循环依赖风险；每个埋点内部已 try/except 兜底，计数失败
 #    绝不影响 prompt 渲染主流程。
-from ._metrics import record_render, record_render_error
+from app.services.prompt_governance import sanitize_error_text as _sanitize_error
+
+from ._metrics import record_render, record_render_error, record_render_missing_vars
 from ._registry import (
     _ALL_PROMPTS,
     clean_prompt_text,
     extract_variables,
     has_residual_placeholders,
+    missing_variables_for_template,
     render_prompt,
     validate_prompt_variables,
 )
@@ -123,7 +128,7 @@ def _resolve_shared_keys(prompt: str, _depth: int = 0, _chain: tuple[str, ...] =
         try:
             resolved = _resolve_shared_keys(get_prompt(key), _depth + 1, (*_chain, key))
         except Exception as e:
-            logger.warning("解析共享提示词 %s 失败: %s", key, e)
+            logger.warning("解析共享提示词 %s 失败: %s", key, _sanitize_error(e))
             return m.group(0)
         if not resolved:
             # key 未注册（拼写错误或已下架）——保留字面量并明确告警
@@ -288,7 +293,7 @@ def _load_prompt_cache_sync():
             finally:
                 conn.close()
         except Exception as e:
-            logger.warning("Failed to load prompt cache from DB: %s", e)
+            logger.warning("Failed to load prompt cache from DB: %s", _sanitize_error(e))
             _prompt_cache = None
 
 
@@ -312,7 +317,7 @@ def _get_prompt_cache() -> dict[str, str]:
             try:
                 _load_prompt_cache_sync()
             except Exception as e:
-                logger.warning("Failed to load prompt cache from DB: %s", e)
+                logger.warning("Failed to load prompt cache from DB: %s", _sanitize_error(e))
                 _prompt_cache = None
         elif current is not None and _loaded_db_path == current:
             # 路径未变但库已变新 → 外部写入（多进程 / 脚本 / 迁移），自动重载。
@@ -324,7 +329,7 @@ def _get_prompt_cache() -> dict[str, str]:
                     _load_prompt_cache_sync()
                     logger.info("Prompt cache reloaded: prompt_templates 表已更新")
                 except Exception as e:
-                    logger.warning("Failed to reload prompt cache from DB: %s", e)
+                    logger.warning("Failed to reload prompt cache from DB: %s", _sanitize_error(e))
                     _prompt_cache = None
         return _prompt_cache or {}
 
@@ -363,7 +368,7 @@ def get_prompt(key: str, **kwargs) -> str:
 
                     register_lazy_prompts()
                 except Exception as e:  # noqa: BLE001 - 补注册失败不得影响读取
-                    logger.warning("惰性补注册失败: %s", e)
+                    logger.warning("惰性补注册失败: %s", _sanitize_error(e))
                 meta = _ALL_PROMPTS.get(key)
             if not meta:
                 logger.warning("Prompt key '%s' not found in registry or cache", key)
@@ -392,7 +397,7 @@ def get_prompt(key: str, **kwargs) -> str:
 
                 prompt = _wrap_fuzzy_fill(prompt)
             except Exception as e:  # noqa: BLE001 - 展开失败不得阻断读取
-                logger.warning("提示词标记展开失败（%s）: %s", key, e)
+                logger.warning("提示词标记展开失败（%s）: %s", key, _sanitize_error(e))
 
         # BUG-FIX（2026-09-23 · 正文生成深度审计 · P0 日志噪音）：
         #   旧实现把缺失变量校验放在 `if kwargs:` 之外，导致任何"取原始模板"的合法
@@ -406,8 +411,16 @@ def get_prompt(key: str, **kwargs) -> str:
         #   "缺了什么"，所以校验只在 kwargs 非空时有意义 —— 这也让告警语义与
         #   validate_prompt_variables() 自身一致（后者同样只在有 kwargs 时才有意义）。
         if kwargs:
-            missing = [v for v in validate_prompt_variables(key, **kwargs) if not v.startswith("SHARED_")]
+            # ✅ 2026-11-07（校验基线错位）：旧实现用 validate_prompt_variables(key)
+            #    以「注册表出厂 content + variables」为基线；DB 定制版新增的
+            #    {新变量} 不在出厂变量表里 → 缺失检测永远漏报，渲染后原样把
+            #    {新变量} 下发给模型。现改为基于**实际下发的模板文本**判定，
+            #    并把缺失次数计入 render_missing_vars（可观测）。
+            missing = [
+                v for v in missing_variables_for_template(prompt, kwargs, key=key) if not v.startswith("SHARED_")
+            ]
             if missing:
+                record_render_missing_vars(key)
                 logger.warning(
                     "Prompt '%s' has missing variables (not passed in call): %s",
                     key,

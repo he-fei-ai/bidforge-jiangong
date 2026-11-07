@@ -79,6 +79,7 @@ export default function PromptMetricsPage() {
       .sort((a, b) => b.total - a.total);
   }, [data]);
 
+  const missingRows = useMemo(() => toRows(data?.render_missing_vars), [data]);
   const repairRows = useMemo(() => toRows(data?.repair_triggered), [data]);
   const failureRows = useMemo(() => toRows(data?.ai_failure_by_scene), [data]);
   const truncatedRows = useMemo(() => toRows(data?.token_budget_truncated), [data]);
@@ -205,6 +206,7 @@ export default function PromptMetricsPage() {
         />
       </Card>
 
+      {renderCountCard("变量缺失告警（key）", missingRows, "volcano")}
       {renderCountCard("修复轮触发分布（repair_key）", repairRows, "orange")}
       {renderCountCard("AI 失败 / 降级（scene）", failureRows, "red")}
       {renderCountCard("Token 预算截断（key）", truncatedRows, "purple")}
