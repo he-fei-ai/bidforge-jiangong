@@ -61,7 +61,7 @@ class TestNumberingConsistencyValidator:
 
     async def test_scheme_summary(self, db_conn):
         """方案级汇总：1 章漂移 → mismatched=1、consistent=False。"""
-        from app.services.numbering import validate_scheme_numbering_consistency
+        from app.services.numbering import validate_scheme_content_numbering
 
         await _seed_scheme(db_conn)
         await db_conn.execute(
@@ -71,7 +71,7 @@ class TestNumberingConsistencyValidator:
             (_outline("1", 1),),
         )
         await db_conn.commit()
-        rep = await validate_scheme_numbering_consistency(db_conn, "s1")
+        rep = await validate_scheme_content_numbering(db_conn, "s1")
         assert rep["checked"] == 1
         assert rep["mismatched"] == 1
         assert rep["consistent"] is False
@@ -94,7 +94,7 @@ class TestNumberingConsistencyValidator:
     async def test_repair_endpoint(self, db_conn):
         """POST /numbering-consistency/repair 修复后内容更新且变为一致。"""
         from app.routers.sections import get_numbering_consistency, repair_numbering_consistency
-        from app.services.numbering import validate_scheme_numbering_consistency
+        from app.services.numbering import validate_scheme_content_numbering
 
         await _seed_scheme(db_conn)
         await db_conn.execute(
@@ -105,7 +105,7 @@ class TestNumberingConsistencyValidator:
         )
         await db_conn.commit()
 
-        before = await validate_scheme_numbering_consistency(db_conn, "s1")
+        before = await validate_scheme_content_numbering(db_conn, "s1")
         assert before["mismatched"] == 1
 
         res = await repair_numbering_consistency("s1", db=db_conn)
@@ -269,7 +269,7 @@ class TestNumberingVersioning:
     async def test_rollback_restores_and_is_undoable(self, db_conn):
         """回滚恢复修复前正文；回滚产生的 undo 快照可再次回滚（撤销回滚）。"""
         from app.routers.sections import repair_numbering_consistency, rollback_numbering_version
-        from app.services.numbering import validate_scheme_numbering_consistency
+        from app.services.numbering import validate_scheme_content_numbering
 
         await self._seed_drifted(db_conn)
         res = await repair_numbering_consistency("s1", db=db_conn)
@@ -281,7 +281,7 @@ class TestNumberingVersioning:
         assert rb["undo_snapshot_id"]
         cur = await db_conn.execute("SELECT content FROM sections WHERE id='sec1'")
         assert "## 3.1 总体安排" in (await cur.fetchone())["content"]
-        after = await validate_scheme_numbering_consistency(db_conn, "s1")
+        after = await validate_scheme_content_numbering(db_conn, "s1")
         assert after["mismatched"] == 1
 
         # 撤销回滚（undo 快照也是 numbering_rollback）：重新修复
@@ -410,9 +410,57 @@ class TestExportNumberingGuardReporting:
                 "error": "db locked",
             }
 
-        monkeypatch.setattr(numbering, "validate_scheme_numbering_consistency", _fake_validate)
+        monkeypatch.setattr(numbering, "validate_scheme_content_numbering", _fake_validate)
         caplog.set_level(logging.WARNING)
         await _export_cache._guard_numbering_consistency(db_conn, "s1")
         msgs = [r.getMessage() for r in caplog.records]
         assert any("读取失败" in m and "db locked" in m for m in msgs), msgs
         assert not any("发现 0 章" in m for m in msgs), msgs
+
+
+class TestSchemeValidatorScopeIsContentOnly:
+    """✅ R185（2026-11-07 更名）：scheme 级校验器**只覆盖正文**。
+
+    旧名 ``validate_scheme_numbering_consistency`` 读起来像「方案编号全量一致」，
+    实现却只比较落库正文子标题 vs ``outline_json.id`` —— DLV-13 曾据此漏查
+    目录结构漂移（R183 才补）。现改名 + docstring 把契约显式化：
+      · docstring 写明「只校验落库正文 / 不校验目录结构」；
+      · **只有结构漂移**（正文为空）时，本函数仍判 ``consistent=True``；
+      · 路由层 ``get_numbering_consistency`` 才把结构结果求与 → False。
+    """
+
+    async def test_declares_content_scope_and_explains_structure_is_elsewhere(self, db_conn):
+        import inspect
+
+        from app.services import numbering
+
+        doc = inspect.getdoc(numbering.validate_scheme_content_numbering) or ""
+        assert "只校验落库正文" in doc
+        assert "不校验目录结构" in doc
+        # 名字本身也必须带 content：调用方从名字就能看出覆盖面
+        assert "content" in numbering.validate_scheme_content_numbering.__name__
+        await _seed_scheme(db_conn)
+        rep = await numbering.validate_scheme_content_numbering(db_conn, "s1")
+        assert rep["checked"] == 0 and rep["consistent"] is True
+
+    async def test_structure_drift_alone_does_not_flip_content_validator(self, db_conn):
+        from app.routers.sections import get_numbering_consistency
+        from app.services import numbering
+
+        await _seed_scheme(db_conn)
+        # 两章平级：第 2 章存储编号陈旧为 "1"（真实树位置应为 "2"），正文为空。
+        for sid, title, sort in (("n1", "第一章 工程概况", 1), ("n2", "第二章 施工部署", 2)):
+            await db_conn.execute(
+                "INSERT INTO sections (id, scheme_id, project_id, title, parent_id, "
+                "level, sort_order, outline_json, content) VALUES (?,?,?,?,?,?,?,?,?)",
+                (sid, "s1", "p1", title, "", 1, sort, _outline("1", 1), ""),
+            )
+        await db_conn.commit()
+
+        content_rep = await numbering.validate_scheme_content_numbering(db_conn, "s1")
+        assert content_rep["checked"] == 0
+        assert content_rep["consistent"] is True, "正文层面无漂移 ≠ 结构一致"
+
+        route_rep = await get_numbering_consistency("s1", db=db_conn)
+        assert route_rep["outline"]["mismatched"] == 1
+        assert route_rep["consistent"] is False, "结构漂移必须由路由层补上，否则就是漏查"

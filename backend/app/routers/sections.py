@@ -31,7 +31,7 @@ from app.services.numbering import (
     normalize_section_content_subheadings,  # ✅ 正文子标题编号落库前规范化（唯一实现）
     renumber_section_outline_ids,  # ✅ 编号统一：DB 重排唯一实现
     repair_scheme_numbering_consistency,  # ✅ 编号统一：显式跨校验器（修复漂移）
-    validate_scheme_numbering_consistency,  # ✅ 编号统一：显式跨校验器
+    validate_scheme_content_numbering,  # ✅ 编号统一：显式跨校验器（仅正文）
 )
 from app.services.numbering import (
     rollback_numbering_version as _rollback_numbering_version,  # ✅ 编号版本管理
@@ -1987,7 +1987,7 @@ async def renumber_sections_after_reorder(db, scheme_id: str) -> None:
 async def _outline_structure_report(db, scheme_id: str) -> dict:
     """结构编号自检：outline_json.id/level 是否与真实树（parent_id+sort_order）同源。
 
-    ✅ BUG 修复（2026-11-07 · 校验盲区）：`validate_scheme_numbering_consistency`
+    ✅ BUG 修复（2026-11-07 · 校验盲区）：`validate_scheme_content_numbering`
     只核对「落库正文子标题 vs outline_json.id」，完全不看 outline_json.id 是否等于
     它在该方案树里的位置。R89 N2 已知的并发回写少行（见 renumber_sections_after_reorder
     的告警）会让编号陈旧，而正文随后按这份陈旧编号重写 → 校验器仍判绿，导出侧
@@ -2107,7 +2107,7 @@ async def _renormalize_all_section_contents(db, scheme_id: str) -> None:
       且该函数在 **5 个结构变更入口**（create/update/delete/reorder/save-outline）都会
       跑一次，拖拽排序这类高频操作实测卡顿数百毫秒。现复用编号模块已有的
       `load_scheme_section_index`（2 条查询压成一次预取，与
-      validate_scheme_numbering_consistency 同一套优化），整轮降为 3 次查询；
+      validate_scheme_content_numbering 同一套优化），整轮降为 3 次查询；
       预取失败时传 index=None 回退逐章查询，**行为与旧版完全一致**（fail-soft）；
     - 单章失败仅告警、绝不阻断事务（编号规范化代价远低于正文丢失）；
     - 在 renumber 之后、commit 之前调用，复用同一事务。
@@ -2199,7 +2199,7 @@ async def get_numbering_consistency(scheme_id: str, db=Depends(get_db)):
     `consistent` 与结构一致性求与——旧实现只查「正文 vs outline_json」，结构编号
     陈旧（outline_json.id 不等于树位置）时仍报绿，见 `_outline_structure_report`。
     """
-    report = await validate_scheme_numbering_consistency(db, scheme_id)
+    report = await validate_scheme_content_numbering(db, scheme_id)
     outline = await _outline_structure_report(db, scheme_id)
     report["outline"] = outline
     report["consistent"] = bool(report.get("consistent")) and bool(outline.get("consistent"))

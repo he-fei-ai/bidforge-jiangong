@@ -6,7 +6,7 @@
 - ``tests/test_numbering_unification.py``        → ``app.services.numbering`` 公开面
   （renumber_outline_nodes / renumber_section_outline_ids / stored_id_to_* /
   renumber_section_body_subheadings / CHINESE_NUMBERS / ALPHABET）
-- ``tests/test_numbering_batch_perf_20260927.py``→ validate_scheme_numbering_consistency /
+- ``tests/test_numbering_batch_perf_20260927.py``→ validate_scheme_content_numbering /
   normalize_section_content_subheadings / load_scheme_section_index
 - ``tests/test_content_generation_g12.py``        → ``app.services.ai.task_registry``
   （_tasks / finish_task / get_conn / update_progress）与

@@ -310,6 +310,13 @@ export interface PreflightRunItem {
   stale?: boolean;
   /** ✅ G5：所属项目（跨方案的项目级审计追溯） */
   project_id?: string;
+  /** ✅ R185：本次运行是否「检查不完整」（1=是，0=否；null/缺省=历史行未记录，
+   *  不等于「完整」）。值来自执行时落库，不在前端重算。 */
+  incomplete?: number | null;
+  /** ✅ R185：执行时落库的失败来源（检查崩溃 → 无法判定） */
+  failed_sources?: string[];
+  /** ✅ R185：执行时落库的部分来源（跑过但未覆盖全文 → 无法判定） */
+  partial_sources?: string[];
 }
 
 /** 审核状态机 */

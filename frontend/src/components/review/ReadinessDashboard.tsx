@@ -916,20 +916,35 @@ function ReadinessDashboard({
             {runs.slice(0, 5).map((r, i) => (
               <Tooltip
                 key={r.id}
-                title={`${r.created_at?.replace("T", " ").slice(0, 19)} · ${r.verdict}${r.stale ? "（正文已变更，结论已过期）" : ""}`}
+                title={
+                  `${r.created_at?.replace("T", " ").slice(0, 19)} · ${r.verdict}` +
+                  (r.stale ? "（正文已变更，结论已过期）" : "") +
+                  // ✅ R185：历史记录必须能区分「当时完整通过」与「当时有一半没查」；
+                  //    incomplete 与原因均来自执行时落库，前端不重算。
+                  (r.incomplete === 1
+                    ? `（检查不完整：${
+                        [...(r.failed_sources || []), ...(r.partial_sources || [])].join("、") ||
+                        "原因未记录"
+                      }）`
+                    : "")
+                }
               >
                 <Tag
                   // ✅ G3：过期记录用 volcano 醒目标注，避免拿旧高分误判
+                  // ✅ R185：检查不完整用 orange，与「不通过/过期」区分开
                   color={
                     r.blocked || r.stale
                       ? "volcano"
-                      : scoreColor(r.total) === "#52c41a"
-                        ? "green"
-                        : "blue"
+                      : r.incomplete === 1
+                        ? "orange"
+                        : scoreColor(r.total) === "#52c41a"
+                          ? "green"
+                          : "blue"
                   }
                   style={{ marginRight: 0 }}
                 >
                   {i === 0 ? "本次" : `#${i}`} {r.total}（{r.grade}）{r.stale ? " 已过期" : ""}
+                  {r.incomplete === 1 ? " 部分检查" : ""}
                 </Tag>
               </Tooltip>
             ))}

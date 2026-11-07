@@ -33,7 +33,7 @@ from app.services.ai.prompts._registry import (  # noqa: E402  _is_false_positiv
     get_default_prompt,
     render,
 )
-from app.services.numbering import validate_scheme_numbering_consistency
+from app.services.numbering import validate_scheme_content_numbering
 
 
 # ---------------------------------------------------------------------------
@@ -520,7 +520,7 @@ class TestSaveOutlineNumberingParity:
         await _seed_scheme(db_conn)
         await _seed_sections(db_conn, "sc1")
 
-        before = await validate_scheme_numbering_consistency(db_conn, "sc1")
+        before = await validate_scheme_content_numbering(db_conn, "sc1")
         assert before["consistent"] is True, "前置条件：初始状态无漂移"
 
         await sec.save_outline(
@@ -540,7 +540,7 @@ class TestSaveOutlineNumberingParity:
         assert "## 3.1" in (row["content"] or ""), row["content"]
         assert "## 2.1" not in (row["content"] or "")
         assert json.loads(row["outline_json"])["id"] == "3"
-        after = await validate_scheme_numbering_consistency(db_conn, "sc1")
+        after = await validate_scheme_content_numbering(db_conn, "sc1")
         assert after["consistent"] is True, after
 
     @pytest.mark.asyncio

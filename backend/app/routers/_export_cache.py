@@ -285,7 +285,7 @@ async def _guard_numbering_consistency(db, scheme_id: str) -> dict:
     校验器自身异常绝不阻断导出。
 
     ✅ R183（2026-11-07 · 严格模式盲区）：此前 strict 分支只调用
-    `validate_scheme_numbering_consistency`（正文子标题 vs outline_json.id），
+    `validate_scheme_content_numbering`（正文子标题 vs outline_json.id），
     当 outline_json.id 本身陈旧（例如「第 2 章存储编号被改成 1」）而正文又按
     这份陈旧编号重写时，正文校验判绿 → 严格模式放行，与导出侧「按树重算」
     的结论分叉。现严格模式同时只读复用 `sections._outline_structure_report`
@@ -312,9 +312,9 @@ async def _guard_numbering_consistency(db, scheme_id: str) -> dict:
         _sh.logger.debug("读取 numbering_consistency_strict 失败（沿用默认非严格模式）", exc_info=True)
         _strict = False
     if _strict:
-        from app.services.numbering import validate_scheme_numbering_consistency
+        from app.services.numbering import validate_scheme_content_numbering
 
-        _rep = await validate_scheme_numbering_consistency(db, scheme_id)
+        _rep = await validate_scheme_content_numbering(db, scheme_id)
         _outline = None
         _outline_reason = ""
         try:
@@ -366,9 +366,9 @@ async def _guard_numbering_consistency(db, scheme_id: str) -> dict:
         return {"outline": _outline_detail}
     else:
         try:
-            from app.services.numbering import validate_scheme_numbering_consistency
+            from app.services.numbering import validate_scheme_content_numbering
 
-            _rep = await validate_scheme_numbering_consistency(db, scheme_id)
+            _rep = await validate_scheme_content_numbering(db, scheme_id)
             if _rep.get("failed"):
                 # ✅ 2026-11-05（R2 日志驱动）：校验器读取失败时返回 failed=True +
                 #    mismatched=0，旧实现会打出「发现 0 章不一致」的误导日志；

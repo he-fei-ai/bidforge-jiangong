@@ -671,7 +671,7 @@ async def load_scheme_section_index(db, scheme_id: str) -> dict:
     """一次性预取方案内全部章节的编号元数据，供批量校验/修复复用。
 
     ✅ 性能修复（2026-09-27 · 消除导出路径的 N+1）：
-    旧实现里 `validate_scheme_numbering_consistency` 虽然把 content 批量读出来了，
+    旧实现里 `validate_scheme_content_numbering` 虽然把 content 批量读出来了，
     但每章仍要调用 `normalize_section_content_subheadings`，而后者**逐章**再查两次
     （读 outline_json/level/title + COUNT 子章节）。实测 200 章方案 =
     **401 次 db.execute / 480ms**，而该函数在 `export.py::_guard_numbering_consistency`
@@ -886,7 +886,7 @@ async def validate_section_content_numbering(
     # ✅ BUG 修复（2026-09-27 · 契约不成立）：docstring 一直承诺
     #    「content_subheading_renumber=False 时返回 skipped=True」，但旧实现
     #    只靠 normalize_section_content_subheadings 返回 changed=False 间接等价，
-    #    `skipped` 字段恒为 False —— 消费方（validate_scheme_numbering_consistency /
+    #    `skipped` 字段恒为 False —— 消费方（validate_scheme_content_numbering /
     #    路由返回体 / 前端）永远看不到「本次校验被开关跳过」，会把
     #    「无法判定」误读成「校验通过」。现按承诺显式回传。
     disabled = _renumber_disabled()
@@ -916,8 +916,17 @@ async def validate_section_content_numbering(
     }
 
 
-async def validate_scheme_numbering_consistency(db, scheme_id: str) -> dict:
-    """批量校验方案内所有含正文章节的编号一致性，返回汇总报告。
+async def validate_scheme_content_numbering(db, scheme_id: str) -> dict:
+    """批量校验方案内所有含正文章节的**正文子标题编号**一致性，返回汇总报告。
+
+    ⚠️ 口径（R185 · 2026-11-07 更名，原名 ``validate_scheme_numbering_consistency``）：
+    本函数**只校验落库正文**（子标题编号 vs ``outline_json.id``），
+    **不校验目录结构**。``outline_json.id`` 是否等于真实树位置（重复 / 错位 /
+    父节点空壳）属于结构检查，由路由层 ``sections._outline_structure_report``
+    负责；导出守卫与总检必须**两边都调**。旧名易被读成「方案编号全量一致」，
+    曾导致 DLV-13 漏查结构（见 ``compliance.py::_numbering_consistency_findings``
+    的修复记录）。**覆盖面以本函数名与 docstring 为准**：正文为空时
+    ``checked=0`` 恒真，不要把 ``consistent=True`` 当成「结构也一致」。
 
     ✅ 性能（2026-09-27）：预取一次编号索引并透传给逐章校验，
     把「1 + 2N 次查询」压到「3 次固定查询」。旧实现 200 章 = 401 次 execute / 480ms，
@@ -974,7 +983,7 @@ async def repair_scheme_numbering_consistency(db, scheme_id: str) -> dict:
     from app.services.content_utils import text_word_count
     from app.services.repair_record import create_snapshot
 
-    report = await validate_scheme_numbering_consistency(db, scheme_id)
+    report = await validate_scheme_content_numbering(db, scheme_id)
     drifted = [s for s in report.get("sections", []) if not s.get("consistent") and not s.get("skipped")]
     if not drifted:
         return {"fixed": 0, "total": report["checked"], "report": report, "snapshot_id": None}
@@ -1053,7 +1062,7 @@ async def repair_scheme_numbering_consistency(db, scheme_id: str) -> dict:
     await db.commit()
     # ✅ B-09（R175）：返回**修复后重新校验**的报告。旧实现回传修复前的
     #    ``report``，前端展示「仍有 N 处漂移」而正文其实已修好，用户反复点修复。
-    fresh = await validate_scheme_numbering_consistency(db, scheme_id)
+    fresh = await validate_scheme_content_numbering(db, scheme_id)
     return {"fixed": fixed, "total": fresh.get("checked", 0), "report": fresh, "snapshot_id": snapshot_id}
 
 

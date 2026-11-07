@@ -109,7 +109,7 @@ async def _seed_two_chapters(db, scheme_id: str, *, drift: bool) -> None:
 class TestDlv13SeesOutlineStructureDrift:
     """DLV-13 结构漂移盲区：30 组「第 2 章存储编号被改成 1」。
 
-    修复前：DLV-13 只调 validate_scheme_numbering_consistency（只解析正文），
+    修复前：DLV-13 只调 validate_scheme_content_numbering（只解析正文），
     结构漂移 30/30 漏检；修复后：只读复用 sections.py::_outline_structure_report，
     30/30 命中。
     """
@@ -196,3 +196,107 @@ class TestProgramCheckerCrashIsUndetermined:
             assert "检查不完整" in payload["verdict"]
         else:
             assert payload["blockers"]
+
+
+class TestSubheadingDetectorCrashIsUndetermined:
+    """✅ R185（2026-11-07 · 三态口径）：检测器崩溃 ≠ 无冲突。
+
+    旧实现（export.py::collect_export_issues）异常分支只写 debug 日志并继续，
+    issues 里没有 ``body_subheading_namespace_conflict`` → 上层读成「零发现 /
+    没问题」。现回传 ``subheading_check.undetermined``，总检据此计入
+    ``partial_sources`` → incomplete → 不放行。
+    """
+
+    async def test_detector_crash_marks_check_undetermined(self, db_conn, monkeypatch):
+        await _seed(db_conn, "正文描述施工流程。\n")
+
+        def _boom(sections):  # noqa: ANN001 - 模拟检测器内部崩溃
+            raise RuntimeError("R185 模拟子标题命名空间检测器崩溃")
+
+        monkeypatch.setattr(E, "_detect_body_subheading_namespace_conflict", _boom)
+        result = await E.collect_export_issues(SCHEME, db_conn, strict_read=True)
+
+        check = result["subheading_check"]
+        assert check["undetermined"] is True, "检测器崩溃不得返回「无冲突」这种干净态"
+        assert check["reason"] == "detector_error"
+        # 崩溃不产生 finding（无法判定不是不通过），但必须有可见的 undetermined 标记
+        assert not [i for i in result["issues"] if i.get("type") == "body_subheading_namespace_conflict"]
+
+    async def test_detector_crash_makes_overview_partial_and_unreleased(self, db_conn, monkeypatch):
+        await _seed(db_conn, "脚手架搭设与验收按本方案执行。" * 60)
+
+        def _boom(sections):  # noqa: ANN001
+            raise RuntimeError("R185 模拟子标题命名空间检测器崩溃")
+
+        monkeypatch.setattr(E, "_detect_body_subheading_namespace_conflict", _boom)
+        payload = await C._readiness_overview_compute(db_conn, SCHEME, persist=False)
+
+        assert payload["incomplete"] is True
+        assert payload["released"] is False
+        assert "export_check" in payload["partial_sources"]
+
+
+class TestPreflightRunPersistsIncomplete:
+    """✅ R185（2026-11-07）：执行时算出的 incomplete 必须随运行落库。
+
+    旧实现只落 released/blocked，历史回看只剩「通过/不通过」，
+    无法区分「当时完整通过」与「当时有一半没查」。口径要求：
+    落库的就是执行时那一个值，读取端不得按来源列表重算。
+    """
+
+    async def test_executed_incomplete_is_persisted_and_listed(self, db_conn, monkeypatch):
+        await _seed(db_conn, "脚手架搭设与验收按本方案执行。" * 60)
+
+        def _boom(ctx):  # noqa: ANN001
+            raise RuntimeError("R185 模拟 checker 崩溃")
+
+        monkeypatch.setattr(PE, "check_deliverability", _boom)
+        payload = await C._readiness_overview_compute(db_conn, SCHEME, persist=True)
+        assert payload["incomplete"] is True
+
+        runs = await C.list_preflight_runs(SCHEME, limit=5, db=db_conn)
+        item = runs["items"][0]
+        assert item["incomplete"] == 1, "历史记录必须能显示「检查不完整」"
+        assert "program" in item["partial_sources"]
+        assert item["failed_sources"] == []
+
+    async def test_persisted_value_wins_over_recomputation(self, db_conn):
+        """落库值 = 执行时值：即使来源列表为空，也不得在读取端改判为「完整」。"""
+        await _seed(db_conn, "正文描述施工流程。\n")
+        await C._persist_run(
+            db_conn,
+            SCHEME,
+            {
+                "total": 90,
+                "grade": "A",
+                "verdict": "建议放行",
+                "released": True,
+                "blocked": False,
+                # 执行时判为不完整，但原因未记录（模拟上游只给布尔值）
+                "incomplete": True,
+                "failed_sources": [],
+                "partial_sources": [],
+                "findings": [],
+                "counts": {},
+                "dimensions": [],
+            },
+            {},
+        )
+        runs = await C.list_preflight_runs(SCHEME, limit=5, db=db_conn)
+        item = runs["items"][0]
+        assert item["incomplete"] == 1, "读取端不得按空来源列表重算成「完整」"
+        assert item["failed_sources"] == [] and item["partial_sources"] == []
+
+    async def test_legacy_row_stays_unrecorded_instead_of_complete(self, db_conn):
+        """本列上线前的历史行 → NULL（未记录），不得伪装成 0（完整）。"""
+        await _seed(db_conn, "正文描述施工流程。\n")
+        await db_conn.execute(
+            "INSERT INTO preflight_runs(id,scheme_id,total,grade,verdict,released,blocked)"
+            " VALUES(?,?,?,?,?,?,?)",
+            ("legacy-run", SCHEME, 80, "B", "需整改", 0, 1),
+        )
+        await db_conn.commit()
+        runs = await C.list_preflight_runs(SCHEME, limit=5, db=db_conn)
+        item = runs["items"][0]
+        assert item["incomplete"] is None
+        assert item["failed_sources"] == [] and item["partial_sources"] == []

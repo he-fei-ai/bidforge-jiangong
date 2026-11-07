@@ -616,6 +616,11 @@ async def collect_export_issues(
     + ``reason``）。方案无任何图表时图/表分支无从比对 → 必须如实标注「无法判定」，
     不得让前端把「跳过」显示成「通过」。不产生 finding、不扣分。
 
+    ✅ R185（2026-11-07）：新增 ``subheading_check``（同形状）。正文子标题命名
+    空间冲突检测器抛异常时，旧实现只剩一条 debug 日志、issues 里零发现 ——
+    「无法判定」被读成「无冲突」。现回传 ``undetermined=True`` +
+    ``reason=detector_error``，总检据此计入 ``partial_sources``。
+
     ✅ BUG 修复（2026-10-17 · 正文/审核联合审计）：四路查询此前一律
     ``_db_fetch_all(strict=False)`` —— DB 瞬时故障时**静默返回空结果集**，
     于是总检侧 ``export_check`` 这一路 findings 整体消失、
@@ -918,10 +923,16 @@ async def collect_export_issues(
     # ✅ E3（2026-09-25 · DLV-13 high）：正文子标题与 DB 子章节命名空间冲突。
     #    配置开启降级（默认）、但正文仍残留 AI 写的 X.X 点分子标题 → 规范化可能被
     #    跳过，导出成稿真撞号。本预检阻断导出（high 级），要求先修复再交付。
+    # ✅ R185（2026-11-07 · 三态口径）：检测器崩溃**不得**折叠成「零发现」。
+    #    旧实现只写 debug 日志并继续 —— issues 里没有该类问题，上层读成
+    #    「无冲突」，实际是「没查成」。现回传 subheading_check 三态，
+    #    undetermined=True 时由总检计入 partial_sources → incomplete → 不放行。
+    subheading_check: dict = {"undetermined": False, "reason": ""}
     try:
         issues.extend(_detect_body_subheading_namespace_conflict(sections))
-    except Exception:
-        logger.debug("正文子标题命名空间冲突预检失败（跳过，不阻断预检）", exc_info=True)
+    except Exception as e:
+        subheading_check.update({"undetermined": True, "reason": "detector_error"})
+        logger.warning("正文子标题命名空间冲突检测器异常（无法判定，不阻断预检）: %s", e, exc_info=True)
 
     empty_ratio = _cov["empty_ratio"]  # ✅ R98：与总检共用口径（见上方 _cov）
     # ✅ 新增（2026-09-19）：内容体检（占位符 / HTML 残留 / LaTeX 空参数 /
@@ -983,6 +994,8 @@ async def collect_export_issues(
         "chart_pending": len(chart_pending),
         "content_audit": content_audit,
         "crossref_check": crossref_check,
+        # ✅ R185：正文子标题命名空间冲突检测的可见性（undetermined=无法判定）
+        "subheading_check": subheading_check,
         "placeholder_report": placeholder_report,
         "review_summary": {
             "pending": review_pending,

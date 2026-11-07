@@ -1055,6 +1055,12 @@ async def _migrate(conn: aiosqlite.Connection):
         #     刻意分开：审核动作不让全库正文指纹一起失效。
         #     历史行空串 = 无法判定 = 不做审核状态失效判定（fail-open）。
         ("preflight_runs", "review_state_hash", "TEXT DEFAULT ''"),
+        # --- ✅ R185（2026-11-07 · 三态留痕）：检查完整性随运行落库。
+        #     旧表只有 released/blocked，历史回看无法区分「当时完整通过」与
+        #     「当时有一半没查」。incomplete 无 DEFAULT → 历史行为 NULL =
+        #     「未记录」，不伪装成「完整」（0）。原因存 JSON，读取端原样回显。
+        ("preflight_runs", "incomplete", "INTEGER"),
+        ("preflight_runs", "incomplete_sources", "TEXT DEFAULT '{}'"),
         # --- ✅ 根治批次截头（2026-09-23）：一次 /check 调用一个 batch_id，
         #     取代 rowid 连续段锚定（created_at 仅秒级精度，跨秒交错会错切批次）。
         #     历史行空串 → 读取端回退 rowid 锚定，向后兼容。

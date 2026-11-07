@@ -2,7 +2,7 @@
 
 背景（实测数据，非推测）
 ------------------------
-`services/numbering.validate_scheme_numbering_consistency` 是导出守卫
+`services/numbering.validate_scheme_content_numbering` 是导出守卫
 （`routers/export.py::_guard_numbering_consistency`，strict 与非 strict
 **两个分支都会跑**）与 `GET /numbering-consistency` 的共同入口。
 
@@ -93,16 +93,16 @@ class TestNumberingBatchQueryCount:
         旧实现下这里会是 2N+1 次；断言用绝对上限锁死回归，
         并额外断言「章数翻 20 倍但查询数不增长」这一更强的性质。
         """
-        from app.services.numbering import validate_scheme_numbering_consistency
+        from app.services.numbering import validate_scheme_content_numbering
 
         await _seed(db_conn, _mixed_rows(10))
         st_small = _count_executes(db_conn)
-        await validate_scheme_numbering_consistency(db_conn, "s1")
+        await validate_scheme_content_numbering(db_conn, "s1")
         n_small = st_small["n"]
 
         await _seed(db_conn, _mixed_rows(200))
         st_big = _count_executes(db_conn)
-        rep = await validate_scheme_numbering_consistency(db_conn, "s1")
+        rep = await validate_scheme_content_numbering(db_conn, "s1")
         n_big = st_big["n"]
 
         assert rep["checked"] > 200
@@ -152,7 +152,7 @@ class TestNumberingBatchQueryCount:
         import app.services.numbering as num
 
         src = inspect.getsource(num)
-        body = src.split("async def validate_scheme_numbering_consistency")[1]
+        body = src.split("async def validate_scheme_content_numbering")[1]
         loop = body.split("for r in rows:")[1].split("return {")[0]
         assert "await db.execute" not in loop, "校验循环体内出现逐章查库，N+1 回归"
 
@@ -162,7 +162,7 @@ class TestNumberingBatchParity:
 
     async def test_report_is_byte_identical_to_legacy_path(self, db_conn):
         from app.services.numbering import (
-            validate_scheme_numbering_consistency,
+            validate_scheme_content_numbering,
             validate_section_content_numbering,
         )
 
@@ -187,7 +187,7 @@ class TestNumberingBatchParity:
             }
 
         await _seed(db_conn, _mixed_rows(20))
-        new = await validate_scheme_numbering_consistency(db_conn, "s1")
+        new = await validate_scheme_content_numbering(db_conn, "s1")
         old = await legacy_validate(db_conn, "s1")
         assert json.dumps(new, sort_keys=True, ensure_ascii=False) == json.dumps(
             old, sort_keys=True, ensure_ascii=False
@@ -195,10 +195,10 @@ class TestNumberingBatchParity:
 
     async def test_dirty_rows_are_not_reported_as_drift(self, db_conn):
         """无编号 / 坏 JSON 的历史脏数据不得被误判为漂移（与旧实现一致）。"""
-        from app.services.numbering import validate_scheme_numbering_consistency
+        from app.services.numbering import validate_scheme_content_numbering
 
         await _seed(db_conn, _mixed_rows(3))
-        rep = await validate_scheme_numbering_consistency(db_conn, "s1")
+        rep = await validate_scheme_content_numbering(db_conn, "s1")
         by_id = {s["section_id"]: s for s in rep["sections"]}
         # content 非空但存储编号非法的两章：normalize 原样返回 → 视为一致
         assert by_id["dirty_noid"]["consistent"] is True
@@ -246,12 +246,12 @@ class TestNumberingBatchFailSoft:
 
     async def test_empty_scheme_returns_clean_report(self, db_conn):
         """空方案：不得抛错，报告为 0 检查 / 一致。"""
-        from app.services.numbering import validate_scheme_numbering_consistency
+        from app.services.numbering import validate_scheme_content_numbering
 
         await db_conn.execute("INSERT OR IGNORE INTO projects (id,name) VALUES ('p1','P')")
         await db_conn.execute("INSERT OR IGNORE INTO schemes (id,project_id,name) " "VALUES ('s1','p1','S')")
         await db_conn.commit()
-        rep = await validate_scheme_numbering_consistency(db_conn, "s1")
+        rep = await validate_scheme_content_numbering(db_conn, "s1")
         assert rep == {"scheme_id": "s1", "checked": 0, "mismatched": 0, "consistent": True, "sections": []}
 
     async def test_renumber_disabled_short_circuits(self, db_conn, monkeypatch):

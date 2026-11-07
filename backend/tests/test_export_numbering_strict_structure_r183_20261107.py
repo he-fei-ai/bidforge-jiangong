@@ -3,7 +3,7 @@
 
 已取证缺陷（目录模块审计结论 2）：
     `_export_cache.py` 的严格模式守卫只调用
-    `validate_scheme_numbering_consistency`（正文子标题 vs outline_json.id），
+    `validate_scheme_content_numbering`（正文子标题 vs outline_json.id），
     完全不看 outline_json.id 是否等于该章节在真实树中的位置。
     因此「第 2 章存储编号被改成 1」这类结构漂移：
       · 导出成稿不受影响（export.py 用 heading_gen 结构计数器重算）；
@@ -99,10 +99,10 @@ def _clean_rows():
 
 async def test_precondition_body_only_checker_is_green_on_drift(db_conn):
     """先证伪：旧校验器在等价样本上必须判绿，证明盲区真实存在。"""
-    from app.services.numbering import validate_scheme_numbering_consistency
+    from app.services.numbering import validate_scheme_content_numbering
 
     await _seed_scheme(db_conn, _drifted_rows())
-    rep = await validate_scheme_numbering_consistency(db_conn, "s1")
+    rep = await validate_scheme_content_numbering(db_conn, "s1")
     assert rep["consistent"] is True
     assert rep["mismatched"] == 0
 

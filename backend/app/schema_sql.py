@@ -744,6 +744,13 @@ CREATE TABLE IF NOT EXISTS preflight_runs (
     --    与正文指纹分开：审核通过/驳回不改正文，却会让「章节未审核」类结论与
     --    总检缓存失真。历史行由 db.py::_migrate 补列，空串 = fail-open。
     review_state_hash TEXT DEFAULT '',
+    -- ✅ R185（2026-11-07）：本次运行是否「检查不完整」（执行时由 score_findings
+    --    产出）。旧表只存 released/blocked，历史回看无法区分「当时完整通过」与
+    --    「当时有一半没查」。NULL = 历史行未记录（不等于「完整」）。
+    incomplete INTEGER,
+    -- ✅ R185：不完整的原因（JSON：{"failed_sources": [...], "partial_sources": [...]}）。
+    --    与 incomplete 同一次写入，读取端原样回显，不在展示层重算。
+    incomplete_sources TEXT DEFAULT '{}',
     rule_version TEXT DEFAULT '',
     total REAL DEFAULT 0,
     grade TEXT DEFAULT '',

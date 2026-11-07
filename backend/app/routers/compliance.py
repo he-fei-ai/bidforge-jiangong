@@ -1694,7 +1694,8 @@ async def _numbering_consistency_findings(db, scheme_id: str) -> tuple[list, boo
     """DLV-13：编号一致性（正文↔目录 + 目录结构↔真实树）。
 
     ✅ R183（2026-11-07 · 结构漂移盲区修复）：旧实现只调
-    :func:`validate_scheme_numbering_consistency` —— 它只解析落库正文，不看
+    :func:`validate_scheme_content_numbering`（R185 更名，旧名
+    ``validate_scheme_numbering_consistency``）—— 它只解析落库正文，不看
     ``outline_json.id`` 是否等于该章节在真实树（parent_id + sort_order）里的位置。
     于是「第 2 章存储编号被改成 1」这类结构漂移：正文与陈旧编号仍自洽 → 校验器
     报绿 → DLV-13 报绿，而 ``/sections/numbering-consistency``（已并入结构自检）
@@ -1711,9 +1712,9 @@ async def _numbering_consistency_findings(db, scheme_id: str) -> tuple[list, boo
           「已检查来源」，避免「没检查」被显示成「通过」）。
     """
     from app.routers.sections import _outline_structure_report
-    from app.services.numbering import validate_scheme_numbering_consistency
+    from app.services.numbering import validate_scheme_content_numbering
 
-    num = await validate_scheme_numbering_consistency(db, scheme_id)
+    num = await validate_scheme_content_numbering(db, scheme_id)
     if num.get("error"):
         raise RuntimeError(str(num["error"]))
     num_bad = [s for s in (num.get("sections") or []) if not s.get("consistent")]
@@ -1849,6 +1850,12 @@ async def _readiness_overview_compute(
         export_findings = export_issues_to_findings(_exp.get("issues") or [])
         if export_findings:
             sources.append("export_check")
+        # ✅ R185（2026-11-07 · 三态口径）：导出预检里的「无法判定」子项
+        #    同样不得折叠成通过。检测器崩溃时 issues 里没有该类问题（零发现），
+        #    若只看 findings 就是「没冲突」；此处按执行态计入 partial_sources，
+        #    使 incomplete=True、released=False。
+        if (_exp.get("subheading_check") or {}).get("undetermined"):
+            partial_sources.append("export_check")
     except Exception as e:
         # ✅ P1-6：读取失败必须让用户可见（否则该来源静默不参与评分、分数虚高）
         failed_sources.append("export_check")
@@ -2181,8 +2188,8 @@ async def _persist_run(db, scheme_id: str, payload: dict, stats: dict):
             db,
             "INSERT INTO preflight_runs (id, scheme_id, project_id, content_fingerprint,"
             " review_state_hash, rule_version, total, grade, verdict, released, blocked,"
-            " counts, dimensions, findings, stats)"
-            " VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)",
+            " counts, dimensions, findings, stats, incomplete, incomplete_sources)"
+            " VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)",
             (
                 str(uuid.uuid4()),
                 scheme_id,
@@ -2200,6 +2207,17 @@ async def _persist_run(db, scheme_id: str, payload: dict, stats: dict):
                 json.dumps(payload.get("dimensions") or [], ensure_ascii=False),
                 json.dumps(payload.get("findings") or [], ensure_ascii=False),
                 json.dumps(stats or {}, ensure_ascii=False),
+                # ✅ R185：落库的必须是**执行时**那一个值（payload 即 score_findings
+                #    的产物），不得在读取端按来源列表重算 —— 否则历史回看会与
+                #    当时看到的结论分叉。
+                1 if payload.get("incomplete") else 0,
+                json.dumps(
+                    {
+                        "failed_sources": payload.get("failed_sources") or [],
+                        "partial_sources": payload.get("partial_sources") or [],
+                    },
+                    ensure_ascii=False,
+                ),
             ),
             what=f"写入预检运行记录（scheme={scheme_id[:8]}）",
         )
@@ -2232,7 +2250,8 @@ async def list_preflight_runs(scheme_id: str, limit: int = 10, db=Depends(get_db
     rows = await review_db.fetch_all(
         db,
         "SELECT id, total, grade, verdict, released, blocked, counts, rule_version,"
-        " content_fingerprint, review_state_hash, created_at FROM preflight_runs WHERE scheme_id=?"
+        " content_fingerprint, review_state_hash, incomplete, incomplete_sources,"
+        " created_at FROM preflight_runs WHERE scheme_id=?"
         " ORDER BY created_at DESC, rowid DESC LIMIT ?",
         (scheme_id, limit),
         what="预检历史：读取运行记录",
@@ -2246,6 +2265,16 @@ async def list_preflight_runs(scheme_id: str, limit: int = 10, db=Depends(get_db
             item["counts"] = json.loads(item.get("counts") or "{}")
         except json.JSONDecodeError:
             item["counts"] = {}
+        # ✅ R185：原因原样回显（执行时写入的 JSON），不在读取端按来源重算。
+        #    历史行（本列上线前）该列为 NULL/'' → 两个清单均为空、incomplete 为 None。
+        try:
+            _src = json.loads(item.get("incomplete_sources") or "{}")
+        except (json.JSONDecodeError, TypeError):
+            _src = {}
+        if not isinstance(_src, dict):
+            _src = {}
+        item["failed_sources"] = [str(x) for x in (_src.get("failed_sources") or [])]
+        item["partial_sources"] = [str(x) for x in (_src.get("partial_sources") or [])]
         if current_fp is None and (item.get("content_fingerprint") or ""):
             current_fp = await _content_fingerprint(db, scheme_id)
         # ✅ R181（B-14）：当前审核状态指纹一次算好，逐行复用
