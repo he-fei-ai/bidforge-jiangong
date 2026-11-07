@@ -371,9 +371,12 @@ def test_reset_clears_token_budget_not_applied():
     assert _not_applied() == {}
 
 
-def test_snapshot_has_nine_top_level_keys():
+def test_snapshot_has_ten_top_level_keys():
     snap = _metrics.get_snapshot()
-    assert len(snap) == 9, sorted(snap)
+    # 9 个计数器 dict + registered_keys（第 5 条为 clip_ledger_failures 再 +1）。
+    assert len(snap) == 10, sorted(snap)
     assert "token_budget_not_applied" in snap
+    assert "clip_ledger_failures" in snap
     assert snap["token_budget_not_applied"] == {}
+    assert snap["clip_ledger_failures"] == {}
 

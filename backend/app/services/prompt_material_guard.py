@@ -333,23 +333,45 @@ def clip_text_logged(text: str, limit: int, label: str = "") -> str:
         return text
     omitted = len(text) - limit
     name = label or "文本"
+    # ✅ 2026-11-07（第 5 条）：此前本行外面还套了一层 `except Exception: pass`，
+    #    是死代码 —— logging 的 ``Handler.handle`` 会自己吞掉处理器/格式化异常
+    #    （只走 ``handleError``，不向上冒泡），所以这里永远不会抛。真被吞掉时
+    #    丢的是本函数**唯一**的账目（这条「仅日志」截断记录），而裁剪照旧发生，
+    #    结果就是「截断在静默发生」—— 正是本函数要防的那种假绿。故直接去掉兜底。
+    logger.warning(
+        "上下文截断（仅日志，%s）：%d → %d 字，已省略 %d 字（文本保持原样，未插标记）",
+        name,
+        len(text),
+        limit,
+        omitted,
+    )
+    # ✅ 2026-11-07（第 5 条）：指标留痕**保留** fail-soft —— 本模块约定
+    #    「治理失败绝不能阻断生成」，且 ``_metrics`` 可能在导入期处于半初始化
+    #    （本模块被更早的链路抢先导入），此时抛错会改变裁剪结果本身。
+    #    但留痕失败必须可观测：落到 ``_metrics.clip_ledger_failures`` 降级计数器
+    #    （吞掉就会丢「截断计数到底记上没有」这一事实 —— 快照里的「零截断」与
+    #    「没发生截断」将无法区分）。纯 pass 不算留痕，故这里不再 pass。
     try:
-        logger.warning(
-            "上下文截断（仅日志，%s）：%d → %d 字，已省略 %d 字（文本保持原样，未插标记）",
-            name,
-            len(text),
-            limit,
-            omitted,
-        )
-    except Exception:
-        pass
-    try:
-        from app.services.ai.prompts._metrics import record_token_budget_truncated
+        from app.services.ai.prompts import _metrics as _pm
 
-        record_token_budget_truncated(name)
-    except Exception:
-        pass
+        _pm.record_token_budget_truncated(name)
+    except Exception:  # noqa: BLE001 - 指标埋点失败不得阻断裁剪；失败已计入 clip_ledger_failures
+        _record_ledger_failure("truncation_counter")
     return text[:limit]
+
+
+def _record_ledger_failure(channel: str) -> None:
+    """把「留痕机制自身故障」落到降级计数器（尽力而为，二次失败也不得冒泡）。
+
+    单独抽函数是为了让 except 分支体是可复核的单一动作；内层再失败时只写
+    debug 日志 —— 观测面自己都不可用时只能放弃，绝不能因此改变裁剪结果。
+    """
+    try:
+        from app.services.ai.prompts import _metrics as _pm
+
+        _pm.record_clip_ledger_failure(channel)
+    except Exception:  # noqa: BLE001 - 二次兜底：降级计数也不可用时只能放弃，绝不阻断裁剪
+        logger.debug("留痕机制故障降级计数失败（忽略）", exc_info=True)
 
 
 #: 调整指令（用户下达的本次任务本体）的物理上限（字），**与预算开关无关**。

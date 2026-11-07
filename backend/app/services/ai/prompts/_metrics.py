@@ -45,6 +45,12 @@ token_budget_omitted_chars: Counter = Counter()
 #:   运维只能看到「没有截断」，无法区分「预算足够」与「预算器根本没跑/跑不动」。
 #:   现四类出口各记一次，`disabled` 只计数（合法关闭不算异常），其余三类另有日志分级。
 token_budget_not_applied: Counter = Counter()
+#: 留痕机制**自身**故障次数（key = 通道，如 ``truncation_counter``）。
+#: ✅ 2026-11-07（第 5 条）：``prompt_material_guard.clip_text_logged`` 的指标留痕
+#:   是设计上的 fail-soft（留痕坏掉不得改变裁剪结果），但此前 `except Exception: pass`
+#:   让「计数根本没记上」完全不可见 —— 快照里看到的「零截断」与「没发生截断」无法区分。
+#:   现把这类失败落到本计数器，保证留痕机制自己坏了也可查。
+clip_ledger_failures: Counter = Counter()
 #: JSON 修复轮触发次数（key = repair_key；首轮输出未过校验进入修复循环即记一次）。
 repair_triggered: Counter = Counter()
 #: AI 调用失败/降级次数（key = 业务场景 scene）。
@@ -95,6 +101,11 @@ def record_token_budget_not_applied(reason: str) -> None:
     _inc(token_budget_not_applied, reason or "unknown")
 
 
+def record_clip_ledger_failure(channel: str) -> None:
+    """记一次「留痕机制自身故障」（key = 通道，见 ``clip_ledger_failures``）。"""
+    _inc(clip_ledger_failures, channel or "unknown")
+
+
 def record_repair_triggered(repair_key: str) -> None:
     """记一次 JSON 修复轮被触发（首轮输出未过校验、进入修复循环时调用）。"""
     _inc(repair_triggered, repair_key)
@@ -108,10 +119,10 @@ def record_ai_failure(scene: str) -> None:
 def get_snapshot() -> dict:
     """导出结构化快照（全部为 dict 拷贝，调用方持有后修改不影响内部计数）。
 
-    顶层固定 9 个键：8 个计数器 dict + ``registered_keys``（注册表全部 key，
+    顶层固定 10 个键：9 个计数器 dict + ``registered_keys``（注册表全部 key，
     供运维对照「哪些模板从无人渲染过」）。
     2026-11-07 新增 ``render_missing_vars`` / ``token_budget_omitted_chars`` /
-    ``token_budget_not_applied``（加法式，不改动既有键）。
+    ``token_budget_not_applied`` / ``clip_ledger_failures``（加法式，不改动既有键）。
     """
     from app.services.ai.prompts._registry import (
         _ALL_PROMPTS,
@@ -133,6 +144,7 @@ def get_snapshot() -> dict:
         "token_budget_truncated": dict(token_budget_truncated),
         "token_budget_omitted_chars": dict(token_budget_omitted_chars),
         "token_budget_not_applied": dict(token_budget_not_applied),
+        "clip_ledger_failures": dict(clip_ledger_failures),
         "repair_triggered": dict(repair_triggered),
         "ai_failure_by_scene": dict(ai_failure_by_scene),
         "registered_keys": registered,
@@ -148,6 +160,7 @@ def reset() -> None:
         token_budget_truncated,
         token_budget_omitted_chars,
         token_budget_not_applied,
+        clip_ledger_failures,
         repair_triggered,
         ai_failure_by_scene,
     ):

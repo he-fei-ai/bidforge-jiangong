@@ -267,6 +267,42 @@ def test_clip_text_truncation_is_visible():
     _metrics.reset()
 
 
+def test_clip_text_logged_normal_ledger():
+    """正常路径：裁剪结果逐字节等于旧切片，截断计数按标签累加。"""
+    from app.services.ai.prompts import _metrics
+
+    _metrics.reset()
+    long_text = "丙" * 2000
+    out = pmg.clip_text_logged(long_text, 1500, "单元测试-仅日志")
+    assert out == long_text[:1500]
+    assert _metrics.token_budget_truncated.get("单元测试-仅日志") == 1
+    assert _metrics.clip_ledger_failures.get("truncation_counter") is None
+    _metrics.reset()
+
+
+def test_clip_text_logged_ledger_failure_is_observable(monkeypatch):
+    """第 5 条：留痕机制自身故障不得静默 —— 裁剪结果不变，降级计数器 +1。
+
+    变异点：若把 `_record_ledger_failure(...)` 删掉（回到 `pass`），
+    `clip_ledger_failures` 将恒为 0，本用例转红。
+    """
+    from app.services.ai.prompts import _metrics
+
+    _metrics.reset()
+
+    def boom(label):
+        raise RuntimeError("metrics store broken")
+
+    monkeypatch.setattr(_metrics, "record_token_budget_truncated", boom)
+    long_text = "丁" * 2000
+    out = pmg.clip_text_logged(long_text, 1500, "单元测试-留痕故障")
+    assert out == long_text[:1500], "留痕故障不得改变裁剪结果（fail-soft 边界）"
+    assert _metrics.clip_ledger_failures.get("truncation_counter") == 1, (
+        "留痕失败必须落到降级计数器，不能是纯 pass"
+    )
+    _metrics.reset()
+
+
 async def test_provider_call_applies_outbound_redaction():
     """出站单点兜底必须真正接线：provider 收到的 user 消息已被脱敏。"""
     settings.prompt_redact_sensitive = True
