@@ -223,6 +223,11 @@ from app.services.placeholder_sections import (
     persist_placeholder_sections,
     split_placeholder_leaves,
 )
+
+# ✅ R186（2026-11-07 · 目录链路截断留痕）：进模型的资料/参考截断统一走
+#    clip_text_notice —— 未超限逐字节原样；超限按边界收刀并附模型可见说明，
+#    同时写日志/指标（原文多少字、保留多少、省略多少）。
+from app.services.prompt_material_guard import clip_text_notice
 from app.services.section_router import (
     ClauseSearchBudget,
     allowed_numbers_for,
@@ -1455,11 +1460,13 @@ async def generate_outline(scheme_id: str, request: Request, db=Depends(get_db))
                     # （** 须置于所有关键字实参之后）
                     **_outline_checkpoint_kwargs(scheme.get("name", ""), scheme.get("type", ""), is_dangerous),
                 )
-                user_prompt = f"【方案名称】：{scheme.get('name','')}\n【方案类型】：{scheme.get('type','')}\n【项目资料摘要】：{project_brief[:3000]}\n"
+                # ✅ R186（2026-11-07）：资料摘要/目录库参考的截断不再静默硬切，
+                #    改走 clip_text_notice（未超限逐字节原样，超限附可见账面）。
+                user_prompt = f"【方案名称】：{scheme.get('name','')}\n【方案类型】：{scheme.get('type','')}\n【项目资料摘要】：{clip_text_notice(project_brief, 3000, '项目资料摘要')}\n"
                 if construction_scope:
                     user_prompt += f"【方案名称主要施工内容】：{construction_scope}\n"
                 if reference_outline:
-                    user_prompt += f"【目录库参考】：{reference_outline[:2000]}\n"
+                    user_prompt += f"【目录库参考】：{clip_text_notice(reference_outline, 2000, '目录库参考')}\n"
                 if is_dangerous:
                     user_prompt += "【注意：本方案为危大工程，目录必须包含全部必要章节】\n"
                 if requirements_text:
@@ -1644,8 +1651,10 @@ async def generate_outline(scheme_id: str, request: Request, db=Depends(get_db))
                     # ✅ 同短方案链路：补齐 {scheme_basis}
                     scheme_basis=scheme_basis,
                     standards_text=standards_text,
-                    project_brief=project_brief[:2000],
-                    reference_outline=reference_outline[:1000] or "无",
+                    # ✅ R186（2026-11-07）：一级目录的资料摘要/参考提纲截断改走
+                    #    clip_text_notice（未超限逐字节原样，超限附可见账面）。
+                    project_brief=clip_text_notice(project_brief, 2000, "项目资料摘要"),
+                    reference_outline=clip_text_notice(reference_outline, 1000, "参考提纲") or "无",
                     project_facts=project_facts_outline,
                     # ✅ 2026-10-02（目录侧检查点前置）
                     **_outline_checkpoint_kwargs(scheme.get("name", ""), scheme.get("type", ""), is_dangerous),
@@ -1831,10 +1840,14 @@ async def generate_outline(scheme_id: str, request: Request, db=Depends(get_db))
                                     scheme_type=scheme.get("type", ""),
                                     construction_scope=construction_scope,
                                     standards_text=standards_text,
-                                    project_brief=project_brief[:1500],
+                                    project_brief=clip_text_notice(project_brief, 1500, "项目资料摘要"),
                                     other_outline=_join_tail_budget(other_titles, 1200),
                                     prior_chapters=_join_tail_budget(prior_ctx, 1500) or "无",
-                                    requirements=requirements_text[:1500] or "无",
+                                    # ✅ R186（2026-11-07）：编制要求是**程序下发的写作要求**，
+                                    #    G6 优先级表已登记「编制要求」=2（先保），此处的
+                                    #    1500 字硬切与表冲突 —— 以表为准删除重复裁剪，
+                                    #    统一交给预算器（开关开启时按优先级保留）。
+                                    requirements=requirements_text or "无",
                                     # ✅ R77：按章相关性重排的事实（无关键词/关闭时
                                     #    与旧行为逐字等价：整案事实截断）。
                                     project_facts=_sublevel_facts_text([i]),
@@ -1859,12 +1872,14 @@ async def generate_outline(scheme_id: str, request: Request, db=Depends(get_db))
                                         scheme_type=scheme.get("type", ""),
                                         construction_scope=construction_scope,
                                         standards_text=standards_text,
-                                        project_brief=project_brief[:1500],
+                                        project_brief=clip_text_notice(project_brief, 1500, "项目资料摘要"),
                                         other_outline=_join_tail_budget(
                                             [t for j, t in enumerate(level1_titles) if j not in unit_idx], 1200
                                         ),
                                         prior_chapters=_join_tail_budget(prior_ctx, 1500) or "无",
-                                        requirements=requirements_text[:1500] or "无",
+                                        # ✅ R186：同单章口径 —— 编制要求以 G6 优先级表为准，
+                                        #    删除 1500 字硬切，避免「表里保留、代码先砍」。
+                                        requirements=requirements_text or "无",
                                         # ✅ R77：批内多章按并集相关性重排（见
                                         #    _sublevel_facts_text docstring）。
                                         project_facts=_sublevel_facts_text(unit_idx),
