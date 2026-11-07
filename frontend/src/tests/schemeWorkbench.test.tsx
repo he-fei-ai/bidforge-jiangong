@@ -36,6 +36,10 @@ const apiMock = vi.hoisted(() => {
   const calls: Record<string, any[][]> = {};
   const defaults: Record<string, any> = {};
   const cache = new Map<string, any>();
+  // 真实模块的数值导出（超时常量）由 vi.mock 工厂通过 importOriginal 填充。
+  // 用例内的页面/hook 在模块初始化时就会做 Math.round(常量 / 1000)，纯动态
+  // 可调用代理无法参与算术（会抛 Cannot convert object to primitive value）。
+  const numericExports: Record<string, number> = {};
 
   /** 可调用节点：既能当方法调用（记录参数 + 返回默认响应），也能继续取子属性 */
   function makeCallable(path: string[]): any {
@@ -79,7 +83,8 @@ const apiMock = vi.hoisted(() => {
         if (prop === "__esModule") return true;
         if (prop === "then") return undefined;
         // 数值导出（页面/hook 会参与算术与文案拼接）：纯动态可调用代理无法参与运算
-        if (prop === "API_GLOBAL_TIMEOUT_MS" || prop === "PREVIEW_TIMEOUT_MS") return 60000;
+        const numeric = numericExports[prop];
+        if (typeof numeric === "number") return numeric;
         return makeCallable([prop]);
       },
       // vitest 会用自己的代理包裹工厂返回值，并校验「导出名是否定义」；
@@ -102,10 +107,19 @@ const apiMock = vi.hoisted(() => {
     });
   }
 
-  return { calls, defaults, root: makeNamespace() };
+  return { calls, defaults, root: makeNamespace(), numericExports };
 });
 
-vi.mock("../api", () => apiMock.root);
+vi.mock("../api", async (importOriginal) => {
+  // 只合并真实模块的「数值导出」（超时常量），其余仍走动态代理。
+  // 不能整体 ...actual：factsApi / docPipelineApi 等是真实命名空间对象，
+  // 展开后页面会打到真实 HTTP；而逐个列字面量在新增超时常量时会再次漏配。
+  const actual = (await importOriginal()) as Record<string, unknown>;
+  for (const [key, value] of Object.entries(actual)) {
+    if (typeof value === "number") apiMock.numericExports[key] = value;
+  }
+  return apiMock.root;
+});
 
 // 测试内使用的别名（工厂只依赖 vi.hoisted 的 apiMock，不受提升影响）
 const apiCalls = apiMock.calls;

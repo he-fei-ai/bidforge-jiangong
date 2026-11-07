@@ -40,15 +40,26 @@ afterEach(cleanup);
 // ⚠️ vi.mock 会被提升到 import 之前，工厂里引用的变量必须用 vi.hoisted 声明，
 //    否则工厂执行时拿到的是 undefined（本文件首版就是这么翻的）。
 const { apiStatusMock } = vi.hoisted(() => ({ apiStatusMock: vi.fn() }));
-vi.mock("../api", () => ({
-  tasksApi: {
-    status: (...args: unknown[]) => (apiStatusMock as any)(...args),
-    control: vi.fn().mockResolvedValue({ data: { ok: true } }),
-  },
-  sectionsApi: {
-    resetContent: vi.fn().mockResolvedValue({ data: { cleared: 0 } }),
-  },
-}));
+vi.mock("../api", async (importOriginal) => {
+  // 只合并真实模块的数值导出（超时常量）：B 组会 import SchemeWorkbenchPage，
+  // 其 hook 在模块初始化时即做 Math.round(REPARSE_TIMEOUT_MS / 1000)；逐个列
+  // 字面量会在新增超时常量时再次漏配。不整体 ...actual：factsApi / docPipelineApi
+  // 等是真实命名空间对象，展开会把真实 HTTP 调用带进用例。
+  const actual = (await importOriginal()) as Record<string, unknown>;
+  const numericExports = Object.fromEntries(
+    Object.entries(actual).filter(([, value]) => typeof value === "number"),
+  );
+  return {
+    ...numericExports,
+    tasksApi: {
+      status: (...args: unknown[]) => (apiStatusMock as any)(...args),
+      control: vi.fn().mockResolvedValue({ data: { ok: true } }),
+    },
+    sectionsApi: {
+      resetContent: vi.fn().mockResolvedValue({ data: { cleared: 0 } }),
+    },
+  };
+});
 
 // ---------------------------------------------------------------------------
 // A 组 · 终态判定纯函数

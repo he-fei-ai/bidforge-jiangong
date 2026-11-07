@@ -52,7 +52,18 @@ const apiMock = vi.hoisted(() => ({
   },
 }));
 
-vi.mock("../api", () => apiMock);
+vi.mock("../api", async (importOriginal) => {
+  // 只合并真实模块的数值导出（超时常量）。本文件的模块图会经
+  // `../pages/SchemeWorkbenchPage` 间接加载 useDocumentWorkflow，而后者在模块
+  // 初始化时即做 Math.round(REPARSE_TIMEOUT_MS / 1000)；逐个列字面量会在新增
+  // 超时常量时再次漏配。不整体 ...actual：factsApi / docPipelineApi 等是真实
+  // 命名空间对象，展开会把真实 HTTP 调用带进用例。
+  const actual = (await importOriginal()) as Record<string, unknown>;
+  const numericExports = Object.fromEntries(
+    Object.entries(actual).filter(([, value]) => typeof value === "number"),
+  );
+  return { ...numericExports, ...apiMock };
+});
 
 import OutlineLibraryEditModal from "../components/OutlineLibraryEditModal";
 import { clearActivity, getActivityItems } from "../utils/activityCenter";
