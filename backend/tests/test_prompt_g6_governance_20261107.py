@@ -137,7 +137,18 @@ def test_review_and_title_fix_labels_have_explicit_priority():
     assert segment_priority_of("待改写清单（逐条给出新标题）") == 1
     assert segment_priority_of("全目录已有标题（新标题必须与其中每一项都不同）") == 1
     assert segment_priority_of("现有目录（含各节点 id）") == 1
-    assert segment_priority_of("调整要求") == 1
+    # ✅ 2026-11-07（第 3 条）：调整要求 = 用户任务本体，优先级 -1，
+    #    必须严格先于所有程序生成的目录/清单/事实（它们可从库里重建，用户原话不可）。
+    assert segment_priority_of("调整要求") == -1
+    for other in (
+        "现有目录（含各节点 id）",
+        "目录",
+        "待生成章节列表",
+        "待改写清单（逐条给出新标题）",
+        "项目关键事实",
+        "参考提纲",
+    ):
+        assert segment_priority_of("调整要求") < segment_priority_of(other), other
     assert segment_priority_of("编制依据规范（按本方案类别匹配，仅可引用，禁杜撰编号与已废止版本）") == 1
 
 

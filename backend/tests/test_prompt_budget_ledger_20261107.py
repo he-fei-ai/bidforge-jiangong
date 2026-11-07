@@ -12,7 +12,7 @@
 * **逐段账面落指标（按标签）**：既有 ``token_budget_truncated`` 记次数，
   新增 ``token_budget_omitted_chars`` 记省略字数；
 * **不消耗预算本身**：提示词正文不含账目标记；
-* **调整要求（优先级 1）被压缩时回传用户**：``adjust_outline`` 响应新增
+* **调整要求（优先级 -1）被压缩时回传用户**：``adjust_outline`` 响应新增
   加法式 ``instruction_truncated`` 键（未截断时不出现，既有响应不变）。
 """
 

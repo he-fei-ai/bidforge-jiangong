@@ -42,7 +42,7 @@ def test_adjust_instructions_are_not_hard_clipped():
     for name, src in (("sections", _SECTIONS), ("global_facts", _FACTS)):
         assert "instruction[:3000]" not in src, name
         assert "instruction=instruction," in src, name
-        # 交给预算器（「调整要求」优先级 1；开关关闭时原样返回）。
+        # 交给预算器（「调整要求」优先级 -1；开关关闭时原样返回）。
         # sections 的 adjust_outline 走 report 变体（需要逐段账面回传用户），
         # global_facts 仍走只取结果的便捷入口。
         assert (

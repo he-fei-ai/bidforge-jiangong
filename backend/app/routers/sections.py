@@ -2026,7 +2026,8 @@ async def adjust_outline(scheme_id: str, body: dict, db=Depends(get_db)):
 
     prompt, _budget_info = _apply_prompt_context_budget_report(prompt)
     # ✅ R186：预算器削减不写提示词标记（见 _apply_prompt_context_budget_report）；
-    #    优先级 1 的「调整要求」若真被压到下限，把逐段账面回传用户。
+    #    优先级 -1 的「调整要求」（用户任务本体，严格先于程序生成的目录）
+    #    若真被压到下限，把逐段账面回传用户。
     instruction_truncated = _adjust_instruction_truncation(_budget_info, _cap_meta)
     try:
         obj, _ = await asyncio.wait_for(
