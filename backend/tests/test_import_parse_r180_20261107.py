@@ -315,6 +315,10 @@ class TestExcelMergedCells:
 
         text, _ = fp.parse_file_content_ex(_xlsx_with(setup), "a.xlsx")
         assert "| 项目 | 项目 |  |  |" in text, f"部分列合并不应作为标题:\n{text}"
+        # 该 sha256 由改动前（HEAD adc3fec）同一固定样本实测得到。
+        assert hashlib.sha256(text.encode("utf-8")).hexdigest() == (
+            "25e5223eeefb84d9351632ad6d5ecc683fab7184add3c822e787b2a52df006dc"
+        ), f"部分跨列合并输出发生漂移:\n{text}"
 
     def test_cross_row_merge_expands_anchor_downwards(self):
         """A1:A3 纵向合并：A1 的值必须展开到 A2/A3（现状不得改变）。"""
@@ -328,6 +332,10 @@ class TestExcelMergedCells:
 
         text, _ = fp.parse_file_content_ex(_xlsx_with(setup), "a.xlsx")
         assert "| 项目 | 1 |" in text and "| 项目 | 2 |" in text, f"纵向合并未展开:\n{text}"
+        # 该 sha256 由改动前（HEAD adc3fec）同一固定样本实测得到。
+        assert hashlib.sha256(text.encode("utf-8")).hexdigest() == (
+            "4c6298e76fce7ee7c1dad9d6e565a4cbb2ca2a140db7b61c14a8328acb328528"
+        ), f"跨行合并输出发生漂移:\n{text}"
 
     def test_no_merge_output_byte_identical(self):
         """无合并区：固定样本输出与改动前逐字节一致（sha256 对照）。"""
