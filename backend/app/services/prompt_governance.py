@@ -355,8 +355,24 @@ def allocate_context_budget(text: str, budget: int, min_ratio: float = _SEGMENT_
         for _d in detail:
             if _d.get("cut"):
                 _pm.record_token_budget_truncated(_d.get("label", ""))
+                _pm.record_token_budget_omitted(_d.get("label", ""), _d["from"] - _d["to"])
     except Exception:  # noqa: BLE001
         logger.debug("上下文预算截断埋点失败（忽略）", exc_info=True)
+
+    # ✅ R186（2026-11-07）：逐段账面落日志 —— 「原文 → 保留 / 省略」。
+    #    刻意**不往提示词里插标记**：标记本身会占用被削减的预算，等于用
+    #    可用空间换可读性；日志 + 指标（token_budget_truncated /
+    #    token_budget_omitted_chars，均按段标签）是唯一可观测面。
+    for _d in detail:
+        logger.info(
+            "上下文预算账面：段「%s」优先级 %d：%d → %d 字，省略 %d 字%s",
+            _d["label"],
+            _d["priority"],
+            _d["from"],
+            _d["to"],
+            _d["from"] - _d["to"],
+            "" if _d.get("cut") else "（未削减）",
+        )
 
     result = assemble_segments(prefix, out_segs, trailing)
     info = {

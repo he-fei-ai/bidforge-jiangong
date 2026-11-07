@@ -69,6 +69,26 @@ def _truncate_context(text: str) -> str:
     return window + "…"
 
 
+def _apply_prompt_context_budget_report(text: str) -> tuple[str, dict]:
+    """同 :func:`_apply_prompt_context_budget`，但返回逐段账面（``detail``）。
+
+    ✅ R186（2026-11-07）：预算削减不往提示词插标记（会吃掉被削减空间），
+    需要让用户知道「调整要求被压到多少」的调用方在这里取逐段账面，
+    再决定是否回传到响应；其余调用方继续用只取结果的便捷入口。
+    ``budget<=0`` 或空文本时返回原文本与 ``applied=False`` 的空报告。
+    """
+    budget = int(getattr(_sh.settings, "prompt_context_budget", 0) or 0)
+    if budget <= 0 or not text:
+        return text, {"applied": False, "budget": budget, "segments": 0}
+    try:
+        from app.services.prompt_governance import allocate_context_budget
+
+        return allocate_context_budget(text, budget)
+    except Exception:
+        _sh.logger.warning("上下文预算削减失败（使用原文继续）", exc_info=True)
+        return text, {"applied": False, "budget": budget, "error": True}
+
+
 def _apply_prompt_context_budget(text: str) -> str:
     """按 prompt_context_budget 对已标注分段的上下文做预算削减。
 
@@ -77,17 +97,11 @@ def _apply_prompt_context_budget(text: str) -> str:
     实际分配逻辑在 services/prompt_governance.allocate_context_budget
     （按「全局事实 > 目录树 > 资料摘要 > 知识库」优先级水填），
     本函数只做开关判断与异常降级 —— 治理异常绝不能阻断生成。
-    """
-    budget = int(getattr(_sh.settings, "prompt_context_budget", 0) or 0)
-    if budget <= 0 or not text:
-        return text
-    try:
-        from app.services.prompt_governance import apply_context_budget
 
-        return apply_context_budget(text, budget)
-    except Exception:
-        _sh.logger.warning("上下文预算削减失败（使用原文继续）", exc_info=True)
-        return text
+    逐段账面由 ``allocate_context_budget`` 写日志与指标（按段标签）；
+    需要把账面回传给调用方/用户时用 :func:`_apply_prompt_context_budget_report`。
+    """
+    return _apply_prompt_context_budget_report(text)[0]
 
 
 def _guard_external_material(text: str) -> str:

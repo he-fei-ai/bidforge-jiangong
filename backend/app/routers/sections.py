@@ -1955,6 +1955,28 @@ def _adjust_outline_validate_fn(obj) -> list:
     return [f"存在 {len(bad)} 个缺标题的非法节点"] if bad else []
 
 
+def _adjust_instruction_truncation(info: dict) -> dict | None:
+    """从预算报告里挑出「调整要求」段被削减的逐段账面（未削减返回 None）。
+
+    ✅ R186（2026-11-07）：调整要求是用户自己写的任务本体（预算优先级 1）。
+    开关开启且预算不足时它可能被压到 20% 下限；此时用户有权知道「原文多少、
+    实际保留多少」。这里只回传账面，**不把标记写进提示词** —— 标记会吃掉
+    被削减的空间本身，得不偿失。
+    """
+    for d in info.get("detail") or []:
+        if d.get("cut") and "调整要求" in str(d.get("label") or ""):
+            n_from = int(d.get("from") or 0)
+            n_to = int(d.get("to") or 0)
+            omitted = n_from - n_to
+            return {
+                "from": n_from,
+                "to": n_to,
+                "omitted": omitted,
+                "notice": f"调整要求超出上下文预算，仅保留前 {n_to} 字（原文 {n_from} 字，省略 {omitted} 字）",
+            }
+    return None
+
+
 @router.post("/adjust-outline")
 async def adjust_outline(scheme_id: str, body: dict, db=Depends(get_db)):
     """目录 AI 自然语言调整：按用户要求定向修改现有目录，返回**待确认**新树。
@@ -2003,9 +2025,12 @@ async def adjust_outline(scheme_id: str, body: dict, db=Depends(get_db)):
     #    上限，交给预算器（「调整要求」优先级 1，开启预算时才按优先级裁剪）。
     #    延迟导入：routers 间存在 sse_handlers ↔ _sse_outline_review 的既有
     #    循环，模块级导入会改变任一方的首次导入顺序并触发半初始化 ImportError。
-    from app.routers._sse_outline_review import _apply_prompt_context_budget
+    from app.routers._sse_outline_review import _apply_prompt_context_budget_report
 
-    prompt = _apply_prompt_context_budget(prompt)
+    prompt, _budget_info = _apply_prompt_context_budget_report(prompt)
+    # ✅ R186：预算器削减不写提示词标记（见 _apply_prompt_context_budget_report）；
+    #    优先级 1 的「调整要求」若真被压到下限，把逐段账面回传用户。
+    instruction_truncated = _adjust_instruction_truncation(_budget_info)
     try:
         obj, _ = await asyncio.wait_for(
             collect_json_response(
@@ -2029,11 +2054,15 @@ async def adjust_outline(scheme_id: str, body: dict, db=Depends(get_db)):
     new_outline = obj.get("outline") or []
     _relink_adjusted_original_ids(new_outline, valid_ids)
     normalized = normalize_outline(new_outline)
-    return {
+    result = {
         "ok": True,
         "outline": normalized,
         "summary": str(obj.get("summary") or "").strip(),
     }
+    # ✅ R186：加法式回传（未截断时不出现该键，既有响应逐字节不变）。
+    if instruction_truncated:
+        result["instruction_truncated"] = instruction_truncated
+    return result
 
 
 SAVE_OUTLINE_ADDITIVE_KEYS: tuple[str, ...] = (

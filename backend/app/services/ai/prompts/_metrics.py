@@ -34,6 +34,11 @@ render_missing_vars: Counter = Counter()
 #: ✅ 2026-10-07：唯一消费点是 `prompt_governance.allocate_context_budget`
 #:   （原先全仓零调用方，端点永远回空 dict —— 运维无法区分「没截断」与「未埋点」）。
 token_budget_truncated: Counter = Counter()
+#: token 预算削减丢弃的字符总量（key = 资料段标签）。
+#: ✅ 2026-11-07（R186）：`token_budget_truncated` 只回答「切了几次」，无法回答
+#:   「这段被削掉了多少字、原文多长」—— 开启 `prompt_context_budget` 后，运维
+#:   与用户看不到逐段账面。这里按标签累计**省略字数**，与截断次数互补。
+token_budget_omitted_chars: Counter = Counter()
 #: JSON 修复轮触发次数（key = repair_key；首轮输出未过校验进入修复循环即记一次）。
 repair_triggered: Counter = Counter()
 #: AI 调用失败/降级次数（key = 业务场景 scene）。
@@ -69,6 +74,16 @@ def record_token_budget_truncated(key: str) -> None:
     _inc(token_budget_truncated, key)
 
 
+def record_token_budget_omitted(key: str, omitted: int) -> None:
+    """记一次预算削减丢弃的字符数（key = 资料段标签，按标签累计）。"""
+    try:
+        n = int(omitted)
+        if key and n > 0:
+            token_budget_omitted_chars[key] += n
+    except Exception:  # noqa: BLE001
+        logger.debug("prompt metrics omitted-chars counter increment failed", exc_info=True)
+
+
 def record_repair_triggered(repair_key: str) -> None:
     """记一次 JSON 修复轮被触发（首轮输出未过校验、进入修复循环时调用）。"""
     _inc(repair_triggered, repair_key)
@@ -82,9 +97,10 @@ def record_ai_failure(scene: str) -> None:
 def get_snapshot() -> dict:
     """导出结构化快照（全部为 dict 拷贝，调用方持有后修改不影响内部计数）。
 
-    顶层固定 7 个键：6 个计数器 dict + ``registered_keys``（注册表全部 key，
+    顶层固定 8 个键：7 个计数器 dict + ``registered_keys``（注册表全部 key，
     供运维对照「哪些模板从无人渲染过」）。
-    2026-11-07 新增 ``render_missing_vars``（加法式，不改动既有键）。
+    2026-11-07 新增 ``render_missing_vars`` 与 ``token_budget_omitted_chars``
+    （加法式，不改动既有键）。
     """
     from app.services.ai.prompts._registry import (
         _ALL_PROMPTS,
@@ -104,6 +120,7 @@ def get_snapshot() -> dict:
         "render_errors": dict(render_errors),
         "render_missing_vars": dict(render_missing_vars),
         "token_budget_truncated": dict(token_budget_truncated),
+        "token_budget_omitted_chars": dict(token_budget_omitted_chars),
         "repair_triggered": dict(repair_triggered),
         "ai_failure_by_scene": dict(ai_failure_by_scene),
         "registered_keys": registered,
@@ -117,6 +134,7 @@ def reset() -> None:
         render_errors,
         render_missing_vars,
         token_budget_truncated,
+        token_budget_omitted_chars,
         repair_triggered,
         ai_failure_by_scene,
     ):
