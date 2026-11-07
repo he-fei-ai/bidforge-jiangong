@@ -245,9 +245,10 @@ describe("PendingConfirmPanel 待确认清单", () => {
     );
     expect(await screen.findByTestId("pending-count")).toBeTruthy();
     expect(screen.getByTestId("pending-count").textContent).toContain("待确认 3 项");
-    expect(screen.getByText("模拟值")).toBeTruthy();
+    expect(screen.getByText("未确认")).toBeTruthy();
     expect(screen.getByText("低置信度 0.55")).toBeTruthy();
     expect(screen.getByText("命中禁改白名单")).toBeTruthy();
+    expect(screen.getByTestId("pending-standards-note")).toBeTruthy();
   });
 
   it("缺陷账本 404 时显示未启用，而不是 0 条", async () => {

@@ -18,12 +18,13 @@ interface PendingRow {
 
 const LOW_CONFIDENCE = 0.8;
 
+/**
+ * 与底稿附件三同口径：事实待确认 = 未 resolve 或 confidence < 0.8。
+ * 来源为 backend/app/services/dossier.py::collect_facts。
+ */
 function factReasons(fact: FactItem): string[] {
   const reasons: string[] = [];
-  if (fact.is_simulated) reasons.push("模拟值");
   if (!fact.is_resolved) reasons.push("未确认");
-  if (fact.has_conflict) reasons.push("多来源矛盾");
-  if (fact.is_stale) reasons.push("来源已过期");
   if (typeof fact.confidence === "number" && fact.confidence < LOW_CONFIDENCE) {
     reasons.push(`低置信度 ${fact.confidence.toFixed(2)}`);
   }
@@ -180,7 +181,7 @@ export function PendingConfirmPanel({ schemeId }: PendingConfirmPanelProps) {
 
       {rows.length === 0 && factsState === "ok" && defectsState !== "error" && (
         <Text type="secondary" style={{ fontSize: 12 }}>
-          当前没有待人工确认的模拟值、未确认事实、矛盾/过期事实，也没有受保护或已建议的缺陷。
+          当前没有未确认或低置信度的事实，也没有受保护或已建议的缺陷。
         </Text>
       )}
 
@@ -231,6 +232,17 @@ export function PendingConfirmPanel({ schemeId }: PendingConfirmPanelProps) {
           ]}
         />
       )}
+
+      {/* 标准待核实与底稿附件三同口径：没有方案级数据源时显式「无法判定」，
+          不输出 0 条冒充「无待核实标准」。 */}
+      <Alert
+        type="info"
+        showIcon
+        style={{ marginTop: 8 }}
+        data-testid="pending-standards-note"
+        message="标准待核实：无法判定"
+        description="后端尚未提供方案级 verification_status 查询接口；本清单与底稿附件三同口径，不把「无数据」当成「无待核实标准」。"
+      />
     </Card>
   );
 }
