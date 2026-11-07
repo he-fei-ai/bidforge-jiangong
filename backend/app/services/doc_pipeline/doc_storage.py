@@ -122,20 +122,41 @@ def parsed_md_path(project_id: str, doc_id: str) -> Path:
 
 
 def atomic_write_bytes(dest: Path, data: bytes) -> Path:
-    """tempfile + os.replace 原子写入，防半截文件。"""
-    dest.parent.mkdir(parents=True, exist_ok=True)
-    fd, tmp = tempfile.mkstemp(dir=str(dest.parent), suffix=".tmp")
-    try:
-        with os.fdopen(fd, "wb") as f:
-            f.write(data)
-        os.replace(tmp, dest)
-    except Exception:
+    """tempfile + os.replace 原子写入，防半截文件。
+
+    ✅ R186 修复（并发清理竞态）：父目录可能在 `mkdir` 之后、`os.replace`
+    之前被外部进程删除（典型为同 basetemp 的第二个 pytest 会话启动时清空
+    目录），Windows 抛 WinError 3 / POSIX 抛 ENOENT。旧实现直接把异常抛给
+    上层 `_safe_io`，被降级成一条 ERROR，产物缺失却仍报成功。这里对
+    FileNotFoundError 重试一次（重建父目录 + 新临时文件），仍失败才上抛，
+    由状态接口显性化。
+    """
+    for attempt in range(2):
+        tmp = ""
         try:
-            os.unlink(tmp)
-        except OSError:
-            pass
-        raise
-    return dest
+            dest.parent.mkdir(parents=True, exist_ok=True)
+            fd, tmp = tempfile.mkstemp(dir=str(dest.parent), suffix=".tmp")
+            with os.fdopen(fd, "wb") as f:
+                f.write(data)
+            os.replace(tmp, dest)
+            return dest
+        except FileNotFoundError:
+            if tmp:
+                try:
+                    os.unlink(tmp)
+                except OSError:
+                    pass
+            if attempt == 0:
+                continue
+            raise
+        except Exception:
+            if tmp:
+                try:
+                    os.unlink(tmp)
+                except OSError:
+                    pass
+            raise
+    raise RuntimeError("atomic_write_bytes 重试后仍未完成")  # pragma: no cover
 
 
 def atomic_write_json(dest: Path, payload: Any) -> Path:

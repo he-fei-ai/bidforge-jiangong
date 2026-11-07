@@ -74,6 +74,15 @@ async def document_status(doc_id: str, db=Depends(get_db)):
     for layer in store.ALL_LAYERS:
         d = store.layer_dir(doc["project_id"], doc_id, layer)
         layers[layer] = await asyncio.to_thread(lambda p=d: sorted(f.name for f in p.iterdir()) if p.exists() else [])
+    # ✅ R186：解析层写入失败会被 `_safe_io` 降级成日志，`layers["parsed"] == []`
+    #    与「文档本来没有内容」无法区分。这里按既有事实派生失败态（不落库、
+    #    不新增事实源）：DB 的 parse_status 已成功，但 canonical 的 parsed.md
+    #    不存在 → 明确告知解析层未落盘，可重解析重建。
+    layer_errors: dict[str, str] = {}
+    if (doc.get("parse_status") or "") == "success":
+        parsed_md = store.parsed_md_path(doc["project_id"], doc_id)
+        if not await asyncio.to_thread(parsed_md.exists):
+            layer_errors[store.LAYER_PARSED] = "解析层写入失败或未落盘：parsed.md 缺失，可重新解析重建"
     completeness = {}
     try:
         completeness = json.loads(doc.get("completeness_json") or "{}")
@@ -115,6 +124,7 @@ async def document_status(doc_id: str, db=Depends(get_db)):
         "completeness": completeness,
         "parse_warnings": [str(w) for w in warnings],
         "layers": layers,
+        "layer_errors": layer_errors,
         "meta_on_disk": bool(meta),
     }
 

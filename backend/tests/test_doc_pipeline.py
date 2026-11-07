@@ -11,8 +11,10 @@
 
 import io
 import json
+import shutil
 import uuid
 from datetime import datetime, timedelta, timezone
+from pathlib import Path
 
 import app.routers.doc_pipeline as dp_api
 import app.routers.global_facts as gf
@@ -441,6 +443,68 @@ async def test_layer_failure_does_not_break_parse(ctx, monkeypatch):
     # 块仍然入库（DB 层不受磁盘故障影响）
     cur = await db.execute("SELECT COUNT(*) n FROM doc_chunks WHERE doc_id=?", (doc_id,))
     assert ((await cur.fetchone())["n"]) >= 1
+
+
+async def test_parsed_layer_parent_loss_is_visible_in_status(ctx, monkeypatch):
+    """父目录在 mkdir 与 os.replace 之间消失（WinError 3）→ 解析层缺产物必须可见。
+
+    注入点只针对四层目录树：模拟 `atomic_write_bytes` 建好目录后被并发清理，
+    `os.replace` 随即抛 `FileNotFoundError`（Windows 即 WinError 3）。
+    旧行为：`_safe_io` 把异常降级成一条 ERROR，解析仍返回 ok，状态接口只给
+    `layers["parsed"] == []`，与「文档本来没有内容」无法区分。
+    """
+    db, pid, docs_root, uploads = ctx
+    real_replace = store.os.replace
+
+    def _vanish_parent(src, dst, *a, **k):
+        target = Path(dst)
+        if docs_root in target.parents:
+            shutil.rmtree(target.parent, ignore_errors=True)
+        return real_replace(src, dst, *a, **k)
+
+    monkeypatch.setattr(store.os, "replace", _vanish_parent)
+
+    f = _upload("设计说明.txt", "# 工程概况\n\n基坑深度 12.5m。\n".encode("utf-8"))
+    up = await gf.upload_documents(scheme_id="", project_id=pid, files=[f], db=db)
+    doc_id = up["saved"][0]["id"]
+    parsed = await gf.parse_document(doc_id, force=False, db=db)
+    assert parsed["ok"], "磁盘写失败不应击穿解析主链路（本次修复不放宽该语义）"
+
+    cur = await db.execute("SELECT parse_status, file_hash_md5 FROM project_documents WHERE id=?", (doc_id,))
+    row = dict(await cur.fetchone())
+    assert row["parse_status"] == "success"
+    assert row["file_hash_md5"] == "", "旧现象：上传指纹落盘失败后 DB 列为空"
+
+    st = await dp_api.document_status(doc_id, db=db)
+    assert st["layers"]["parsed"] == [], "解析层确实没有落盘（磁盘事实不变）"
+    assert st["layer_errors"].get("parsed"), f"空数组不得冒充正常，status={st}"
+
+
+async def test_parent_dir_transient_loss_recovers(ctx, monkeypatch):
+    """父目录只被删一次（并发清理的瞬时窗口）→ 原子写重试后产物完整。"""
+    db, pid, docs_root, uploads = ctx
+    real_replace = store.os.replace
+    vanished = False
+
+    def _vanish_once(src, dst, *a, **k):
+        nonlocal vanished
+        target = Path(dst)
+        if docs_root in target.parents and not vanished:
+            vanished = True
+            shutil.rmtree(target.parent, ignore_errors=True)
+        return real_replace(src, dst, *a, **k)
+
+    monkeypatch.setattr(store.os, "replace", _vanish_once)
+
+    doc_id = await _upload_and_parse(ctx)
+    assert store.parsed_md_path(pid, doc_id).exists(), "重试后解析层 Markdown 必须落盘"
+    cur = await db.execute("SELECT file_hash_md5, parse_status FROM project_documents WHERE id=?", (doc_id,))
+    row = dict(await cur.fetchone())
+    assert row["parse_status"] == "success" and len(row["file_hash_md5"]) == 32
+
+    st = await dp_api.document_status(doc_id, db=db)
+    assert st["layers"]["parsed"], "重试成功后各层产物应可见"
+    assert "parsed" not in st["layer_errors"]
 
 
 # ---------------------------------------------------------------------------
