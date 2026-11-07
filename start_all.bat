@@ -389,7 +389,7 @@ REM :8000 listen socket and the worker child inherits the handle, which
 REM produced parent/child accept() races plus orphan workers holding the
 REM port after the parent died. One process = one socket owner.
 REM For hot reload during development, stop the server and restart it.
-start "后端-专项方案工具箱" /D "%~dp0backend" cmd /S /K ""%PY%" -m uvicorn app.main:app --host 0.0.0.0 --port 8000"
+start "后端-专项方案工具箱" /D "%~dp0backend" cmd /S /K ""%PY%" -m uvicorn app.main:app --host 0.0.0.0 --port 8000 --timeout-graceful-shutdown 30"
 
 REM 等后端起来。旧脚本用 for /l %%i in (1,1,15) 只等 15 秒，且直接调裸 curl：
 REM 精简系统 / 旧版 Windows 没有 curl.exe 时会永远判定未就绪并误报「超时」，

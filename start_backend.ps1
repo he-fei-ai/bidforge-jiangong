@@ -18,8 +18,9 @@
 #  WHAT IT DOES
 #    1. free port 8000 (kill_port.ps1) + sweep leftover zombie pytest,
 #    2. locate an interpreter that can import the app,
-#    3. start `python -m uvicorn app.main:app --host 0.0.0.0 --port 8000`
-#       as ONE detached process (no --reload),
+#    3. start `python -m uvicorn app.main:app --host 0.0.0.0 --port 8000
+#       --timeout-graceful-shutdown 30` as ONE detached process (no --reload),
+#       so a live SSE connection cannot block shutdown forever,
 #    4. print PID / listening port / health URL / clickable frontend URL,
 #    5. poll health, print measured latency; exit 1 on failure.
 #
@@ -78,7 +79,7 @@ Write-Output "  interpreter: $pyVer  ($PY)"
 
 # ---- 3. start single-process uvicorn (NO --reload) ------------------------
 Write-Output "[start_backend] step 3/5: starting uvicorn (single process, no --reload)..."
-$uvArgs = @('-m', 'uvicorn', 'app.main:app', '--host', '0.0.0.0', '--port', "$Port")
+$uvArgs = @('-m', 'uvicorn', 'app.main:app', '--host', '0.0.0.0', '--port', "$Port", '--timeout-graceful-shutdown', '30')
 $proc = Start-Process -FilePath $PY -ArgumentList $uvArgs `
         -WorkingDirectory $backendDir -WindowStyle Hidden -PassThru
 if (-not $proc) { Die "Start-Process failed." }
