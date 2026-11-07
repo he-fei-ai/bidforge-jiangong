@@ -499,7 +499,17 @@ class TestGuardDiscrimination:
             src = src.replace("        _export_dedup_release(_lk)\n", "        pass  # 变异\n")
         elif variant == "acquire_before_guard":
             lines = src.splitlines()
-            out = [ln for ln in lines if not ln.lstrip().startswith("await _guard_numbering_consistency(")]
+            # ✅ R183-补 适配：守卫返回值（编号自检结论）现被接收为 `_num_check`，
+            #    源码形态由 `await _guard_...(` 变为 `_num_check = await _guard_...(`。
+            #    变异必须把两种形态都摘掉，否则"守卫后移"这一变异根本无法构造，
+            #    用例会因变异体未变而误判为"守卫失效"。
+            out = [
+                ln
+                for ln in lines
+                if not ln.lstrip().startswith(
+                    ("await _guard_numbering_consistency(", "_num_check = await _guard_numbering_consistency(")
+                )
+            ]
             # ✅ R106 适配：acquire 现位于 `try:` **体内**（8 空格）—— 目的是
             #    `_lk = None` 先置初值、acquire 抛错时 finally 仍能成对释放并注销
             #    取消登记（见 export_docx 的 R106 FIX-1 注释）。原实现用

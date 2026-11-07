@@ -64,7 +64,15 @@ const apiMock = vi.hoisted(() => {
         if (prop === "__esModule") return true;
         if (prop === "then") return undefined;
         // 数值导出（页面/hook 会参与算术与文案拼接）：纯动态可调用代理无法参与运算
-        if (prop === "API_GLOBAL_TIMEOUT_MS" || prop === "PREVIEW_TIMEOUT_MS") return 60000;
+        if (
+          prop === "API_GLOBAL_TIMEOUT_MS" ||
+          prop === "PREVIEW_TIMEOUT_MS" ||
+          prop === "REPARSE_TIMEOUT_MS" ||
+          prop === "SYNC_EXTRACTIONS_TIMEOUT_MS" ||
+          prop === "CROSS_CHECK_TIMEOUT_MS"
+        ) {
+          return 60000;
+        }
         return makeCallable([prop]);
       },
       has(_t, prop: any) {

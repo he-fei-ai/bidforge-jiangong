@@ -2657,6 +2657,23 @@ def _export_audit_headers(audit: dict) -> dict:
     return {"X-Content-Audit": quote(json.dumps(audit, ensure_ascii=False), safe="")}
 
 
+def _numbering_check_headers(report: dict | None) -> dict:
+    """把编号自检结论以 latin-1 安全方式回传（仅严格模式守卫会返回非空）。
+
+    ✅ R183-补（2026-11-07）：自检异常时旧实现只写 debug 日志，响应里没有任何
+    痕迹 —— "没检查"被当成"没问题"。本函数保证：
+      · 自检成功 → ``checked=true`` + consistent / mismatched / chapters；
+      · 自检失败 → ``checked=false`` + ``consistent=null`` + reason。
+    失败**不阻断导出**（自检崩溃不能害用户导不出），但结论不得显示成结构一致。
+    """
+    outline = (report or {}).get("outline")
+    if not isinstance(outline, dict):
+        return {}
+    from urllib.parse import quote
+
+    return {"X-Numbering-Check": quote(json.dumps(outline, ensure_ascii=False), safe="")}
+
+
 # ---------------------------------------------------------------------------
 # ✅ R176 · D2-2（2026-11-04）：内容体检结果旁车（``<产物>.audit.json``）
 # ---------------------------------------------------------------------------
@@ -5512,7 +5529,7 @@ async def export_docx(scheme_id: str, body: dict, db=Depends(get_db)):
     _prepare_export **之前**的临界区（含计费的 AI 生图），否则并发会双计费。
     键与判据见 _EXPORT_BUILD_LOCKS 前的模块注释。
     """
-    await _guard_numbering_consistency(db, scheme_id)
+    _num_check = await _guard_numbering_consistency(db, scheme_id)
     # ✅ R106 FIX-1：取消事件登记在去重锁**之前** —— /cancel 在全窗口
     #    （等锁 / 取数段 / 渲染段 / 构建线程）均可生效；本路由 finally 注销。
     cancel_ev = _export_cancel_register(scheme_id)
@@ -5573,6 +5590,7 @@ async def export_docx(scheme_id: str, body: dict, db=Depends(get_db)):
                 **_export_audit_headers(prep.get("content_audit") or {}),
                 **_global_facts_status_headers(prep.get("global_facts_status")),
                 **_override_headers,
+                **_numbering_check_headers(_num_check),
             }
             # ✅ BUG-6（R175）：登记读租约 —— FileResponse 懒打开，文件在本响应
             #    流式读取期间不得被并发 prune 删除。
@@ -5595,6 +5613,7 @@ async def export_docx(scheme_id: str, body: dict, db=Depends(get_db)):
             **_export_audit_headers(prep.get("content_audit") or {}),
             **_global_facts_status_headers(prep.get("global_facts_status")),
             **_override_headers,
+            **_numbering_check_headers(_num_check),
         }
 
         # ✅ R99：未命中 → 此时才执行渲染段（图表预渲染 / AI 配图 / 位图下载）。
@@ -6011,7 +6030,7 @@ async def export_pdf(scheme_id: str, body: dict, db=Depends(get_db)):
     还有一次 Word COM 转换（秒~分钟级），故同样在去重锁内执行构建与缓存提交；
     守卫在锁外。键与判据见 _EXPORT_BUILD_LOCKS 前的模块注释。
     """
-    await _guard_numbering_consistency(db, scheme_id)
+    _num_check = await _guard_numbering_consistency(db, scheme_id)
     # ✅ R106 FIX-1：与 DOCX 链同构 —— 取消事件登记在去重锁之前，finally 注销。
     cancel_ev = _export_cancel_register(scheme_id)
     _lk = None
@@ -6068,6 +6087,7 @@ async def export_pdf(scheme_id: str, body: dict, db=Depends(get_db)):
                 **_export_audit_headers(prep.get("content_audit") or {}),
                 **_global_facts_status_headers(prep.get("global_facts_status")),
                 **_override_headers,
+                **_numbering_check_headers(_num_check),
             }
             # ✅ BUG-6（R175）：PDF 缓存命中同样登记读租约
             _export_read_lease_register(cached[0])
@@ -6088,6 +6108,7 @@ async def export_pdf(scheme_id: str, body: dict, db=Depends(get_db)):
             **_export_audit_headers(prep.get("content_audit") or {}),
             **_global_facts_status_headers(prep.get("global_facts_status")),
             **_override_headers,
+            **_numbering_check_headers(_num_check),
         }
 
         # ✅ R99（2026-10-17 · 缓存命中快速路径）：与 DOCX 同序 —— 未命中才渲染。

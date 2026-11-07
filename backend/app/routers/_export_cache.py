@@ -1,5 +1,7 @@
 """导出缓存·指纹与治理群（配置指纹/内容指纹/缓存行判据/缓存修剪/孤儿产物 GC，自 export.py 按导出阶段拆出，facade 延迟绑定，纯搬移零行为变更）"""
 
+import posixpath
+import xml.etree.ElementTree as ET
 import zipfile
 
 import app.routers.export as _sh  # noqa: F401 — facade 命名空间延迟绑定（monkeypatch 兼容）
@@ -273,15 +275,34 @@ def _summarize_numbering_consistency(report: dict) -> str:
     return "; ".join(parts) or f"不一致章节数={report.get('mismatched', 0)}"
 
 
-async def _guard_numbering_consistency(db, scheme_id: str) -> None:
-    """✅ 编号统一（2026-09-26 · 显式跨校验器）：导出前校验落库正文子标题编号与
-    当前 outline 编号一致（捕获 D4 类漂移残留，原始需求 五.6 后半）。
+async def _guard_numbering_consistency(db, scheme_id: str) -> dict:
+    """✅ 编号统一（2026-09-26 · 显式跨校验器）：导出前校验落库编号与真实树一致。
     DOCX 与 PDF 两条链路共用（均经此守卫，避免"改了一处漏一处"）。
 
     严格模式（numbering_consistency_strict）直接 409 阻断产出不一致文档
-    （CI 校验场景）；默认仅告警——导出成稿本身仍由 _compute_subheading 重算
-    保证正确，落库正文可用 /sections/numbering-consistency/repair 修复。
-    校验器自身异常绝不阻断导出（降级为 debug 日志）。
+    （CI 校验场景）；默认仅告警——导出成稿本身仍由 _compute_subheading /
+    heading_gen 按结构树重算，落库正文可用 repair 接口修复。
+    校验器自身异常绝不阻断导出。
+
+    ✅ R183（2026-11-07 · 严格模式盲区）：此前 strict 分支只调用
+    `validate_scheme_numbering_consistency`（正文子标题 vs outline_json.id），
+    当 outline_json.id 本身陈旧（例如「第 2 章存储编号被改成 1」）而正文又按
+    这份陈旧编号重写时，正文校验判绿 → 严格模式放行，与导出侧「按树重算」
+    的结论分叉。现严格模式同时只读复用 `sections._outline_structure_report`
+    （与 `renumber_sections_after_reorder` 同一 `_build_tree` +
+    `renumber_section_outline_ids` 算法），确保「阻断判定」与「导出重算」同源。
+
+    ✅ R183-补（2026-11-07 · 自检崩溃不得伪装成「结构一致」）：本函数已是
+    第三个调用 `_outline_structure_report` 的点（目录路由 / 审核 DLV-13 / 导出）。
+    旧实现自检异常时只写 debug 日志、返回 None → 响应里没有任何痕迹，
+    「没检查」被当成「没问题」。现在返回值固定为 ``{"outline": {...}}``：
+
+      · 自检成功：``checked=True``，携带 consistent / mismatched / chapters；
+      · 自检失败（异常或符号不可用）：``checked=False``、``consistent=None``
+        且带 ``reason``，同时写 WARNING 日志；**不阻断导出**（自检崩了不能
+        害用户导不出），但结论不得显示成结构一致。
+
+    非严格模式返回 ``{}``（本就不做结构自检，不发任何结论头）。
     """
     try:
         from app.config import settings as _settings
@@ -294,15 +315,55 @@ async def _guard_numbering_consistency(db, scheme_id: str) -> None:
         from app.services.numbering import validate_scheme_numbering_consistency
 
         _rep = await validate_scheme_numbering_consistency(db, scheme_id)
-        if not _rep["consistent"]:
-            raise _sh.HTTPException(
-                409,
-                detail={
-                    "error": "numbering_inconsistency",
-                    "mismatched": _rep["mismatched"],
-                    "summary": _sh._summarize_numbering_consistency(_rep),
-                },
+        _outline = None
+        _outline_reason = ""
+        try:
+            # 只读复用，不复制实现：结构自检的唯一事实源在 sections.py。
+            from app.routers.sections import _outline_structure_report
+        except Exception as _e:  # noqa: BLE001 — 符号不可用同样必须可见
+            _outline_reason = f"结构自检不可用（符号导入失败）：{_e}"
+            _sh.logger.warning(
+                "导出前结构编号自检不可用（不阻断导出，结论标记 checked=false）: %s", _e, exc_info=True
             )
+        else:
+            try:
+                _outline = await _outline_structure_report(db, scheme_id)
+            except Exception as _e:  # noqa: BLE001 — 自检异常不阻断，但必须可见
+                _outline_reason = f"结构自检执行异常：{_e}"
+                _sh.logger.warning(
+                    "导出前结构编号自检失败（不阻断导出，结论标记 checked=false）: %s", _e, exc_info=True
+                )
+        if _outline is not None:
+            _outline_detail = {
+                "checked": True,
+                "consistent": bool(_outline.get("consistent")),
+                "mismatched": int(_outline.get("mismatched") or 0),
+                "chapters": int(_outline.get("checked") or 0),
+                "unverifiable": int(_outline.get("unverifiable") or 0),
+                "samples": _outline.get("samples", []),
+            }
+        else:
+            _outline_detail = {
+                "checked": False,
+                "consistent": None,
+                "mismatched": None,
+                "reason": _outline_reason or "结构自检未执行（原因未知）",
+            }
+        _body_bad = not _rep["consistent"]
+        _outline_bad = bool(_outline_detail["checked"] and not _outline_detail["consistent"])
+        if _body_bad or _outline_bad:
+            _summary = _summarize_numbering_consistency(_rep)
+            if _outline_bad:
+                _outline_note = f"结构编号与树位置不一致={_outline_detail['mismatched']} 章（stored≠树位置）"
+                _summary = f"{_summary}；{_outline_note}" if _body_bad else _outline_note
+            detail = {
+                "error": "numbering_inconsistency",
+                "mismatched": _rep["mismatched"],
+                "summary": _summary,
+                "outline": _outline_detail,
+            }
+            raise _sh.HTTPException(409, detail=detail)
+        return {"outline": _outline_detail}
     else:
         try:
             from app.services.numbering import validate_scheme_numbering_consistency
@@ -326,6 +387,7 @@ async def _guard_numbering_consistency(db, scheme_id: str) -> None:
                 )
         except Exception as _e:  # noqa: BLE001
             _sh.logger.debug("编号一致性预检失败（不影响导出）: %s", _e)
+        return {}
 
 
 #: ZIP 完整性校验结果记忆化（键 = (路径, 大小, mtime_ns)），避免每次命中/裁剪
@@ -339,25 +401,158 @@ _ZIP_VERIFIED: dict[tuple[str, int, int], bool] = {}
 _ZIP_VERIFIED_LOCK = _sh.threading.Lock()
 _ZIP_VERIFIED_MAX = 1024
 
+# ---------------------------------------------------------------------------
+# ✅ R183（2026-11-07 · 用户硬要求）：DOCX 包结构级校验
+# ---------------------------------------------------------------------------
+# 背景：R175 的 `_zip_integrity_ok` 只做 `testzip()` + 「两个文件名存在」，
+# 对「CRC 全好但 OOXML 包结构损坏」的文件一律放行。实测四类可复现误判
+# （见 tests/test_export_docx_ooxml_structure_r183_20261107.py）：
+#   ① [Content_Types].xml 为空壳 `<Types/>`（Word/WPS 打开即报损坏）；
+#   ② [Content_Types].xml 本身不是合法 XML；
+#   ③ word/document.xml 被截断成非法 XML；
+#   ④ document.xml 在 [Content_Types].xml 中没有任何 ContentType 声明。
+# 这四类文件作为「缓存命中」交付时，用户看到的就是「导出文档无法打开」。
+# 现按 OPC / ECMA-376 最小充分判据逐项校验：ZIP CRC、必需部件、全部
+# XML/RELS 可解析、Content_Types 覆盖与主文档 MIME、关系目标存在性、
+# 关键根元素命名空间。判据失败 → 该产物不可作为缓存命中（触发重建）。
+
+_DOCX_REQUIRED_PARTS = (
+    "[Content_Types].xml",
+    "_rels/.rels",
+    "word/document.xml",
+    "word/_rels/document.xml.rels",
+)
+_CT_NS = "http://schemas.openxmlformats.org/package/2006/content-types"
+_REL_NS = "http://schemas.openxmlformats.org/package/2006/relationships"
+_WML_NS = "http://schemas.openxmlformats.org/wordprocessingml/2006/main"
+_WML_DOCUMENT_CT = "application/vnd.openxmlformats-officedocument.wordprocessingml.document.main+xml"
+_REL_OFFICE_DOCUMENT = "http://schemas.openxmlformats.org/officeDocument/2006/relationships/officeDocument"
+
+
+def _rels_target_part(base_rels_part: str, target: str) -> str:
+    """把关系文件里的相对 Target 解析为包内部件名（空串 = 无法解析）。"""
+    tgt = (target or "").split("#", 1)[0].strip()
+    if not tgt:
+        return ""
+    if tgt.startswith("/"):
+        return posixpath.normpath(tgt.lstrip("/"))
+    base_dir = posixpath.dirname(posixpath.dirname(base_rels_part))
+    return posixpath.normpath(posixpath.join(base_dir, tgt))
+
+
+def _docx_package_problems(path) -> list[str]:
+    """返回 DOCX 包结构问题列表（空列表 = 通过 OOXML 结构级校验）。
+
+    只读、不修改文件；任何异常都收敛为一条问题而不是抛出 —— 调用方按
+    「不可用缓存」处理（fail-closed：校验不了就不交付）。
+    """
+    problems: list[str] = []
+    try:
+        with zipfile.ZipFile(str(path)) as zf:
+            bad_member = zf.testzip()
+            if bad_member is not None:
+                problems.append(f"zip-crc:{bad_member}")
+            names = set(zf.namelist())
+            for req in _DOCX_REQUIRED_PARTS:
+                if req not in names:
+                    problems.append(f"missing-part:{req}")
+
+            # 1) 全部 XML / RELS 部件必须良构（截断的 document.xml 在此暴露）
+            for name in sorted(names):
+                if not (name.endswith(".xml") or name.endswith(".rels")):
+                    continue
+                try:
+                    with zf.open(name) as fh:
+                        ET.parse(fh)
+                except Exception as exc:  # noqa: BLE001 — 逐部件记录，不中断
+                    problems.append(f"xml-invalid:{name}:{type(exc).__name__}")
+
+            # 2) Content_Types 覆盖 + 主文档 MIME
+            if "[Content_Types].xml" in names:
+                try:
+                    ct_root = ET.fromstring(zf.read("[Content_Types].xml"))
+                    if ct_root.tag != f"{{{_CT_NS}}}Types":
+                        problems.append("ct-root-invalid")
+                    defaults = {
+                        (el.get("Extension") or "").lower()
+                        for el in ct_root.findall(f"{{{_CT_NS}}}Default")
+                    }
+                    overrides: dict[str, str] = {}
+                    for el in ct_root.findall(f"{{{_CT_NS}}}Override"):
+                        part = (el.get("PartName") or "").lstrip("/")
+                        if part:
+                            overrides[part] = el.get("ContentType") or ""
+                    for name in sorted(names):
+                        if name == "[Content_Types].xml" or name.endswith(".rels"):
+                            continue
+                        ext = posixpath.basename(name).rsplit(".", 1)[-1].lower() if "." in posixpath.basename(name) else ""
+                        if name in overrides or (ext and ext in defaults):
+                            continue
+                        problems.append(f"ct-uncovered:{name}")
+                    if overrides.get("word/document.xml") != _WML_DOCUMENT_CT:
+                        problems.append("main-part-mime-invalid")
+                except Exception as exc:  # noqa: BLE001
+                    problems.append(f"ct-unparsable:{type(exc).__name__}")
+
+            # 3) 关系目标存在性 + 与主文档的关系
+            for name in sorted(names):
+                if not name.endswith(".rels"):
+                    continue
+                try:
+                    rel_root = ET.fromstring(zf.read(name))
+                    if rel_root.tag != f"{{{_REL_NS}}}Relationships":
+                        problems.append(f"rels-root-invalid:{name}")
+                    rel_ids: set[str] = set()
+                    for rel in rel_root.findall(f"{{{_REL_NS}}}Relationship"):
+                        rid = rel.get("Id") or ""
+                        if rid in rel_ids:
+                            problems.append(f"rels-duplicate-id:{name}:{rid}")
+                        rel_ids.add(rid)
+                        if (rel.get("TargetMode") or "").lower() == "external":
+                            continue
+                        resolved = _rels_target_part(name, rel.get("Target") or "")
+                        if not resolved or resolved not in names:
+                            problems.append(f"rels-target-missing:{name}:{rel.get('Target') or ''}")
+                        if name == "_rels/.rels" and (rel.get("Type") or "") == _REL_OFFICE_DOCUMENT:
+                            if resolved != "word/document.xml":
+                                problems.append(f"office-document-target-invalid:{resolved}")
+                except Exception as exc:  # noqa: BLE001
+                    problems.append(f"rels-unparsable:{name}:{type(exc).__name__}")
+
+            # 4) 关键根元素命名空间（防止扩展名对、内容却是别的东西）
+            if "word/document.xml" in names:
+                try:
+                    doc_root = ET.fromstring(zf.read("word/document.xml"))
+                    if doc_root.tag != f"{{{_WML_NS}}}document":
+                        problems.append("document-root-invalid")
+                except Exception:  # noqa: BLE001 — 已在第 1 步记录
+                    pass
+    except Exception as exc:  # noqa: BLE001 — 打不开包 = 结构性不可用
+        problems.append(f"package-unreadable:{type(exc).__name__}")
+    return problems[:20]
+
+
 
 def _zip_integrity_ok(path, size: int, mtime_ns: int) -> bool:
-    """DOCX（ZIP 容器）是否结构完整；结果记忆化（线程安全）。"""
+    """DOCX（ZIP 容器）是否通过 OOXML 结构级校验；结果记忆化（线程安全）。"""
     key = (str(path), int(size), int(mtime_ns))
     with _ZIP_VERIFIED_LOCK:
         cached = _ZIP_VERIFIED.get(key)
     if cached is not None:
         return cached
-    ok = False
+    problems: list[str] = []
     try:
-        with zipfile.ZipFile(str(path)) as zf:
-            # testzip 返回首个损坏成员名（None = 全部 CRC 校验通过）
-            ok = zf.testzip() is None
-            # 额外必需部件：缺 [Content_Types].xml 的包 Word/WPS 必判「损坏」
-            if ok:
-                names = set(zf.namelist())
-                ok = "[Content_Types].xml" in names and "word/document.xml" in names
+        # ✅ R183：不只是 CRC —— 结构损坏但 CRC 正常的包同样「打不开」。
+        problems = _docx_package_problems(path)
+        ok = not problems
     except Exception:  # BadZipFile / OSError / CRC 异常
         ok = False
+    if not ok:
+        _sh.logger.warning(
+            "DOCX 产物未通过 OOXML 结构校验（按不可用缓存/不可交付处理）: %s | %s",
+            path,
+            "; ".join(problems[:8]) or "unknown",
+        )
     with _ZIP_VERIFIED_LOCK:
         if len(_ZIP_VERIFIED) >= _ZIP_VERIFIED_MAX:
             _ZIP_VERIFIED.clear()
