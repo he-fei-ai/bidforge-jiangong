@@ -590,13 +590,22 @@ async def build_completeness_report(db, *, doc_id: str, project_id: str, total_p
 
 
 def compute_freshness(meta: dict, *, current_md5: str = "") -> dict:
-    """时效性判定（规范 §4.2）：valid / expired / file_changed / not_parsed。"""
+    """时效性判定（规范 §4.2）：valid / expired / file_changed / not_parsed / unknown。
+
+    ✅ R188：`file_hash_md5` 为空表示指纹未知（典型为上传落盘被 `_safe_io` 吞掉），
+    旧写法只在两侧都有值时才比对，指纹未知会静默落进 valid —— 把「无法判定」
+    显示成「没变化」。现显性化为 unknown；只在读时派生，不落库、不加列。
+    """
     status = "valid"
     reasons: list[str] = []
     if (meta.get("parse_status") or "") != "success":
         status = "not_parsed"
         reasons.append("文档尚未成功解析")
-    if current_md5 and meta.get("file_hash_md5") and current_md5 != meta["file_hash_md5"]:
+    stored_md5 = str(meta.get("file_hash_md5") or "").strip()
+    if status == "valid" and not stored_md5:
+        status = "unknown"
+        reasons.append("文件指纹缺失（file_hash_md5 为空），无法判定源文件是否变更")
+    if status == "valid" and current_md5 and stored_md5 and current_md5 != stored_md5:
         status = "file_changed"
         reasons.append("源文件指纹与解析时不一致，需要重新解析")
     expires = (meta.get("expires_at") or "").strip()

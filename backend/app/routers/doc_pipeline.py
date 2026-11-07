@@ -17,6 +17,7 @@ from __future__ import annotations
 import asyncio
 import json
 import logging
+from datetime import datetime, timezone
 
 from fastapi import APIRouter, Depends, HTTPException, Query
 
@@ -83,24 +84,81 @@ async def document_status(doc_id: str, db=Depends(get_db)):
         parsed_md = store.parsed_md_path(doc["project_id"], doc_id)
         if not await asyncio.to_thread(parsed_md.exists):
             layer_errors[store.LAYER_PARSED] = "解析层写入失败或未落盘：parsed.md 缺失，可重新解析重建"
+        else:
+            # ✅ R188：parsed.md 本身不内嵌代次（front-matter 只有 doc_id/title/page_count），
+            #    只查存在会把「上一代次残留」当成成功。主判据是磁盘 meta.parse_version
+            #    与 DB parse_version（均为既有事实）；meta 缺失/无版本时退化为
+            #    parsed_at 与文件 mtime 比对。mtime 判据不可靠：复制/备份可能保留或刷新
+            #    mtime、网络盘存在时钟漂移，故留 1 小时容差；无法解析 parsed_at 时不报错。
+            disk_ver = str(meta.get("parse_version") or "").strip()
+            db_ver = str(doc.get("parse_version") or "").strip()
+            stale_reason = ""
+            if disk_ver and db_ver and disk_ver != db_ver:
+                stale_reason = f"磁盘代次 {disk_ver} 与数据库 {db_ver} 不一致"
+            else:
+                parsed_at = str(doc.get("parsed_at") or "").strip()
+                try:
+                    st_mtime = (await asyncio.to_thread(parsed_md.stat)).st_mtime
+                except OSError:
+                    st_mtime = 0.0
+                parsed_ts = 0.0
+                if parsed_at:
+                    try:
+                        parsed_ts = (
+                            datetime.strptime(parsed_at, "%Y-%m-%dT%H:%M:%SZ").replace(tzinfo=timezone.utc).timestamp()
+                        )
+                    except ValueError:
+                        parsed_ts = 0.0
+                if parsed_ts and st_mtime and parsed_ts - st_mtime > 3600:
+                    stale_reason = "磁盘产物早于本次解析时间（可能为上一代次残留）"
+            if stale_reason:
+                layer_errors[store.LAYER_PARSED] = f"解析层陈旧：{stale_reason}，可重新解析重建"
     # ✅ R187：提取层同理。`_safe_io(store.write_extraction, ...)` 失败时只留一条
     #    ERROR，DB 的 doc_extractions 行与 extract_status='success' 仍照写 ——
     #    状态接口的 `extract_status` 读 DB 显示成功，`layers["extracted"]` 读磁盘
     #    为空，两者自相矛盾却无失败语义。按既有事实派生（不落库、不加列）：
     #    DB 里每个 status='success' 的类别，磁盘必须有同名归档文件。
+    #    ✅ R188：仅查存在不够 —— 上次归档成功、本次改写失败时旧文件仍在，内容陈旧
+    #    却不会报错。追加「陈旧」判定：DB extract_data 与磁盘文件内的 extract_time
+    #    均来自同一 payload，可直接比对；任一侧缺失/JSON 读坏即视为「无法判定」跳过。
     if (doc.get("extract_status") or "") == "success":
         cur = await db.execute(
-            "SELECT extract_type FROM doc_extractions" " WHERE doc_id=? AND COALESCE(status,'')='success'",
+            "SELECT extract_type, extract_data FROM doc_extractions"
+            " WHERE doc_id=? AND COALESCE(status,'')='success'",
             (doc_id,),
         )
-        # R13：查询返回 None 时无法判定，按不报错处理（避免误报失败态）
-        succ_types = [r["extract_type"] for r in await cur.fetchall()] if cur is not None else []
+        rows = [dict(r) for r in await cur.fetchall()] if cur is not None else []
         disk_files = set(layers[store.LAYER_EXTRACTED])
-        missing = [t for t in succ_types if f"{doc_id}_{t}.json" not in disk_files]
-        if missing:
+        missing_types: list[str] = []
+        stale_types: list[str] = []
+        for r in rows:
+            ext_type = r["extract_type"]
+            if f"{doc_id}_{ext_type}.json" not in disk_files:
+                missing_types.append(ext_type)
+                continue
+            try:
+                disk_payload = await asyncio.to_thread(store.read_extraction, doc["project_id"], doc_id, ext_type)
+                db_payload = json.loads(r.get("extract_data") or "{}")
+            except (TypeError, ValueError):
+                continue
+            db_time = str((db_payload or {}).get("extract_time") or "")
+            disk_time = str((disk_payload or {}).get("extract_time") or "")
+            if db_time and disk_time and db_time != disk_time:
+                stale_types.append(ext_type)
+        parts: list[str] = []
+        if missing_types:
+            parts.append(f"磁盘缺少 {', '.join(missing_types)}")
+        if stale_types:
+            parts.append(f"产物陈旧 {', '.join(stale_types)}（提取时间与数据库不一致）")
+        if parts:
             layer_errors[store.LAYER_EXTRACTED] = (
-                f"提取层写入失败或未落盘：磁盘缺少 {', '.join(missing)}，可重新物化提取层重建"
+                "提取层写入失败或未落盘：" + "；".join(parts) + "，可重新物化提取层重建"
             )
+    # ✅ R188：上传阶段 `_sync` 被 `_safe_io` 吞掉时，DB 行的 file_hash_md5 为空、
+    #    raw/ 可能没有归档文件；`/freshness` 旧口径会静默判 valid（指纹未知当成没变化）。
+    #    这里按既有事实（DB 指纹 + 磁盘 raw 列表）派生可见失败态，不落库、不加列。
+    if not (doc.get("file_hash_md5") or "").strip() or not layers[store.LAYER_RAW]:
+        layer_errors[store.LAYER_RAW] = "原文层缺失：文件指纹为空或 raw/ 无归档文件，无法判定源文件是否变更"
     completeness = {}
     try:
         completeness = json.loads(doc.get("completeness_json") or "{}")

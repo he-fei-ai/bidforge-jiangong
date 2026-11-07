@@ -11,6 +11,7 @@
 
 import io
 import json
+import os
 import shutil
 import uuid
 from datetime import datetime, timedelta, timezone
@@ -547,6 +548,123 @@ async def test_extract_layer_write_failure_is_visible_in_status(ctx, monkeypatch
     st = await dp_api.document_status(doc_id, db=db)
     assert st["layers"]["extracted"] == [], "磁盘提取层确实为空（磁盘事实不变）"
     assert st["layer_errors"].get("extracted"), f"空数组不得冒充正常，status={st}"
+
+
+async def test_extract_stale(ctx, monkeypatch):
+    """旧文件掩盖本次失败：磁盘文件存在但内容是上一代次 → 必须报「陈旧」。
+
+    第一次物化成功归档；随后源提取项更新时间变化、DB 行随之刷新，但本次磁盘
+    改写失败（旧文件保留）。只查「文件是否存在」会静默通过，这里比对 DB
+    `extract_data` 与磁盘文件内的 `extract_time`（两者同源 payload）。
+    """
+    db, pid, docs_root, uploads = ctx
+    doc_id = await _upload_and_parse(ctx)
+    item_pk = f"{pid}_projectBasicInfo"
+    await db.execute(
+        "INSERT INTO bid_analysis_items (id, project_id, item_id, label,"
+        " output_type, required, status, content, sort_order, updated_at)"
+        " VALUES (?,?,?,?,'json',1,'success',?,1,?)",
+        (
+            item_pk,
+            pid,
+            "projectBasicInfo",
+            "项目级基本信息",
+            json.dumps({"project_info": {"project_name": {"value": "某某工程"}}}, ensure_ascii=False),
+            "2026-01-01T00:00:00Z",
+        ),
+    )
+    await db.commit()
+
+    first = await dp_api.sync_extractions(doc_id, db=db)
+    assert first["written_types"] == ["project_info"]
+    old_time = store.read_extraction(pid, doc_id, "project_info")["extract_time"]
+    assert old_time == "2026-01-01T00:00:00Z"
+
+    # 源项更新 → DB payload 时间变化；本次磁盘写入失败，旧文件仍在
+    await db.execute("UPDATE bid_analysis_items SET updated_at=? WHERE id=?", ("2026-11-01T00:00:00Z", item_pk))
+    await db.commit()
+
+    def _boom(*a, **k):
+        raise OSError("disk full")
+
+    monkeypatch.setattr(store, "write_extraction", _boom)
+    second = await dp_api.sync_extractions(doc_id, db=db)
+    assert second["extract_status"] == "success", "DB 侧仍报成功（旧行为）"
+    disk_payload = store.read_extraction(pid, doc_id, "project_info")
+    assert disk_payload["extract_time"] == old_time, "磁盘仍是上一代次产物"
+
+    st = await dp_api.document_status(doc_id, db=db)
+    extracted_err = st["layer_errors"].get("extracted", "")
+    assert "陈旧" in extracted_err and "project_info" in extracted_err, f"旧文件不得冒充最新，status={st}"
+
+
+async def test_parsed_stale(ctx, monkeypatch):
+    """parsed.md 存在但属于上一代次 → 必须报「解析层陈旧」。
+
+    parsed.md 内不嵌代次（front-matter 只有 doc_id/title/page_count），故用
+    磁盘 meta.parse_version 与 DB parse_version 比对为主判据；两者一致时
+    退化为 DB parsed_at 与文件 mtime 比对（留 1 小时容差，规避复制/时钟漂移）。
+    本用例模拟「重解析时 parsed.md 写入失败、meta 却已更新到 v2」：此时版本
+    两侧一致，只有 mtime 能识别，正是原盲区。
+    """
+    db, pid, docs_root, uploads = ctx
+    doc_id = await _upload_and_parse(ctx)  # v1
+    parsed_md = store.parsed_md_path(pid, doc_id)
+
+    def _boom(*a, **k):
+        raise OSError("disk full")
+
+    monkeypatch.setattr(store, "write_parsed_layer", _boom)
+    rep = await gf.parse_document(doc_id, force=True, db=db)  # v2，parsed.md 仍为 v1
+    assert rep["ok"]
+
+    cur = await db.execute("SELECT parse_version, parse_status FROM project_documents WHERE id=?", (doc_id,))
+    row = dict(await cur.fetchone())
+    assert row["parse_version"] == "v2" and row["parse_status"] == "success"
+
+    # 测试执行只差秒级，按真实时间落在容差内；把 mtime 前移两天，等价于
+    # 「上一代次解析发生在很久以前」，触发 mtime 判据。
+    old_ts = datetime.now(timezone.utc).timestamp() - 2 * 86400
+    os.utime(parsed_md, (old_ts, old_ts))
+    st = await dp_api.document_status(doc_id, db=db)
+    assert "陈旧" in st["layer_errors"].get("parsed", ""), f"旧代次不得冒充最新，status={st}"
+
+    # 主判据：磁盘 meta 代次与 DB 不一致时，直接报代次差
+    meta = store.read_meta(pid, doc_id)
+    meta["parse_version"] = "v1"
+    store.write_meta(pid, doc_id, meta)
+    st2 = await dp_api.document_status(doc_id, db=db)
+    assert "代次" in st2["layer_errors"].get("parsed", ""), f"代次不一致必须可见，status={st2}"
+
+
+async def test_missing_fingerprint(ctx, monkeypatch):
+    """上传落盘失败让 file_hash_md5 为空 → 状态可见、时效性必须是 unknown。
+
+    复现 `_safe_io(ingest_upload._sync)` 吞异常：DB 仍插入文档行，指纹列留空；
+    旧 `/freshness` 把「指纹未知」静默判 valid（没做成显示成做成了）。
+    """
+    db, pid, docs_root, uploads = ctx
+
+    def _boom(*a, **k):
+        raise OSError("disk full")
+
+    monkeypatch.setattr(store, "write_meta", _boom)
+    f = _upload("设计说明.txt", "# 工程概况\n\n基坑深度 12.5m。\n".encode("utf-8"))
+    up = await gf.upload_documents(scheme_id="", project_id=pid, files=[f], db=db)
+    doc_id = up["saved"][0]["id"]
+    parsed = await gf.parse_document(doc_id, force=False, db=db)
+    assert parsed["ok"], "磁盘写失败不应击穿解析主链路"
+
+    cur = await db.execute("SELECT file_hash_md5, parse_status FROM project_documents WHERE id=?", (doc_id,))
+    row = dict(await cur.fetchone())
+    assert row["file_hash_md5"] == "" and row["parse_status"] == "success"
+
+    st = await dp_api.document_status(doc_id, db=db)
+    assert st["layer_errors"].get("raw"), f"指纹缺失必须可见，status={st}"
+
+    fresh = await dp_api.document_freshness(doc_id, db=db)
+    assert fresh["status"] == "unknown", f"指纹未知不得判 valid，fresh={fresh}"
+    assert any("指纹缺失" in r for r in fresh["reasons"])
 
 
 # ---------------------------------------------------------------------------

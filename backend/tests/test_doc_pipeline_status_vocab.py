@@ -71,3 +71,8 @@ async def test_compute_freshness_not_parsed_vocabulary():
     # 已成功解析且指纹一致 → 回到 valid（验证 not_parsed 不是无条件返回）
     fresh_ok = pipeline.compute_freshness({"parse_status": "success", "file_hash_md5": "abc"})
     assert fresh_ok["status"] == "valid"
+
+    # 已解析但存储指纹为空 → 无法判定（R188），不得静默落进 valid
+    fresh_unknown = pipeline.compute_freshness({"parse_status": "success", "file_hash_md5": ""})
+    assert fresh_unknown["status"] == "unknown"
+    assert any("指纹缺失" in r for r in fresh_unknown["reasons"])
