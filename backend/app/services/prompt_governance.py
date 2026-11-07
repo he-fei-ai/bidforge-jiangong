@@ -266,6 +266,16 @@ def _overhead_of(prefix: str, segs: list[dict]) -> int:
     return total
 
 
+def _record_budget_not_applied(reason: str) -> None:
+    """预算分配「未生效」的可观测埋点（观测指标 fail-soft，绝不阻断主流程）。"""
+    try:
+        from app.services.ai.prompts import _metrics as _pm
+
+        _pm.record_token_budget_not_applied(reason)
+    except Exception:  # noqa: BLE001
+        logger.debug("上下文预算未生效埋点失败（忽略）", exc_info=True)
+
+
 def allocate_context_budget(text: str, budget: int, min_ratio: float = _SEGMENT_MIN_RATIO) -> tuple[str, dict]:
     """按优先级给多段上下文分配字符预算（优先级主导的水填式分配）。
 
@@ -287,10 +297,15 @@ def allocate_context_budget(text: str, budget: int, min_ratio: float = _SEGMENT_
     段内用边界感知截断，避免砍在句中。
     """
     if budget <= 0:
+        # ✅ 2026-11-07（第 4 条）：配置关闭是合法状态，只计数、不打日志 ——
+        #    运维看 `disabled` 增长即可确认「这次没生效是因为没开，不是坏了」。
+        _record_budget_not_applied("disabled")
         return text, {"applied": False, "budget": budget, "segments": 0}
 
     prefix, segs, trailing = split_labeled_segments(text)
     if not segs:
+        _record_budget_not_applied("no_labeled_segments")
+        logger.warning("上下文预算未生效（无【标签】段，无法按优先级分配）：预算 %d 字", budget)
         return text, {"applied": False, "budget": budget, "segments": 0}
 
     bodies = [_segment_body(s) for s in segs]
@@ -298,7 +313,22 @@ def allocate_context_budget(text: str, budget: int, min_ratio: float = _SEGMENT_
     total = overhead + sum(len(b) for b in bodies)
     available = budget - overhead
 
-    if total <= budget or available <= 0:
+    if available <= 0:
+        # 段头开销（标签 + 分隔符）自己就吃光了预算：不是「内容超了」，而是
+        # 预算小到分配器无从下手 —— 属配置不当，必须 WARNING。
+        _record_budget_not_applied("overhead_exceeds_budget")
+        logger.warning(
+            "上下文预算未生效（段头开销已超预算）：预算 %d 字，开销 %d 字，段数 %d",
+            budget,
+            overhead,
+            len(segs),
+        )
+        return text, {"applied": False, "budget": budget, "total_chars": total, "segments": len(segs)}
+
+    if total <= budget:
+        # 预算够用属正常放行，INFO 即可（开启预算后最常见的一支）。
+        _record_budget_not_applied("within_budget")
+        logger.info("上下文预算未生效（总字数未超预算）：预算 %d 字，总 %d 字", budget, total)
         return text, {"applied": False, "budget": budget, "total_chars": total, "segments": len(segs)}
 
     n = len(segs)
@@ -401,9 +431,12 @@ def allocate_context_budget(text: str, budget: int, min_ratio: float = _SEGMENT_
 
 
 def apply_context_budget(text: str, budget: int) -> str:
-    """预算分配器的「只取结果」便捷入口（调用方不需要报告时用）。"""
-    if budget <= 0:
-        return text
+    """预算分配器的「只取结果」便捷入口（调用方不需要报告时用）。
+
+    ✅ 2026-11-07（第 4 条）：去掉本函数自己的 ``budget <= 0`` 早退，改为委托
+    :func:`allocate_context_budget` —— 否则走这个入口的调用方**永远不计数**，
+    「预算开了没生效」在指标上依然静默。
+    """
     return allocate_context_budget(text, budget)[0]
 
 

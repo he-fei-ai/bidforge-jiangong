@@ -324,3 +324,56 @@ async def test_adjust_facts_physical_cap_only_on_preview_not_on_apply(db_conn, m
     )
     assert "instruction_truncated" not in applied, "apply=True 不渲染提示词，不得虚报截断"
 
+
+# ---------------------------------------------------------------------------
+# 2026-11-07（第 4 条）：预算「未生效」不再静默 —— 四类出口各记一次
+# ---------------------------------------------------------------------------
+def _not_applied() -> dict:
+    return _metrics.get_snapshot()["token_budget_not_applied"]
+
+
+def test_budget_not_applied_reasons_are_all_counted():
+    # disabled：配置关闭（合法），只计数、不打日志
+    _pg.allocate_context_budget("【全局事实】：x", 0)
+    _pg.apply_context_budget("【全局事实】：x", 0)
+    assert _not_applied().get("disabled") == 2, "apply 入口不得再自己早退绕过计数"
+
+    # no_labeled_segments：开了预算但文本里没有【标签】段
+    _pg.allocate_context_budget("纯文本没有标签" * 300, 100)
+    assert _not_applied().get("no_labeled_segments") == 1
+
+    # within_budget：预算够用（正常放行）
+    _pg.allocate_context_budget("【全局事实】：短", 10000)
+    assert _not_applied().get("within_budget") == 1
+
+    # overhead_exceeds_budget：段头开销自己就吃光预算（配置不当）
+    _pg.allocate_context_budget("前缀" * 300 + "\n【全局事实】：短", 100)
+    assert _not_applied().get("overhead_exceeds_budget") == 1
+    assert set(_not_applied()) == {
+        "disabled",
+        "no_labeled_segments",
+        "within_budget",
+        "overhead_exceeds_budget",
+    }
+
+
+def test_overhead_exceeds_budget_emits_warning(caplog):
+    with caplog.at_level(logging.WARNING, logger="prompt_governance"):
+        _pg.allocate_context_budget("前缀" * 300 + "\n【全局事实】：短", 100)
+    warns = [r for r in caplog.records if r.levelno == logging.WARNING and "段头开销已超预算" in r.getMessage()]
+    assert warns, [r.getMessage() for r in caplog.records]
+
+
+def test_reset_clears_token_budget_not_applied():
+    _metrics.record_token_budget_not_applied("disabled")
+    assert _not_applied().get("disabled") == 1
+    _metrics.reset()
+    assert _not_applied() == {}
+
+
+def test_snapshot_has_nine_top_level_keys():
+    snap = _metrics.get_snapshot()
+    assert len(snap) == 9, sorted(snap)
+    assert "token_budget_not_applied" in snap
+    assert snap["token_budget_not_applied"] == {}
+
