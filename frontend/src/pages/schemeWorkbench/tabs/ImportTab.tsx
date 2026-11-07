@@ -129,8 +129,8 @@ export function ImportSidePanel({
       style={{
         width: 300,
         flexShrink: 0,
-        background: "#fafafa",
-        border: "1px solid #f0f0f0",
+        background: "var(--bp-panel-bg)",
+        border: "1px solid var(--bp-border)",
         borderRadius: 8,
         overflow: "hidden",
         display: "flex",
@@ -140,8 +140,8 @@ export function ImportSidePanel({
       <div
         style={{
           padding: "10px 14px",
-          background: "#fff",
-          borderBottom: "1px solid #f0f0f0",
+          background: "var(--bp-panel-header)",
+          borderBottom: "1px solid var(--bp-border)",
           display: "flex",
           alignItems: "center",
           justifyContent: "space-between",

@@ -13,7 +13,7 @@ import {
 import { useNavigate } from "react-router-dom";
 import { useAntdMessageHub } from "../utils/activityCenter";
 import { notifySidebarTreeRefresh } from "../utils/sidebarEvents";
-import { PageHero } from "../utils/ui";
+import { PageHero, StatCards } from "../utils/ui";
 import { projectsApi } from "../api";
 
 const ENGINEERING_TYPES = [
@@ -249,75 +249,14 @@ export default function ProjectListPage() {
         }
       />
 
-      {/* ========== 统计卡片 ========== */}
-      <div
-        className="bp-stat-cards"
-        style={{
-          display: "grid",
-          gridTemplateColumns: "repeat(3, minmax(0, 1fr))",
-          gap: 12,
-          flexShrink: 0,
-          minWidth: 0,
-          width: "100%",
-        }}
-      >
-        {[
+      {/* ========== 统计卡片（统一走 StatCards：内置 1/2/3 列断点与暗色卡片） ========== */}
+      <StatCards
+        items={[
           { icon: <FolderOutlined />, label: "项目总数", value: totalProjects, color: "#00D4FF" },
           { icon: <FileTextOutlined />, label: "方案总数", value: totalSchemes, color: "#00C853" },
           { icon: <RocketOutlined />, label: "活跃项目", value: activeProjects, color: "#FFB800" },
-        ].map((s) => (
-          <div
-            key={s.label}
-            style={{
-              background: "#FFFFFF",
-              borderRadius: 4,
-              padding: "14px 18px",
-              display: "flex",
-              alignItems: "center",
-              gap: 14,
-              border: "1px solid #E8EDF4",
-              transition: "box-shadow 0.2s",
-            }}
-            onMouseEnter={(e) => {
-              (e.currentTarget as HTMLElement).style.boxShadow =
-                "0 2px 6px rgba(15,43,79,0.06), 0 4px 12px rgba(15,43,79,0.05)";
-            }}
-            onMouseLeave={(e) => {
-              (e.currentTarget as HTMLElement).style.boxShadow = "none";
-            }}
-          >
-            <div
-              style={{
-                width: 40,
-                height: 40,
-                borderRadius: 4,
-                background: `${s.color}15`,
-                display: "flex",
-                alignItems: "center",
-                justifyContent: "center",
-                color: s.color,
-                fontSize: 20,
-              }}
-            >
-              {s.icon}
-            </div>
-            <div>
-              <div
-                style={{
-                  fontSize: 22,
-                  fontWeight: 700,
-                  fontFamily: "'JetBrains Mono', monospace",
-                  color: "#1A2332",
-                  lineHeight: 1.1,
-                }}
-              >
-                {s.value}
-              </div>
-              <div style={{ fontSize: 12, color: "#8B99AC", marginTop: 2 }}>{s.label}</div>
-            </div>
-          </div>
-        ))}
-      </div>
+        ]}
+      />
 
       {/* ========== 项目表格 ========== */}
       <Card
@@ -332,13 +271,13 @@ export default function ProjectListPage() {
               justifyContent: "space-between",
               alignItems: "center",
               padding: "12px 20px",
-              borderBottom: "1px solid #E8EDF4",
+              borderBottom: "1px solid var(--bp-border)",
               flexShrink: 0,
             }}
           >
-            <span style={{ fontWeight: 600, color: "#1A2332", fontSize: 14 }}>
+            <span style={{ fontWeight: 600, color: "var(--bp-text)", fontSize: 14 }}>
               项目清单
-              <span style={{ color: "#8B99AC", fontWeight: 400, fontSize: 12, marginLeft: 8 }}>
+              <span style={{ color: "var(--bp-text-tertiary)", fontWeight: 400, fontSize: 12, marginLeft: 8 }}>
                 共 {totalProjects} 个项目 · {totalSchemes} 个方案
               </span>
             </span>

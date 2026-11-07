@@ -160,7 +160,7 @@ export function BidAnalysisItemBody({ item }: { item: BaStoredItem | null }) {
 
   if (!content) {
     if (banner) return banner;
-    return <div style={{ color: "#999", padding: 20 }}>（暂无内容）</div>;
+    return <div style={{ color: "var(--bp-text-tertiary)", padding: 20 }}>（暂无内容）</div>;
   }
   const isJson =
     item.output_type === "json" ||
@@ -201,13 +201,13 @@ export function BidAnalysisItemBody({ item }: { item: BaStoredItem | null }) {
             key={k}
             style={{ marginBottom: 2, display: "flex", gap: 8, fontSize: 13, lineHeight: 1.4 }}
           >
-            <div style={{ minWidth: 160, color: "#666", flexShrink: 0 }}>
+            <div style={{ minWidth: 160, color: "var(--bp-text-secondary)", flexShrink: 0 }}>
               {isProjectInfo ? projectInfoFieldLabel(k) : k}
             </div>
             <div
               style={{
                 flex: 1,
-                color: v === "没有提及" ? "#bbb" : "#333",
+                color: v === "没有提及" ? "var(--bp-text-tertiary)" : "var(--bp-text)",
                 wordBreak: "break-word",
               }}
             >
@@ -239,7 +239,7 @@ export function BidAnalysisEvidenceList({ item }: { item: BaStoredItem | null })
   return (
     <div
       className="ba-evidence-list"
-      style={{ marginTop: 6, borderTop: "1px dashed #e5e5e5", paddingTop: 4 }}
+      style={{ marginTop: 6, borderTop: "1px dashed var(--bp-border)", paddingTop: 4 }}
     >
       <Text type="secondary" style={{ fontSize: 12 }}>
         来源位置（由提取结果反查原文自动匹配，共 {list.length} 处；人工校正后清空）
@@ -248,7 +248,7 @@ export function BidAnalysisEvidenceList({ item }: { item: BaStoredItem | null })
         <div
           key={i}
           className="ba-evidence-item"
-          style={{ marginTop: 6, fontSize: 12, color: "#555", lineHeight: 1.7 }}
+          style={{ marginTop: 6, fontSize: 12, color: "var(--bp-text-secondary)", lineHeight: 1.7 }}
         >
           <Space size={6} wrap>
             <Tag style={{ marginInlineEnd: 0 }}>{e.doc || "原文"}</Tag>
@@ -261,7 +261,7 @@ export function BidAnalysisEvidenceList({ item }: { item: BaStoredItem | null })
               {e.heading ? `${e.heading} › ` : ""}第 {e.line ?? "?"} 行
             </Text>
           </Space>
-          <div style={{ color: "#888", paddingLeft: 2, wordBreak: "break-word" }}>
+          <div style={{ color: "var(--bp-text-tertiary)", paddingLeft: 2, wordBreak: "break-word" }}>
             「{e.quote}」
           </div>
         </div>
@@ -437,11 +437,11 @@ export function ClassificationPanel({ data }: { data: BaClassificationData | nul
             <div key={key}>
               <div style={{ display: "flex", justifyContent: "space-between", fontSize: 12 }}>
                 <span>{chapterTitleOf(ch, key)}</span>
-                <span style={{ color: pct >= 100 ? "#52c41a" : "#fa8c16" }}>{pct}%</span>
+                <span style={{ color: pct >= 100 ? "var(--bp-success)" : "var(--bp-warning-strong)" }}>{pct}%</span>
               </div>
               <Progress percent={pct} size="small" status={pct >= 100 ? "success" : "active"} />
               {missing.length > 0 && (
-                <div style={{ fontSize: 11, color: "#999" }}>
+                <div style={{ fontSize: 11, color: "var(--bp-text-tertiary)" }}>
                   缺失：{missing.slice(0, 6).join("、")}
                   {missing.length > 6 ? "…" : ""}
                 </div>
@@ -724,9 +724,9 @@ function BidAnalysisTab({
               flexShrink: 0,
               padding: vertical ? "7px 12px" : "3px 10px",
               borderRadius: vertical ? 0 : 14,
-              background: active ? (vertical ? "#e6f4ff" : "#1677ff") : "transparent",
+              background: active ? (vertical ? "rgba(0, 212, 255, 0.12)" : "#1677ff") : "transparent",
               color:
-                active && !vertical ? "#fff" : active ? (vertical ? "#1677ff" : "#fff") : "#555",
+                active && !vertical ? "#fff" : active ? (vertical ? "#1677ff" : "#fff") : "var(--bp-text-secondary)",
               fontWeight: active ? 600 : 400,
               border: vertical ? "none" : `1px solid ${active ? "#1677ff" : "#d9d9d9"}`,
               display: "flex",
@@ -736,7 +736,7 @@ function BidAnalysisTab({
             }}
           >
             <span>{c.label}</span>
-            <span style={{ color: active && !vertical ? "#fff" : "#999", fontSize: 11 }}>
+            <span style={{ color: active && !vertical ? "#fff" : "var(--bp-text-tertiary)", fontSize: 11 }}>
               {c.count}
             </span>
           </div>
@@ -985,7 +985,7 @@ function BidAnalysisTab({
                   <div
                     style={{
                       padding: "4px 8px",
-                      background: "#fafafa",
+                      background: "var(--bp-panel-bg)",
                       borderBottom: "1px solid #f0f0f0",
                       fontSize: 13,
                       fontWeight: 500,
@@ -1024,7 +1024,7 @@ function BidAnalysisTab({
                         }
                       />
                     ) : (
-                      <div style={{ padding: 12, textAlign: "center", color: "#999" }}>
+                      <div style={{ padding: 12, textAlign: "center", color: "var(--bp-text-tertiary)" }}>
                         解析项定义加载中…
                       </div>
                     )
@@ -1048,7 +1048,7 @@ function BidAnalysisTab({
                             alignItems: "center",
                             gap: 8,
                             cursor: "pointer",
-                            background: isSelected ? "#e6f4ff" : "transparent",
+                            background: isSelected ? "rgba(0, 212, 255, 0.12)" : "transparent",
                           }}
                           onClick={() => selectRow(row)}
                         >
@@ -1059,7 +1059,7 @@ function BidAnalysisTab({
                               width: 24,
                               flexShrink: 0,
                               textAlign: "right",
-                              color: "#999",
+                              color: "var(--bp-text-tertiary)",
                               fontSize: 12,
                             }}
                           >
@@ -1070,7 +1070,7 @@ function BidAnalysisTab({
                               style={{ display: "flex", alignItems: "center", gap: 6, minWidth: 0 }}
                             >
                               {def.required ? (
-                                <span style={{ color: "#ff4d4f", flexShrink: 0 }}>*</span>
+                                <span style={{ color: "var(--bp-error)", flexShrink: 0 }}>*</span>
                               ) : null}
                               <span
                                 style={{
@@ -1101,7 +1101,7 @@ function BidAnalysisTab({
                               className="ba-row-summary"
                               style={{
                                 fontSize: 12,
-                                color: "#999",
+                                color: "var(--bp-text-tertiary)",
                                 overflow: "hidden",
                                 textOverflow: "ellipsis",
                                 whiteSpace: "nowrap",
@@ -1152,7 +1152,7 @@ function BidAnalysisTab({
             <div
               style={{
                 padding: "4px 8px",
-                background: "#fafafa",
+                background: "var(--bp-panel-bg)",
                 borderBottom: "1px solid #f0f0f0",
                 fontSize: 13,
                 fontWeight: 500,
@@ -1278,7 +1278,7 @@ function BidAnalysisTab({
                   <BidAnalysisEvidenceList item={selectedItem} />
                 </>
               ) : (
-                <div style={{ color: "#999", textAlign: "center", padding: 40 }}>
+                <div style={{ color: "var(--bp-text-tertiary)", textAlign: "center", padding: 40 }}>
                   从左侧选择一个解析项查看其完整提取结果
                 </div>
               )}

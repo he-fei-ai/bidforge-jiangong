@@ -22,8 +22,8 @@ export function FactsCategoryPanel({
       style={{
         width: 300,
         flexShrink: 0,
-        background: "#fafafa",
-        border: "1px solid #f0f0f0",
+        background: "var(--bp-panel-bg)",
+        border: "1px solid var(--bp-border)",
         borderRadius: 8,
         overflow: "hidden",
         display: "flex",
@@ -33,8 +33,8 @@ export function FactsCategoryPanel({
       <div
         style={{
           padding: "10px 14px",
-          background: "#fff",
-          borderBottom: "1px solid #f0f0f0",
+          background: "var(--bp-panel-header)",
+          borderBottom: "1px solid var(--bp-border)",
           display: "flex",
           alignItems: "center",
           justifyContent: "space-between",
@@ -57,7 +57,7 @@ export function FactsCategoryPanel({
         style={{ flex: 1, overflow: "auto", padding: "8px 8px", minHeight: 0 }}
       >
         {entries.length === 0 ? (
-          <div style={{ textAlign: "center", padding: "24px 8px", color: "#999", fontSize: 13 }}>
+          <div style={{ textAlign: "center", padding: "24px 8px", color: "var(--bp-text-tertiary)", fontSize: 13 }}>
             暂无提取结果
           </div>
         ) : (
@@ -72,8 +72,8 @@ export function FactsCategoryPanel({
                   borderRadius: 6,
                   marginBottom: 4,
                   cursor: "pointer",
-                  background: active ? "#e6f4ff" : "transparent",
-                  border: active ? "1px solid #91caff" : "1px solid transparent",
+                  background: active ? "rgba(0, 212, 255, 0.12)" : "transparent",
+                  border: active ? "1px solid var(--bp-primary)" : "1px solid transparent",
                 }}
               >
                 <div style={{ display: "flex", alignItems: "center", gap: 6 }}>

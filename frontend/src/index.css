@@ -1145,8 +1145,20 @@ pre,
   --bp-text-tertiary: #8b99ac;
   --bp-bg-layout: #f4f6fa;
   --bp-bg-container: #ffffff;
+  --bp-panel-bg: #fafafa;
+  --bp-panel-header: #ffffff;
   --bp-border: #e8edf4;
   --bp-border-strong: #d8dfe8;
+  /* 语义状态色：成功 / 警告 / 失败 / 无法判定，全仓统一引用 */
+  --bp-success: #00c853;
+  --bp-success-text: #389e0d;
+  --bp-warning: #ffb800;
+  --bp-warning-strong: #fa8c16;
+  --bp-warning-text: #d46b08;
+  --bp-error: #ff3d5a;
+  --bp-error-text: #cf1322;
+  --bp-undetermined: #d48806;
+  --bp-purple: #722ed1;
 }
 [data-bp-mode="dark"] {
   --bp-primary: #00d4ff;
@@ -1155,8 +1167,19 @@ pre,
   --bp-text-tertiary: #6f87a5;
   --bp-bg-layout: #0a1626;
   --bp-bg-container: #12243d;
+  --bp-panel-bg: #0f2b4f;
+  --bp-panel-header: #12243d;
   --bp-border: #1f3854;
   --bp-border-strong: #284466;
+  --bp-success: #49d17a;
+  --bp-success-text: #73d13d;
+  --bp-warning: #ffc53d;
+  --bp-warning-strong: #ffa940;
+  --bp-warning-text: #ffc069;
+  --bp-error: #ff7875;
+  --bp-error-text: #ff9c9c;
+  --bp-undetermined: #e8b339;
+  --bp-purple: #b37feb;
 }
 
 /* ================================================================
