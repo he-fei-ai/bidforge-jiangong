@@ -343,3 +343,55 @@ async def test_finished_status_matches_terminal_event(stub_env):
     assert (
         stub_env["finished"][-1][0] == term["event"]
     ), f"任务终态与事件不一致: {stub_env['finished']} vs {term['event']}"
+
+
+# ============================================================================
+# 6 · 不变量：section_start 每章每次生成恰好 1 条（前端终态护栏依赖）
+# ============================================================================
+
+
+@pytest.mark.asyncio
+async def test_section_start_emitted_exactly_once_even_with_retry(stub_env, monkeypatch):
+    """同一次生成里，每个 section 的 `section_start` 恰好 1 条。
+
+    前端 `contentEvents.ts` 的护栏：收到 running 事件时若该章已是终态
+    （done/failed）则直接忽略 —— 防止乱序的 section_start 把已完成章节
+    打回 running、一直转圈到整批结束。该护栏的前提是后端「每章每次生成
+    只发一次 section_start」；这条不变量此前只活在前端注释里，后端没有
+    测试锁定。
+
+    本用例让首章触发一次 attempt 重试（首轮 AI 抛错、重试成功），断言该章
+    `section_start` 计数仍为 1（不是 2）。将来若有人在重试路径上重发
+    section_start，本用例必须变红；否则前端护栏会静默吞掉合法的重跑状态，
+    用户表现为「点了重写但一直没反应」。
+    """
+    calls = {"n": 0}
+
+    async def _flaky(messages, **k):
+        calls["n"] += 1
+        if calls["n"] == 1:
+            raise RuntimeError("模拟首轮 AI 失败（触发 attempt 重试）")
+        return _LONG_AI_TEXT
+
+    monkeypatch.setattr(sh, "chat_with_fallback", _flaky)
+    # 显式保留 1 次重试（默认值即为 1）；退避归零，避免用例白等 6s。
+    monkeypatch.setattr(sh, "CONTENT_SECTION_RETRIES", 1)
+    monkeypatch.setattr(sh, "CONTENT_RETRY_BACKOFF", 0.0)
+
+    db = _MultiSectionDB()
+    _, events = await _run(db)
+
+    # 前置条件：首章确实重试了（首轮失败 + 重试成功 → 至少 3 次 AI 调用），
+    # 否则本用例没有覆盖到「重试路径不重发」这一目标路径。
+    assert calls["n"] >= 3, f"首章未发生重试，用例未覆盖目标路径: calls={calls['n']}"
+
+    counts: dict[str, int] = {}
+    for e in events:
+        if e.get("event") == "section_start":
+            counts[e["section_id"]] = counts.get(e["section_id"], 0) + 1
+
+    assert counts == {"s1": 1, "s2": 1}, (
+        "section_start 每章每次生成必须恰好 1 条（重试不得重发）: "
+        f"{counts} / 事件序列={_names(events)}"
+    )
+    assert "section_error" not in _names(events), f"重试成功后不得下发 section_error: {_names(events)}"
