@@ -34,6 +34,10 @@ RUN_STATUSES = frozenset({"pending", "running", "succeeded", "failed", "undeterm
 STAGE_STATUSES = frozenset({"pending", "running", "succeeded", "failed", "undetermined"})
 _TERMINAL = frozenset({"succeeded", "failed", "undetermined"})
 _AUDIT_SCENE = "agent_orchestration"
+#: 本模块写入 ai_audit_logs 的 action 前缀。
+#: 收敛护栏（tests/test_audit_budget_config_and_action_enum_20261104.py）静态读取本常量，
+#: 并校验本文件内所有 ``_audit(...)`` 的 action 均带该前缀。
+_AUDIT_ACTION_PREFIX = "agent_"
 
 _AGENT_SCHEMA_DDL = """
 CREATE TABLE IF NOT EXISTS agent_runs (
@@ -117,7 +121,13 @@ async def _audit(
     output_hash: str = "",
     error: str = "",
 ) -> None:
-    """写一条迁移审计（与状态更新同事务，调用方负责 commit）。"""
+    """写一条迁移审计（与状态更新同事务，调用方负责 commit）。
+
+    ⚠️ 写的是**任务/阶段状态迁移审计**，不是 AI 调用审计：不填 provider/model、
+    不计 token 与耗时，``attempt_count`` 恒为 1。``success`` 列恒为 1 仅表示
+    「迁移动作已落库」，**不表示调用成功** —— 不得据此统计成功率（真实的迁移
+    结果看 ``attempts_json`` 里的 ``to`` 与 ``error`` 列）。
+    """
     detail = [
         {
             "run_id": run_id,
