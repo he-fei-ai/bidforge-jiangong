@@ -114,13 +114,14 @@ class TestR13ReadGuardsR166:
         assert ei.value.status_code == 503
 
     def test_read_guard_site_ratchet(self):
-        """棘轮锁：事实半区读游标守卫位点数固定为 21（定义 + 委派 + 19 个读位点）。
+        """棘轮锁：事实半区读游标守卫位点数固定为 22（定义 + 委派 + 20 个读位点）。
 
         新增读位点时必须同步接守卫并更新本数（漏接会让本数与实际位点数失配，
         有意新增时改这个数即可 —— 锁的目的是强迫「加位点必想守卫」）。
+        ✅ R183（2026-11-07）：批量过期解除新增「唯一性闸门预检」读位点，21 → 22。
         """
         src = _src("app/routers/global_facts.py")
-        assert src.count("_require_fact_cursor(cur") == 21
+        assert src.count("_require_fact_cursor(cur") == 22
 
 
 # ---------------------------------------------------------------------------

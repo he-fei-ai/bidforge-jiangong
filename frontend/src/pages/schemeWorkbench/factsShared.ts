@@ -79,7 +79,7 @@ export function buildBatchResolveResultCopy(
       : "";
     return {
       tone: "warning",
-      text: `已确认 ${changed} 项；${safety} 项模拟值或安全关键事实未放行${detail}，请逐条核对裁决`,
+      text: `已确认 ${changed} 项；${safety} 项模拟值/安全关键/同名取值不同的事实未放行${detail}，请逐条核对裁决`,
       blockedNames,
     };
   }
@@ -88,6 +88,57 @@ export function buildBatchResolveResultCopy(
     text: `已确认 ${changed} 项${skipped ? `，${skipped} 项原本已确认` : ""}，可注入事实已就绪`,
     blockedNames: [],
   };
+}
+
+/** 批量解除过期结果文案。
+ *
+ * ✅ R183（2026-11-07）：后端新增 `blocked_duplicates`（解除后会与可注入事实
+ * 同名不同值，因而被保持过期）。此前前端只读 changed/gated，会把「部分条目
+ * 因同名矛盾未解除」静默成一句成功提示，用户以为全部恢复了注入。
+ */
+export function buildBatchAckStaleResultCopy(
+  result:
+    | {
+        changed?: unknown;
+        gated?: unknown;
+        blocked_duplicates_count?: unknown;
+        blocked_duplicates?: unknown;
+      }
+    | null
+    | undefined,
+): { tone: "success" | "warning" | "info"; text: string } {
+  const changed = Number(result?.changed) || 0;
+  const gated = Number(result?.gated) || 0;
+  const blocked = Number(result?.blocked_duplicates_count) || 0;
+  const rawBlocked: unknown = result?.blocked_duplicates;
+  const blockedNames = Array.isArray(rawBlocked)
+    ? rawBlocked
+        .map((it: { name?: unknown; title?: unknown }) =>
+          String(it?.title || it?.name || "").trim(),
+        )
+        .filter(Boolean)
+    : [];
+  if (!changed && !blocked) {
+    return { tone: "info", text: "没有需要解除的过期标记" };
+  }
+  if (blocked > 0) {
+    const shown = blockedNames.slice(0, 6);
+    const detail = shown.length
+      ? `（${shown.join("、")}${blockedNames.length > shown.length ? ` 等 ${blockedNames.length} 条` : ""}）`
+      : "";
+    const gatedPart = gated > 0 ? `${gated} 条为模拟值/矛盾值，` : "";
+    return {
+      tone: "warning",
+      text: `已解除 ${changed} 条；${gatedPart}${blocked} 条与可注入事实同名不同值，已保持过期待处理${detail}`,
+    };
+  }
+  if (gated > 0) {
+    return {
+      tone: "warning",
+      text: `已解除 ${changed} 条；其中 ${gated} 条为模拟值/矛盾值，仍需逐条处理`,
+    };
+  }
+  return { tone: "success", text: `已解除 ${changed} 条过期标记` };
 }
 
 /** 九大章节完整性与危大诊断只读面板（组件级测试锁定空态/覆盖率/缺参）。 */

@@ -400,6 +400,18 @@ export interface FactsCompletedEvent {
 // 写操作返回契约
 // =========================================================================
 
+/** 批量确认被安全/唯一性闸门拦下的条目（后端只回传轻量字段，不是完整 FactItem）。 */
+export interface FactSkippedSafety {
+  id?: string;
+  /** 批量确认路径回传 `title`，历史路径回传 `name`，前端二者兼容 */
+  name?: string;
+  title?: string;
+  reason?: string;
+  /** R183：`duplicate_injectable_fact` 表示同名不同值，需先合并/删除 */
+  reason_code?: string;
+  duplicate_fact_ids?: string[];
+}
+
 export interface FactResolveResponse {
   ok: boolean;
   /**
@@ -413,10 +425,13 @@ export interface FactResolveResponse {
   idempotent?: boolean;
   skipped?: number;
   /** ✅ 后端逐条回传被安全闸门拦下的事实；前端此前只读计数，用户不知「是哪几条」 */
-  skipped_safety?: FactItem[];
+  skipped_safety?: FactSkippedSafety[];
   skipped_safety_count?: number;
   safety_blocked?: boolean;
   gated?: number;
+  /** ✅ R183（2026-11-07）：批量过期解除时因同名不同值被保持过期的条目 */
+  blocked_duplicates?: FactSkippedSafety[];
+  blocked_duplicates_count?: number;
   is_resolved?: boolean;
   blocked_reason?: string;
   deleted?: number;

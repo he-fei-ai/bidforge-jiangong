@@ -99,6 +99,12 @@ from app.services.file_parser import (  # noqa: F401  re-export for tests monkey
     parse_file_content_ex,
     signature_valid,
 )
+
+# ✅ R184（2026-11-07）：本模块所有异常文本回显统一走脱敏单一出口。
+#    上游厂商 401/403 错误体可能回显 `Authorization: Bearer sk-…`；
+#    即使 Provider 层已做一次脱敏，路由层仍不得把 `str(e)` 原样回给前端/日志
+#    （多 Provider、代理层、未来新增调用方都可能绕过那一层）。
+from app.services.redaction import redact_sensitive_text
 from app.utils.log_context import new_trace_id, set_context  # noqa: F401
 
 logger = logging.getLogger("global_facts")
@@ -152,14 +158,17 @@ async def _facts_write_guard_dependency(request: Request, db=Depends(get_db)):
     try:
         project_id = await _facts_write_scope_project_id(request, db)
     except Exception as e:  # noqa: BLE001 - 作用域解析失败不改变原有路由行为（无锁放行）
-        logger.warning("写保护作用域解析失败（本次按无锁执行）: %s", e)
+        logger.warning("写保护作用域解析失败（本次按无锁执行）: %s", redact_sensitive_text(str(e)))
     if project_id:
         try:
             lease = await acquire_project_facts_write(db, project_id, holder=f"{request.method} {path}")
         except FactsWriteConflict as e:
             raise HTTPException(
                 status_code=409,
-                detail={"code": "facts_write_conflict", "message": str(e)},
+                # 持有者文本只应来自 `METHOD /path` 或固定 worker 名，但按
+                # 「异常文本一律脱敏」的单一出口处理，避免后续调用方把带凭据的
+                # 文本塞进 holder/异常后被 409 回显。
+                detail={"code": "facts_write_conflict", "message": redact_sensitive_text(str(e))},
             )
     try:
         yield
@@ -802,26 +811,103 @@ def _normalize_page_ref(value) -> int | None:
         return None
 
 
-async def _assert_no_conflicting_injectable_duplicate(db, fact_id: str, row: dict, *, name: str, value: str) -> None:
-    """T-01 闸门：同作用域已有同名但取值不同的可注入行 ⇒ 409（不改库）。"""
+async def _load_injectable_peers_for_gate(db, sid: str, pid: str) -> list[dict]:
+    """唯一性闸门的读口径：当前作用域内满足注入门控的事实行。
+
+    ✅ R183（2026-11-07）：把「读 peers + 404 放行 + 其他异常 fail-closed」收敛为
+    单一出口。批量确认 / 过期解除 / 条目更新 / 分组重建此前各自重写一遍（或
+    根本没写），四条旁路的根因就是这份口径只在三个入口存在。
+    """
+    try:
+        return await _load_fact_rows(db, sid, pid, injectable_only=True)
+    except HTTPException as exc:
+        # 作用域校验 404（方案/项目不存在）：该作用域没有可注入的同名行，
+        # 无从产生「双值注入」，放行并留下日志（不是静默吞掉）。
+        if exc.status_code == 404:
+            logger.info("事实唯一性闸门：作用域不存在，跳过同名校验（scheme_id=%s project_id=%s）", sid, pid)
+            return []
+        raise
+    except Exception as exc:  # noqa: BLE001 - 闸门读失败必须 fail-closed
+        logger.warning("事实唯一性闸门读取失败（拒绝写入，fail-closed）: %s", exc)
+        raise HTTPException(503, "事实校验暂时不可用，请稍后重试") from exc
+
+
+def _duplicate_injectable_detail(name: str, dup_ids: list[str]) -> dict:
+    """唯一性闸门的 409 响应体（单条确认 / 批量 / 改名 / 分组重建共用）。"""
+    return {
+        "code": "duplicate_injectable_fact",
+        "message": (
+            f"已存在同名事实且取值不同（事实名：{name}），"
+            "两条同时确认会让正文拿到互相矛盾的值；请删除或合并重复项后再确认"
+        ),
+        "duplicate_fact_ids": dup_ids[:20],
+    }
+
+
+def _collect_duplicate_injectable_conflicts(
+    peers: list[dict], planned: list[tuple[str, str, str]], *, exclude_ids: set[str] | None = None
+) -> dict[str, list[str]]:
+    """在「既有可注入行 + 本次计划写入行」之间找出同名不同值的冲突。
+
+    Args:
+        peers: 既有可注入事实行（``_load_injectable_peers_for_gate`` 的返回）。
+        planned: ``[(id, name, value)]`` —— 本次写入后将成为可注入的行，按写入
+            顺序排列；同一批内先写者视为「已存在」，后续同值放行、不同值判冲突。
+        exclude_ids: 即将被替换的旧行 id（分组重建），不参与比对。
+
+    Returns:
+        ``{planned_id: [冲突行 id, ...]}``；无冲突返回空 dict。
+    """
+    peer_index: dict[str, list[tuple[str, str]]] = {}
+    for peer in peers:
+        peer_id = str(peer.get("id") or "")
+        if not peer_id or (exclude_ids and peer_id in exclude_ids):
+            continue
+        pname, pvalue = _fact_name_value(peer)
+        norm_name = _norm_fact_text(pname)
+        if not norm_name:
+            continue
+        peer_index.setdefault(norm_name, []).append((peer_id, _norm_fact_text(pvalue)))
+
+    conflicts: dict[str, list[str]] = {}
+    planned_index: list[tuple[str, str, str]] = []
+    for planned_id, name, value in planned:
+        norm_name = _norm_fact_text(name)
+        if not norm_name:
+            continue
+        norm_value = _norm_fact_text(value)
+        dup_ids = [
+            peer_id
+            for peer_id, pvalue in peer_index.get(norm_name, [])
+            if peer_id != planned_id and pvalue != norm_value
+        ]
+        dup_ids += [
+            prior_id
+            for prior_id, pname, pvalue in planned_index
+            if prior_id != planned_id and pname == norm_name and pvalue != norm_value
+        ]
+        if dup_ids:
+            conflicts[planned_id] = dup_ids
+        planned_index.append((planned_id, norm_name, norm_value))
+    return conflicts
+
+
+async def _assert_no_conflicting_injectable_duplicate(
+    db, fact_id: str, row: dict, *, name: str, value: str, peers: list[dict] | None = None
+) -> None:
+    """T-01 闸门：同作用域已有同名但取值不同的可注入行 ⇒ 409（不改库）。
+
+    ``peers`` 可由调用方预取（批量条目更新只需一次作用域读），缺省按 row 的
+    scheme/project 走 :func:`_load_injectable_peers_for_gate` 单一出口。
+    """
     norm_name = _norm_fact_text(name)
     norm_value = _norm_fact_text(value)
     if not norm_name:
         return
     sid = str(row.get("scheme_id") or "")
     pid = str(row.get("project_id") or "")
-    try:
-        peers = await _load_fact_rows(db, sid, pid, injectable_only=True)
-    except HTTPException as exc:
-        # 作用域校验 404（方案/项目不存在）：该作用域没有可注入的同名行，
-        # 无从产生「双值注入」，放行并留下日志（不是静默吞掉）。
-        if exc.status_code == 404:
-            logger.info("事实唯一性闸门：作用域不存在，跳过同名校验（scheme_id=%s project_id=%s）", sid, pid)
-            return
-        raise
-    except Exception as exc:  # noqa: BLE001 - 闸门读失败必须 fail-closed
-        logger.warning("事实唯一性闸门读取失败（拒绝确认，fail-closed）: %s", exc)
-        raise HTTPException(503, "事实校验暂时不可用，请稍后重试") from exc
+    if peers is None:
+        peers = await _load_injectable_peers_for_gate(db, sid, pid)
     dup_ids: list[str] = []
     for peer in peers:
         peer_id = str(peer.get("id") or "")
@@ -843,17 +929,7 @@ async def _assert_no_conflicting_injectable_duplicate(db, fact_id: str, row: dic
             name,
             dup_ids,
         )
-        raise HTTPException(
-            409,
-            {
-                "code": "duplicate_injectable_fact",
-                "message": (
-                    f"已存在同名事实且取值不同（事实名：{name}），"
-                    "两条同时确认会让正文拿到互相矛盾的值；请删除或合并重复项后再确认"
-                ),
-                "duplicate_fact_ids": dup_ids[:20],
-            },
-        )
+        raise HTTPException(409, _duplicate_injectable_detail(name, dup_ids))
 
 
 @router.get("")
@@ -1551,14 +1627,23 @@ async def _filter_create_fact_duplicates(
     口径：
       · 比对作用域与正文注入一致（本方案私有 + 项目共享；项目级新增只比对
         项目共享行），不会误伤其他方案的私有事实；
-      · 同名同值 → 幂等去重（不新增行，避免列表出现重复条目）；
-      · 同名不同值 → 409 并提示直接编辑既有条目（不静默覆盖、不双值注入）。
+      · 同名同值且既有行**可注入** → 幂等去重（不新增行，避免列表出现重复条目）；
+      · 同名不同值 → 409 并提示直接编辑既有条目（不静默覆盖、不双值注入）；
+      · 同名同值但既有行**未通过注入门控**（模拟值/待确认/过期/矛盾）→ 409：
+        R183 修复。旧实现按同值幂等去重返回成功，用户补录的真实值根本没落库，
+        既有行仍被门控挡在正文外 —— 界面提示「已保存」而事实静默为空。
+      · 存量行 ``fact_key=''``（列引入前的数据）也按 title 参与比对，避免
+        查询条件只看 fact_key 时静默漏过同名守卫。
     """
     keys: list[str] = []
+    names: list[str] = []
     for r in rows_buf:
         k = str(r[14] or "").strip() or normalize_key(r[5])
         if k and k not in keys:
             keys.append(k)
+        nm = str(r[5] or "").strip()
+        if nm and nm not in names:
+            names.append(nm)
     if not keys:
         return rows_buf, 0, ""
     if sid:
@@ -1568,28 +1653,40 @@ async def _filter_create_fact_duplicates(
     else:
         where = FACT_SCOPE_SHARED_FRAGMENT
         params = (pid,)
-    placeholders = ",".join("?" for _ in keys)
+    key_ph = ",".join("?" for _ in keys)
+    name_ph = ",".join("?" for _ in names)
     cur = await db.execute(
-        f"SELECT id, group_id, title, content, fact_key FROM global_facts "
-        f"WHERE {where} AND fact_key IN ({placeholders})",
-        (*params, *keys),
+        f"SELECT id, group_id, title, content, fact_key, is_simulated, is_resolved, "
+        f"has_conflict, is_stale FROM global_facts "
+        f"WHERE {where} AND (fact_key IN ({key_ph}) OR title IN ({name_ph}))",
+        (*params, *keys, *names),
     )
-    # key -> (归一取值, 既有名称)；同一 key 多行时取首行，仅用于提示文案
-    existing: dict[str, tuple[str, str]] = {}
+    # key -> 可注入取值列表 / 未过门控取值列表；同一 key 多行时不再「取首行」
+    # （旧实现首行可能恰是可注入行，也可能恰是模拟值行，判定随行序漂移）。
+    injectable: dict[str, list[tuple[str, str]]] = {}
+    blocked: dict[str, list[tuple[str, str]]] = {}
     fallback_gid = ""
     for row in await cur.fetchall():
         k = str(row["fact_key"] or "").strip() or normalize_key(row["title"] or "")
-        if not k or k in existing:
+        if not k:
             continue
-        existing[k] = (_norm_dup_value(row["title"] or "", row["content"] or ""), str(row["title"] or ""))
+        _val = _norm_dup_value(row["title"] or "", row["content"] or "")
+        _name = str(row["title"] or "")
         fallback_gid = fallback_gid or str(row["group_id"] or "")
+        is_injectable = (
+            bool(row["is_resolved"])
+            and not bool(row["is_simulated"])
+            and not bool(row["has_conflict"])
+            and not bool(row["is_stale"])
+        )
+        (injectable if is_injectable else blocked).setdefault(k, []).append((_val, _name))
     kept: list[tuple] = []
     deduplicated = 0
     for r in rows_buf:
         k = str(r[14] or "").strip() or normalize_key(r[5])
         val = _norm_dup_value(r[5], r[6])
-        if k in existing:
-            prior_val, prior_name = existing[k]
+        if k in injectable:
+            prior_val, prior_name = injectable[k][0]
             if val == prior_val:
                 deduplicated += 1
                 continue
@@ -1600,7 +1697,19 @@ async def _filter_create_fact_duplicates(
                     "请直接编辑该条事实后再保存，避免同一事实出现两个取值。"
                 ),
             )
-        existing[k] = (val, r[5])
+        if k in blocked:
+            prior_val, prior_name = blocked[k][0]
+            raise HTTPException(
+                status_code=409,
+                detail=(
+                    f"同名事实「{r[5]}」已存在但未通过注入门控"
+                    f"（当前值：{prior_val or prior_name}，可能为模拟值/待确认/过期/矛盾）。"
+                    "请先在事实列表中核对并确认该条，或删除后再新增，"
+                    "否则本次补录的真实值不会进入正文。"
+                ),
+            )
+        # 本次计划写入的手工行默认 is_resolved=1，对后续同 key 行即可注入口径
+        injectable.setdefault(k, []).append((val, r[5]))
         kept.append(r)
     return kept, deduplicated, fallback_gid
 
@@ -1952,7 +2061,8 @@ async def _apply_item_updates(db, updates: list[dict], *, commit: bool = True) -
         return 0, ""
     placeholders = ",".join("?" for _ in fids)
     cur = await db.execute(
-        f"SELECT id, title, content, category, is_simulated, confidence, scheme_id, "
+        "SELECT id, title, content, category, is_simulated, confidence, scheme_id, "
+        "project_id, is_resolved, has_conflict, is_stale, "
         # ✅ 2026-09-29：fact_type 参与九大章节归属的派生（分类变更时重算 chapter），
         #    需一并预取，避免额外一次往返。
         f"fact_key, fact_type FROM global_facts WHERE id IN ({placeholders})",
@@ -1963,6 +2073,8 @@ async def _apply_item_updates(db, updates: list[dict], *, commit: bool = True) -
 
     scheme_id = ""
     updated = 0
+    # 一次批量更新通常同属一个作用域：唯一性闸门的 peers 只读一次（R183）
+    gate_peer_cache: dict[tuple[str, str], list[dict]] = {}
     for u in updates:
         fid = str(u.get("fact_id") or "").strip()
         row = rows.get(fid)
@@ -1976,6 +2088,7 @@ async def _apply_item_updates(db, updates: list[dict], *, commit: bool = True) -
         is_sim = bool(row["is_simulated"])
         title_changed = False
         value_changed = False
+        is_sim_changed = False
 
         raw_name = u.get("name")
         # 改名会替换归一化键；先取出旧键，改完后用新键参与章节派生
@@ -1995,6 +2108,7 @@ async def _apply_item_updates(db, updates: list[dict], *, commit: bool = True) -
 
         if u.get("is_simulated") is not None:
             is_sim = bool(u.get("is_simulated"))
+            is_sim_changed = is_sim != bool(row["is_simulated"])
             sets.append("is_simulated=?")
             vals.append(1 if is_sim else 0)
             # ✅ 模拟值闸门：标为模拟值即回到「待审核」，防止模拟值直接注入正文
@@ -2080,6 +2194,24 @@ async def _apply_item_updates(db, updates: list[dict], *, commit: bool = True) -
         _name_now = (title or (row["title"] or "")).strip()
         _val_now = str(u["value"]).strip() if u.get("value") is not None else str(old_value).strip()
         _cat_now = new_cat if cat_changed else (row["category"] or "")
+        # ✅ R183（2026-11-07）：条目级改名/改值/取消模拟标记同样必须过同名唯一性
+        #    闸门。旧实现只有新增、单条确认、矛盾裁决三处校验；在编辑弹窗里把
+        #    「技术负责人」改成已存在的「项目经理」，两条同时可注入 → 正文双值。
+        #    仅当写入后**确实可注入**且名称/取值/模拟标记发生变化时才校验，
+        #    只改分类/置信度/value_kind 不触发（避免对存量脏数据造成无关 409）。
+        if title_changed or value_changed or is_sim_changed:
+            _prospective_resolved = 0 if is_sim else int(row["is_resolved"] or 0)
+            _prospective_conflict = 0 if value_changed else int(row["has_conflict"] or 0)
+            _prospective_stale = 0 if value_changed else int(row["is_stale"] or 0)
+            if _prospective_resolved == 1 and not _prospective_conflict and not _prospective_stale:
+                _gate_key = (str(row["scheme_id"] or ""), str(row["project_id"] or ""))
+                _gate_peers = gate_peer_cache.get(_gate_key)
+                if _gate_peers is None:
+                    _gate_peers = await _load_injectable_peers_for_gate(db, *_gate_key)
+                    gate_peer_cache[_gate_key] = _gate_peers
+                await _assert_no_conflicting_injectable_duplicate(
+                    db, fid, dict(row), name=_name_now, value=_val_now, peers=_gate_peers
+                )
         # ⚠️ 门控与应用都走 _rederive_dimension_columns 单一出口。
         # 旧实现此处写 `cat_changed or title_changed or value_changed`，与分组
         # 重建的 _carry_dimensions 各写一份字面量比较 —— 三次漏改（2026-09-29
@@ -2176,7 +2308,11 @@ async def update_fact(
             await _assert_fact_in_scheme_scope(db, str(u.get("fact_id") or ""), scheme_scope)
         await _assert_fact_in_scheme_scope(db, fact_id, scheme_scope)
     if item_updates:
-        n, sid = await _apply_item_updates(db, item_updates)
+        # ✅ R183（2026-11-07）：条目级更新与随后的分组/行级字段更新是同一请求，
+        #    旧实现先 commit 条目更新再继续；若后段触发唯一性闸门 409 或作用域
+        #    404，条目更新已落库 → 响应失败但数据半更新。与 fields 同请求时把
+        #    提交延后到后段（其后各路径均会 commit 或异常回滚）。
+        n, sid = await _apply_item_updates(db, item_updates, commit=not fields)
         if not fields:
             await _invalidate_item_update_caches(db, item_updates)
             return {"ok": True, "updated_items": n}
@@ -2410,6 +2546,7 @@ async def update_fact(
     # （防止中途异常导致悬空 DELETE 被后续请求连带提交、整组静默丢失）。
 
     insert_buf = []
+    gate_candidates: list[tuple[str, str, str]] = []
     for nm, val, is_sim in parsed:
         content_line = _build_fact_content(nm, val, is_sim)
         # ✅ BUG 修复：模拟值行必须保持 is_resolved=0（模拟值闸门生效）；
@@ -2432,9 +2569,14 @@ async def update_fact(
             if (old.get("content") or "").strip() == content_line.strip():
                 has_conflict = int(old.get("has_conflict") or 0)
                 conflict_keys = old.get("conflict_keys") or ""
+        _row_id = str(uuid.uuid4())
+        # ✅ R183：重建后落库即可注入的行（非模拟、已确认、无未裁决矛盾）参与
+        #    同名唯一性校验；模拟值/矛盾行仍被门控挡在正文外，无需拦截。
+        if is_resolved == 1 and has_conflict == 0:
+            gate_candidates.append((_row_id, nm, val))
         insert_buf.append(
             (
-                str(uuid.uuid4()),
+                _row_id,
                 grow["project_id"],
                 grow["scheme_id"],
                 group_id,
@@ -2456,9 +2598,12 @@ async def update_fact(
     # content 不是列表（旧版纯文本）→ 整块存为单行
     if not insert_buf:
         old = _lookup_old(title, "")
+        _row_id = str(uuid.uuid4())
+        # 非列表形态整块存为单行（is_resolved=1），同样参与唯一性校验
+        gate_candidates.append((_row_id, title, content))
         insert_buf.append(
             (
-                str(uuid.uuid4()),
+                _row_id,
                 grow["project_id"],
                 grow["scheme_id"],
                 group_id,
@@ -2477,6 +2622,50 @@ async def update_fact(
                 *_carry_dimensions(old, title, ""),
             )
         )
+    # ✅ R183（2026-11-07）：分组重建（DELETE+INSERT）此前是唯一性闸门的空白区 ——
+    #    用户在组 B 里把一条事实改名成组 A 已有的名称并填不同值，重建后两行都满足
+    #    注入门控，正文同时拿到两个取值。
+    #    这里**不整组拒绝**（重建必须保住行数与各自溯源 —— 既有契约
+    #    test_group_rebuild_same_title_twice_keeps_first_provenance），而是沿用提取
+    #    链的冲突语义：把「同名不同值」的后出现行标记 has_conflict=1 / is_resolved=0，
+    #    移出注入与导出，用户可在列表中看到并裁决/合并。组内同名不同值同样只放行
+    #    第一行；模拟值/未裁决矛盾行本就进不了正文，不参与比对。
+    if gate_candidates:
+        _gate_peers = await _load_injectable_peers_for_gate(
+            db, str(grow["scheme_id"] or ""), str(grow["project_id"] or "")
+        )
+        _gate_conflicts = _collect_duplicate_injectable_conflicts(
+            _gate_peers,
+            gate_candidates,
+            exclude_ids={str(r.get("id") or "") for r in old_rows},
+        )
+        if _gate_conflicts:
+            _idx_conflict = MANUAL_FACT_INSERT_COLS.index("has_conflict")
+            _idx_resolved = MANUAL_FACT_INSERT_COLS.index("is_resolved")
+            _idx_keys = MANUAL_FACT_INSERT_COLS.index("conflict_keys")
+            _buf_idx = {str(_insert_row[0]): _i for _i, _insert_row in enumerate(insert_buf)}
+            _name_by_id = {cid: nm for cid, nm, _v in gate_candidates}
+            for _fid, _dups in _gate_conflicts.items():
+                _i = _buf_idx.get(_fid)
+                if _i is None:
+                    continue
+                _row = list(insert_buf[_i])
+                _row[_idx_conflict] = 1
+                _row[_idx_resolved] = 0
+                if not _row[_idx_keys]:
+                    _row[_idx_keys] = json.dumps(
+                        [{"name": _name_by_id.get(_fid, ""), "duplicate_fact_ids": _dups[:20]}],
+                        ensure_ascii=False,
+                    )
+                insert_buf[_i] = tuple(_row)
+                logger.warning(
+                    "分组重建：group_id=%s 名称「%s」与可注入事实 %s 取值不同，"
+                    "该行已标记为矛盾待裁决（不进入正文注入）",
+                    group_id,
+                    _name_by_id.get(_fid, ""),
+                    _dups,
+                )
+
     # ✅ 事务守卫：DELETE 与 INSERT+commit 原子完成，异常回滚，避免悬空事务
     # （连接归还写池后 DELETE 被下个请求的 commit 连带提交 → 整组静默删除）。
     try:
@@ -2619,8 +2808,8 @@ async def ack_fact_stale(
     scheme_scope = scheme_id.strip() if isinstance(scheme_id, str) else ""
     await _guard_fact_write_scope(db, fact_id, scheme_scope)
     cur = await db.execute(
-        "SELECT scheme_id, project_id, is_simulated, has_conflict, is_stale, is_resolved"
-        " FROM global_facts WHERE id=?",
+        "SELECT scheme_id, project_id, title, content, is_simulated, has_conflict,"
+        " is_stale, is_resolved FROM global_facts WHERE id=?",
         (fact_id,),
     )
     _require_fact_cursor(cur, "过期解除·闸门预检")
@@ -2667,6 +2856,13 @@ async def ack_fact_stale(
             )
             new_resolved = bool(row["is_resolved"])
         else:
+            # ✅ R183（2026-11-07）：解除过期会把该行恢复为「可注入」，必须与单条确认
+            #    同口径校验同名不同值。旧实现只清 is_stale 并顺带 is_resolved=1，
+            #    stale 行因此成为绕过 T-01 闸门的第四条写路径。
+            _ack_name, _ack_value = _fact_name_value(dict(row))
+            await _assert_no_conflicting_injectable_duplicate(
+                db, fact_id, dict(row), name=_ack_name, value=_ack_value
+            )
             cur = await db.execute(
                 "UPDATE global_facts SET is_stale=0, is_resolved=1, "
                 "updated_at=datetime('now','localtime') WHERE id=?",
@@ -2728,6 +2924,47 @@ async def batch_ack_stale(data: AckStaleRequest, db=Depends(get_db)):
     #    （首版把 id_sql 拼在 scope_sql 之后、参数却把 fact_ids 放前面 →
     #     SQL 把 scheme_id 的值当 fact_id 比对，UPDATE 恒 0 行、零报错，
     #     属"静默不生效"——正是 safe_rowcount 也救不了的绑定错位。）
+    # ✅ R183（2026-11-07）：批量解除过期的 SQL CASE 会对非模拟/非矛盾行顺带
+    #    is_resolved=1（恢复可注入），因此整批都会绕开同名唯一性闸门。先在
+    #    同一作用域读一次可注入 peers，找出「解除后会同名不同值」的行；这些行
+    #    本轮**保持过期不动**（不回退用户已有确认状态），并在响应中明确回传，
+    #    由用户先处理同名矛盾后重试。
+    cur = await db.execute(
+        "SELECT id, title, content FROM global_facts WHERE is_stale=1"
+        + id_sql
+        + scope_sql
+        + " AND COALESCE(is_simulated,0)=0 AND COALESCE(has_conflict,0)=0",
+        scope_params,
+    )
+    _require_fact_cursor(cur, "批量过期解除·唯一性闸门预检")
+    _gate_planned = [
+        (str(r["id"]), str(r["title"] or ""), str(r["content"] or ""))
+        for r in await cur.fetchall()
+    ]
+    blocked_duplicates: list[dict] = []
+    blocked_ids: list[str] = []
+    if _gate_planned:
+        # content 形如 `- **名称**: 取值`，取值需从正文解析（_fact_name_value 同样
+        # 支持该格式），否则无法判断同名同值/不同值。
+        _gate_planned_parsed = []
+        for _fid, _title, _content in _gate_planned:
+            _nm, _val = _fact_name_value({"title": _title, "content": _content})
+            _gate_planned_parsed.append((_fid, _nm, _val))
+        _gate_peers = await _load_injectable_peers_for_gate(db, scheme_id, real_pid)
+        _gate_conflicts = _collect_duplicate_injectable_conflicts(_gate_peers, _gate_planned_parsed)
+        for _fid, _dups in _gate_conflicts.items():
+            _name = next((nm for cid, nm, _v in _gate_planned_parsed if cid == _fid), "")
+            blocked_ids.append(_fid)
+            blocked_duplicates.append(
+                {
+                    "id": _fid,
+                    "title": _name,
+                    "reason": "同名事实取值不同，解除过期后会与其他可注入事实双值并存",
+                    "reason_code": "duplicate_injectable_fact",
+                    "duplicate_fact_ids": _dups[:20],
+                }
+            )
+
     # ✅ G-04 修复（2026-10-04）：COUNT + UPDATE + commit 是多语句写路径。
     #    UPDATE 已下推但 commit 前抛异常（DB 锁、连接中断、safe_rowcount 内
     #    rowcount 读取异常），几十到几百行仍留在悬空事务里；连接归还池后会被
@@ -2747,13 +2984,17 @@ async def batch_ack_stale(data: AckStaleRequest, db=Depends(get_db)):
         if grow:
             gated = int(grow[0] or 0)
 
-        cur = await db.execute(
+        update_sql = (
             "UPDATE global_facts SET is_stale=0, "
             + _ACK_STALE_RESOLVE_CASE
             + ", updated_at=datetime('now','localtime')"
-            " WHERE is_stale=1" + id_sql + scope_sql,
-            scope_params,
+            " WHERE is_stale=1" + id_sql + scope_sql
         )
+        update_params: list = list(scope_params)
+        if blocked_ids:
+            update_sql += f" AND id NOT IN ({','.join('?' * len(blocked_ids))})"
+            update_params.extend(blocked_ids)
+        cur = await db.execute(update_sql, update_params)
         changed = safe_rowcount(cur, what="批量解除事实过期标记")
         await db.commit()
     except Exception:
@@ -2762,7 +3003,13 @@ async def batch_ack_stale(data: AckStaleRequest, db=Depends(get_db)):
 
     # 事实集合变化 → 失效项目下所有方案缓存（可能改动了项目共享事实）
     await _invalidate_fact_scope_cache(db, "", real_pid)
-    return {"ok": True, "changed": changed, "gated": gated}
+    return {
+        "ok": True,
+        "changed": changed,
+        "gated": gated,
+        "blocked_duplicates": blocked_duplicates,
+        "blocked_duplicates_count": len(blocked_duplicates),
+    }
 
 
 @router.patch("/{fact_id}/resolve-conflict")
@@ -3000,7 +3247,18 @@ async def batch_resolve(data: BatchResolveRequest, db=Depends(get_db)):
     if fact_ids:
         fact_ids = [str(fid).strip() for fid in fact_ids if str(fid).strip()]
         if not fact_ids:
-            return {"ok": True, "updated": 0, "skipped_safety": [], "skipped_safety_count": 0, "safety_blocked": False}
+            # ✅ R183（2026-11-07）：旧响应形状是 `updated`，与正常路径的
+            #    `changed` 不一致 —— 前端 buildBatchResolveResultCopy 只读
+            #    `changed`，空白 id 列表会让提示显示「已确认 0 项」而丢掉
+            #    skipped 语义。统一为正常路径的字段集合（无兼容别名）。
+            return {
+                "ok": True,
+                "changed": 0,
+                "skipped": 0,
+                "skipped_safety": [],
+                "skipped_safety_count": 0,
+                "safety_blocked": False,
+            }
         placeholders = ",".join("?" * len(fact_ids))
         if scheme_id:
             # ✅ F6 续（2026-10-08）：反查走 _scheme_project_id 单一出口
@@ -3024,7 +3282,7 @@ async def batch_resolve(data: BatchResolveRequest, db=Depends(get_db)):
 
         # 先查询目标事实，检测安全约束
         cur = await db.execute(
-            f"SELECT id, title, fact_key, is_simulated, is_resolved, has_conflict, is_stale "
+            f"SELECT id, title, content, fact_key, is_simulated, is_resolved, has_conflict, is_stale "
             f"FROM global_facts WHERE id IN ({placeholders}){scope}",
             params,
         )
@@ -3038,7 +3296,7 @@ async def batch_resolve(data: BatchResolveRequest, db=Depends(get_db)):
             raise HTTPException(404, "方案不存在")
         real_pid = _rp2
         cur = await db.execute(
-            "SELECT id, title, fact_key, is_simulated, is_resolved, has_conflict, is_stale "
+            "SELECT id, title, content, fact_key, is_simulated, is_resolved, has_conflict, is_stale "
             "FROM global_facts WHERE " + _FACT_SCOPE_PREDICATE,
             (scheme_id, real_pid),
         )
@@ -3120,6 +3378,33 @@ async def batch_resolve(data: BatchResolveRequest, db=Depends(get_db)):
             )
         else:
             changed_ids.append(row["id"])
+
+    # ✅ R183（2026-11-07）：批量确认是 T-01 唯一性闸门的主要旁路 —— 单条确认
+    #    遇到同名不同值会 409，但选中两条一起批量确认会一次性放行。此处按行序
+    #    比对「既有可注入行 + 本批即将确认的行」：同值放行、不同值只确认先出现
+    #    的那条，其余移入 skipped_safety 并给出 reason_code，前端可逐条处理。
+    if changed_ids:
+        _by_id = {str(row["id"]): row for row in rows}
+        _planned: list[tuple[str, str, str]] = []
+        for row in rows:
+            if row["id"] not in changed_ids:
+                continue
+            _nm, _val = _fact_name_value(row)
+            _planned.append((row["id"], _nm, _val))
+        _gate_peers = await _load_injectable_peers_for_gate(db, scheme_id, real_pid)
+        _gate_conflicts = _collect_duplicate_injectable_conflicts(_gate_peers, _planned)
+        for _fid, _dups in _gate_conflicts.items():
+            changed_ids.remove(_fid)
+            _row = _by_id.get(_fid) or {}
+            skipped_safety.append(
+                {
+                    "id": _fid,
+                    "title": _row.get("title", ""),
+                    "reason": "同名事实取值不同，批量确认会让正文拿到互相矛盾的值；请先合并或删除重复项",
+                    "reason_code": "duplicate_injectable_fact",
+                    "duplicate_fact_ids": _dups[:20],
+                }
+            )
 
     # ✅ G-04 修复（2026-10-04）：先 SELECT 判门槛、再 UPDATE 落库、再 commit 是
     #    **多语句**写路径。UPDATE 后 commit 前若抛异常（连接中断、DB 锁），
@@ -3405,8 +3690,12 @@ async def adjust_facts(data: AdjustRequest, db=Depends(get_db)):
         except HTTPException:
             raise
         except Exception as e:
-            logger.warning("全局事实 AI 调整失败: %s", e)
-            raise HTTPException(502, f"事实调整失败：{e}")
+            # ✅ R184（2026-11-07）：真实泄露面。`e` 来自 AI 调用链（含厂商
+            #    HTTP 错误体），旧实现把 `str(e)` 同时写日志并原样 502 回前端。
+            #    统一脱敏后再回显；日志也使用同一文本，避免审计日志成为第二处泄露。
+            safe_error = redact_sensitive_text(str(e))
+            logger.warning("全局事实 AI 调整失败: %s", safe_error)
+            raise HTTPException(502, f"事实调整失败：{safe_error}")
         ops, summary = _validate_adjust_ops(obj, valid_ids, existing_keys=existing_keys, ignored_out=ignored_ops)
 
     applied = {"updated": 0, "added": 0, "deleted": 0}

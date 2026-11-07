@@ -19,6 +19,7 @@ import { render, fireEvent, cleanup } from "@testing-library/react";
 import React from "react";
 import {
   FactsGroupList,
+  buildBatchAckStaleResultCopy,
   buildBatchResolveResultCopy,
   buildBatchResolveCopy,
   factChapterTitle,
@@ -429,6 +430,41 @@ describe("批量确认结果文案", () => {
     expect(() => buildBatchResolveResultCopy(null as any)).not.toThrow();
     expect(buildBatchResolveResultCopy({} as any).text).toContain("0");
     expect(buildBatchResolveResultCopy({} as any).blockedNames).toEqual([]);
+  });
+
+  // ✅ R183（2026-11-07）：批量解除过期的同名矛盾提示（组件级契约）
+  it("批量解除过期：同名矛盾被拦时仍明确提示并列出条目", () => {
+    const r = buildBatchAckStaleResultCopy({
+      ok: true,
+      changed: 2,
+      gated: 0,
+      blocked_duplicates_count: 2,
+      blocked_duplicates: [{ title: "项目经理" }, { title: "基坑深度" }],
+    } as any);
+    expect(r.tone).toBe("warning");
+    expect(r.text).toContain("2 条与可注入事实同名不同值");
+    expect(r.text).toContain("项目经理");
+    expect(r.text).toContain("基坑深度");
+  });
+
+  it("批量解除过期：无拦截时成功、空结果时 info，不误报", () => {
+    expect(buildBatchAckStaleResultCopy({ changed: 3, gated: 0 } as any)).toEqual({
+      tone: "success",
+      text: "已解除 3 条过期标记",
+    });
+    expect(buildBatchAckStaleResultCopy({ changed: 0, gated: 0 } as any).tone).toBe("info");
+  });
+
+  it("批量解除过期：模拟值/矛盾值仍按 warning 提示", () => {
+    const r = buildBatchAckStaleResultCopy({ changed: 1, gated: 1 } as any);
+    expect(r.tone).toBe("warning");
+    expect(r.text).toContain("仍需逐条处理");
+  });
+
+  it("批量解除过期：缺字段 / null 安全回退", () => {
+    expect(() => buildBatchAckStaleResultCopy({} as any)).not.toThrow();
+    expect(() => buildBatchAckStaleResultCopy(null as any)).not.toThrow();
+    expect(buildBatchAckStaleResultCopy({} as any).text).toContain("没有需要解除");
   });
 
   it("预检文案：含模拟值时升级为 warning 并给出核对提示", () => {
