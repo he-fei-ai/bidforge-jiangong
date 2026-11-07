@@ -379,10 +379,11 @@ class TestDefaultsBackwardCompatible:
         assert _cfg.settings.prompt_strict_variables is False
 
     def test_injection_defense_off_by_default(self):
-        assert _cfg.settings.prompt_injection_defense is False
+        # 断言模块级默认常量本身，不依赖外界未设环境变量
+        assert _cfg.Settings.model_fields["prompt_injection_defense"].default is False
 
     def test_context_budget_off_by_default(self):
-        assert _cfg.settings.prompt_context_budget <= 0
+        assert _cfg.Settings.model_fields["prompt_context_budget"].default <= 0
 
     def test_all_default_registry_contracts_consistent(self):
         """出厂注册表 + 契约表必须自洽（CI 护栏，不依赖 DB）。

@@ -249,11 +249,13 @@ class TestRollbackEndpoint:
 # 四、治理开关默认关闭（G5 / G6 向后兼容护栏）
 # ---------------------------------------------------------------------------
 class TestGovernanceDefaultOff:
+    """断言模块级默认常量本身（而非当前运行值），避免依赖外界未设环境变量。"""
+
     def test_budget_off_by_default(self):
-        assert _cfg.settings.prompt_context_budget == 0
+        assert _cfg.Settings.model_fields["prompt_context_budget"].default == 0
 
     def test_injection_defense_off_by_default(self):
-        assert _cfg.settings.prompt_injection_defense is False
+        assert _cfg.Settings.model_fields["prompt_injection_defense"].default is False
 
     def test_snapshot_on_by_default(self):
         assert _cfg.settings.prompt_audit_snapshot_enabled is True
@@ -261,15 +263,19 @@ class TestGovernanceDefaultOff:
     def test_strict_variables_off_by_default(self):
         assert _cfg.settings.prompt_strict_variables is False
 
-    def test_sse_budget_helper_returns_text_unchanged_when_off(self):
+    def test_sse_budget_helper_returns_text_unchanged_when_off(self, monkeypatch):
         from app.routers.sse_handlers import _apply_prompt_context_budget
 
+        monkeypatch.setattr(_cfg.settings, "prompt_context_budget", 0)
         text = "【全局事实变量（唯一可信数据源）】：\n" + "开挖深度10.5m。" * 500
         assert _apply_prompt_context_budget(text) == text
 
-    def test_sse_guard_helper_returns_text_unchanged_when_off(self):
+    def test_sse_guard_helper_returns_text_unchanged_when_off(self, monkeypatch):
         from app.routers.sse_handlers import _guard_external_material
 
+        # 注入防护与脱敏显式关闭（redaction_enabled 为「或」关系，只关一个不够）
+        monkeypatch.setattr(_cfg.settings, "prompt_injection_defense", False)
+        monkeypatch.setattr(_cfg.settings, "prompt_redact_sensitive", False)
         text = "【项目概述】：正常资料内容"
         assert _guard_external_material(text) == text
 

@@ -50,9 +50,14 @@ def _reset_governance_flags():
 # ---------------------------------------------------------------------------
 
 
-def test_redaction_disabled_keeps_text_bytewise():
-    """默认关闭时必须**逐字节**原样返回（既有行为零变化）。"""
-    settings.prompt_redact_sensitive = False
+def test_redaction_disabled_keeps_text_bytewise(monkeypatch):
+    """两个相关开关显式关闭时必须**逐字节**原样返回（不依赖外界未设环境变量）。
+
+    注意 ``redaction_enabled()`` 是 ``prompt_redact_sensitive`` **或**
+    ``prompt_injection_defense``（保留历史耦合），因此只关前者不够。
+    """
+    monkeypatch.setattr(settings, "prompt_redact_sensitive", False)
+    monkeypatch.setattr(settings, "prompt_injection_defense", False)
     out = pmg.govern_blob(_CRED_SAMPLE, budget=False)
     assert out == _CRED_SAMPLE
     out2 = pmg.redact_only(_CRED_SAMPLE)
@@ -69,9 +74,14 @@ def test_redaction_enabled_masks_credentials_but_keeps_numbers_and_units():
         assert keep in out, f"正常文本被误脱敏: {keep}"
 
 
-def test_redact_outbound_messages_covers_user_role_only():
-    """出站收口：user 消息脱敏，system/assistant 模板不受影响。"""
-    settings.prompt_redact_sensitive = True
+def test_redact_outbound_messages_covers_user_role_only(monkeypatch):
+    """出站收口：user 消息脱敏，system/assistant 模板不受影响。
+
+    注入防护显式关闭：否则 ``redaction_enabled()`` 恒真（开关为「或」关系），
+    「关闭时返回原对象」这半段就测不到。
+    """
+    monkeypatch.setattr(settings, "prompt_injection_defense", False)
+    monkeypatch.setattr(settings, "prompt_redact_sensitive", True)
     msgs = [
         {"role": "system", "content": "你是投标分析专家（模板，不含资料）"},
         {"role": "user", "content": _CRED_SAMPLE},
@@ -80,7 +90,7 @@ def test_redact_outbound_messages_covers_user_role_only():
     assert out[0]["content"] == msgs[0]["content"]
     assert "sk-abcdef1234567890abcdef" not in out[1]["content"]
 
-    settings.prompt_redact_sensitive = False
+    monkeypatch.setattr(settings, "prompt_redact_sensitive", False)
     same = pmg.redact_outbound_messages(msgs)
     assert same is msgs  # 关闭时返回原对象（零开销零行为变化）
 
@@ -187,8 +197,10 @@ async def test_governance_partial_put_keeps_other_flags(tmp_path, monkeypatch):
     assert (await governance_get())["prompt_context_budget"] == 8000
 
 
-def test_governance_notice_when_redaction_off():
-    settings.prompt_redact_sensitive = False
+def test_governance_notice_when_redaction_off(monkeypatch):
+    """两个相关开关显式关闭后，治理姿态必须报告「未开启」并给出风险提示。"""
+    monkeypatch.setattr(settings, "prompt_redact_sensitive", False)
+    monkeypatch.setattr(settings, "prompt_injection_defense", False)
     posture = pmg.governance_posture()
     assert posture["redaction_enabled"] is False
     assert "未开启" in posture["redaction_notice"]
