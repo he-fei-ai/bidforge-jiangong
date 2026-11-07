@@ -26,12 +26,15 @@ import type { TreeNode } from "../outlineTreeModel";
 import type { ExportGateResult } from "../../../utils/exportCharts";
 import type { NumberingCheckInfo } from "../../../utils/exportResponse";
 import { numberingCheckWarning } from "../../../utils/exportResponse";
+import { DossierExportCard } from "../../../components/review/DossierExportCard";
 import { EXPORT_STAGE_LABEL, EXPORT_STAGE_ORDER } from "../exportShared";
 
 const { Text } = Typography;
 
 /** 「导出文档」Tab（Tab 6）面板：页面级状态 / handler / setter 全部显式注入。 */
 export interface ExportTabProps {
+  /** R179 Phase H：可复核底稿导出入口定位方案；可选以兼容既有测试夹具。 */
+  schemeId?: string;
   // 导出配置表单 + 导出进度
   exportForm: FormInstance;
   exporting: boolean;
@@ -66,6 +69,7 @@ export interface ExportTabProps {
 }
 
 export function ExportTab({
+  schemeId,
   exportForm,
   exporting,
   exportPhase,
@@ -798,6 +802,10 @@ export function ExportTab({
           文档导出是两种产物：这里是"目录文件"，上方是"完整方案文档"。
         </Text>
       </Card>
+
+      {/* ===== R179 Phase H：可复核底稿导出入口（Phase D 后端）=====
+               与上方 DOCX/PDF、目录导出并列，后端开关关闭时显示「未启用」。 */}
+      <DossierExportCard schemeId={schemeId} />
 
       {/* ===== ✅ 导出缓存状态（exportApi.cacheStatus）===== */}
       <Card

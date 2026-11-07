@@ -72,6 +72,16 @@ import type {
   SseSoftStopMarker,
 } from "../types/api";
 import type { OutlineSavePayload } from "../types/api";
+// ✅ R179 Phase H（2026-11-07）：文种标签 / 缺陷账本 / 可复核底稿的前后端契约类型
+import type { GenreResponse } from "../types/genre";
+import type {
+  DefectDecision,
+  DefectDiff,
+  DefectItem,
+  DefectListResponse,
+  DefectSummary,
+  DefectSyncResult,
+} from "../types/defect";
 
 /**
  * ✅ R14 修复（2026-09-22）：全局 401 短路保护。
@@ -1094,6 +1104,70 @@ export const exportApi = {
     remove: (schemeId: string, presetId: string) =>
       api.delete(`/schemes/${schemeId}/export/presets/${presetId}`),
   },
+};
+
+// =========================================================================
+// R179 Phase A：文种标签（后端开关 genre_tag_enabled，默认关闭 → 404）
+// =========================================================================
+export const genreApi = {
+  /** 读取已落库的结构化文种标签（未评估过时 genre=null） */
+  get: (projectId: string, schemeId: string) =>
+    api.get<GenreResponse>(`/projects/${projectId}/schemes/${schemeId}/genre`),
+  /** 按规则引擎评估并落库；assist 仅补类别建议，危大等级仍由规则决定 */
+  evaluate: (
+    projectId: string,
+    schemeId: string,
+    data: {
+      params?: Record<string, unknown>;
+      extra_text?: string;
+      text?: string;
+      allow_llm?: boolean;
+    } = {},
+  ) =>
+    api.post<GenreResponse>(
+      `/projects/${projectId}/schemes/${schemeId}/genre/evaluate`,
+      data,
+    ),
+};
+
+// =========================================================================
+// R179 Phase C：统一缺陷账本（后端开关 defect_ledger_enabled，默认关闭 → 404）
+// =========================================================================
+export const defectsApi = {
+  list: (schemeId: string, params?: { status?: string; verdict?: string }) =>
+    api.get<DefectListResponse>(`/schemes/${schemeId}/defects`, { params }),
+  /** 三态统计：passed 仅计 verdict=yes，undetermined 单列 */
+  summary: (schemeId: string) => api.get<DefectSummary>(`/schemes/${schemeId}/defects/summary`),
+  /** 只读拉取最近一次预检 / 一致性审计结果，不回写源表 */
+  sync: (schemeId: string, data: { include_preflight?: boolean; include_consistency?: boolean } = {}) =>
+    api.post<DefectSyncResult>(`/schemes/${schemeId}/defects/sync`, data),
+  get: (defectId: string) => api.get<DefectItem>(`/defects/${defectId}`),
+  diff: (defectId: string) => api.get<DefectDiff>(`/defects/${defectId}/diff`),
+  /** 建议权：只登记全文建议，不写正文 */
+  propose: (defectId: string, data: { after_text: string; suggestion?: string }) =>
+    api.post<DefectItem>(`/defects/${defectId}/proposal`, data),
+  /** 执行权（自动路径）：受保护缺陷后端返回 409 */
+  apply: (defectId: string, data: { applied_by?: string } = {}) =>
+    api.post(`/defects/${defectId}/apply`, data),
+  /** 人的裁决权：受保护缺陷的唯一执行通道 */
+  decide: (
+    defectId: string,
+    data: { decision: DefectDecision; decided_by?: string; reason?: string },
+  ) => api.post(`/defects/${defectId}/decision`, data),
+  /** 运行检查器；未注册 / 异常一律落 undetermined */
+  verify: (defectId: string) => api.post<DefectItem>(`/defects/${defectId}/verify`),
+};
+
+// =========================================================================
+// R179 Phase D：可复核底稿导出（后端开关 dossier_enabled，默认关闭 → 404）
+// =========================================================================
+export const dossierApi = {
+  export: (schemeId: string, signal?: AbortSignal) =>
+    api.post(`/schemes/${schemeId}/dossier`, null, {
+      responseType: "blob",
+      timeout: 600000,
+      signal,
+    }),
 };
 
 // 专项方案清单

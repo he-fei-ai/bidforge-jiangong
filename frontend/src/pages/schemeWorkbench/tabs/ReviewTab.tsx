@@ -24,6 +24,7 @@ import {
   StopOutlined,
 } from "@ant-design/icons";
 import ReadinessDashboard from "../../../components/review/ReadinessDashboard";
+import { PhaseHPanels } from "../../../components/review/PhaseHPanels";
 import ReviewWorkflowPanel from "../../../components/review/ReviewWorkflowPanel";
 import PlaceholderReportPanel from "../../../components/PlaceholderReportPanel";
 import { NumberingConsistencyPanel } from "../NumberingConsistencyPanel";
@@ -49,6 +50,8 @@ const { Text } = Typography;
 /** 「审核与预检」Tab（Tab 5）面板：页面级状态 / handler / setter 全部显式注入。 */
 export interface ReviewTabProps {
   id: string | undefined;
+  /** R179 Phase H：文种标签接口按项目定位，作为可选以兼容既有测试夹具。 */
+  projectId?: string;
   load: () => Promise<void>;
   reviewTick: number;
   setReviewTick: Dispatch<SetStateAction<number>>;
@@ -103,6 +106,7 @@ export interface ReviewTabProps {
 
 export function ReviewTab({
   id,
+  projectId,
   load,
   reviewTick,
   setReviewTick,
@@ -175,6 +179,11 @@ export function ReviewTab({
         }}
         onLocateSection={handlePlaceholderJump}
       />
+
+      {/* ===== R179 Phase H：文种标签 / 统一缺陷账本 / 待确认清单 =====
+               三张卡共用同一 schemeId；文种标签额外需要 projectId 定位。
+               任一后端开关关闭时卡片显示「未启用」，不把 404 当成空结果。 */}
+      <PhaseHPanels schemeId={id || ""} projectId={projectId || ""} />
 
       {/* ✅ R174 F1（2026-11-03）：编号一致性检查/修复/版本/回滚面板。
               后端 4 端点 + api 封装早已存在但界面零入口（审计 R173 · D1/F1），

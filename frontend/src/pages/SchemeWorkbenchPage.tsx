@@ -3470,6 +3470,7 @@ export default function SchemeWorkbenchPage() {
       children: (
         <ReviewTab
           id={id}
+          projectId={schemeProjectId}
           load={load}
           reviewTick={reviewTick}
           setReviewTick={setReviewTick}
@@ -3534,6 +3535,7 @@ export default function SchemeWorkbenchPage() {
       ),
       children: (
         <ExportTab
+          schemeId={id}
           exportForm={exportForm}
           exporting={exporting}
           exportPhase={exportPhase}
