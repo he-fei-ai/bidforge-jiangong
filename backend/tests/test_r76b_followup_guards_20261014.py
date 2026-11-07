@@ -23,7 +23,7 @@ from app.services.repair_validator import structure_signature, validate_repair
 
 BACKEND_ROOT = pathlib.Path(__file__).resolve().parents[1]
 APP_ROOT = BACKEND_ROOT / "app"
-ARTIFACTS = BACKEND_ROOT / "artifacts" / "r76b"
+SCRIPTS = BACKEND_ROOT / "scripts"
 
 BT = chr(96)
 F3 = BT * 3
@@ -167,7 +167,7 @@ class TestBidAnalysisFenceDelegation:
 # G2 —— 历史存量只读盘点的「只读形态」锁（仿 R75b G8，防被改成回填工具）
 # =========================================================================
 class TestInventoryG2IsReadOnly:
-    SCRIPT = ARTIFACTS / "inventory_g2.py"
+    SCRIPT = SCRIPTS / "inventory_g2.py"
 
     def test_inventory_script_exists(self):
         assert self.SCRIPT.is_file(), "G2 盘点脚本缺失（遗留项必须可复核，不能只写在报告里）"
