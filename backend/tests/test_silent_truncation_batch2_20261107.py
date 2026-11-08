@@ -371,10 +371,35 @@ BARE_SLICE_SPECS = [
 ]
 
 
+def _module_tree(rel: str) -> ast.Module:
+    return ast.parse((APP / rel).read_text(encoding="utf-8"))
+
+
+def _name_used(tree: ast.AST, name: str) -> bool:
+    """模块里是否真的用了这个**标识符**（``Name`` 节点）。
+
+    注释 / docstring / 普通字符串字面量里的同名文字不产生 ``Name`` 节点，因此
+    不会触发 —— 这正是「别再被散文绊倒」的判据。
+    """
+    return any(isinstance(n, ast.Name) and n.id == name for n in ast.walk(tree))
+
+
+def _string_key_used(tree: ast.AST, key: str) -> bool:
+    """模块里是否把该字符串当**下标键**用（``x["key"]`` / ``result["key"] = ...``）。
+
+    只认「键访问」这一种结构性位置；docstring、日志文案、普通字面量里的同名
+    文字都不会被当成键，故不触发。
+    """
+    return any(
+        isinstance(n, ast.Subscript) and isinstance(n.slice, ast.Constant) and n.slice.value == key
+        for n in ast.walk(tree)
+    )
+
+
 def test_no_bare_slice_regressions():
     problems: list[str] = []
     for rel, var, limit in BARE_SLICE_SPECS:
-        tree = ast.parse((APP / rel).read_text(encoding="utf-8"))
+        tree = _module_tree(rel)
         for node in ast.walk(tree):
             if not isinstance(node, ast.Subscript):
                 continue
@@ -387,7 +412,7 @@ def test_no_bare_slice_regressions():
                 problems.append(f"{rel}: {var}[:{limit}] 裸切片回流")
 
     # summary[:max_chars]（上限来自参数名，不是常量）
-    facts_tree = ast.parse((APP / "services" / "facts_extractor.py").read_text(encoding="utf-8"))
+    facts_tree = _module_tree("services/facts_extractor.py")
     for node in ast.walk(facts_tree):
         if not isinstance(node, ast.Subscript) or not isinstance(node.slice, ast.Slice):
             continue
@@ -401,7 +426,7 @@ def test_no_bare_slice_regressions():
             problems.append("services/facts_extractor.py: summary[:max_chars] 裸切片回流")
 
     # desc[:budget[0]]（目录描述，上限取自 budget 列表）
-    review_tree = ast.parse((APP / "routers" / "_sse_outline_review.py").read_text(encoding="utf-8"))
+    review_tree = _module_tree("routers/_sse_outline_review.py")
     for node in ast.walk(review_tree):
         if not isinstance(node, ast.Subscript) or not isinstance(node.slice, ast.Slice):
             continue
@@ -417,7 +442,7 @@ def test_no_bare_slice_regressions():
 
     # 落库列不得再按旧上限裁剪
     for rel in ("routers/ai_config/config.py", "services/ai/provider_factory.py"):
-        tree = ast.parse((APP / rel).read_text(encoding="utf-8"))
+        tree = _module_tree(rel)
         for node in ast.walk(tree):
             if not isinstance(node, ast.Subscript) or not isinstance(node.slice, ast.Slice):
                 continue
@@ -427,12 +452,33 @@ def test_no_bare_slice_regressions():
             if "remark" in ast.unparse(node.value).lower():
                 problems.append(f"{rel}: remark[:2000] 裸切片回流")
 
-    audit_src = (APP / "services" / "audit_service.py").read_text(encoding="utf-8")
-    if "_DETAIL_MAX" in audit_src:
+    # ✅ 2026-11-08：两处原整文件子串判断改为 AST —— 整文件 ``in`` 分不清代码与
+    #    散文：``upload_outline.py`` 那句「不再回传 raw_text_truncated」的**说明
+    #    文字**曾让全量连续两轮误红，而 ``git show HEAD:`` 源码零命中。
+    #    ``_DETAIL_MAX`` 认标识符（常量定义与其切片使用都产生 Name 节点）；
+    #    ``raw_text_truncated`` 认**下标键**（``result["raw_text_truncated"]``），
+    #    两者的同名散文都不再触发。
+    if _name_used(_module_tree("services/audit_service.py"), "_DETAIL_MAX"):
         problems.append("services/audit_service.py: _DETAIL_MAX 截断常量回流")
-
-    upload_src = (APP / "routers" / "upload_outline.py").read_text(encoding="utf-8")
-    if "raw_text_truncated" in upload_src:
+    if _string_key_used(_module_tree("routers/upload_outline.py"), "raw_text_truncated"):
         problems.append("routers/upload_outline.py: raw_text_truncated 标记回流")
 
     assert not problems, "发现静默硬截断回流：" + "；".join(problems)
+
+
+def test_regression_detector_ignores_prose_but_catches_code():
+    """探针自检：同样的词写进 docstring / 注释 / 普通字面量不触发，写成代码才触发。"""
+    prose = '''
+"""说明文字：不再回传 raw_text_truncated，也不再使用 _DETAIL_MAX。"""
+# 注释里也写 raw_text_truncated 与 _DETAIL_MAX
+MSG = "raw_text_truncated / _DETAIL_MAX 均已废弃"
+'''
+    prose_tree = ast.parse(prose)
+    assert not _name_used(prose_tree, "_DETAIL_MAX")
+    assert not _string_key_used(prose_tree, "raw_text_truncated")
+
+    assert _name_used(ast.parse("_DETAIL_MAX = 500"), "_DETAIL_MAX")
+    assert _string_key_used(
+        ast.parse('def f(result):\n    result["raw_text_truncated"] = True\n    return result\n'),
+        "raw_text_truncated",
+    )
