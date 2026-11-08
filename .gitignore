@@ -59,6 +59,8 @@ backend/scheme_assistant.db.*
 backend/data/
 # data/ 的手工快照备份（如 data_on_J_backup_20261103，仅本地留存）
 backend/data_on_J_backup_*/
+# 断链清理前的手工数据快照（338 MB / 10.7 万文件，仅本地留存，不入库）
+backend/data_brokenlink_bak/
 backend/cache/
 backend/logs/
 backend/_exports/
