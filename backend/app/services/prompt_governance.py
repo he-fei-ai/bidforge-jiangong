@@ -268,6 +268,12 @@ def _truncate_fenced_body(body: str, limit: int) -> str:
 
     现在把两个标记从额度消耗中剥离，只在标记之间的正文上做边界截断：
     围栏永远成对；正文额度不足（连标记都放不下）时退化为空围栏，仍成对。
+
+    ⚠️ 刻意取舍（看到「某段超预算」时先看这里）：标记本身仍要占字，因此被
+    围栏的段最多会比它分到的额度多出 ``len(MATERIAL_OPEN) + len(MATERIAL_CLOSE)``
+    量级（数十字符），整份上下文也可能略超 ``prompt_context_budget``。
+    宁可略微超出预算，也不让模型看到只有开标记没有闭合的残围栏 ——
+    后者会把后续段落误当资料原文，是更严重的错误。
     """
     if not body.startswith(MATERIAL_OPEN) or not body.endswith(MATERIAL_CLOSE) or len(body) <= 2:
         return _truncate_body(body, limit)
