@@ -152,6 +152,34 @@ def test_review_and_title_fix_labels_have_explicit_priority():
     assert segment_priority_of("编制依据规范（按本方案类别匹配，仅可引用，禁杜撰编号与已废止版本）") == 1
 
 
+def test_budget_and_fence_together_keep_material_close_paired(monkeypatch):
+    """围栏与预算同开：预算刀切到围栏尾部时，闭合标记必须补回，不能被腰斩。
+
+    ✅ P2-3（2026-11-08）：目录链路走的是 ``_apply_prompt_context_budget``
+    （内部直接调 ``allocate_context_budget``），不经过 ``govern_text``。
+    旧实现只在 ``govern_text`` 里补 ``MATERIAL_CLOSE``，这条路径上预算把
+    资料段尾部连同闭合标记一起切掉 —— 模型会以为围栏内资料一直延续到后续段。
+    现在闭合配对修复下沉到预算分配器（所有预算链路的唯一汇聚点）。
+    """
+    _disable_all(monkeypatch)
+    monkeypatch.setattr(settings, "prompt_injection_defense", True, raising=False)
+    monkeypatch.setattr(settings, "prompt_context_budget", 200, raising=False)
+    material = "资" * 400
+    text = (
+        "指令前言\n"
+        "【方案名称】：某项目\n"
+        f"【项目资料摘要】：{material}\n"
+        "【参考提纲】：1 总则\n"
+    )
+
+    out = _govern(text)
+
+    assert out.count("资") < len(material), "测试前提：预算必须真的削减了资料段"
+    assert out.count(MATERIAL_OPEN) == out.count(MATERIAL_CLOSE), (
+        "每个围栏开标记都必须配平闭合标记（预算不得把围栏腰斩）：" + repr(out[-120:])
+    )
+
+
 # ---------------------------------------------------------------------------
 # 4. 接线锁：五个组装点都调用了治理入口（防未来新增链路再次裸奔）
 # ---------------------------------------------------------------------------

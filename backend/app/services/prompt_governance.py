@@ -257,6 +257,32 @@ def _truncate_body(text: str, limit: int) -> str:
     return truncate_to_boundary(text, limit)
 
 
+def _truncate_fenced_body(body: str, limit: int) -> str:
+    """段内截断的围栏感知版本：围栏标记单独保护，绝不被切成半截。
+
+    ✅ P2-3（2026-11-08）：整段围栏（``wrap_full_segment``）的正文形态是
+    ``MATERIAL_OPEN\\n资料…\\nMATERIAL_CLOSE``，闭合标记正好落在段尾 ——
+    正是预算刀最先切到的地方。旧实现按纯字符额度切，会把闭合标记（额度更小时
+    连开标记也）切成半截：模型看到「【外部资料原…」这种残句，或看到只有开标记
+    没有闭合，会把后续段落误当成围栏内的资料原文。
+
+    现在把两个标记从额度消耗中剥离，只在标记之间的正文上做边界截断：
+    围栏永远成对；正文额度不足（连标记都放不下）时退化为空围栏，仍成对。
+    """
+    if not body.startswith(MATERIAL_OPEN) or not body.endswith(MATERIAL_CLOSE) or len(body) <= 2:
+        return _truncate_body(body, limit)
+    head = MATERIAL_OPEN + "\n"
+    tail = "\n" + MATERIAL_CLOSE
+    # 极端短体（开/闭标记本身就重叠）不做剥离，交回普通截断。
+    if len(body) <= len(head) + len(tail):
+        return _truncate_body(body, limit)
+    inner = body[len(head) : -len(tail)]
+    allow = limit - len(head) - len(tail)
+    if allow <= 0:
+        return MATERIAL_OPEN + "\n" + MATERIAL_CLOSE
+    return head + _truncate_body(inner, allow) + tail
+
+
 def _overhead_of(prefix: str, segs: list[dict]) -> int:
     """标签头 + 段间换行 + 前缀本身占据的字符数（正文之外的固定开销）。"""
     total = sum(len(s["head"]) + len(s["leading"]) for s in segs)
@@ -366,7 +392,8 @@ def allocate_context_budget(text: str, budget: int, min_ratio: float = _SEGMENT_
     for seg, body, give in zip(segs, bodies, alloc):
         give = min(give, len(body))
         if len(body) > give:
-            cut = _truncate_body(body, give)
+            # 围栏标记不参与额度：预算刀只能切标记之间的正文（P2-3）。
+            cut = _truncate_fenced_body(body, give)
             seg = {**seg, "body": [cut]}
             detail.append(
                 {"label": seg["label"], "priority": seg["priority"], "from": len(body), "to": len(cut), "cut": True}
