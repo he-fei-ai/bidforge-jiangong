@@ -103,6 +103,7 @@ from app.services.file_parser import (  # noqa: F401  re-export for tests monkey
 from app.services.prompt_governance import instruction_truncation, serialize_bounded_json_array
 from app.services.prompt_material_guard import (
     INSTRUCTION_PROMPT_MAX_CHARS,
+    clip_text_notice_meta,
     clip_text_notice_report,
 )
 
@@ -3847,10 +3848,10 @@ async def adjust_facts(data: AdjustRequest, db=Depends(get_db)):
         if k:
             existing_keys.add(k)
     confirmed_ops = data.operations
-    # ✅ 2026-11-07（第 2 条）：调整指令被削减时的用户可见账面。
-    #    只在「AI 产出预览计划」路径（do_apply=False）计算并回传 ——
-    #    do_apply=True 复用用户已确认的操作计划、根本不渲染提示词，报它等于
-    #    谎称本次下发被裁过。
+    # ✅ 2026-11-08（口径对齐）：调整指令被削减时的用户可见账面，两条路径都回传。
+    #    do_apply=True 复用已确认的操作计划、不做模型下发 —— 因此本路径**只可能**
+    #    有物理上限这一道刀（预算削减无从发生），用纯账面函数取同一份 from/to/omitted，
+    #    不重跑裁剪原语（否则同一份指令会把截断日志与指标算两次）。
     instruction_truncated: dict | None = None
     # ✅ 可观测性补齐（2026-10-08 · F3）：被丢弃的操作不再只进日志。
     #    「AI 给了 3 条、实际只落 2 条」必须有理由回传，否则用户与前端都无法
@@ -3862,6 +3863,11 @@ async def adjust_facts(data: AdjustRequest, db=Depends(get_db)):
         # 生成另一份可能不同的计划（否则“确认内容”与“实际落库内容”存在漂移）。
         ops, summary = _validate_adjust_ops(
             {"operations": confirmed_ops}, valid_ids, existing_keys=existing_keys, ignored_out=ignored_ops
+        )
+        # 本次不渲染提示词 → 不会有预算削减；但「指令本身超单条上限」与路径无关，
+        # 照 do_apply=False 的口径回传物理上限账面（纯账面：不截断、不重复留痕）。
+        instruction_truncated = instruction_truncation(
+            clip_text_notice_meta(instruction, INSTRUCTION_PROMPT_MAX_CHARS), None
         )
     else:
         # ✅ 2026-11-07（物理上限）：调整指令是任务本体，但不能无界 ——

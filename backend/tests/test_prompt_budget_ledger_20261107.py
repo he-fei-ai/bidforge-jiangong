@@ -256,8 +256,14 @@ async def test_adjust_outline_reports_physical_cap_when_budget_off(db_conn, monk
 
 
 @pytest.mark.asyncio
-async def test_adjust_facts_physical_cap_only_on_preview_not_on_apply(db_conn, monkeypatch):
-    """global_facts：预览路径回传物理上限账面；apply=True 不渲染提示词、不得报。"""
+async def test_adjust_facts_cap_book_on_both_paths_and_counted_once(db_conn, monkeypatch):
+    """global_facts：预览与 apply 两条路径回传**同一份**「指令超单条上限」账面。
+
+    apply=True 复用用户已确认的操作计划、不渲染提示词，因此不产生预算削减；
+    但「这条指令本身超出单条上限」是与路径无关的客观事实，仍须按 do_apply=False
+    的口径回传。禁止把账面算重：apply 只复用纯账面，不重跑裁剪原语，
+    截断指标在两次请求后仍应只有 1 次。
+    """
     import uuid
 
     import app.routers.global_facts as gf
@@ -312,6 +318,9 @@ async def test_adjust_facts_physical_cap_only_on_preview_not_on_apply(db_conn, m
     assert book, preview
     assert book["from"] == len(long_instruction)
     assert "超出单条上限" in book["notice"]
+    assert _metrics.get_snapshot()["token_budget_truncated"].get("调整要求", 0) == 1, (
+        "测试前提：预览路径的物理上限裁剪已记 1 次截断指标"
+    )
 
     applied = await gf.adjust_facts(
         gf.AdjustRequest(
@@ -322,7 +331,12 @@ async def test_adjust_facts_physical_cap_only_on_preview_not_on_apply(db_conn, m
         ),
         db=db_conn,
     )
-    assert "instruction_truncated" not in applied, "apply=True 不渲染提示词，不得虚报截断"
+    applied_book = applied.get("instruction_truncated")
+    assert applied_book, "apply=True 复用已确认计划不渲染提示词，但指令超限的事实仍须回传（口径对齐预览）"
+    assert applied_book == book, "两条路径的物理上限账面必须同口径（apply 不产生预算削减，不得凭空加 reason=both）"
+    assert _metrics.get_snapshot()["token_budget_truncated"].get("调整要求", 0) == 1, (
+        "别把账面算重：apply 复用纯账面，不得为同一份指令再记一次截断指标"
+    )
 
 
 # ---------------------------------------------------------------------------

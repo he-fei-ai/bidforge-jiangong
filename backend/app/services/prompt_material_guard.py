@@ -384,6 +384,24 @@ def _record_ledger_failure(channel: str) -> None:
 INSTRUCTION_PROMPT_MAX_CHARS = 6000
 
 
+def clip_text_notice_meta(text: str, limit: int) -> dict | None:
+    """只算「倘若截断会怎么记账」，**不截断、不写日志、不计指标**。
+
+    账面字段与 :func:`clip_text_notice_report` 完全一致（同一切点算法）：
+    ``from`` / ``to`` / ``omitted`` / ``limit``；未超限返回 ``None``。
+
+    用途：本次请求**不渲染提示词**、但仍需向用户回传「这条文本本身超限」的
+    路径（如 ``global_facts.adjust_facts(do_apply=True)`` 复用已确认操作计划）。
+    这类路径若改调 ``clip_text_notice_report`` 取账面，会为同一份文本再写一次
+    截断日志、再记一次截断指标 —— 账目算重。纯账面函数把两件事拆开：
+    记账口径一致，副作用只发生一次。
+    """
+    if not text or limit is None or limit <= 0 or len(text) <= limit:
+        return None
+    cut = _clip_cut_point(text, limit)
+    return {"from": len(text), "to": cut, "omitted": len(text) - cut, "limit": int(limit)}
+
+
 def clip_text_notice_report(
     text: str, limit: int, label: str = ""
 ) -> tuple[str, dict | None]:
@@ -395,10 +413,11 @@ def clip_text_notice_report(
 
     约定与 :func:`clip_text_notice` 完全一致（同一实现，字节输出不变）。
     """
-    if not text or limit is None or limit <= 0 or len(text) <= limit:
+    meta = clip_text_notice_meta(text, limit)
+    if meta is None:
         return text, None
-    cut = _clip_cut_point(text, limit)
-    omitted = len(text) - cut
+    cut = meta["to"]
+    omitted = meta["omitted"]
     name = label or "文本"
     try:
         logger.warning(
