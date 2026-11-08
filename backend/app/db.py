@@ -1965,7 +1965,23 @@ async def _acquire_read_conn() -> aiosqlite.Connection:
         if conn is None:
             continue
         # 用 PRAGMA wal_checkpoint(NOOP) 走 IO 层，覆盖"读取时抖"场景
-        if await _read_probe(conn):
+        # ✅ 2026-11-08（取消安全 · 读池获取窗口 2）：出池**不**递减
+        #    `_read_pool_total`（该连接仍计入「已创建未关闭」）。若探活期间被取消，
+        #    异常会绕过下方所有回退分支 → 配额永久 -1；累计到 _READ_POOL_MAX_SIZE
+        #    后 `total < MAX` 永假，获取路径永久 wait 且无连接可归还 → 死锁。
+        #    这里精确配对回退一次并关闭连接，取消**原样重抛**（吞掉会让关闭流程卡住）。
+        try:
+            probe_ok = await _read_probe(conn)
+        except BaseException:
+            async with _read_pool_cv:
+                _read_pool_total -= 1
+                _read_pool_cv.notify()  # 容量已释放，唤醒等待者
+            try:
+                await conn.close()
+            except BaseException as e:
+                logger.debug("读池探活被取消时关闭连接失败（清理路径，忽略）: %s", e)
+            raise
+        if probe_ok:
             _read_pool_borrowed.add(conn)
             return conn
         async with _read_pool_cv:
@@ -2016,6 +2032,24 @@ async def _acquire_read_conn() -> aiosqlite.Connection:
             if attempt + 1 >= _PROBE_MAX_ATTEMPTS:
                 break
             logger.warning("新建读池连接 disk I/O 失败（第 %d 次），重试", attempt + 1)
+        except BaseException:
+            # ✅ 2026-11-08（取消安全 · 读池获取窗口 1）：与写池同口径 ——
+            #    `CancelledError` 继承 `BaseException`，上面的 `except Exception`
+            #    捕获不到；预留的容量配额（L1952 一带 `_read_pool_total += 1`）会
+            #    永久 +1，而 close_db 只按容器递减、容器里没有这条连接 → 减不回来。
+            #    这里精确配对回退一次，并把取消**原样重抛**。
+            #    读池差异：新建路径在建连后还要执行 `PRAGMA query_only=ON`，取消可
+            #    发生在建连 / `_setup_connection` / query_only / 探活的任一 await 上，
+            #    本分支统一覆盖（预留计数在整个重试期间只回退一次，不逐次重试归还）。
+            async with _read_pool_cv:
+                _read_pool_total -= 1
+                _read_pool_cv.notify()
+            if conn is not None:
+                try:
+                    await conn.close()
+                except BaseException as close_err:
+                    logger.debug("读池建连被取消时关闭连接失败（清理路径，忽略）: %s", close_err)
+            raise
     async with _read_pool_cv:
         _read_pool_total -= 1
         _read_pool_cv.notify()
@@ -2045,19 +2079,36 @@ async def _release_read_conn(conn: aiosqlite.Connection) -> None:
         except Exception as e:
             logger.debug("剔除失效读池连接（poisoned/已关闭）时关闭失败（忽略）: %s", e)
         return
-    if not await _read_probe(conn):
+    try:
+        probe_ok = await _read_probe(conn)
+        if probe_ok:
+            async with _read_pool_cv:
+                _read_pool.append(conn)
+                _read_pool_cv.notify()
+            return
+    except BaseException:
+        # ✅ 2026-11-08（取消安全 · 读池归还窗口）：连接已从在途集合移除
+        #    （`_read_pool_borrowed.discard`），若在探活/入池期间被取消，它既不在
+        #    池里也不在在途集合，而 `_read_pool_total` 仍包含它 → `close_db()`
+        #    按容器递减也回收不了，配额永久 -1（8 次即死锁）。
+        #    这里精确配对回退一次、关闭连接，并把取消原样重抛。
         async with _read_pool_cv:
             _read_pool_total -= 1
-            _read_pool_cv.notify()  # 容量已释放，唤醒等待者
+            _read_pool_cv.notify()
         try:
             await conn.close()
-        except Exception as e:
-            logger.debug("剔除读池连接（归还前探活失败）时关闭失败（忽略）: %s", e)
-        logger.warning("剔除读池连接：归还前探活 disk I/O 失败")
-        return
+        except BaseException as e:
+            logger.debug("归还读池连接被取消时关闭失败（清理路径，忽略）: %s", e)
+        raise
+    # 探活失败：回锁归还计数并唤醒等待者
     async with _read_pool_cv:
-        _read_pool.append(conn)
-        _read_pool_cv.notify()
+        _read_pool_total -= 1
+        _read_pool_cv.notify()  # 容量已释放，唤醒等待者
+    try:
+        await conn.close()
+    except Exception as e:
+        logger.debug("剔除读池连接（归还前探活失败）时关闭失败（忽略）: %s", e)
+    logger.warning("剔除读池连接：归还前探活 disk I/O 失败")
 
 
 async def get_read_conn() -> aiosqlite.Connection:

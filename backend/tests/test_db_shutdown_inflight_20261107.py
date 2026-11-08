@@ -387,9 +387,153 @@ async def test_release_pool_conn_cancel_rolls_back_count(tmp_path):
         db._db_pool_total = 0
 
 
+@pytest.mark.asyncio
+async def test_acquire_read_conn_cancel_rolls_back_reservation(tmp_path, monkeypatch):
+    """读池窗口 1：预留后、读连接建立前被取消 → 配额精确回退，取消上抛。
+
+    `_read_pool_total` 同样是获取闸门（`total < _READ_POOL_MAX_SIZE` 才允许新建），
+    且预留计数在整个建连重试期间保持 —— 取消若只被 `except Exception` 漏掉，
+    配额会永久 +1（close_db 按容器递减，容器里没有这条连接）。
+    """
+    monkeypatch.setattr(db, "DB_PATH", tmp_path / "cancel_read_new.db")
+    monkeypatch.setattr(db, "_read_pool_path", db.DB_PATH)
+    db._read_pool.clear()
+    db._read_pool_borrowed.clear()
+    db._read_pool_total = 0
+
+    started = asyncio.Event()
+    calls = {"n": 0}
+
+    async def _hanging_connect(*_a, **_k):
+        calls["n"] += 1
+        started.set()
+        if calls["n"] == 1:
+            await asyncio.sleep(3600)
+        # 第二次进入立刻抛普通异常：若实现吞掉取消并回到重试循环，任务会在此结束，
+        # 而不是变成「取消免疫」任务让 pytest 收尾 gather 永久挂死。
+        raise RuntimeError("取消后仍继续重试建连（吞掉了取消）")
+
+    monkeypatch.setattr(aiosqlite, "connect", _hanging_connect)
+    task = asyncio.create_task(db._acquire_read_conn())
+    try:
+        await asyncio.wait_for(started.wait(), 2.0)
+        task.cancel()
+        done, _pending = await asyncio.wait({task}, timeout=3.0)
+        assert done, "取消被吞：任务在 3s 内未结束（会让关闭/停止流程卡住）"
+        assert task.cancelled(), "取消未原样上抛（被当成普通异常处理了）"
+        assert db._read_pool_total == 0, "取消后读池配额未回退（获取闸门会被永久占满）"
+        assert db._read_pool == []
+        assert db._read_pool_borrowed == set()
+    finally:
+        if not task.done():
+            task.cancel()
+            await asyncio.wait({task}, timeout=1.0)
+        db._read_pool.clear()
+        db._read_pool_borrowed.clear()
+        db._read_pool_total = 0
+
+
+@pytest.mark.asyncio
+async def test_acquire_read_conn_cancel_during_probe_rolls_back(tmp_path, monkeypatch):
+    """读池窗口 2：从池里 pop 后、探活期间被取消 → 连接 close 且配额归位。
+
+    与写池一致：pop 出池**不**递减 `_read_pool_total`（仍计入「已创建未关闭」），
+    取消路径必须自己回退一次并关闭连接，否则连接泄漏 + 配额永久占用。
+    """
+    monkeypatch.setattr(db, "DB_PATH", tmp_path / "cancel_read_probe.db")
+    # ⚠️ 必须与 DB_PATH 同一对象类型（Path）：否则顶部路径失配会先排空池再走
+    #    「新建连接」分支，根本到不了「pop 后探活」这个窗口。
+    monkeypatch.setattr(db, "_read_pool_path", db.DB_PATH)
+    db._read_pool.clear()
+    db._read_pool_borrowed.clear()
+
+    conn = await aiosqlite.connect(str(tmp_path / "cancel_read_probe.db"))
+    db._read_pool.append(conn)
+    db._read_pool_total = 1
+
+    started = asyncio.Event()
+
+    async def _hanging_probe(_conn):
+        started.set()
+        await asyncio.sleep(3600)
+        return True
+
+    original_probe = db._read_probe
+    db._read_probe = _hanging_probe
+    task = asyncio.create_task(db._acquire_read_conn())
+    try:
+        await asyncio.wait_for(started.wait(), 2.0)
+        task.cancel()
+        done, _pending = await asyncio.wait({task}, timeout=3.0)
+        assert done, "取消被吞：读池获取在 3s 内未结束"
+        assert task.cancelled(), "取消未原样上抛"
+        assert db._read_pool_total == 0, "读池探活取消后配额未回退"
+        assert db._read_pool == [], "被取消的连接不应回到池里"
+        assert conn not in db._read_pool_borrowed
+        assert db._is_dead_conn(conn), "读池探活取消后连接未被关闭（连接/线程泄漏）"
+    finally:
+        db._read_probe = original_probe
+        if not task.done():
+            task.cancel()
+            await asyncio.wait({task}, timeout=1.0)
+        try:
+            await conn.close()
+        except Exception:
+            pass
+        db._read_pool.clear()
+        db._read_pool_borrowed.clear()
+        db._read_pool_total = 0
+
+
+@pytest.mark.asyncio
+async def test_release_read_conn_cancel_rolls_back_count(tmp_path):
+    """读池归还窗口：discard 后在途集合后、探活/入池期间被取消 → 配额回退 + close。
+
+    中途被取消时连接既不在池里也不在在途集合，而 total 仍含它 →
+    `close_db()` 按容器递减永远收不回这条配额。
+    """
+    conn = await aiosqlite.connect(str(tmp_path / "release_read_cancel.db"))
+    db._read_pool.clear()
+    db._read_pool_borrowed.clear()
+    db._read_pool_borrowed.add(conn)
+    db._read_pool_total = 1
+
+    started = asyncio.Event()
+
+    async def _hanging_probe(_conn):
+        started.set()
+        await asyncio.sleep(3600)
+        return True
+
+    original_probe = db._read_probe
+    db._read_probe = _hanging_probe
+    task = asyncio.create_task(db._release_read_conn(conn))
+    try:
+        await asyncio.wait_for(started.wait(), 2.0)
+        task.cancel()
+        done, _pending = await asyncio.wait({task}, timeout=3.0)
+        assert done, "取消被吞：读池归还在 3s 内未结束"
+        assert task.cancelled(), "取消未原样上抛"
+        assert db._read_pool_total == 0, "读池归还取消后配额未回退"
+        assert db._read_pool == [], "归还取消后连接不应入池"
+        assert conn not in db._read_pool_borrowed
+        assert db._is_dead_conn(conn), "读池归还取消后连接未被关闭（连接/线程泄漏）"
+    finally:
+        db._read_probe = original_probe
+        if not task.done():
+            task.cancel()
+            await asyncio.wait({task}, timeout=1.0)
+        try:
+            await conn.close()
+        except Exception:
+            pass
+        db._read_pool.clear()
+        db._read_pool_borrowed.clear()
+        db._read_pool_total = 0
+
+
 class TestPoolCancelSafetyGuard:
-    """源码护栏：三条取消回退（获取窗口1/2 + 归还窗口）必须捕获 BaseException
-    且原样重抛。
+    """源码护栏：写池/读池的取消回退分支必须捕获 BaseException 且原样重抛。
 
     为什么不能只靠运行时用例：实现一旦吞掉取消，任务会变成「取消免疫」——
     在挂起的建连上无限重入，`asyncio` 收尾也无法结束它，用例表现为挂死而不是
@@ -399,14 +543,19 @@ class TestPoolCancelSafetyGuard:
     删掉任一处分支末尾的 `raise` → 本用例红。
     """
 
-    _EXPECTED = {"_acquire_pool_conn": 2, "_release_pool_conn": 1}
+    _EXPECTED = {
+        "_acquire_pool_conn": ("_db_pool_total", 2),
+        "_release_pool_conn": ("_db_pool_total", 1),
+        "_acquire_read_conn": ("_read_pool_total", 2),
+        "_release_read_conn": ("_read_pool_total", 1),
+    }
 
-    def _rollback_handlers(self, func_name):
+    def _rollback_handlers(self, func_name, total_name):
         """只取「回退配额」的 BaseException 分支，排除嵌套的 close 清理分支。
 
         `except BaseException as close_err:` 也在同一函数内，但它只负责关闭
-        连接、不动 `_db_pool_total`；按「分支体内是否有 `_db_pool_total -= 1`」
-        过滤，保证计数与语义一一对应。
+        连接、不动配额；按「分支体内是否有 `<total_name> -= 1`」过滤，保证
+        计数与语义一一对应。
         """
         src = io.open(_DB_SRC, encoding="utf-8-sig").read()
         tree = ast.parse(src, filename=_DB_SRC)
@@ -427,7 +576,7 @@ class TestPoolCancelSafetyGuard:
             mutates_total = any(
                 isinstance(s, ast.AugAssign)
                 and isinstance(s.target, ast.Name)
-                and s.target.id == "_db_pool_total"
+                and s.target.id == total_name
                 for s in ast.walk(h)
             )
             if mutates_total:
@@ -435,8 +584,8 @@ class TestPoolCancelSafetyGuard:
         return handlers
 
     def test_cancel_rollbacks_catch_base_exception(self):
-        for func_name, expected in self._EXPECTED.items():
-            handlers = self._rollback_handlers(func_name)
+        for func_name, (total_name, expected) in self._EXPECTED.items():
+            handlers = self._rollback_handlers(func_name, total_name)
             assert len(handlers) == expected, (
                 "%s 取消安全回退分支数量不对：应为 %d 个，实际 %d 个 —— "
                 "CancelledError 继承 BaseException，用 except Exception 接不住"
@@ -444,8 +593,8 @@ class TestPoolCancelSafetyGuard:
             )
 
     def test_cancel_rollbacks_reraise(self):
-        for func_name, expected in self._EXPECTED.items():
-            handlers = self._rollback_handlers(func_name)
+        for func_name, (total_name, expected) in self._EXPECTED.items():
+            handlers = self._rollback_handlers(func_name, total_name)
             assert len(handlers) == expected, "前置条件不满足：先修好 %s 的 BaseException 捕获" % func_name
             for h in handlers:
                 assert isinstance(h.body[-1], ast.Raise), (
