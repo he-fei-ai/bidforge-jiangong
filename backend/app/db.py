@@ -1687,7 +1687,24 @@ async def _acquire_pool_conn() -> aiosqlite.Connection:
         if conn is None:  # 防御性：理论到不了
             continue
         # PRAGMA wal_checkpoint 探针：真实 IO 往返，覆盖"写入才抖"场景
-        if await _probe_conn(conn):
+        # ✅ 2026-11-08（取消安全 · 窗口 2）：连接已出池、尚未进在途集合，但
+        #    `_db_pool_total` 仍包含它（出池不递减）。若探活期间被取消，异常会绕过
+        #    下方所有归还分支 → 配额永久 -1 不减（只增不减 → 累计到 _POOL_MAX_SIZE
+        #    后 `total < MAX` 永假，获取路径永久 wait 且无连接可归还 → 死锁）。
+        #    这里精确配对回退一次并关闭连接，然后把取消继续上抛——
+        #    **吞掉取消会让关闭流程卡住，比泄漏更糟**。
+        try:
+            probe_ok = await _probe_conn(conn)
+        except BaseException:
+            async with _db_pool_cv:
+                _db_pool_total -= 1
+                _db_pool_cv.notify()  # 容量已释放，唤醒等待者
+            try:
+                await conn.close()
+            except BaseException as e:
+                logger.debug("探活被取消时关闭写池连接失败（清理路径，忽略）: %s", e)
+            raise
+        if probe_ok:
             _db_pool_borrowed.add(conn)
             return conn
         # 探活失败：回锁归还计数并唤醒等待者（缺 notify 会让等待者永久睡死）
@@ -1739,6 +1756,21 @@ async def _acquire_pool_conn() -> aiosqlite.Connection:
             if attempt + 1 >= _PROBE_MAX_ATTEMPTS:
                 break
             logger.warning("新建写池连接 disk I/O 失败（第 %d 次），重试", attempt + 1)
+        except BaseException:
+            # ✅ 2026-11-08（取消安全 · 窗口 1）：`CancelledError` 继承
+            #    `BaseException`，上面的 `except Exception` 捕获不到 —— 预留的
+            #    容量配额会永久 +1（close_db 只按容器递减，容器里没有这条连接，
+            #    减不回来）。这里精确配对回退一次，并把取消**原样重抛**：
+            #    吞掉取消会让关闭/停止流程卡住，比泄漏更糟。
+            async with _db_pool_cv:
+                _db_pool_total -= 1
+                _db_pool_cv.notify()
+            if conn is not None:
+                try:
+                    await conn.close()
+                except BaseException as close_err:
+                    logger.debug("建连被取消时关闭写池连接失败（清理路径，忽略）: %s", close_err)
+            raise
     # 放弃新建：归还预留容量并唤醒等待者
     async with _db_pool_cv:
         _db_pool_total -= 1

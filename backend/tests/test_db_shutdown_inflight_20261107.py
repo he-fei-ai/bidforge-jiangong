@@ -14,6 +14,7 @@ import os
 import sqlite3
 import threading
 
+import aiosqlite
 import app.db as db
 import pytest
 from app.services.ai import task_registry as tr
@@ -24,6 +25,11 @@ _REGISTRY_SRC = os.path.join(
     "services",
     "ai",
     "task_registry.py",
+)
+_DB_SRC = os.path.join(
+    os.path.dirname(os.path.dirname(os.path.abspath(__file__))),
+    "app",
+    "db.py",
 )
 
 
@@ -230,4 +236,168 @@ class TestShutdownSwallowGuard:
         assert len(handlers) == 1, "shutdown_inflight 中未找到「except Exception + 失败计数自增」分支"
         header = lines[handlers[0].lineno - 1]
         assert "# noqa: BLE001" in header, f"关闭收口宽异常缺 noqa: BLE001 标注：{header!r}"
+
+
+@pytest.mark.asyncio
+async def test_acquire_pool_conn_cancel_rolls_back_reservation(tmp_path, monkeypatch):
+    """窗口 1：预留配额后、连接入池前被取消 → 配额必须精确回退，取消必须上抛。
+
+    `_db_pool_total` 是获取闸门（`total < _POOL_MAX_SIZE` 才允许新建），只增不减
+    会在累计到上限后让获取路径永久 wait（P1）。`CancelledError` 继承
+    `BaseException`，原先的 `except Exception` 捕获不到 → 配额永久 +1。
+    """
+    monkeypatch.setattr(db, "DB_PATH", tmp_path / "cancel_new.db")
+    monkeypatch.setattr(db, "_db_pool_path", db.DB_PATH)
+    db._db_pool.clear()
+    db._db_pool_borrowed.clear()
+    db._db_pool_total = 0
+
+    started = asyncio.Event()
+    calls = {"n": 0}
+
+    async def _hanging_connect(*_a, **_k):
+        calls["n"] += 1
+        started.set()
+        if calls["n"] == 1:
+            await asyncio.sleep(3600)  # 模拟建连期间挂住（真实 IO 窗口）
+        # ✅ 第二次进入立刻抛普通异常：若实现吞掉取消并回到重试循环，任务会在此
+        #    结束而不是变成「取消免疫」任务 —— 后者会让 pytest 收尾 gather 永久
+        #    挂死，把「吞取消」这个缺陷表现成超时而非可判定的红。
+        raise RuntimeError("取消后仍继续重试建连（吞掉了取消）")
+
+    monkeypatch.setattr(aiosqlite, "connect", _hanging_connect)
+    task = asyncio.create_task(db._acquire_pool_conn())
+    try:
+        await asyncio.wait_for(started.wait(), 2.0)
+        task.cancel()
+        # 有界等待：若实现吞掉取消，任务会在建连上继续挂起且「取消免疫」——
+        # 直接 await 会永久卡住，这里只用 3s 预算并断言任务必须已结束。
+        done, _pending = await asyncio.wait({task}, timeout=3.0)
+        assert done, "取消被吞：任务在 3s 内未结束（会让关闭/停止流程卡住）"
+        assert task.cancelled(), "取消未原样上抛（被当成普通异常处理了）"
+        assert db._db_pool_total == 0, "取消后写池配额未回退（获取闸门会被永久占满）"
+        assert db._db_pool == []
+        assert db._db_pool_borrowed == set()
+    finally:
+        if not task.done():
+            task.cancel()
+            await asyncio.wait({task}, timeout=1.0)
+        db._db_pool.clear()
+        db._db_pool_borrowed.clear()
+        db._db_pool_total = 0
+
+
+@pytest.mark.asyncio
+async def test_acquire_pool_conn_cancel_during_probe_rolls_back(tmp_path, monkeypatch):
+    """窗口 2：从池里 pop 之后、探活期间被取消 → 连接必须 close 且配额归位。
+
+    pop 出池时 `_db_pool_total` 不递减（该连接仍计入「已创建未关闭」），所以取消
+    路径必须自己回退一次并关闭连接，否则连接泄漏 + 配额永久占用。
+    """
+    monkeypatch.setattr(db, "DB_PATH", tmp_path / "cancel_probe.db")
+    # ⚠️ 必须与 DB_PATH **同一对象类型**（Path）：写成 str 会让 `_acquire_pool_conn`
+    #    顶部的 `_db_pool_path != DB_PATH` 恒真 → 先把池排空再走「新建连接」分支，
+    #    根本到不了「pop 后探活」这个窗口（这是本用例第一版的真实缺陷）。
+    monkeypatch.setattr(db, "_db_pool_path", db.DB_PATH)
+    db._db_pool.clear()
+    db._db_pool_borrowed.clear()
+
+    conn = await aiosqlite.connect(str(tmp_path / "cancel_probe.db"))
+    db._db_pool.append(conn)
+    db._db_pool_total = 1
+
+    started = asyncio.Event()
+
+    async def _hanging_probe(_conn):
+        started.set()
+        await asyncio.sleep(3600)
+        return True
+
+    monkeypatch.setattr(db, "_probe_conn", _hanging_probe)
+    task = asyncio.create_task(db._acquire_pool_conn())
+    try:
+        await asyncio.wait_for(started.wait(), 2.0)
+        assert db._db_pool == [], "前置条件：连接应已被 pop 出池"
+        task.cancel()
+        done, _pending = await asyncio.wait({task}, timeout=3.0)
+        assert done, "取消被吞：探活任务在 3s 内未结束"
+        assert task.cancelled(), "取消未原样上抛"
+        assert db._db_pool_total == 0, "探活取消后写池配额未回退"
+        assert db._is_dead_conn(conn), "探活取消后连接未被关闭（连接泄漏）"
+        assert conn not in db._db_pool_borrowed
+    finally:
+        if not task.done():
+            task.cancel()
+            await asyncio.wait({task}, timeout=1.0)
+        try:
+            await conn.close()
+        except Exception:
+            pass
+        db._db_pool.clear()
+        db._db_pool_borrowed.clear()
+        db._db_pool_total = 0
+
+
+class TestAcquireCancelSafetyGuard:
+    """源码护栏：`_acquire_pool_conn` 的取消回退必须捕获 BaseException 且原样重抛。
+
+    为什么不能只靠运行时用例：实现一旦吞掉取消，任务会变成「取消免疫」——
+    在挂起的建连上无限重入，`asyncio` 收尾也无法结束它，用例表现为挂死而不是
+    红。所以「没吞取消」这一半必须用静态护栏锁住。
+
+    变异判据：`except BaseException` 改回 `except Exception` → 本用例红（找不到
+    两个 BaseException 回退分支）；删掉分支末尾的 `raise` → 本用例红。
+    """
+
+    def _acquire_handlers(self):
+        """只取「回退配额」的 BaseException 分支，排除嵌套的 close 清理分支。
+
+        `except BaseException as close_err:` 也在 `_acquire_pool_conn` 内，但它
+        只负责关闭连接、不动 `_db_pool_total`；按「分支体内是否有
+        `_db_pool_total -= 1`」过滤，保证计数与语义一一对应（当前应为 2 个：
+        窗口1 预留回退 / 窗口2 探活回退）。
+        """
+        src = io.open(_DB_SRC, encoding="utf-8-sig").read()
+        tree = ast.parse(src, filename=_DB_SRC)
+        target = None
+        for node in ast.walk(tree):
+            if isinstance(node, ast.AsyncFunctionDef) and node.name == "_acquire_pool_conn":
+                target = node
+                break
+        assert target is not None, "app.db._acquire_pool_conn 不存在"
+        handlers = []
+        for h in ast.walk(target):
+            if not (
+                isinstance(h, ast.ExceptHandler)
+                and isinstance(h.type, ast.Name)
+                and h.type.id == "BaseException"
+            ):
+                continue
+            mutates_total = any(
+                isinstance(s, ast.AugAssign)
+                and isinstance(s.target, ast.Name)
+                and s.target.id == "_db_pool_total"
+                for s in ast.walk(h)
+            )
+            if mutates_total:
+                handlers.append(h)
+        return handlers
+
+    def test_cancel_rollbacks_catch_base_exception(self):
+        handlers = self._acquire_handlers()
+        assert len(handlers) == 2, (
+            "取消安全回退分支缺失：应为 2 个 (窗口1 预留回退 / 窗口2 探活回退)，实际 %d 个 —— "
+            "CancelledError 继承 BaseException，用 except Exception 接不住" % len(handlers)
+        )
+
+    def test_cancel_rollbacks_reraise(self):
+        handlers = self._acquire_handlers()
+        assert len(handlers) == 2, "前置条件不满足：先修好 BaseException 捕获"
+        for h in handlers:
+            assert isinstance(h.body[-1], ast.Raise), (
+                "第 %d 行的取消回退分支末尾不是 raise —— 吞掉取消会让关闭/停止流程卡住（比泄漏更糟）"
+                % h.lineno
+            )
+
+
 

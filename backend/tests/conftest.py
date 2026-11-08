@@ -65,6 +65,34 @@ def _restore_app_db_path():
         _appdb.DB_PATH = original
 
 
+# ✅ 2026-11-08（写池计数守恒探针）：`_db_pool_total` 是获取闸门
+#    （`total < _POOL_MAX_SIZE` 才允许新建写连接），而它只增不减 —— 任何一条
+#    「预留后未配对回退」的路径都会让有效容量永久缩水，累计到上限后获取路径
+#    永久 `wait()` 且无连接可归还（死锁，P1）。历史证据：全量顺序下
+#    `test_lifespan_shutdown_writes_failed_before_close_db` 的
+#    `assert db._db_pool_total == 0` 曾收到 1，单跑却绿 —— 说明是**前序用例**
+#    留下的漂移。本探针逐用例比对「总量 = 池内 + 在途」三方守恒，漂移即点名。
+#
+#    为使后续用例能独立判定（否则首个泄漏者之后全员连坐红），检查失败后把本
+#    用例遗留的漂移量从计数里剔除；这是测试隔离，不是生产回退路径。
+@pytest.fixture(autouse=True)
+def _pool_accounting_invariant(request):
+    import app.db as _appdb
+
+    yield
+    total = _appdb._db_pool_total
+    pool_n = len(_appdb._db_pool)
+    borrowed_n = len(_appdb._db_pool_borrowed)
+    held = pool_n + borrowed_n
+    if total != held:
+        _appdb._db_pool_total = held
+        pytest.fail(
+            "写池计数漂移（用例 %s）：_db_pool_total=%d，但池内 %d + 在途 %d = %d"
+            % (request.node.nodeid, total, pool_n, borrowed_n, held),
+            pytrace=False,
+        )
+
+
 @pytest_asyncio.fixture
 async def db_conn(monkeypatch):
     """内存 SQLite 连接，初始化完整 schema，并 patch get_conn
