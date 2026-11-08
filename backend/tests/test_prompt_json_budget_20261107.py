@@ -83,6 +83,97 @@ def test_helper_zero_budget_means_unlimited():
     assert serialize_bounded_json_array(items, 0, field="items") == json.dumps(items, ensure_ascii=False)
 
 
+def test_helper_exactly_at_budget_is_byte_identical():
+    """基线锁：预算恰好等于整串长度（含中文 / 嵌套 / None）仍逐字节原样返回。
+
+    2026-11-08 逐条裁剪改造的硬要求是「未超预算路径一字节都不动」，本用例直接
+    钉住该边界（``len(whole)`` 等于预算、以及预算更大两种情形），不经过任何
+    router 包装，避免包装层变化掩盖 helper 回归。
+    """
+    items = [{"a": "中文取值"}, {"b": [1, 2, {"c": None}]}, {"d": True}]
+    whole = json.dumps(items, ensure_ascii=False)
+    assert serialize_bounded_json_array(items, len(whole), field="items") == whole
+    assert serialize_bounded_json_array(items, len(whole) + 1, field="items") == whole
+    assert serialize_bounded_json_array(items, 600, field="items") == whole
+
+
+# ---------------------------------------------------------------------------
+# 1b. 逐条裁剪：每个「自身超预算」条目都必须被单独裁剪（不止 items[0]）
+# ---------------------------------------------------------------------------
+def test_helper_clips_second_and_third_oversized_items():
+    """首条不超预算时，第 2/3 条自身超预算仍要逐条裁剪进输出。
+
+    旧实现只在 ``items[0]`` 自身超预算时进入裁剪分支；首条正常时直接走整条
+    贪心，后面两条超长事实被整体省略 —— 模型完全看不到它们。新实现必须把
+    两条都裁进输出，并逐条记 ``__truncated_chars__`` 与 ``clipped_details``。
+    """
+    items = _facts_for_adjust_prompt(_make_fact_rows(3, value_len=20))
+    items[1]["value"] = "甲" * 3000
+    items[2]["value"] = "乙" * 3000
+    text = _facts_adjust_current_text(items, max_chars=1400)
+    data = json.loads(text)
+    kept = data["facts"]
+    assert len(kept) == 3, kept
+    assert kept[0].get("__truncated_chars__", 0) == 0, kept[0]
+    assert kept[1]["__truncated_chars__"] > 0, kept[1]
+    assert kept[2]["__truncated_chars__"] > 0, kept[2]
+    marker = data["truncation"]
+    assert marker["clipped_items"] == 2, marker
+    assert marker["clipped_chars"] > 0, marker
+    assert [d["index"] for d in marker["clipped_details"]] == [1, 2], marker
+    assert all(d["omitted_chars"] > 0 for d in marker["clipped_details"]), marker
+    assert len(text) <= 1400, len(text)
+
+
+def test_helper_clips_single_middle_oversized_item_and_keeps_tail():
+    """只有中间一条超预算时，前后两条完整保留、中间那条被裁并记账。"""
+    items = _facts_for_adjust_prompt(_make_fact_rows(3, value_len=20))
+    items[1]["value"] = "甲" * 2500
+    text = _facts_adjust_current_text(items, max_chars=1200)
+    data = json.loads(text)
+    kept = data["facts"]
+    assert len(kept) == 3, kept
+    assert kept[0].get("__truncated_chars__", 0) == 0, kept[0]
+    assert kept[1]["__truncated_chars__"] > 0, kept[1]
+    assert kept[2].get("__truncated_chars__", 0) == 0, kept[2]
+    marker = data["truncation"]
+    assert marker["clipped_items"] == 1, marker
+    assert marker["clipped_details"][0]["index"] == 1, marker
+    assert len(text) <= 1200, len(text)
+
+
+def test_helper_unshrinkable_item_is_omitted_not_oversized_payload():
+    """裁剪收敛定义：裁完仍超预算 → 从输出尾部整条回退，直到可容纳。
+
+    这里用「拒绝收缩」的回调模拟结构键本身已超预算的情形：条目必须被整条
+    省略（计入 ``omitted_items``），绝不能把超预算的整条原样塞给模型。
+    """
+
+    def _no_shrink(item, max_chars):
+        return item, 0
+
+    items = [{"id": "a", "v": "小"}, {"id": "b", "v": "巨" * 3000}]
+    text = serialize_bounded_json_array(items, 600, field="items", clip_item=_no_shrink)
+    data = json.loads(text)
+    assert data["items"] == [items[0]], data
+    assert data["truncation"]["omitted_items"] == 1, data["truncation"]
+    assert len(text) <= 600, len(text)
+
+
+def test_helper_budget_below_wrapper_returns_legal_empty_shell():
+    """收敛定义的终点：预算连包装都装不下时返回**合法空壳**（仍可 json.loads）。"""
+
+    def _no_shrink(item, max_chars):
+        return item, 0
+
+    items = [{"id": "a", "v": "巨" * 3000}]
+    text = serialize_bounded_json_array(items, 60, field="items", clip_item=_no_shrink)
+    data = json.loads(text)  # 唯一硬判据：任何预算下都必须是合法 JSON
+    assert data["items"] == [], data
+    assert data["truncation"]["omitted_items"] == 1, data["truncation"]
+    assert data["truncation"]["omitted_chars"] == len(json.dumps(items[0], ensure_ascii=False))
+
+
 # ---------------------------------------------------------------------------
 # 2. 目录：超预算按一级章节边界裁剪，结构合法且每条完整
 # ---------------------------------------------------------------------------

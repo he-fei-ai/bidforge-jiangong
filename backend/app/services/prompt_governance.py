@@ -896,6 +896,14 @@ def allocate_char_budgets(lengths: list[int], budget: int) -> list[int]:
 # ==========================================================================
 # 三、结构化 JSON 预算器（原 json.dumps(...)[:N] · R184 G-STRUCT）
 # ==========================================================================
+#: 「自身超预算」条目的裁剪份额下限（字符）：低于此额度时该条只剩结构键、
+#: 有效文本近乎为零，保留它反而比整条省略更占预算 —— 此时改走整条省略。
+MIN_CLIPPED_ITEM_CHARS = 120
+#: ``truncation.clipped_details`` 每条账目的预估占用（字符），计入预算预留，
+#: 避免「逐条裁剪 + 账目」把结果顶出预算。
+_CLIPPED_DETAIL_COST = 48
+
+
 def serialize_bounded_json_array(
     items: list,
     max_chars: int,
@@ -913,17 +921,25 @@ def serialize_bounded_json_array(
 
     - 未超预算：返回 ``json.dumps(items, ensure_ascii=False)``，
       **与原实现逐字节一致**（不改未截断路径）；
-    - 超预算：返回 ``{field: [...保留的完整条目...], "truncation": {...}}``，
-      覆盖处只落在条目边界；``truncation`` 显式给出省略条目数 / 字符数 / 原因；
-    - 单条自身超预算：调用 ``clip_item(item, allowed_chars)`` 只对**该条**做带
-      标注的文本裁剪（回调须在条目内写 ``__truncated_chars__``），其余条目仍按
-      整条省略并计入 ``truncation``。
+    - 超预算：返回 ``{field: [...保留条目...], "truncation": {...}}``，覆盖处只落在
+      条目边界；``truncation`` 给出 ``kept_items`` / ``omitted_items`` /
+      ``omitted_chars``（相对原文的实际丢失字数）/ ``clipped_items`` / ``clipped_chars``；
+    - 「自身超预算」条目（独占预算仍放不下，**与它排第几无关**）逐条调用
+      ``clip_item(item, share)`` 做带标注的条目内裁剪（回调须在条目内写
+      ``__truncated_chars__``）；每条的实际省略量另记在 ``truncation.clipped_details``
+      （``{"index": 原列表下标（0 基）, "omitted_chars": N}``）。份额按剩余预算在
+      超大条目间平分；不足 :data:`MIN_CLIPPED_ITEM_CHARS` 时该条整条省略
+      （保留它只付结构开销、几乎没有有效文本）；
+    - **收敛定义**：裁剪后包装仍超预算 → 从输出尾部逐条整条回退，直到可容纳；
+      回退到空列表仍超预算（预算小于包装本身）→ 返回空壳。任何路径的输出
+      都是可被 ``json.loads`` 解析的 JSON。
 
     :param items: 待序列化的列表（顶层条目是「整条保留/整条省略」的最小单位）。
     :param max_chars: 字符预算（``<=0`` 表示不限制，与旧实现无上限语义一致）。
     :param field: 超预算包装对象里保留条目所在键名（如 ``outline`` / ``facts``）。
     :param label: 人类可读条目名，写进 ``truncation.item_label`` 与日志。
-    :param clip_item: 单条超预算回调 ``(item, allowed_chars) -> (clipped, dropped)``。
+    :param clip_item: 自身超预算条目回调 ``(item, share) -> (clipped, dropped)``；
+        ``share`` 是该条可分到的字符额度（包装与账目开销已先扣除）。
     :param reason: 写进 ``truncation.reason`` 的省略原因。
     """
     items = list(items or [])
@@ -931,19 +947,27 @@ def serialize_bounded_json_array(
     def _dumps(obj) -> str:
         return json.dumps(obj, ensure_ascii=False)
 
-    def _marker(kept_n: int, omitted_n: int, omitted_chars: int) -> dict:
-        return {
+    def _marker(kept_n: int, omitted_n: int, omitted_chars: int, clipped_details=None) -> dict:
+        details = [dict(d) for d in (clipped_details or [])]
+        marker = {
             "truncated": True,
             "item_label": label,
             "kept_items": kept_n,
             "omitted_items": omitted_n,
             "omitted_chars": omitted_chars,
+            "clipped_items": len(details),
+            "clipped_chars": sum(int(d.get("omitted_chars") or 0) for d in details),
             "reason": reason or "输入超过 prompt 字符预算，已按条目边界裁剪",
             "note": "仅下列条目参与本次推理；被省略条目不在输入中，禁止臆造其内容。",
         }
+        if details:
+            marker["clipped_details"] = details
+        return marker
 
-    def _payload(kept: list, omitted_n: int, omitted_chars: int) -> str:
-        return _dumps({field: list(kept), "truncation": _marker(len(kept), omitted_n, omitted_chars)})
+    def _payload(kept: list, omitted_n: int, omitted_chars: int, clipped_details=None) -> str:
+        return _dumps(
+            {field: list(kept), "truncation": _marker(len(kept), omitted_n, omitted_chars, clipped_details)}
+        )
 
     whole = _dumps(items)
     if max_chars is None or int(max_chars) <= 0 or len(whole) <= int(max_chars):
@@ -952,29 +976,95 @@ def serialize_bounded_json_array(
         return whole
 
     budget = int(max_chars)
+    n = len(items)
     sizes = [len(_dumps(it)) for it in items]
     total_chars = sum(sizes)
 
-    # ① 单条自身超预算：只对该条做显式标注的文本裁剪，其余条目整条省略。
+    # ① 逐条裁剪：每个**自身超预算**条目单独裁（2026-11-08 起不再只处理首条）。
+    #    「自身超预算」= 独占预算（连完整省略计数的外壳都装不下）仍放不下，
+    #    与它排第几无关；判定用与最终 payload 完全一致的包装口径，避免边界漂移。
     if clip_item is not None:
-        head_payload = _payload([items[0]], len(items) - 1, total_chars - sizes[0])
-        if len(head_payload) > budget:
-            # 预留包装外壳（空列表 + 完整省略计数）后再给该条分配字符额度。
-            overhead = len(_payload([], len(items), total_chars))
-            allowance = max(1, budget - overhead - 20)
-            clipped, _dropped = clip_item(items[0], allowance)
-            omitted_chars = max(0, total_chars - len(_dumps(clipped)))
-            payload = _payload([clipped], len(items) - 1, omitted_chars)
+        over_idx = [
+            i for i in range(n)
+            if len(_payload([items[i]], n - 1, total_chars - sizes[i])) > budget
+        ]
+        if over_idx:
+            over_set = set(over_idx)
+            overhead = len(_payload([], n, total_chars))
+            content_budget = max(0, budget - overhead - _CLIPPED_DETAIL_COST * len(over_idx))
+            # 先给每个超大条目留出保底份额，剩余额度才让非超大条目整条保留。
+            reserve = min(content_budget, MIN_CLIPPED_ITEM_CHARS * len(over_idx))
+            cap_whole = content_budget - reserve
+
+            kept_whole: list[int] = []
+            used = 0
+            for i in range(n):
+                if i in over_set:
+                    continue
+                cost = sizes[i] + 1  # +1：与后续条目之间的逗号（保守估计）
+                if used + cost > cap_whole:
+                    break
+                kept_whole.append(i)
+                used += cost
+
+            # 剩余额度在超大条目间平分；份额不足保底额度 → 该条整条省略
+            # （保留它要付整份结构键/定位键的 JSON 开销，有效文本却近乎为零）。
+            left = max(0, content_budget - used)
+            share = left // len(over_idx)
+            clipped: dict[int, object] = {}
+            if share >= MIN_CLIPPED_ITEM_CHARS:
+                for i in over_idx:
+                    clipped[i], _dropped = clip_item(items[i], share)
+
+            kept_rows: list[object] = []
+            kept_ids: list[int] = []
+            for i in range(n):
+                if i in clipped:
+                    kept_rows.append(clipped[i])
+                    kept_ids.append(i)
+                elif i in kept_whole:
+                    kept_rows.append(items[i])
+                    kept_ids.append(i)
+
+            def _details(idxs: list[int]) -> list[dict]:
+                out: list[dict] = []
+                for i in idxs:
+                    if i not in clipped:
+                        continue
+                    lost = sizes[i] - len(_dumps(clipped[i]))
+                    if lost > 0:
+                        out.append({"index": i, "omitted_chars": lost})
+                return out
+
+            def _build(rows: list, idxs: list[int]) -> str:
+                kept_chars = sum(len(_dumps(x)) for x in rows)
+                return _payload(rows, n - len(rows), max(0, total_chars - kept_chars), _details(idxs))
+
+            payload = _build(kept_rows, kept_ids)
+            # 收敛定义（写死，不留「看情况」）：裁剪后仍超预算 → 从**输出尾部**
+            # 逐条整条回退，直到可容纳；回退到空列表仍超预算（预算小于包装本身）
+            # 时返回空壳 —— 此时任何条目都装不下，合法 JSON 是唯一可交付形态。
+            while len(payload) > budget and kept_rows:
+                kept_rows.pop()
+                kept_ids.pop()
+                payload = _build(kept_rows, kept_ids)
             logger.warning(
-                "JSON 预算裁剪·单条（%s）：首条约 %d 字符超出预算 %d，已裁剪该条文本%s",
+                "JSON 预算裁剪·逐条（%s）：自身超预算 %d 条，实际裁剪 %d 条（份额 %d 字符），"
+                "保留 %d/%d 条，省略 %d 条共 %d 字符（预算 %d）",
                 label,
-                sizes[0],
+                len(over_idx),
+                len(_details(kept_ids)),
+                share,
+                len(kept_rows),
+                n,
+                n - len(kept_rows),
+                max(0, total_chars - sum(len(_dumps(x)) for x in kept_rows)),
                 budget,
-                "" if len(payload) <= budget else "（包装开销后仍略超预算，已尽力收敛）",
             )
             return payload
 
-    # ② 多条超预算：按顶层条目边界贪心保留，尾部整条省略。
+    # ② 无「自身超预算」条目（或调用方未提供 clip_item）：按顶层条目边界贪心保留，
+    #    尾部整条省略（既有口径，行为不变）。
     kept: list = []
     used = 0
     reserve = len(_payload([], 0, total_chars))  # 空列表情形的包装固定开销
