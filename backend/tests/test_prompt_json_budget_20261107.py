@@ -240,3 +240,37 @@ def test_facts_single_huge_value_is_clipped_with_marker():
     assert kept[0]["category"] == "material"
     assert kept[0]["__truncated_chars__"] > 0, kept[0]
     assert len(text) <= 600, len(text)
+
+
+# ---------------------------------------------------------------------------
+# 4. 同族调用点复查锁：每个调用都必须传 clip_item（逐条裁剪才真正生效）
+# ---------------------------------------------------------------------------
+def test_all_serialize_bounded_json_array_callsites_clip_each_item():
+    """B4（2026-11-08）：扫全部调用点，要求都传 ``clip_item``。
+
+    ``items[0]`` 只裁首条的历史缺陷修复后，同族还有一个等价的退化形态：
+    调用方不传 ``clip_item`` 时，自身超预算的条目只能「整条保留 / 整条省略」，
+    最长的那条仍会原样进提示词或被静默丢弃。本用例把「新增调用点漏传」
+    锁成红：以后谁再写一处不传 ``clip_item`` 的调用都会在这里暴露。
+    """
+    import ast
+    from pathlib import Path
+
+    app_dir = Path(__file__).resolve().parents[1] / "app"
+    offenders: list[str] = []
+    sites = 0
+    for path in sorted(app_dir.rglob("*.py")):
+        tree = ast.parse(path.read_text(encoding="utf-8"))
+        for node in ast.walk(tree):
+            if not isinstance(node, ast.Call):
+                continue
+            func = node.func
+            name = func.id if isinstance(func, ast.Name) else getattr(func, "attr", "")
+            if name != "serialize_bounded_json_array":
+                continue
+            sites += 1
+            if not any(kw.arg == "clip_item" for kw in node.keywords):
+                offenders.append(f"{path.relative_to(app_dir)}:{node.lineno}")
+
+    assert sites >= 2, f"应至少找到 2 个调用点（事实/目录各一），实际 {sites}"
+    assert not offenders, "以下调用点未传 clip_item，逐条裁剪不会生效：" + "；".join(offenders)
