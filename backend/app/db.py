@@ -1898,6 +1898,18 @@ _read_pool_path: Path | None = None
 _read_pool_cv = asyncio.Condition()
 _READ_POOL_MAX_SIZE = 8
 
+# ✅ 2026-11-08（取消安全 · 读池回退取锁窗口）：连接出池后、成功移交借出前，
+#    它既不在 `_read_pool` 也不在 `_read_pool_borrowed`，但仍计入 `_read_pool_total`。
+#    这段「在途」状态此前只能靠代码顺序推断 —— 取消恰好落在回退分支的
+#    `async with _read_pool_cv` 上时，「已进入回退」与「刚拿到锁还没回退」两种
+#    状态无法区分，谁也无法判断该不该再递减一次。
+#    本集合是这段状态的**显式真相**：成员在集合里 ⇒ 配额尚未结算；不在 ⇒ 已结算
+#    （或已移交借出）。所有回退点都以它为准，因此天然可重入 —— 重复补偿只会命中
+#    "不在集合"，绝不二次递减。
+_read_pool_inflight: set[aiosqlite.Connection] = set()
+# 回退路径的唤醒任务（吞掉唤醒会让等待者永久睡死，见 _schedule_read_pool_wakeup）
+_read_pool_wake_tasks: set[asyncio.Task] = set()
+
 
 async def _read_probe(conn: aiosqlite.Connection) -> bool:
     """读连接探活：query_only=ON 会拒绝 wal_checkpoint 的写路径，
@@ -1913,6 +1925,27 @@ async def _read_probe(conn: aiosqlite.Connection) -> bool:
         if _is_disk_io_error(e):
             return False
         return True
+
+
+async def _read_pool_wakeup() -> None:
+    async with _read_pool_cv:
+        _read_pool_cv.notify_all()
+
+
+def _schedule_read_pool_wakeup() -> None:
+    """配额已在同步段结清后唤醒等待者（取消安全）。
+
+    为什么不在取消路径里直接 ``async with _read_pool_cv: notify()``：取条件变量锁
+    本身是一次可取消的等待，若恰在此处被（第二次）取消，``notify`` 就永远不会执行，
+    正在 ``wait()`` 的协程可能永久睡死（容量明明已经释放）。``create_task`` 是纯同步
+    动作，取消打不断；唤醒任务随后自行取锁通知。计数正确性不依赖本函数。
+    """
+    try:
+        task = asyncio.get_running_loop().create_task(_read_pool_wakeup(), name="read-pool-wakeup")
+    except RuntimeError:  # 无运行中的事件循环（解释器收尾），无人可唤醒
+        return
+    _read_pool_wake_tasks.add(task)
+    task.add_done_callback(_read_pool_wake_tasks.discard)
 
 
 async def _acquire_read_conn() -> aiosqlite.Connection:
@@ -1943,9 +1976,13 @@ async def _acquire_read_conn() -> aiosqlite.Connection:
         async with _read_pool_cv:
             if _read_pool:
                 conn = _read_pool.pop()
+                # 显式在途标记：与 `_read_pool_total` 同一同步段里持有，取消只能在
+                # await 点发生 → 两者不可能在中途不一致。
+                _read_pool_inflight.add(conn)
                 # poisoned 标记：读路径曾抛过 disk I/O error，直接剔除
                 # ✅ 2026-09-26：已关闭的连接同样剔除（与写池同口径）
                 if _is_poisoned(conn) or _is_dead_conn(conn):
+                    _read_pool_inflight.discard(conn)
                     _read_pool_total -= 1
                     dead, conn = conn, None
                     logger.warning("剔除失效读池连接（poisoned 或已关闭）")
@@ -1973,20 +2010,32 @@ async def _acquire_read_conn() -> aiosqlite.Connection:
         try:
             probe_ok = await _read_probe(conn)
         except BaseException:
-            async with _read_pool_cv:
+            # ✅ 2026-11-08（取消安全 · 读池回退取锁窗口）：原语义是回锁内递减
+            #    `_read_pool_total -= 1; notify()`。回锁（`async with _read_pool_cv`）
+            #    本身是一次可取消的等待：取消恰好落在取锁瞬间时，递减与关闭都被跳过，
+            #    连接漏线程、配额漏回退；而若改在外层再补一次，又会与「已成功回退」
+            #    的分支重复递减 —— 两种状态在取消时无法用计数区分。
+            #    新语义：结算放进**无 await 的同步段**（取消打不进来），是否该结算由
+            #    `_read_pool_inflight` 显式标记判定 → 可重入，重复补偿只命中"已结算"。
+            if conn in _read_pool_inflight:
+                _read_pool_inflight.discard(conn)
                 _read_pool_total -= 1
-                _read_pool_cv.notify()  # 容量已释放，唤醒等待者
+                _schedule_read_pool_wakeup()
             try:
                 await conn.close()
             except BaseException as e:
                 logger.debug("读池探活被取消时关闭连接失败（清理路径，忽略）: %s", e)
             raise
         if probe_ok:
+            # 移交借出：先摘在途标记再登记借出（同一同步段，无取消窗口）
+            _read_pool_inflight.discard(conn)
             _read_pool_borrowed.add(conn)
             return conn
-        async with _read_pool_cv:
+        # 探活失败（正常路径，非取消）：同样先同步结清再关闭
+        if conn in _read_pool_inflight:
+            _read_pool_inflight.discard(conn)
             _read_pool_total -= 1
-            _read_pool_cv.notify()
+            _schedule_read_pool_wakeup()
         try:
             await conn.close()
         except Exception as e:
@@ -2025,9 +2074,10 @@ async def _acquire_read_conn() -> aiosqlite.Connection:
                     logger.debug("关闭新建读池连接失败（异常路径，忽略）: %s", close_err)
             last_err = e
             if not _is_disk_io_error(e):
-                async with _read_pool_cv:
-                    _read_pool_total -= 1
-                    _read_pool_cv.notify()
+                # ✅ 2026-11-08（取消安全 · 读池回退取锁窗口）：同步结清后再起新的
+                #    await（取锁等待可被取消 → 递减与后续动作都会丢）。下同。
+                _read_pool_total -= 1
+                _schedule_read_pool_wakeup()
                 raise
             if attempt + 1 >= _PROBE_MAX_ATTEMPTS:
                 break
@@ -2041,18 +2091,20 @@ async def _acquire_read_conn() -> aiosqlite.Connection:
             #    读池差异：新建路径在建连后还要执行 `PRAGMA query_only=ON`，取消可
             #    发生在建连 / `_setup_connection` / query_only / 探活的任一 await 上，
             #    本分支统一覆盖（预留计数在整个重试期间只回退一次，不逐次重试归还）。
-            async with _read_pool_cv:
-                _read_pool_total -= 1
-                _read_pool_cv.notify()
+            # ✅ 2026-11-08（取消安全 · 读池回退取锁窗口）：原语义把递减放在
+            #    `async with _read_pool_cv` 里 —— 取消落在取锁瞬间时递减与关闭全部
+            #    跳过。新语义：递减移入无 await 的同步段（取消打不进来），再关闭连接。
+            _read_pool_total -= 1
+            _schedule_read_pool_wakeup()
             if conn is not None:
                 try:
                     await conn.close()
                 except BaseException as close_err:
                     logger.debug("读池建连被取消时关闭连接失败（清理路径，忽略）: %s", close_err)
             raise
-    async with _read_pool_cv:
-        _read_pool_total -= 1
-        _read_pool_cv.notify()
+    # 全部重试都失败（disk I/O）：同步结清预留配额后抛错
+    _read_pool_total -= 1
+    _schedule_read_pool_wakeup()
     raise RuntimeError(f"数据库读池连接建立失败（连续 {_PROBE_MAX_ATTEMPTS} 次 disk I/O error）") from last_err
 
 
