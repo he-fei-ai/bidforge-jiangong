@@ -1803,19 +1803,36 @@ async def _release_pool_conn(conn: aiosqlite.Connection) -> None:
         except Exception as e:
             logger.debug("剔除失效写池连接（poisoned/已关闭）时关闭失败（忽略）: %s", e)
         return
-    if not await _probe_conn(conn):
+    try:
+        probe_ok = await _probe_conn(conn)
+        if probe_ok:
+            async with _db_pool_cv:
+                _db_pool.append(conn)
+                _db_pool_cv.notify()
+            return
+    except BaseException:
+        # ✅ 2026-11-08（取消安全 · 归还窗口）：连接已从在途集合移除
+        #    （`_db_pool_borrowed.discard`），若在探活/入池期间被取消，它既不在
+        #    池里也不在在途集合，而 `_db_pool_total` 仍包含它 → `close_db()`
+        #    按容器递减也回收不了（容器里没有它），配额永久 -1（8 次即死锁）。
+        #    这里精确配对回退一次、关闭连接，并把取消原样重抛。
         async with _db_pool_cv:
             _db_pool_total -= 1
-            _db_pool_cv.notify()  # 容量已释放，唤醒等待者
+            _db_pool_cv.notify()
         try:
             await conn.close()
-        except Exception as e:
-            logger.debug("剔除写池连接（归还前探活失败）时关闭失败（忽略）: %s", e)
-        logger.warning("剔除写池连接：归还前探活 disk I/O 失败")
-        return
+        except BaseException as e:
+            logger.debug("归还写池连接被取消时关闭失败（清理路径，忽略）: %s", e)
+        raise
+    # 探活失败：回锁归还计数并唤醒等待者
     async with _db_pool_cv:
-        _db_pool.append(conn)
-        _db_pool_cv.notify()
+        _db_pool_total -= 1
+        _db_pool_cv.notify()  # 容量已释放，唤醒等待者
+    try:
+        await conn.close()
+    except Exception as e:
+        logger.debug("剔除写池连接（归还前探活失败）时关闭失败（忽略）: %s", e)
+    logger.warning("剔除写池连接：归还前探活 disk I/O 失败")
 
 
 async def get_db():

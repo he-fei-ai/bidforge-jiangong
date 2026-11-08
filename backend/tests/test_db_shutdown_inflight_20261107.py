@@ -338,33 +338,84 @@ async def test_acquire_pool_conn_cancel_during_probe_rolls_back(tmp_path, monkey
         db._db_pool_total = 0
 
 
-class TestAcquireCancelSafetyGuard:
-    """源码护栏：`_acquire_pool_conn` 的取消回退必须捕获 BaseException 且原样重抛。
+@pytest.mark.asyncio
+async def test_release_pool_conn_cancel_rolls_back_count(tmp_path):
+    """归还窗口：探活期间被取消必须精确回退配额并关闭连接。
+
+    与获取窗口不同的漏点：`_release_pool_conn` 先把连接从 `_db_pool_borrowed`
+    移除、再去探活；中途被取消时连接既不在池里也不在在途集合，而 total 仍含它
+    → `close_db()` 按容器递减永远收不回这条配额（历史红的签名正是
+    total=1 / pool=0 / borrowed=0）。
+    """
+    conn = await aiosqlite.connect(str(tmp_path / "release_cancel.db"))
+    db._db_pool.clear()
+    db._db_pool_borrowed.clear()
+    db._db_pool_borrowed.add(conn)
+    db._db_pool_total = 1
+
+    started = asyncio.Event()
+
+    async def _hanging_probe(_conn):
+        started.set()
+        await asyncio.sleep(3600)
+        return True
+
+    original_probe = db._probe_conn
+    db._probe_conn = _hanging_probe
+    task = asyncio.create_task(db._release_pool_conn(conn))
+    try:
+        await asyncio.wait_for(started.wait(), 2.0)
+        task.cancel()
+        done, _pending = await asyncio.wait({task}, timeout=3.0)
+        assert done, "取消被吞：归还在 3s 内未结束"
+        assert task.cancelled(), "取消未原样上抛"
+        assert db._db_pool_total == 0, "归还取消后写池配额未回退"
+        assert db._db_pool == [], "归还取消后连接不应入池"
+        assert conn not in db._db_pool_borrowed
+        assert db._is_dead_conn(conn), "归还取消后连接未被关闭（连接/线程泄漏）"
+    finally:
+        db._probe_conn = original_probe
+        if not task.done():
+            task.cancel()
+            await asyncio.wait({task}, timeout=1.0)
+        try:
+            await conn.close()
+        except Exception:
+            pass
+        db._db_pool.clear()
+        db._db_pool_borrowed.clear()
+        db._db_pool_total = 0
+
+
+class TestPoolCancelSafetyGuard:
+    """源码护栏：三条取消回退（获取窗口1/2 + 归还窗口）必须捕获 BaseException
+    且原样重抛。
 
     为什么不能只靠运行时用例：实现一旦吞掉取消，任务会变成「取消免疫」——
     在挂起的建连上无限重入，`asyncio` 收尾也无法结束它，用例表现为挂死而不是
     红。所以「没吞取消」这一半必须用静态护栏锁住。
 
-    变异判据：`except BaseException` 改回 `except Exception` → 本用例红（找不到
-    两个 BaseException 回退分支）；删掉分支末尾的 `raise` → 本用例红。
+    变异判据：任一处 `except BaseException` 改回 `except Exception` → 本用例红；
+    删掉任一处分支末尾的 `raise` → 本用例红。
     """
 
-    def _acquire_handlers(self):
+    _EXPECTED = {"_acquire_pool_conn": 2, "_release_pool_conn": 1}
+
+    def _rollback_handlers(self, func_name):
         """只取「回退配额」的 BaseException 分支，排除嵌套的 close 清理分支。
 
-        `except BaseException as close_err:` 也在 `_acquire_pool_conn` 内，但它
-        只负责关闭连接、不动 `_db_pool_total`；按「分支体内是否有
-        `_db_pool_total -= 1`」过滤，保证计数与语义一一对应（当前应为 2 个：
-        窗口1 预留回退 / 窗口2 探活回退）。
+        `except BaseException as close_err:` 也在同一函数内，但它只负责关闭
+        连接、不动 `_db_pool_total`；按「分支体内是否有 `_db_pool_total -= 1`」
+        过滤，保证计数与语义一一对应。
         """
         src = io.open(_DB_SRC, encoding="utf-8-sig").read()
         tree = ast.parse(src, filename=_DB_SRC)
         target = None
         for node in ast.walk(tree):
-            if isinstance(node, ast.AsyncFunctionDef) and node.name == "_acquire_pool_conn":
+            if isinstance(node, ast.AsyncFunctionDef) and node.name == func_name:
                 target = node
                 break
-        assert target is not None, "app.db._acquire_pool_conn 不存在"
+        assert target is not None, f"app.db.{func_name} 不存在"
         handlers = []
         for h in ast.walk(target):
             if not (
@@ -384,20 +435,20 @@ class TestAcquireCancelSafetyGuard:
         return handlers
 
     def test_cancel_rollbacks_catch_base_exception(self):
-        handlers = self._acquire_handlers()
-        assert len(handlers) == 2, (
-            "取消安全回退分支缺失：应为 2 个 (窗口1 预留回退 / 窗口2 探活回退)，实际 %d 个 —— "
-            "CancelledError 继承 BaseException，用 except Exception 接不住" % len(handlers)
-        )
-
-    def test_cancel_rollbacks_reraise(self):
-        handlers = self._acquire_handlers()
-        assert len(handlers) == 2, "前置条件不满足：先修好 BaseException 捕获"
-        for h in handlers:
-            assert isinstance(h.body[-1], ast.Raise), (
-                "第 %d 行的取消回退分支末尾不是 raise —— 吞掉取消会让关闭/停止流程卡住（比泄漏更糟）"
-                % h.lineno
+        for func_name, expected in self._EXPECTED.items():
+            handlers = self._rollback_handlers(func_name)
+            assert len(handlers) == expected, (
+                "%s 取消安全回退分支数量不对：应为 %d 个，实际 %d 个 —— "
+                "CancelledError 继承 BaseException，用 except Exception 接不住"
+                % (func_name, expected, len(handlers))
             )
 
-
-
+    def test_cancel_rollbacks_reraise(self):
+        for func_name, expected in self._EXPECTED.items():
+            handlers = self._rollback_handlers(func_name)
+            assert len(handlers) == expected, "前置条件不满足：先修好 %s 的 BaseException 捕获" % func_name
+            for h in handlers:
+                assert isinstance(h.body[-1], ast.Raise), (
+                    "%s 第 %d 行的取消回退分支末尾不是 raise —— "
+                    "吞掉取消会让关闭/停止流程卡住（比泄漏更糟）" % (func_name, h.lineno)
+                )
