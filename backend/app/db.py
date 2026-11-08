@@ -1560,61 +1560,85 @@ async def _setup_connection(conn: aiosqlite.Connection) -> aiosqlite.Connection:
     return conn
 
 
+def _stop_conn_for_close(conn) -> asyncio.Future | None:
+    """同步发出 aiosqlite「停止哨兵」，返回用于等待工作线程退出的 future。
+
+    ✅ 2026-11-08（取消安全 · close_db 漏线程窗口）：
+    ``Connection.stop()`` 除创建 future 外全是同步动作（``_running=False`` +
+    ``put_nowait(close_and_stop)``），取消打不进来；工作线程收到哨兵后关闭底层
+    sqlite3 连接、返回停止哨兵并退出。返回的 future 只用于**等待**线程结束 ——
+    即使调用方随后被取消、不再等它，线程也已经注定退出。
+    """
+    if conn is None:
+        return None
+    if getattr(conn, "_running", True) is False and getattr(conn, "_connection", None) is None:
+        return None  # 已彻底关闭：线程不在，无需再发哨兵
+    try:
+        return conn.stop()
+    except Exception as e:
+        logger.debug("close_db 同步发出停止信号失败（忽略）: %s", e)
+        return None
+
+
 async def close_db():
     global _conn, _conn_path, _db_pool_total, _read_pool_total
     global _probe_task
-    # ✅ 2026-11-07（关闭顺序）：完整性巡检任务此前从未被取消 —— 关闭后它仍会
-    #    按周期醒来读库（sqlite3/to_thread），既拖住进程退出，也让“已关闭”的
-    #    状态名不副实。先 cancel + await，再关连接；异常一律不阻断关闭。
+    # ✅ 2026-11-08（取消安全 · close_db 漏线程窗口）：
+    #    原语义：先 await 取消巡检任务，再逐条 ``await conn.close()``。
+    #    关闭期本身可能就在**取消上下文**里：取消落在任一次 await 上时，
+    #    ``except Exception`` 接不住 CancelledError，其后尚未处理的连接一条都不会关
+    #    （aiosqlite 工作线程是非守护线程 ⇒ 进程退不出去）。
+    #    新语义：阶段 1 是零 await 的同步段 —— 巡检任务取消、两条池整体摘空并结清
+    #    计数、每条连接收到停止哨兵，全部在这一段完成；阶段 2 才是可被取消的等待
+    #    （等巡检退出、等线程退出），取消只会提前返回而不影响清理结果。
     probe = _probe_task
     _probe_task = None
     if probe is not None and not probe.done():
         probe.cancel()
+
+    to_stop: list[aiosqlite.Connection] = []
+    if _conn is not None:
+        to_stop.append(_conn)
+        _conn = None
+        _conn_path = None
+    # 两条池同步摘空并结清计数。这里**不取** `_db_pool_cv` / `_read_pool_cv`：
+    # 本段无 await ⇒ 事件循环不会切到其它协程，池状态不可能在中途被改动；
+    # 而「取锁」本身是一次可取消的 await，一旦恰在此处被取消，整条池都不会被回收。
+    while _db_pool:
+        to_stop.append(_db_pool.pop())
+        _db_pool_total -= 1
+    while _db_pool_borrowed:
+        to_stop.append(_db_pool_borrowed.pop())
+        _db_pool_total -= 1
+    while _read_pool:
+        to_stop.append(_read_pool.pop())
+        _read_pool_total -= 1
+    while _read_pool_borrowed:
+        to_stop.append(_read_pool_borrowed.pop())
+        _read_pool_total -= 1
+    pending: list[asyncio.Future] = []
+    for c in to_stop:
+        fut = _stop_conn_for_close(c)
+        if fut is not None:
+            pending.append(fut)
+
+    # ---- 阶段 2：可被取消的等待段（哨兵已入队，线程必然退出） ----
+    if probe is not None and not probe.done():
         try:
             await probe
         except asyncio.CancelledError:
-            pass
+            # ⚠️ 巡检任务自身被取消时，await 它同样抛 CancelledError —— 不能一律
+            #    吞掉：那样关闭协程自己被取消时也会“假装成功返回”。只吞「不是
+            #    冲我来的」那种，属于本任务的取消一律继续上抛。
+            if asyncio.current_task() is not None and asyncio.current_task().cancelling():
+                raise
         except Exception as e:
             logger.debug("close_db 等待完整性巡检任务退出失败（忽略）: %s", e)
-    if _conn is not None:
-        # ✅ 幂等：连接可能已被外部关闭（再 close 会抛），关闭流程不应因
-        #    重复关闭而中断 —— 否则启动/关闭竞态下残留的池连接永远不被清理。
+    for fut in pending:
         try:
-            await _conn.close()
+            await fut
         except Exception as e:
-            logger.debug("close_db 关闭全局连接失败（可能已关闭，忽略）: %s", e)
-        _conn = None
-        _conn_path = None
-    # P1-3：关闭连接池中的空闲连接，以及借出未归还的在途连接。
-    # 在途连接若不回收，其 aiosqlite 非守护工作线程会阻塞进程退出；而且关闭后
-    # 后台任务再归还时会把仍然存活的连接重新塞回池里（_release_* 已拒绝回池）。
-    to_close: list[aiosqlite.Connection] = []
-    async with _db_pool_cv:
-        while _db_pool:
-            to_close.append(_db_pool.pop())
-            _db_pool_total -= 1
-        while _db_pool_borrowed:
-            to_close.append(_db_pool_borrowed.pop())
-            _db_pool_total -= 1
-    for c in to_close:
-        try:
-            await c.close()
-        except Exception as e:
-            logger.debug("close_db 关闭写池连接失败（忽略）: %s", e)
-    # Phase 3：关闭只读连接池（同样包含在途借出的读连接）
-    to_close = []
-    async with _read_pool_cv:
-        while _read_pool:
-            to_close.append(_read_pool.pop())
-            _read_pool_total -= 1
-        while _read_pool_borrowed:
-            to_close.append(_read_pool_borrowed.pop())
-            _read_pool_total -= 1
-    for c in to_close:
-        try:
-            await c.close()
-        except Exception as e:
-            logger.debug("close_db 关闭读池连接失败（忽略）: %s", e)
+            logger.debug("close_db 等待连接工作线程退出失败（忽略）: %s", e)
 
 
 # P1-3 性能优化：FastAPI 依赖连接池（有界、请求结束归还）
