@@ -44,6 +44,7 @@ import re
 
 import pytest
 from app.routers import sse_handlers as sh
+from app.services import outline_title_fix
 from app.services.outline_quality import (
     check_outline_continuity,
     detect_generic_titles,
@@ -352,3 +353,34 @@ class TestExitInvariant:
         assert isinstance(covered, bool) and isinstance(missing, list)
         assert tree == snapshot, "复检不得修改目录树（纯函数红线）"
         assert getattr(sh.settings, "outline_title_fix", None) is True
+
+
+# ---------------------------------------------------------------------------
+# F8（2026-11-08）：同级兄弟清单**进入模型提示词** —— 超限必须带可见说明
+# ---------------------------------------------------------------------------
+class TestTitleFixItemsSiblingClip:
+    """``_build_title_fix_items`` 的同级兄弟清单是模型可见内容，不许静默裸切。"""
+
+    @staticmethod
+    def _outline(count: int) -> list:
+        kids = [
+            {"title": f"工序{i}号专项施工方案实施细则", "description": "说明", "children": []}
+            for i in range(count)
+        ]
+        return [{"title": "基坑支护施工", "description": "母章", "children": kids}]
+
+    def test_under_limit_is_byte_identical(self):
+        outline = self._outline(4)
+        hits = [{"path": "1.2", "title": "专项6", "kind": "generic"}]
+        items = outline_title_fix._build_title_fix_items(outline, hits)
+        titles = [n["title"] for n in outline[0]["children"]]
+        expected = "、".join(f"「{t}」" for t in titles if t != titles[1])
+        assert "已截断" not in items, items
+        assert f"｜同级兄弟：{expected}｜" in items, items
+
+    def test_over_limit_carries_model_visible_notice(self):
+        outline = self._outline(40)
+        hits = [{"path": "1.2", "title": "专项6", "kind": "generic"}]
+        items = outline_title_fix._build_title_fix_items(outline, hits)
+        assert "同级标题已截断" in items, items
+        assert "原文" in items and "已省略" in items, items

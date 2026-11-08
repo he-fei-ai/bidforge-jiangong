@@ -113,7 +113,17 @@ def _build_title_fix_items(outline: list, hits: list[dict]) -> str:
             continue
         node = info["node"]
         desc = str(node.get("description") or "").strip()[:60]
-        sib = "、".join(f"「{t}」" for t in info["siblings"] if t != str(node.get("title") or "").strip())[:400]
+        # ✅ 2026-11-08：同级标题清单**进入模型提示词**（本函数产物即 ``broken_items``），
+        #    此前 ``[...][:400]`` 裸切后模型只看到半截兄弟清单、误判「同级已看完」，
+        #    再撞上 ``_apply_title_updates`` 的重名红线只会造成整批拒收。改走留痕
+        #    原语：未超限逐字节原样；超限按「、」边界收刀并附模型可见说明。标记
+        #    自带 ``\n\n``，会把本条清单项折成两行 —— 用「模型知道还有更多同级
+        #    标题」换行内单行格式，取舍上优于静默丢清单。
+        sib = clip_text_notice(
+            "、".join(f"「{t}」" for t in info["siblings"] if t != str(node.get("title") or "").strip()),
+            400,
+            "同级标题",
+        )
         lines.append(
             f"- path={path}｜层级 L{str(path).count('.') + 1}｜上级章节「{info['parent'] or '（一级）'}」"
             f"｜当前标题「{h.get('title')}」（类型 {h.get('kind')}）"

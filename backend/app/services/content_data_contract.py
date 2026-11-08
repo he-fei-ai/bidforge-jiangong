@@ -757,7 +757,12 @@ def build_cross_section_digest(
         "与指代一致，不要沿用与之冲突的数值。",
     ]
     lines.extend(items)
-    return "\n".join(lines)[:max_chars]
+    # ✅ 2026-11-08：此前是 ``"\n".join(lines)[:max_chars]`` 裸切 —— 本摘要经调用方
+    #    注入**当前章节提示词**（见函数 docstring），超长时模型只收到半截文本、
+    #    无从知晓后面还有取值，会据此断言「未提及」。改走统一留痕原语：未超限
+    #    逐字节原样；超限按段落/句末边界收刀 + 附加模型可见说明，同时写日志与
+    #    截断指标。
+    return clip_text_notice("\n".join(lines), max_chars, "跨章节关键数据摘要")
 
 
 def chapter_facts_for_key(chapter_key: str, facts_rows) -> list:

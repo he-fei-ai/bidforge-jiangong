@@ -471,6 +471,20 @@ class TestFailSoft:
         assert "工程基本情况" in out
         assert "总工期184天" in out
 
+    def test_digest_over_budget_carries_model_visible_notice(self):
+        """2026-11-08：本摘要注入当前章节提示词 —— 超限不得静默裸切。"""
+        secs = {f"s{i}": {"title": f"章节{i}", "content": f"总工期约{i}天。"} for i in range(1, 40)}
+        out = c.build_cross_section_digest(secs, max_chars=300)
+        assert out.startswith("【已生成章节的关键取值参考"), out
+        assert "已截断" in out, out
+        assert "跨章节关键数据摘要" in out, out
+
+    def test_digest_under_budget_is_unchanged(self):
+        """未超限：输出与旧实现（``"\\n".join(lines)``）逐字节一致，无任何标记。"""
+        out = c.build_cross_section_digest({"s1": {"title": "工程基本情况", "content": "总工期约184天。"}})
+        assert "已截断" not in out, out
+        assert out.endswith("- 【工程基本情况】总工期184天"), out
+
     def test_cross_section_findings_fail_soft_on_garbage(self):
         for bad in (None, [], "x", 42, [None, 42, "s"], [{"content": None}]):
             assert c.cross_section_value_findings(bad, new_section_id="s1") == []
