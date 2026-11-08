@@ -257,6 +257,95 @@ def test_db_customized_marker_is_expanded_on_read(monkeypatch):
     assert len(out) > len("定制前缀\n\n定制后缀") + 100
 
 
+def test_preset_cache_survives_when_db_unloadable(tmp_path, monkeypatch):
+    """显式预置缓存 + 本进程从未成功加载过库 → 预置值不得被重载覆盖。
+
+    回归 `_cache.py::_get_prompt_cache` 的隔离缺陷：旧实现把「非 None 缓存 +
+    `_loaded_db_path=None`」当作陈旧缓存，每次访问都重载失败并覆盖预置值。
+    """
+    from app.services.ai.prompts import _cache
+
+    missing = tmp_path / "missing.db"  # 不存在 → 加载必然失败
+    monkeypatch.setattr(_cache, "_current_db_path", lambda: str(missing))
+    monkeypatch.setattr(_cache, "_prompt_cache", {"probe_key": "预置内容"}, raising=False)
+    monkeypatch.setattr(_cache, "_loaded_db_path", None, raising=False)
+    monkeypatch.setattr(_cache, "_loaded_db_mtime", None, raising=False)
+    monkeypatch.setattr(_cache, "_loaded_db_missing", False, raising=False)
+
+    assert _cache._get_prompt_cache() == {"probe_key": "预置内容"}
+    assert _cache.get_prompt("probe_key") == "预置内容"
+
+
+def test_load_retries_after_db_becomes_available(tmp_path, monkeypatch):
+    """未预置时，库不可加载 → 后来可用仍必须自动加载（R179 行为不得被锁死）。"""
+    import sqlite3
+
+    from app.services.ai.prompts import _cache
+
+    db_path = tmp_path / "late.db"
+    monkeypatch.setattr(_cache, "_current_db_path", lambda: str(db_path))
+    monkeypatch.setattr(_cache, "_prompt_cache", None, raising=False)
+    monkeypatch.setattr(_cache, "_loaded_db_path", None, raising=False)
+    monkeypatch.setattr(_cache, "_loaded_db_mtime", None, raising=False)
+    monkeypatch.setattr(_cache, "_loaded_db_watermark", None, raising=False)
+    monkeypatch.setattr(_cache, "_loaded_db_missing", False, raising=False)
+
+    assert _cache._get_prompt_cache() == {}  # 库尚不存在：走失败/空缓存路径
+
+    conn = sqlite3.connect(db_path)
+    try:
+        conn.execute(
+            "CREATE TABLE prompt_templates (key TEXT PRIMARY KEY, content TEXT DEFAULT '', updated_at TEXT)"
+        )
+        conn.execute(
+            "INSERT INTO prompt_templates (key, content, updated_at) VALUES (?, ?, ?)",
+            ("probe_key", "库内内容", "2026-11-08 00:00:00"),
+        )
+        conn.commit()
+    finally:
+        conn.close()
+
+    assert _cache._get_prompt_cache() == {"probe_key": "库内内容"}
+
+
+def test_load_recovers_after_db_path_resolves_later(tmp_path, monkeypatch):
+    """无可用库路径（加载时记 "" 哨兵）→ 路径恢复后仍必须重载（失败路径不锁死）。
+
+    `_loaded_db_path=None` 只保留给「从未尝试加载」的外部预置语义；一次真实的
+    无路径加载必须留下非 None 标记，否则会被误判为预置缓存而永久短路。
+    """
+    import sqlite3
+
+    from app.services.ai.prompts import _cache
+
+    db_path = tmp_path / "resolved_later.db"
+    state = {"path": None}
+    monkeypatch.setattr(_cache, "_current_db_path", lambda: state["path"])
+    monkeypatch.setattr(_cache, "_prompt_cache", None, raising=False)
+    monkeypatch.setattr(_cache, "_loaded_db_path", None, raising=False)
+    monkeypatch.setattr(_cache, "_loaded_db_mtime", None, raising=False)
+    monkeypatch.setattr(_cache, "_loaded_db_watermark", None, raising=False)
+    monkeypatch.setattr(_cache, "_loaded_db_missing", False, raising=False)
+
+    assert _cache._get_prompt_cache() == {}  # 首轮：完全拿不到库路径
+
+    conn = sqlite3.connect(db_path)
+    try:
+        conn.execute(
+            "CREATE TABLE prompt_templates (key TEXT PRIMARY KEY, content TEXT DEFAULT '', updated_at TEXT)"
+        )
+        conn.execute(
+            "INSERT INTO prompt_templates (key, content, updated_at) VALUES (?, ?, ?)",
+            ("probe_key", "路径恢复后内容", "2026-11-08 00:00:00"),
+        )
+        conn.commit()
+    finally:
+        conn.close()
+
+    state["path"] = str(db_path)
+    assert _cache._get_prompt_cache() == {"probe_key": "路径恢复后内容"}
+
+
 # ---------------------------------------------------------------------------
 # 5. R179（2026-11-05）：截断可见 + 出站脱敏真正接线
 # ---------------------------------------------------------------------------

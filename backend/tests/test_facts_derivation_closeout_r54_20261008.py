@@ -474,9 +474,17 @@ class TestAdjustScopeAndAtomicity:
         n = await _count(db, "SELECT COUNT(*) FROM global_facts WHERE title=?", ("触发异常项",))
         assert n == 0
 
-    async def test_response_contract_is_additive(self, dbf):
+    async def test_response_contract_is_additive(self, dbf, monkeypatch):
         db, pid, sid = dbf
         fid = await _ins(db, pid=pid, sid=sid, value=OLD_Q)
+
+        # ✅ 2026-11-08：注入假 provider（monkeypatch 到 AI 调用入口），
+        #    断言照旧完整检查契约键；不再依赖 backend/.env 的私有 key 与公网。
+        async def _fake_collect(*_args, **_kwargs):
+            return {"operations": [{"op": "update", "fact_id": fid, "value": NEW_Q}]}, None
+
+        monkeypatch.setattr(gf, "collect_json_response", _fake_collect)
+
         out = await gf.adjust_facts(
             gf.AdjustRequest(
                 instruction="预览不改库",

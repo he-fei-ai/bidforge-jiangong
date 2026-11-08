@@ -249,7 +249,11 @@ def _load_prompt_cache_sync():
             db_path = _current_db_path()
             if not db_path or db_path == ":memory:":
                 _prompt_cache = {}
-                _loaded_db_path = db_path
+                # ✅ 2026-11-08：无可用库路径时记录 "" 哨兵而非 None —— None 只保留
+                #    给「本进程从未尝试加载」（供 _get_prompt_cache 识别外部显式
+                #    预置缓存，不得覆盖）；此处是一次真实的加载尝试，后续路径
+                #    变为可用时仍需按「路径变化 → 重载」恢复（不锁死）。
+                _loaded_db_path = db_path or ""
                 _loaded_db_watermark = None
                 # ✅ R179：未加载到任何库文件时不得残留上一次的 mtime 基线，
                 #    否则「库文件后创建」会因旧基线更小而永不触发重载。
@@ -312,6 +316,17 @@ def _get_prompt_cache() -> dict[str, str]:
     global _prompt_cache
     with _cache_lock:
         current = _current_db_path()
+        # ✅ 2026-11-08（隔离缺陷）：外部**显式预置**缓存必须优先。
+        #    任何真实的加载尝试都会落值：成功/文件缺失记实际路径，无可用路径记
+        #    "" 哨兵，异常时把 _prompt_cache 置 None（见 _load_prompt_cache_sync），
+        #    因此「非 None 缓存 + _loaded_db_path 仍为 None」只可能是调用方直接
+        #    赋值，不能当成陈旧缓存。旧实现把它当成「路径未记录 → 必须重载」，
+        #    每次访问都重载失败并把预置值覆盖成 None，导致单跑该用例
+        #    （没有别的用例先成功加载过库）必红。
+        #    这里只对「预置值」短路；未预置（None）时仍走下面的重载分支，
+        #    保留 R179 既有行为：库文件后来出现/变得可用时，下次访问会自动加载。
+        if _prompt_cache is not None and _loaded_db_path is None:
+            return _prompt_cache
         if _prompt_cache is None or (current is not None and _loaded_db_path != current):
             _prompt_cache = {}
             try:
