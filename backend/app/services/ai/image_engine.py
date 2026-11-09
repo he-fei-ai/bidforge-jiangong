@@ -17,9 +17,14 @@ logger = logging.getLogger(__name__)
 
 # 图片生成结果缓存（基于 Prompt+Style+Size+Provider 的 MD5 哈希）
 # 使用 OrderedDict 实现 LRU 淘汰，最大 100 条
-# key: MD5 hexdigest, value: 图片 URL
-_IMAGE_CACHE: OrderedDict[str, str] = OrderedDict()
+# ✅ R196（2026-11-09）：value 由裸 URL 改为 (url, monotonic_ts) 二元组 ——
+#    多数文生图厂商返回**带时效的签名 URL**，裸 LRU 永不过期：URL 过期后同一
+#    prompt 持续命中死链 → 导出下载失败 → 成稿缺图，且进程存活期间反复失败。
+#    现在成功缓存条目超 _IMAGE_SUCCESS_TTL 即视为过期（删除后重新生成）。
+# key: MD5 hexdigest, value: (图片 URL, 写入时间戳)
+_IMAGE_CACHE: OrderedDict[str, tuple[str, float]] = OrderedDict()
 _IMAGE_CACHE_MAX_SIZE = 100
+_IMAGE_SUCCESS_TTL = 12 * 3600.0
 _image_cache_lock = threading.Lock()
 
 # 失败结果缓存（BUG 修复）：旧实现把失败结果以 None 写入 _IMAGE_CACHE，
@@ -44,7 +49,7 @@ def _image_cache_set(key: str, value: str | None) -> None:
         _IMAGE_FAIL_CACHE.pop(key, None)
         if key in _IMAGE_CACHE:
             _IMAGE_CACHE.move_to_end(key)
-        _IMAGE_CACHE[key] = value
+        _IMAGE_CACHE[key] = (value, time.monotonic())
         while len(_IMAGE_CACHE) > _IMAGE_CACHE_MAX_SIZE:
             _IMAGE_CACHE.popitem(last=False)
 
@@ -262,6 +267,15 @@ def validate_mermaid(code: str) -> tuple[bool, str]:
         # Mermaid 合法连线不止 `-->`：虚线 `-.->`、粗线 `==>`、无箭头 `---`、
         # `--x` / `--o` 均有效。旧实现只认 `"-->"` 子串，导致「渲染器能出图、
         # 校验器判缺连接关系」的删块型错配（虚线/粗线流程图被整块删除）。
+        # ✅ R196（2026-11-09）：subgraph/end 配对校验 —— _parse_flow_graph 跳过
+        #    subgraph/end 行，缺 end 的残缺图此前一路放行（登记 status=generated），
+        #    HTTP 渲染轨才失败 → 导出跳过，图表清单与成稿分叉。栈式不必：flowchart
+        #    的 subgraph 终止符只有单独 `end` 行（整行 strip 后恰为 end），计数相等
+        #    即配对（嵌套 subgraph 也满足）。
+        _sub_open = sum(1 for _l in code.split("\n") if _l.strip().lower().startswith("subgraph"))
+        _sub_close = sum(1 for _l in code.split("\n") if _l.strip().lower() == "end")
+        if _sub_open != _sub_close:
+            return False, f"subgraph/end 不配对（subgraph {_sub_open} 个 vs end {_sub_close} 个）"
         if not _ARROW_SPLIT_RE.search(code):
             return False, "流程图缺少连接关系"
 
@@ -383,13 +397,39 @@ def validate_mermaid(code: str) -> tuple[bool, str]:
             return False, "甘特图缺少竣工验收里程碑（末行 milestone, 0d）"
         return True, "ok"
 
+    # ✅ R196（2026-11-09）：四类 Mermaid 此前无条件 return True —— 截断/残缺的
+    #    图（只剩 header 行）通过登记（status=generated），渲染失败只在导出期暴露
+    #    并被跳过 → 图表清单有图、成稿无图，且无法走 fix-mermaid 预修复。现各补
+    #    **最低限度结构校验**（合法图必然满足；只拦完全残缺的块，宁缺勿滥）。
     if code.startswith("sequenceDiagram"):
+        # 时序图至少 1 条消息行：->>/-->>（实线/虚线箭头）或 -)/--)（开/闭端）
+        _msg_lines = sum(
+            1 for _l in code.split("\n") if re.search(r"->>|-->>|-\)|--\)", _l)
+        )
+        if _msg_lines < 1:
+            return False, f"时序图缺少消息行（{_msg_lines}<1，疑似截断残块）"
         return True, "ok"
 
     if code.startswith("classDiagram"):
+        # 类图至少 1 个成员/关系行（header 之后的非注释非空行）
+        _body = [
+            _l.strip()
+            for _l in code.split("\n")[1:]
+            if _l.strip() and not _l.strip().startswith(("%%", "//"))
+        ]
+        if len(_body) < 1:
+            return False, "类图缺少类声明/成员行（疑似截断残块）"
         return True, "ok"
 
     if code.startswith("stateDiagram") or code.startswith("stateDiagram-v2"):
+        # 状态图至少 1 个转换（-->）或状态声明（state X）
+        _ok_states = any(
+            ("-->" in _l or _l.strip().startswith("state "))
+            for _l in code.split("\n")[1:]
+            if _l.strip() and not _l.strip().startswith(("%%", "//", "note "))
+        )
+        if not _ok_states:
+            return False, "状态图缺少状态转换/声明（疑似截断残块）"
         return True, "ok"
 
     if code.startswith("pie"):
@@ -404,6 +444,10 @@ def validate_mermaid(code: str) -> tuple[bool, str]:
         return True, "ok"
 
     if code.startswith("erDiagram"):
+        # ER 图至少 1 条关系行（形如 CUSTOMER ||--o{ ORDER : places）
+        _rel_lines = sum(1 for _l in code.split("\n") if "--" in _l and not _l.strip().startswith(("%%", "//")))
+        if _rel_lines < 1:
+            return False, f"ER 图缺少实体关系行（{_rel_lines}<1，疑似截断残块）"
         return True, "ok"
 
     # BUG-FIX-29 修复：原 validate_mermaid 不支持 timeline 类型，
@@ -586,12 +630,23 @@ async def generate_illustration_image(
     # ---- 图片生成缓存（基于 MD5，含 provider_name 避免切换 provider 后误命中） ----
     _cache_key = hashlib.md5(f"{prompt}|{style}|{section_size}|{provider_name}".encode()).hexdigest()
     with _image_cache_lock:
-        _cached_url = _IMAGE_CACHE.get(_cache_key)
-        if _cached_url is not None:
-            # 命中缓存，将 key 移到末尾（LRU 刷新）
-            _IMAGE_CACHE.move_to_end(_cache_key)
-            logger.info("generate_illustration_image: 命中缓存 (key=%s)", _cache_key[:12])
-            return _cached_url
+        _cached_entry = _IMAGE_CACHE.get(_cache_key)
+        if _cached_entry is not None:
+            _cached_url, _cached_ts = _cached_entry
+            # ✅ R196：签名 URL 时效兜底 —— 超过成功 TTL 的条目视为过期，
+            #    删除后按未命中继续走生成链（厂商 URL 过期不再反复命中死链）。
+            if time.monotonic() - _cached_ts > _IMAGE_SUCCESS_TTL:
+                _IMAGE_CACHE.pop(_cache_key, None)
+                logger.info(
+                    "generate_illustration_image: 成功缓存已过 TTL（%.0fh），重新生成 (key=%s)",
+                    _IMAGE_SUCCESS_TTL / 3600.0,
+                    _cache_key[:12],
+                )
+            else:
+                # 命中缓存，将 key 移到末尾（LRU 刷新）
+                _IMAGE_CACHE.move_to_end(_cache_key)
+                logger.info("generate_illustration_image: 命中缓存 (key=%s)", _cache_key[:12])
+                return _cached_url
         # BUG 修复：失败缓存命中检查。旧实现失败结果（None）永远无法命中，
         # 每张失败配图都会重复走完整 Provider 降级链（多次网络调用）。
         # 现在短 TTL（10 分钟）内的失败直接快速返回 None，过期后允许重试。
@@ -626,6 +681,17 @@ async def generate_illustration_image(
             return ""
         return re.sub(r"/(?:dashscope/)?images/generations$", "", url.rstrip("/"))
 
+    # ✅ R196（2026-11-09）：image_enabled=False 是显式的「关闭生图」语义 ——
+    #    旧实现只把它当作「不用图像专用配置、改用文本模型配置兜底」的开关，
+    #    生图调用照常发出（只是换了 key/base_url），运维关掉后导出仍继续计费生图，
+    #    语义反直觉。现显式短路返回 None：调用方（导出/渲染链）对 None 已有
+    #    「跳过该图、不占图号」的既有路径，行为即「关闭后不出图、不产生调用」。
+    if image_config and not image_config.get("image_enabled", True):
+        logger.info(
+            "generate_illustration_image: 图像配置 image_enabled=False，跳过生图（不产生模型调用）"
+        )
+        return None
+
     # 优先使用图像专用配置
     if image_config and image_config.get("image_enabled", True):
         _fallback_api_key = getattr(provider, "api_key", "") or ""
@@ -645,11 +711,16 @@ async def generate_illustration_image(
     # 降级链定义：主 Provider → 备选1 → 备选2
     _FALLBACK_CHAIN = ["qwen_image", "dashscope", "agnes"]
 
-    # 如果传入的 provider_name 不在降级链中，将其作为第一优先级
+    # ✅ R196（2026-11-09）：用户显式配置的 provider 必须**始终**排在队首 ——
+    #    旧实现只在 provider_name 不在降级链内时才前置：配置 provider_name="dashscope"
+    #    （或 agnes）+ 自选 image_model 的用户，队列仍是 ["qwen_image", ...]，
+    #    而 qwen_image 用 dashscope 适配器 + 硬编码模型 qwen-image-3.0-pro ——
+    #    要么静默产出非用户所选模型的图，要么用用户的 key 白烧一次失败调用才轮到
+    #    用户配置。现统一：provider_name 非空即队首，链内其余条目作备选（去重）。
     _provider_queue: list[str] = []
-    if provider_name and provider_name not in _FALLBACK_CHAIN:
+    if provider_name:
         _provider_queue.append(provider_name)
-    _provider_queue.extend(_FALLBACK_CHAIN)
+    _provider_queue.extend(p for p in _FALLBACK_CHAIN if p != provider_name)
 
     # 已尝试过的 provider（避免重复）
     _tried_providers: set[str] = set()
@@ -727,9 +798,6 @@ async def generate_illustration_image(
                 _last_error = f"Provider '{_pname}' 未配置 API Key"
                 continue
 
-                # 尺寸语义自适应：
-                continue
-
             # 尺寸语义自适应：
             # - 适配器支持 1K/2K + ratio 风格（agnes 等）→ 传默认尺寸 + 宽高比
             # - 适配器只接受像素尺寸（dashscope 等）→ 传宽x高像素值
@@ -801,11 +869,9 @@ async def generate_illustration_image(
                     _pname,
                     e,
                 )
-            logger.warning(
-                "generate_illustration_image: Provider '%s' 失败 (%s)，尝试下一个",
-                _pname,
-                e,
-            )
+            # ✅ R196：旧实现此处还无条件重复打一条同文案 WARNING —— 每个
+            #    provider 异常必然双重记录（4xx 三条），日志噪声干扰聚合排查，
+            #    已删除（分支内的两条分级 WARNING 是唯一出口）。
             continue
 
     # 所有 Provider 均失败
@@ -817,14 +883,6 @@ async def generate_illustration_image(
     # 缓存失败结果（避免重复失败尝试）
     _image_cache_set(_cache_key, None)
     return None
-
-
-def build_illustration_url(prompt: str, image_size: str = "landscape_16_9") -> str:
-    """构建配图 URL（使用 text-to-image API）"""
-    import urllib.parse
-
-    encoded_prompt = urllib.parse.quote(prompt)
-    return f"https://trae-api-cn.mchost.guru/api/ide/v1/text_to_image?prompt={encoded_prompt}&image_size={image_size}"
 
 
 # ---------------------------------------------------------------------------

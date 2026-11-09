@@ -121,6 +121,11 @@ describe("fixStatsParts · 降级计数（2026-10-06 加法式扩展）", () => 
     expect(parts.some((p) => p.includes("表格截断") && p.includes("1"))).toBe(true);
   });
 
+  it("超长段落截断可见（R195 收口）", () => {
+    const parts = fixStatsParts({ paragraph_truncated: 3 });
+    expect(parts.some((p) => p.includes("超长段落被截断") && p.includes("3"))).toBe(true);
+  });
+
   it("计数为 0 时不展示（零值不噪干）", () => {
     expect(fixStatsParts({ block_render_failed: 0, table_truncated: 0 })).toEqual([]);
   });
@@ -663,6 +668,86 @@ describe("parseNumberingCheck · 编号结构自检结论（R183-补）", () => 
     expect(parseNumberingCheck(null)).toBeNull();
     expect(numberingCheckWarning(null)).toBeNull();
   });
+
+// =========================================================================
+// ✅ R195（2026-11-09）：导出模块收口 —— 新降级信号 / 附录 FixStats 键 /
+//    409 互斥与 503 转换繁忙的状态码差异化文案
+// =========================================================================
+describe("parseExportDegraded · R195 新增信号", () => {
+  it("appendix-dropped → 附录渲染失败精确文案（不落入未知信号通用文案）", () => {
+    const d = parseExportDegraded({ "X-Export-Degraded": "appendix-dropped" });
+    expect(d).not.toBeNull();
+    expect(d!.signals).toEqual(["appendix-dropped"]);
+    expect(d!.message).toContain("附录");
+    expect(d!.message).toContain("不写入缓存");
+  });
+
+  it("section-dropped → 章级丢章精确文案", () => {
+    const d = parseExportDegraded({ "X-Export-Degraded": "section-dropped" });
+    expect(d).not.toBeNull();
+    expect(d!.message).toContain("章节渲染失败");
+    expect(d!.message).toContain("重新导出");
+  });
+
+  it("多信号组合（content-residue,appendix-dropped）逐项翻译", () => {
+    const d = parseExportDegraded({ "X-Export-Degraded": "content-residue,appendix-dropped" });
+    expect(d!.signals).toEqual(["content-residue", "appendix-dropped"]);
+    expect(d!.message).toContain("格式残留");
+    expect(d!.message).toContain("附录");
+  });
+});
+
+describe("fixStatsParts · R195 附录丢弃计数", () => {
+  it("facts/sources_appendix_dropped > 0 时可见", () => {
+    const parts = fixStatsParts({
+      facts_appendix_dropped: 2,
+      sources_appendix_dropped: 1,
+    });
+    expect(parts.some((p) => p.includes("项目关键事实") && p.includes("2"))).toBe(true);
+    expect(parts.some((p) => p.includes("数据来源附录") && p.includes("1"))).toBe(true);
+  });
+
+  it("计数为 0 / 缺省时不展示（零值不噪干）", () => {
+    expect(fixStatsParts({ facts_appendix_dropped: 0 })).toHaveLength(0);
+    expect(fixStatsParts({})).toHaveLength(0);
+  });
+});
+
+describe("resolveExportError · R195 状态码差异化（无错误体时）", () => {
+  it("409（无 high_issues 体）→ 生成中互斥可行动文案", async () => {
+    const r = await resolveExportError({
+      message: "Request failed with status code 409",
+      response: { status: 409, data: undefined },
+    });
+    expect(r.message).toContain("生成中");
+    expect(r.message).toContain("停止生成");
+  });
+
+  it("503 → PDF 转换队列繁忙可行动文案", async () => {
+    const r = await resolveExportError({
+      message: "Request failed with status code 503",
+      response: { status: 503, data: undefined },
+    });
+    expect(r.message).toContain("PDF 转换");
+    expect(r.message).toContain("稍后重试");
+  });
+
+  it("有真实错误体时优先展示 body（409 互斥体含 detail 不被状态码文案覆盖）", async () => {
+    const r = await resolveExportError({
+      message: "Request failed with status code 409",
+      response: { status: 409, data: { detail: "本方案正文正在后台生成中，请等待完成后再导出" } },
+    });
+    expect(r.message).toBe("本方案正文正在后台生成中，请等待完成后再导出");
+  });
+
+  it("其它状态码保持泛化文案（不误标生成互斥）", async () => {
+    const r = await resolveExportError({
+      message: "Request failed with status code 502",
+      response: { status: 502, data: undefined },
+    });
+    expect(r.message).toContain("导出失败（HTTP 502）");
+  });
+});
 
   it("解码/JSON 非法、缺 checked 布尔字段 → null，不抛错", () => {
     expect(parseNumberingCheck({ "X-Numbering-Check": "%%%" })).toBeNull();

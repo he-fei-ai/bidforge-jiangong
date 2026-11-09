@@ -32,6 +32,13 @@ CONTRACT_FILES = (
 def _run_in_fresh_interpreter(code: str) -> subprocess.CompletedProcess:
     env = dict(os.environ)
     env["PYTHONPATH"] = str(BACKEND)
+    # ✅ R189（2026-11-08 · 全量回归暴露的既有测试设施缺陷）：本文件此前
+    #    `text=True` 不带 encoding，Windows 宿主按 cp936 严格解码子进程输出；
+    #    而子进程因 PYTHONIOENCODING=utf-8 输出 UTF-8 中文 traceback，后台
+    #    `_readerthread` 抛 UnicodeDecodeError 使 proc.stderr 变成 None，
+    #    下游 `proc.stderr + proc.stdout` 再抛 TypeError → 护栏恒假红。
+    #    同族问题在 R122 的 process_cleanup.py 已修，此处是漏网面。
+    env["PYTHONIOENCODING"] = "utf-8"
     env.pop("PYTHONSTARTUP", None)
     return subprocess.run(
         [sys.executable, "-c", code],
@@ -39,6 +46,8 @@ def _run_in_fresh_interpreter(code: str) -> subprocess.CompletedProcess:
         env=env,
         capture_output=True,
         text=True,
+        encoding="utf-8",
+        errors="replace",
         timeout=180,
     )
 
@@ -59,7 +68,8 @@ class TestImportOrderContract:
         """顺序打乱（先导入 _sse_outline_build）必须失败，且是循环导入。"""
         proc = _run_in_fresh_interpreter("import app.routers._sse_outline_build")
         assert proc.returncode != 0, "先导入 _sse_outline_build 竟然成功，契约前提已变"
-        err = proc.stderr + proc.stdout
+        # 双保险：即便未来某环境再次出现读取线程异常，也不要用 None 做 +
+        err = (proc.stderr or "") + (proc.stdout or "")
         assert "partially initialized" in err or "circular import" in err, err
 
     @pytest.mark.parametrize("path", CONTRACT_FILES, ids=lambda p: p.name)

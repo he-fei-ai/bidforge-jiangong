@@ -629,9 +629,11 @@ def _snapshot_outline_stats(st: dict) -> dict:
             "done": done,
             "total": total,
             "failed": len(st.get("failed_chapters") or []),
-            "words": 0,
-            "concurrency": 0,
-            "running": [],
+            # ✅ R188（L7）：不再写死 0 —— 目录 _prog 现在由 sse_handlers 写入
+            #    concurrency / running；words 在目录链无对应量，缺省 0 是正确语义。
+            "words": st.get("words", 0),
+            "concurrency": st.get("concurrency", 0),
+            "running": list(st.get("running") or []),
             "phase": st.get("phase", ""),
             "phase_label": _sh._outline_phase_label(st),
             "progress": progress,
@@ -669,7 +671,10 @@ def _rank_sections_by_basis(text: str, basis) -> tuple[str, int]:
     正文 —— 尾部项可能只剩标题。相关性前置后，方案名称涉及的项在固定预算下
     **全部可见**，这正是要求一「与方案名称相关的解析提取内容必须进入目录」。
     """
-    if not text or basis is None or not getattr(_sh.settings, "outline_basis_relevance", False):
+    # ✅ R188：fallback 默认值必须与 config.py 声明的默认 True 同向。
+    #    旧写 False 在 settings 被 monkeypatch / 属性缺失的单测隔离场景下
+    #    会静默关闭相关性前置（与声明语义相反）；运行期属性恒存在故零行为变化。
+    if not text or basis is None or not getattr(_sh.settings, "outline_basis_relevance", True):
         return text, 0
     try:
         from app.services.scheme_basis import rank_by_relevance

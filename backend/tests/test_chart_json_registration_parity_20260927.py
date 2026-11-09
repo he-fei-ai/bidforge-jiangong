@@ -92,8 +92,13 @@ class TestChartJsonRegistrationParity:
 class TestNoTypePayloadRespectsLimits:
     """无 type 载荷不得绕过配图上限（此前正是靠"未登记"绕过的）。"""
 
-    def test_per_section_limit_applies_to_inferred_blocks(self):
+    def test_per_section_limit_applies_to_inferred_blocks(self, monkeypatch):
         """同章两个不同类型的无 type 块：第 2 个必须被上限裁掉。"""
+        # ✅ R199 重锚：R196 引入 min_words 闸（本 fixture 正文 <200 字会被先删），
+        #    本用例测的是 per_section_limit 判据，置 0 恢复原判据。
+        import app.routers._chart_pipeline as _CP
+
+        monkeypatch.setattr(_CP, "_CHART_MIN_WORDS", 0)
         content = (
             "```chart-json\n" + NO_TYPE_PAYLOADS["architecture"] + "\n```\n\n"
             "中间段落。\n\n"

@@ -27,7 +27,7 @@ import {
   resolveExportFilename,
 } from "../../utils/exportResponse";
 import type { NumberingCheckInfo } from "../../utils/exportResponse";
-import type { createSseBatcher } from "../../utils/sseBatcher";
+import { createSseBatcher } from "../../utils/sseBatcher";
 import { deepMergeExportConfig } from "./exportShared";
 import type { SchemeRecord } from "./workbenchTypes";
 
@@ -98,6 +98,15 @@ export function useExportRun(deps: ExportRunDeps) {
     const exportSeq = ++exportSeqRef.current;
     exportAbortRef.current?.abort();
     exportAbortRef.current = controller;
+    // ✅ R195（FIX-8 · 2026-11-09）：导出批量器**按次重建** —— 切方案 effect 会
+    // stop() 旧批量器（createSseBatcher 的 stop() 置 stopped 永不复位，schedule()
+    // 从此静默丢弃），而 /scheme/:id 同路由切方案不卸载组件、惰性创建只发生一次
+    // → 首次切换后本页余下**所有**导出的图表阶段进度（0→70% 文案+进度条）被静默
+    // 冻结。与 SSE 会话开头 flushNow→stop→新建 的重建形态对齐（数据无副作用，
+    // 仅进度帧丢更新，但确定性可感知）。
+    exportBatcherRef.current?.flushNow();
+    exportBatcherRef.current?.stop();
+    exportBatcherRef.current = createSseBatcher();
     exportingRef.current = true;
     exportPctRef.current = -1;
     // 新一轮导出开始即撤销上一轮的「自检未执行」结论，避免陈旧告警误导本次判断。

@@ -443,6 +443,15 @@ async def confirm(scheme_id: str, body: dict | None = None, db=Depends(get_db)):
                 # ✅ BUG 修复（2026-09-17 · 与 repair_agent 同口径）：恢复正文时
                 #    word_count / word_status 必须按唯一口径重算，避免正文回到
                 #    1200 字而库里仍显示修复后 1500 字判 over。
+                # ✅ R203（2026-11-09 · 编号归一化补链）：回滚恢复的正文同样须经
+                #    normalize_section_content_subheadings 归一化子标题编号，否则
+                #    回滚到旧编号的正文永久留库。fail-soft 不阻断恢复。
+                try:
+                    from app.services.numbering import normalize_section_content_subheadings
+
+                    text, _ = await normalize_section_content_subheadings(db, scheme_id, sid, text)
+                except Exception as _ne:  # noqa: BLE001 - 编号规范化失败不得阻断恢复
+                    logger.warning("一致性修复确认：章节 %s 编号规范化失败（保留恢复正文）: %s", sid[:8], _ne)
                 _wc = text_word_count(text)
                 wb = (crow["word_budget"] if crow["word_budget"] else None) or DEFAULT_WORD_BUDGET
                 await review_db.exec_write(

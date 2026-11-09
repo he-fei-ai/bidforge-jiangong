@@ -133,12 +133,22 @@ def redact_only(text: str) -> str:
 
 
 def redact_outbound_messages(messages: list) -> list:
-    """出站前对 ``role=user`` 消息统一脱敏（覆盖全部 AI 链路的兜底收口）。
+    """出站前对**所有角色**的消息统一脱敏（覆盖全部 AI 链路的兜底收口）。
 
     ✅ 为什么放在出站侧：一致性审计 / 合规预检 / 导出等链路目前由其他会话
     占用或直接组装 f-string 提示词，逐点接线会漏；出站单点收口可保证
     「任何走向外部 AI 的用户资料原文」都被同一判据覆盖，且**不修改**库内
     原文（用户上传的文档内容保持完整）。
+
+    ✅ R204（2026-11-09 · system 消息此前完全绕过脱敏）：旧实现只处理
+    ``role == "user"``，其余角色原样放行。但本仓**大量外部资料被放进
+    system 消息**：``compliance_check_system``（章节正文/全局事实/清单）、
+    ``expert_review_system``（附件/全局事实）、``consistency_audit_system``、
+    ``facts_extract_system``（上传的招标文件全文）、``outline_short_system``
+    （项目资料摘要/关键事实）、图表修复提示词的 ``{code}``（上一轮 AI 输出）
+    …… 于是开启 ``PROMPT_REDACT_SENSITIVE=True`` 时，这些链路的凭据
+    **原样外发** —— 启动日志却宣告「已开启脱敏」，属假绿。
+    现改为对所有角色脱敏（``content`` 非字符串时跳过；不改结构、不改字节序）。
 
     开关关闭时返回**原列表对象**（调用方无需感知，零开销零行为变化）。
     """
@@ -148,7 +158,7 @@ def redact_outbound_messages(messages: list) -> list:
     changed = False
     total = 0
     for msg in messages:
-        if not isinstance(msg, dict) or msg.get("role") != "user":
+        if not isinstance(msg, dict):
             out.append(msg)
             continue
         content = msg.get("content")
@@ -163,8 +173,76 @@ def redact_outbound_messages(messages: list) -> list:
         else:
             out.append(msg)
     if total:
-        logger.warning("出站 user 消息共脱敏 %d 处疑似凭据", total)
+        logger.warning("出站消息共脱敏 %d 处疑似凭据", total)
     return out if changed else messages
+
+
+def scan_outbound_messages(messages: list) -> list:
+    """出站消息**注入手法检测**（只读 · 默认常开 · 绝不改动任何字节）。
+
+    ✅ 为什么与 :func:`redact_outbound_messages` 分开（G1 · 2026-11-09）：
+    注入防护此前整体挂在 ``prompt_injection_defense``（**默认 False**）之下，
+    于是默认部署下既没有围栏、也**没有任何检测** —— 运维完全看不到
+    「用户上传的招标文件里带了越狱指令」。两种行为的代价不同：
+
+    * **围栏/脱敏**会**改写**送模型的字节 → 属于行为变更，必须由用户显式
+      开启（沿用既有开关，默认值逐字不变）；
+    * **检测**只读不写（只产出 WARNING + 指标）→ 没有任何行为风险，故
+      **默认常开**，让风险面在默认部署下也可见。
+
+    命中不阻断生成（误报成本高：招标文件/技术规格书里出现「忽略以上要求」
+    并不罕见），只告警并计数，由运维按需处置。
+
+    :param messages: 出站消息列表。
+    :return: **原列表对象**（逐字节不变；本函数不返回改写结果）。
+    """
+    if not isinstance(messages, list) or not messages:
+        return messages
+    try:
+        from app.services.prompt_governance import scan_prompt_injection
+    except Exception:  # noqa: BLE001 - 检测不可用时绝不阻断调用
+        logger.debug("注入手法检测不可用（跳过）", exc_info=True)
+        return messages
+    total_hits = 0
+    samples: list[str] = []
+    try:
+        from app.services.ai.prompts import _metrics as _pm
+
+        for msg in messages:
+            if not isinstance(msg, dict):
+                continue
+            role = str(msg.get("role") or "")
+            content = msg.get("content")
+            if not isinstance(content, str) or not content:
+                continue
+            try:
+                _pm.record_injection_scan(role)
+            except Exception:  # noqa: BLE001 - 指标失败不得影响检测
+                pass
+            hits = scan_prompt_injection(content)
+            if not hits:
+                continue
+            total_hits += len(hits)
+            for h in hits:
+                try:
+                    _pm.record_injection_hit(str(h.get("pattern") or "unknown"))
+                except Exception:  # noqa: BLE001 - 同上
+                    pass
+            for h in hits[:3]:
+                sample = str(h.get("text") or "")[:60]
+                if sample and sample not in samples:
+                    samples.append(sample)
+    except Exception:  # noqa: BLE001 - 检测整体失败绝不阻断调用
+        logger.debug("注入手法检测失败（跳过）", exc_info=True)
+        return messages
+    if total_hits:
+        logger.warning(
+            "出站消息检出疑似提示词注入手法 %d 处（仅告警，未改写内容、未阻断生成）：%s。"
+            "如需自动隔离，请在治理配置中开启 prompt_injection_defense（将外部资料包入只读围栏）。",
+            total_hits,
+            " / ".join(samples[:5]),
+        )
+    return messages
 
 
 def guard_text(text: str, labels=None) -> str:
@@ -284,13 +362,16 @@ def clip_text(text: str, limit: int, label: str = "") -> str:
             limit,
         )
     except Exception:  # noqa: BLE001 - 留痕失败不得阻断生成
-        pass
+        # ✅ R204（2026-11-09 · 留痕失败不再静默）：三个裁剪原语此前都用
+        #   ``except Exception: pass`` 吞掉落痕失败 —— 于是「零截断」与
+        #   「没发生截断」在指标上不可区分（与 R186 第 5 条口径不一致）。
+        _record_ledger_failure("truncation_log")
     try:
         from app.services.ai.prompts._metrics import record_token_budget_truncated
 
         record_token_budget_truncated(label or "unknown")
     except Exception:  # noqa: BLE001 - 指标失败不得阻断生成
-        pass
+        _record_ledger_failure("truncation_counter")
     return text[:limit]
 
 
@@ -384,6 +465,55 @@ def _record_ledger_failure(channel: str) -> None:
 INSTRUCTION_PROMPT_MAX_CHARS = 6000
 
 
+#: 调整指令占「用户上下文安全上限」的份额（G6 · 2026-11-09 · 窗口联动）。
+#: 指令是任务本体，不能被压到没有表达空间；但它也只是上下文的一部分，
+#: 不应挤占资料段的额度 —— 取 1/4 是「够说清意图，又不喧宾夺主」的折中。
+INSTRUCTION_SHARE_OF_CONTEXT = 0.25
+
+#: 调整指令下限（字）。低于此值，用户几乎无法表达「要改什么」，
+#: 指令段落会退化成噪声（模型据此胡乱生成）。
+INSTRUCTION_MIN_CHARS = 600
+
+
+def effective_instruction_cap() -> int:
+    """解析**本次生效**的调整指令物理上限（字）。
+
+    ✅ G6（2026-11-09 · 6000 字上限与模型窗口脱钩）：
+    :data:`INSTRUCTION_PROMPT_MAX_CHARS` = 6000 的推导锚定「32k token 窗口」，
+    但该锚点是**写死的常量** —— 用户把模型换成 8k/16k 小窗口后，6000 字
+    （≈4k token）指令 + system 模板 + 资料段仍可能直接撑爆窗口（502）。
+    本函数把上限与「用户自述的上下文安全上限」联动：
+
+      1. ``settings.prompt_instruction_max_chars`` > 0 → 显式指定（夹到硬天花板）；
+      2. ``settings.context_length_limit`` > 0 → 按份额推导
+         （指令 ≤ 上下文的 1/4，夹到 [600, 6000]）；
+      3. 两者都未配置 → :data:`INSTRUCTION_PROMPT_MAX_CHARS`（6000，**既有行为
+         逐字节不变**）。
+
+    ⚠️ 口径诚实说明：本仓 ``ai_config`` 表**不持久化**每个模型的上下文窗口
+    （``context_tokens`` 只在 ``GET /models`` 拉取瞬间存在，见
+    ``routers/ai_config/models.py``），故此处只能用**全局上下文安全上限**
+    作窗口代理 —— 它是用户自己配置的「正文上下文能有多大」，
+    与真实模型窗口同量级，但不是同一个量。
+
+    :return: 生效上限（字）；调用方据此裁剪指令段。
+    """
+    try:
+        explicit = int(getattr(settings, "prompt_instruction_max_chars", 0) or 0)
+    except (TypeError, ValueError):
+        explicit = 0
+    if explicit > 0:
+        return max(INSTRUCTION_MIN_CHARS, min(explicit, INSTRUCTION_PROMPT_MAX_CHARS))
+    try:
+        ctx_limit = int(getattr(settings, "context_length_limit", 0) or 0)
+    except (TypeError, ValueError):
+        ctx_limit = 0
+    if ctx_limit <= 0:
+        return INSTRUCTION_PROMPT_MAX_CHARS
+    derived = int(ctx_limit * INSTRUCTION_SHARE_OF_CONTEXT)
+    return max(INSTRUCTION_MIN_CHARS, min(derived, INSTRUCTION_PROMPT_MAX_CHARS))
+
+
 def clip_text_notice_meta(text: str, limit: int) -> dict | None:
     """只算「倘若截断会怎么记账」，**不截断、不写日志、不计指标**。
 
@@ -428,15 +558,57 @@ def clip_text_notice_report(
             omitted,
         )
     except Exception:  # noqa: BLE001 - 留痕失败不得阻断生成
-        pass
+        # ✅ R204：留痕失败落降级计数（不再静默 pass）。
+        _record_ledger_failure("truncation_log")
     try:
         from app.services.ai.prompts._metrics import record_token_budget_truncated
 
         record_token_budget_truncated(name)
     except Exception:  # noqa: BLE001 - 指标失败不得阻断生成
-        pass
+        _record_ledger_failure("truncation_counter")
     out = text[:cut] + f"\n\n[……{name}已截断：原文 {len(text)} 字，此处保留前 {cut} 字，已省略 {omitted} 字]"
     return out, {"from": len(text), "to": cut, "omitted": omitted, "limit": int(limit)}
+
+
+def clip_text_notice_at(text: str, cut: int, label: str = "") -> str:
+    """在**给定切点**收刀，附加模型可见说明并留痕（日志 + 指标）。
+
+    ✅ R202（2026-11-09 · G2）：供「自定义切点算法」复用同一套说明与账目
+    格式 —— 原先只有「按 limit 自动切点」这一条路径带模型可见说明；
+    另有调用方（如 ``routers/_sse_outline_review._truncate_context``）按自己的
+    规则（句末边界）切点后**直接返回**，模型看不到任何截断痕迹，只能把
+    半份上下文当成完整上下文理解（并据此断言「资料里没有提到 X」）。
+
+    与 :func:`clip_text_notice_report` 的关系：后者 = 「算切点 + 记账」，
+    本函数 = 「按给定切点记账」，两者产出的说明文本格式**逐字相同**。
+
+    :param cut: 保留长度（``0 <= cut <= len(text)``；越界会被夹到合法区间）。
+    :return: 收刀后的文本（附模型可见说明）。
+    """
+    if not text:
+        return text
+    total = len(text)
+    cut = max(0, min(int(cut), total))
+    name = label or "文本"
+    omitted = total - cut
+    try:
+        logger.warning(
+            "上下文截断（%s）：%d → %d 字，已省略 %d 字（模型可见说明已附加）",
+            name,
+            total,
+            cut,
+            omitted,
+        )
+    except Exception:  # noqa: BLE001 - 留痕失败不得阻断生成
+        # ✅ R204：留痕失败落降级计数（不再静默 pass）。
+        _record_ledger_failure("truncation_log")
+    try:
+        from app.services.ai.prompts._metrics import record_token_budget_truncated
+
+        record_token_budget_truncated(name)
+    except Exception:  # noqa: BLE001 - 指标失败不得阻断生成
+        _record_ledger_failure("truncation_counter")
+    return text[:cut] + f"\n\n[……{name}已截断：原文 {total} 字，此处保留前 {cut} 字，已省略 {omitted} 字]"
 
 
 def clip_text_notice(text: str, limit: int, label: str = "") -> str:

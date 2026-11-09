@@ -131,6 +131,15 @@ class TestPersistParseResultContract:
         rows = await _docs(db, pid)
         assert rows[0]["parsed_markdown"] == "工程名称：某某项目"
 
+    async def test_returns_false_when_zero_rows_updated(self, ctx):
+        """R13 第二层（2026-11-08）：UPDATE 执行但 0 行生效（目标文档在读取→落库之间
+        被并发删除）必须回 False，否则调用方（parse_document / parse_all_documents）
+        会当成「解析成功」给出假成功。"""
+        db, _pid, _sid, _up = ctx
+        # 不插入 doc_id 行 → `UPDATE ... WHERE id=?` 命中 0 行
+        ok = await gf._persist_parse_result(db, uuid.uuid4().hex, "正文内容", 0.1, [], {}, False)
+        assert ok is False, "0 行生效必须回 False，否则调用方当成解析成功（假成功）"
+
     async def test_parse_document_raises_503_when_persist_fails(self, ctx, monkeypatch):
         """落库未生效时**不得**回 ok=True（旧实现在此处给出假成功）。"""
         db, pid, sid, _up = ctx
@@ -302,7 +311,10 @@ class TestReadCursorGuards:
             scheme_id=sid, project_id="", files=[_upload("doc.txt", "工程名称：某某产业园".encode("utf-8"))], db=db
         )
         doc_id = (await _docs(db, pid))[0]["id"]
-        proxy = _NullDb(db, lambda s: s.startswith("SELECT parsed_markdown FROM project_documents"))
+        # ✅ R193 锚点跟随：parse_document 短路分支 SELECT 增列 parse_status
+        #    （failed 状态诚实回传，R193 B-C2），匹配串从「整句 startswith」
+        #    收敛为列首前缀——仍唯一命中该语句，判据强度不降。
+        proxy = _NullDb(db, lambda s: s.lstrip().startswith("SELECT parsed_markdown"))
         with pytest.raises(HTTPException) as e:
             await gf.parse_document(doc_id, db=proxy)
         assert e.value.status_code == 503

@@ -95,6 +95,22 @@ export function stripOutlineNumbering(title: string): string {
   return stripped || trimmed;
 }
 
+/**
+ * ✅ R203：Excel 风格字母编号 —— 1→a, 2→b, …, 26→z, 27→aa, 28→ab, …。
+ *    替代旧 L7 的 alphaLetters[idx] 钳制（超 26 个同级尾注静默折叠为 z）。
+ */
+export function alphaLabel(n: number): string {
+  const A = "abcdefghijklmnopqrstuvwxyz";
+  let x = Math.max(1, Math.floor(n));
+  let out = "";
+  while (x > 0) {
+    x -= 1;
+    out = A[x % 26] + out;
+    x = Math.floor(x / 26);
+  }
+  return out;
+}
+
 export function formatOutlineTitle(id: string | undefined, level: number, title: string): string {
   if (!title || !title.trim()) return title || "";
   const bareTitle = stripOutlineNumbering(title);
@@ -129,10 +145,10 @@ export function formatOutlineTitle(id: string | undefined, level: number, title:
     sep = "、";
   } else if (level === 7) {
     // L7: "a" / "b"（小写字母，只用最后一个 part）+ 、分隔
+    // ✅ R203 FIX：旧实现钳制 idx ≤ 25（z），超 26 个同级尾注静默折叠为 z。
+    //    改用 Excel 风格双字母续编：26 以内 a-z，27 起 aa/ab/…/az/ba/…
     const n = parts[parts.length - 1] || 1;
-    const alphaLetters = "abcdefghijklmnopqrstuvwxyz";
-    const idx = Math.max(0, Math.min(n - 1, alphaLetters.length - 1));
-    number = alphaLetters[idx];
+    number = alphaLabel(n);
     sep = "、";
   } else {
     return bareTitle;

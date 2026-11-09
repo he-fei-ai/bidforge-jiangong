@@ -64,6 +64,23 @@ __all__ = ["router", "PROMPT_MAX_CHARS"]
 
 logger = logging.getLogger(__name__)
 
+
+def _now_ts() -> str:
+    """当前本地时间戳（**毫秒**精度，格式 ``YYYY-MM-DD HH:MM:SS.mmm``）。
+
+    ✅ R204（2026-11-09）：``prompt_templates.updated_at`` 是提示词 CAS
+    （乐观并发控制）的判据 —— 秒级精度下「同一秒内的两次并发写」无法区分，
+    后写会**静默覆盖**前写（模块自述「冲突返回 409」永不触发）。故写侧统一
+    用毫秒精度。
+
+    ⚠️ 为什么不用 SQL 侧 ``strftime('%Y-%m-%d %H:%M:%f','localtime')``：
+    SQLite **不支持** ``%f``（实测 SQLite 3.50.4 返回 NULL → updated_at 被写成
+    NULL，列表页「更新时间」变空）。故由应用层生成，格式与既有秒级
+    ``datetime('now','localtime')`` 兼容（旧行照常可比）。
+    """
+    now = time.time()
+    return time.strftime("%Y-%m-%d %H:%M:%S", time.localtime(now)) + f".{int((now % 1) * 1000):03d}"
+
 #: ✅ R48（2026-10-06 · prompts 运行时指标 + 硬编码→DB 一键同步）：
 #:   两个**独立前缀**的新路由，刻意不挂在 ``/api/v1/prompts`` 下 ——
 #:   指标与 admin 同步是运维/管理面操作，路径按任务要求落在 ``/system`` 与
@@ -140,11 +157,20 @@ async def _write_with_before(
         if not after.strip():
             await db.execute("DELETE FROM prompt_templates WHERE key=?", (key,))
         else:
+            # ✅ R204（2026-11-09 · CAS 精度）：旧写法 ``datetime('now','localtime')``
+            #   只到**秒** —— 同一秒内的两次并发写，第二次读到的 ``updated_at``
+            #   与客户端回传的 ``expected_updated_at`` **完全相同** → CAS 判据
+            #   失效 → 后写**静默覆盖**前写（模块自述「冲突时返回 409」永不触发，
+            #   回滚路径同理可覆盖掉别人刚保存的版本）。
+            #   现改为**毫秒**精度：时间戳由**应用层**生成（``_now_ts()``）——
+            #   SQLite 的 ``strftime('%f')`` 并不被支持（实测 SQLite 3.50.4
+            #   返回 NULL，会把 updated_at 写成 NULL），故不能走 SQL 侧格式。
+            #   兼容：旧库里的秒级字符串照常可比（只是精度低，仍能防跨秒冲突）。
             await db.execute(
-                "INSERT INTO prompt_templates (key, content) VALUES (?,?)"
+                "INSERT INTO prompt_templates (key, content, updated_at) VALUES (?,?,?)"
                 " ON CONFLICT(key) DO UPDATE SET content=excluded.content,"
-                " updated_at=datetime('now','localtime')",
-                (key, after),
+                " updated_at=excluded.updated_at",
+                (key, after, _now_ts()),
             )
         await record_prompt_audit(db, key, action, real_before, eff, before_vars, after_vars, request)
         await db.commit()
@@ -193,8 +219,57 @@ async def list_prompts(category: str = "", db=Depends(read_db)):
 
 
 @router.get("/audit-logs")
+async def prompt_audit_logs_legacy_denied():
+    """审计查询已迁至管理面（保留本路由仅用于给出明确指引）。
+
+    ✅ R204（2026-11-09 · 越权面收口）：提示词**审计**含
+    ``client_ip`` 与内容指纹，属治理面敏感数据；此前它与写端点一起挂在
+    无门禁的 ``/api/v1/prompts`` 上，任何可达客户端都能读全平台提示词的
+    变更历史。现随写端点一并迁至 ``/admin/prompts/*``（fail-closed 闸门）。
+    """
+    raise HTTPException(
+        403,
+        "提示词审计接口已迁移至管理面：GET /admin/prompts/audit-logs"
+        "（本机回环可直接访问，远程需携带 X-Admin-Token）",
+    )
+
+
+@router.patch("/{key}")
+async def update_prompt_legacy_denied(key: str):
+    """写接口已迁至管理面（保留本路由仅用于给出明确指引）。"""
+    raise HTTPException(
+        403,
+        f"提示词写接口已迁移至管理面：PATCH /admin/prompts/{key}"
+        "（本机回环可直接访问，远程需携带 X-Admin-Token）",
+    )
+
+
+@router.post("/{key}/reset")
+async def reset_prompt_legacy_denied(key: str):
+    """写接口已迁至管理面（保留本路由仅用于给出明确指引）。"""
+    raise HTTPException(
+        403,
+        f"提示词写接口已迁移至管理面：POST /admin/prompts/{key}/reset"
+        "（本机回环可直接访问，远程需携带 X-Admin-Token）",
+    )
+
+
+@router.post("/{key}/rollback")
+async def rollback_prompt_legacy_denied(key: str):
+    """写接口已迁至管理面（保留本路由仅用于给出明确指引）。"""
+    raise HTTPException(
+        403,
+        f"提示词写接口已迁移至管理面：POST /admin/prompts/{key}/rollback"
+        "（本机回环可直接访问，远程需携带 X-Admin-Token）",
+    )
+
+
+@admin_prompts_router.get("/audit-logs")
 async def prompt_audit_logs(key: str, limit: int = 50, offset: int = 0, db=Depends(read_db)):
-    """提示词变更审计（只含指纹与变量集合，不复制完整正文）。"""
+    """提示词变更审计（只含指纹与变量集合，不复制完整正文）。
+
+    ✅ R204：随写端点迁至管理面（``require_admin_access``，fail-closed）。
+    """
     try:
         return await list_prompt_audit_logs(db, key, limit, offset)
     except ValueError as e:
@@ -202,9 +277,16 @@ async def prompt_audit_logs(key: str, limit: int = 50, offset: int = 0, db=Depen
         raise HTTPException(400, _safe_error(e, max_chars=120))
 
 
-@router.patch("/{key}")
+@admin_prompts_router.patch("/{key}")
 async def update_prompt(key: str, body: dict, db=Depends(get_db), request: Request = None):
-    """保存提示词编辑；空内容按“恢复默认”处理。"""
+    """保存提示词编辑；空内容按“恢复默认”处理。
+
+    ✅ R204（2026-11-09 · 管理面收口）：本端点自 ``/api/v1/prompts/{key}``
+    迁至 ``/admin/prompts/{key}``（``require_admin_access`` 闸门）——
+    提示词是**全局共享资产**，无门禁的写接口等价于「任意客户端可改写全平台
+    提示词」（此前 ``/admin/prompts/sync-from-code`` 有闸门、而功能等价的
+    保存/重置/回滚没有，属口径倒挂）。
+    """
     from app.services.ai.prompts._cache import reload_prompt_cache
     from app.services.ai.prompts._registry import (
         _ALL_PROMPTS,
@@ -219,6 +301,13 @@ async def update_prompt(key: str, body: dict, db=Depends(get_db), request: Reque
 
     if key not in _ALL_PROMPTS:
         raise HTTPException(404, "提示词不存在")
+    # ✅ R204（数据丢失防护）：旧实现 ``body.get("content", "")`` 把「**字段缺失**」
+    #   与「显式空串」压成同一语义 —— 请求体写错字段名（``{"text": ...}``）或
+    #   网关吞字段时，空串会走 reset 分支 **DELETE 掉用户定制**（并记一条
+    #   action="reset" 审计，看起来像"保存成功"）。现在区分二者：
+    #   缺字段 → 400；显式空串 → 才走「恢复默认」（另有独立端点 POST /reset）。
+    if not isinstance(body, dict) or "content" not in body:
+        raise HTTPException(400, "缺少 content 字段（恢复出厂默认请用 POST /admin/prompts/{key}/reset）")
     content = body.get("content", "")
     if not isinstance(content, str):
         raise HTTPException(400, "提示词内容必须是字符串")
@@ -276,9 +365,9 @@ async def update_prompt(key: str, body: dict, db=Depends(get_db), request: Reque
     }
 
 
-@router.post("/{key}/reset")
+@admin_prompts_router.post("/{key}/reset")
 async def reset_prompt(key: str, db=Depends(get_db), request: Request = None):
-    """恢复出厂默认提示词。"""
+    """恢复出厂默认提示词（管理面，fail-closed 闸门）。"""
     from app.services.ai.prompts._cache import reload_prompt_cache
     from app.services.ai.prompts._registry import (
         _ALL_PROMPTS,
@@ -320,9 +409,9 @@ async def reset_prompt(key: str, db=Depends(get_db), request: Request = None):
     }
 
 
-@router.post("/{key}/rollback")
+@admin_prompts_router.post("/{key}/rollback")
 async def rollback_prompt(key: str, body: dict, db=Depends(get_db), request: Request = None):
-    """把提示词回滚到某条审计记录**变更前**的版本（✅ G2 版本回滚）。
+    """把提示词回滚到某条审计记录**变更前**的版本（✅ G2 版本回滚 · 管理面）。
 
     语义与 ``POST /api/v1/ai/config/{id}/rollback`` 对齐：
       1. 需要目标审计行的快照里带 ``before`` 正文 —— 历史行（引入快照前写入）
@@ -412,10 +501,9 @@ async def rollback_prompt(key: str, body: dict, db=Depends(get_db), request: Req
 async def get_prompt_metrics(db=Depends(read_db)):
     """提示词运行时指标快照（进程内内存计数器，不持久化、重启清零）。
 
-    顶层固定 7 个键：``render_total`` / ``render_errors`` /
-    ``render_missing_vars``（✅ 2026-11-07 新增）/ ``token_budget_truncated`` /
-    ``repair_triggered`` / ``ai_failure_by_scene`` 六个维度 dict，外加
-    ``registered_keys``（注册表全部 key，供运维对照「哪些模板从无人渲染过」）。
+    顶层为「若干计数器维度 dict + ``registered_keys``（注册表全部 key，供运维
+    对照「哪些模板从无人渲染过」）」。计数器随功能演进**加法式增加**，此处
+    **不再硬编码键数**（旧 docstring 写「固定 7 个键 … 六个维度」，与实现不符）。
 
     ✅ R180（2026-11-05 · 可观测性）：新增 ``today`` 子对象（加法式，不改原有键）：
       · ``version_changes_today``：今日提示词版本变更（覆盖/回滚/恢复默认）次数，
@@ -449,8 +537,14 @@ async def get_prompt_metrics(db=Depends(read_db)):
 
 
 @system_metrics_router.post("/prompt-metrics/reset")
-async def reset_prompt_metrics():
-    """清零提示词运行时内存计数器（运维调试 / 测试隔离用）。"""
+async def reset_prompt_metrics(request: Request = None, _admin: None = Depends(require_admin_access)):
+    """清零提示词运行时内存计数器（运维调试 / 测试隔离用）。
+
+    ✅ R204（2026-11-09 · 越权面收口）：清零会**销毁运维证据**（谁在读不存在的
+    模板、哪些提示词被截断），此前挂在无门禁的 ``/system`` 前缀下，任意客户端
+    均可调用。现与管理面同口径（``require_admin_access``，fail-closed：
+    本机回环免 token，远程需 ``X-Admin-Token``）。
+    """
     _reset_metrics_counters()
     return {"ok": True, "message": "prompt metrics counters reset"}
 
@@ -479,14 +573,26 @@ async def sync_prompts_from_code(force: bool = False, db=Depends(get_db)):
         get_default_prompt,
         register_lazy_prompts,
     )
-    from app.services.ai.prompts._registry import (
-        update_prompt as _up,
-    )
 
     register_lazy_prompts()
     summary = {"inserted": 0, "in_sync": 0, "drift": 0, "overwritten": 0, "errors": 0}
     details: list[dict] = []
+    # ✅ R204（2026-11-09 · 原子性）：force 覆盖时**内存注册表**的改写必须
+    #   发生在 commit **之后**。旧实现先 `_up()`（内存立即变）再 commit，
+    #   commit 失败 → DB 回滚、内存已改 → 「列表显示新内容、运行期用旧内容」，
+    #   且 reload_prompt_cache() 也不会执行（缓存仍是旧值）→ 三方不一致。
+    _pending_memory_updates: list[tuple[str, str]] = []
     for key in sorted(_ALL_PROMPTS.keys()):
+        # ✅ R204：每个 key 用**独立保存点**包裹「模板行 + 审计行」——
+        #   旧实现两者在同一个 try 里，审计写失败时只 errors+=1 并 continue，
+        #   模板行**仍留在待提交事务里**最终被 commit → 「内容已改但无审计留痕」
+        #   （违背模块自述「内容变更必留痕」），且事后无法回滚。
+        _sp = f"r203_sync_{key}"
+        try:
+            await db.execute(f"SAVEPOINT {_sp}")
+        except Exception as e:  # noqa: BLE001 - 保存点不可用时退回旧行为（不阻断）
+            logger.warning("sync-from-code 建立保存点失败（继续，原子性降级）: %s", _safe_error(e))
+            _sp = ""
         try:
             # 对比基准 = 硬编码出厂值（统一清洗，与 DB 落库口径一致）
             code_content = clean_prompt_text(get_default_prompt(key))
@@ -494,7 +600,11 @@ async def sync_prompts_from_code(force: bool = False, db=Depends(get_db)):
             row = await cur.fetchone() if cur is not None else None
             if row is None:
                 # DB 无行 → 插入硬编码出厂值
-                await db.execute("INSERT INTO prompt_templates (key, content) VALUES (?, ?)", (key, code_content))
+                await db.execute(
+                    "INSERT INTO prompt_templates (key, content, updated_at) VALUES (?,?,"
+                    "strftime('%Y-%m-%d %H:%M:%f','localtime'))",
+                    (key, code_content),
+                )
                 # ✅ R169：同步写入也要落审计（与 PATCH/reset/rollback 同为「内容
                 #    变更必留痕」口径）。旧实现直写 DB 不写 prompt_audit_logs，
                 #    force 之外的首插行不在任何审计快照里；本函数与最终 commit
@@ -510,6 +620,8 @@ async def sync_prompts_from_code(force: bool = False, db=Depends(get_db)):
                         "code_hash": prompt_content_hash(code_content),
                     }
                 )
+                if _sp:
+                    await db.execute(f"RELEASE {_sp}")
                 continue
             db_content = clean_prompt_text(row["content"] or "")
             if db_content == code_content:
@@ -523,16 +635,19 @@ async def sync_prompts_from_code(force: bool = False, db=Depends(get_db)):
                         "db_modified_at": row["updated_at"] or "",
                     }
                 )
+                if _sp:
+                    await db.execute(f"RELEASE {_sp}")
                 continue
             # 不一致：默认 drift（不覆盖用户编辑）；force=true 才覆盖
             if force:
                 await db.execute(
-                    "INSERT INTO prompt_templates (key, content) VALUES (?, ?)"
+                    "INSERT INTO prompt_templates (key, content, updated_at) VALUES (?,?,?)"
                     " ON CONFLICT(key) DO UPDATE SET content=excluded.content,"
-                    " updated_at=datetime('now','localtime')",
-                    (key, code_content),
+                    " updated_at=excluded.updated_at",
+                    (key, code_content, _now_ts()),
                 )
-                _up(key, code_content)
+                # ✅ R204：内存改写延后到 commit 成功之后（见 _pending_memory_updates）。
+                _pending_memory_updates.append((key, code_content))
                 # ✅ R169：force 覆盖用户编辑是本端点唯一可能**丢失内容**的路径，
                 #    被覆盖的 DB 原文必须进审计快照，否则回滚 UI 永远无法恢复。
                 _db_before = row["content"] or ""
@@ -567,8 +682,18 @@ async def sync_prompts_from_code(force: bool = False, db=Depends(get_db)):
                         "db_modified_at": row["updated_at"] or "",
                     }
                 )
+            if _sp:
+                await db.execute(f"RELEASE {_sp}")
         except Exception as e:  # noqa: BLE001 - 单 key 失败不阻断其他 key
             summary["errors"] += 1
+            if _sp:
+                # 回滚该 key 的**全部**改动（模板行 + 审计行）→ 真正 all-or-nothing
+                try:
+                    await db.execute(f"ROLLBACK TO {_sp}")
+                    await db.execute(f"RELEASE {_sp}")
+                except Exception as e2:  # noqa: BLE001 - 回滚失败只记日志
+                    logger.warning("sync-from-code 回滚保存点失败 key=%s: %s", key, _safe_error(e2))
+                # 该 key 的内存改写尚未发生（延后到 commit 后），此处无需回退
             # ✅ 2026-11-07：批量明细与日志同样走脱敏收敛，避免错误体带出凭据。
             _err = _safe_error(e, max_chars=160)
             logger.warning("sync-from-code 处理 key=%s 失败（跳过，不阻断）: %s", key, _err)
@@ -580,5 +705,14 @@ async def sync_prompts_from_code(force: bool = False, db=Depends(get_db)):
         logger.warning("sync-from-code commit 失败: %s", _safe_error(e))
         await db.rollback()
         raise HTTPException(500, "硬编码→DB 同步提交失败")
+    # ✅ R204：commit 成功后才改内存注册表（此前 force 分支在 commit 前改，
+    #   commit 失败会造成「内存已改 / DB 已回滚 / 缓存未失效」三方不一致）。
+    if _pending_memory_updates:
+        from app.services.ai.prompts._registry import (
+            update_prompt as _up,
+        )
+
+        for _k, _c in _pending_memory_updates:
+            _up(_k, _c)
     reload_prompt_cache()
     return {"summary": summary, "details": details, "force": force}

@@ -30,6 +30,15 @@ W_NS = "http://schemas.openxmlformats.org/wordprocessingml/2006/main"
 
 # 控制字符：除 \t \n \r 外的 C0 控制符
 _CTRL_RE = re.compile(r"[\x00-\x08\x0b\x0c\x0e-\x1f\x7f]")
+# ✅ R195 收口（P2-5）：零宽字符族 —— U+200B（零宽空格）/U+200C（零宽不连字）/
+#    U+2060（词连接符）/U+FEFF（BOM 残留）。这些属 Unicode「格式字符（Cf）」，
+#    非空白类，\s 不匹配，也非 XML 非法字符（不会触发崩溃），但 AI 正文夹带后
+#    ① 原样印进成稿（复制/检索错位）；② 可打断导出后处理正则使失效引用静默漏报。
+#    旧的 _CTRL_RE 不含它们 → 主正文路径（_add_runs_with_inline_format → clean_text）
+#    此前把零宽原样落档。此处统一剥除（与 routers/_export_docx_parts._xml_safe_text
+#    口径一致；services 层是主路径的实际清洗出口）。U+200D（ZWJ）刻意保留，
+#    以免误拆 emoji / 复杂文字连写。
+_ZERO_WIDTH_RE = re.compile(r"[\u200b\u200c\u2060\ufeff]")
 # U+FFFD 替换字符（UTF-8 解码失败的产物）
 _REPLACEMENT_RE = re.compile(r"\ufffd+")
 # GBK 乱码循环 "锟斤拷"（0xEF 0xBF 0xBD 被按 GBK 读取的经典结果）
@@ -153,6 +162,7 @@ def clean_text(text: str) -> str:
 
     规则（保守，避免误伤正常内容）：
     - 删除控制字符；
+    - 删除零宽字符（U+200B/U+200C/U+2060/U+FEFF，见 _ZERO_WIDTH_RE）；
     - U+FFFD 替换字符 -> 空格（避免粘连）；
     - GBK 乱码循环 "锟斤拷" -> 删除；
     - Latin-1 mojibake 高置信模式 -> 还原；
@@ -161,6 +171,7 @@ def clean_text(text: str) -> str:
     if not text:
         return text
     out = _CTRL_RE.sub("", text)
+    out = _ZERO_WIDTH_RE.sub("", out)
     out = _REPLACEMENT_RE.sub(" ", out)
     out = _MOJIBUKE_GBK_RE.sub("", out)
     out = _LATIN1_RE.sub(lambda m: dict(_LATIN1_MOJIBUKE)[m.group(0)], out)
@@ -603,14 +614,11 @@ class _LatexParser:
                     nodes.append(("frac", num, den))
                     continue
                 if name == "sqrt":
-                    # \sqrt[n]{x}
-                    if i + 1 < len(tokens) and tokens[i + 1] == ("brace", "["):
-                        deg, i = self._parse_optional_bracket(tokens, i + 1)
-                        base, i = self._parse_required_group(tokens, i)
-                        nodes.append(("rad", deg, base))
-                    else:
-                        base, i = self._parse_required_group(tokens, i + 1)
-                        nodes.append(("rad", None, base))
+                    # \sqrt[n]{x} —— ✅ R195：可选方括号判断下放 _parse_optional_bracket
+                    #（旧调用点判 ("brace", "[") 恒假，与死分支同根）。
+                    deg, ni = self._parse_optional_bracket(tokens, i + 1)
+                    base, i = self._parse_required_group(tokens, ni)
+                    nodes.append(("rad", deg, base))
                     continue
                 if name in _NARY:
                     # \sum_{i=1}^{n} expr
@@ -621,6 +629,10 @@ class _LatexParser:
                     if j < len(tokens) and tokens[j][0] == "script" and tokens[j][1] == "^":
                         sup, j = self._parse_script_arg(tokens, j + 1)
                     body, i = self._parse_seq(tokens, j, stop_brace=True)
+                    # ✅ R195：nary 体内的 script_marker 原样滞留（不经
+                    # _attach_scripts），``\sum_{i=1}^{n} x_i`` 的 ``x_i`` 下标
+                    # 在渲染期被丢弃 —— 与顶层 parse() 同口径附着。
+                    body = self._attach_scripts(body)
                     nodes.append(("nary", _NARY[name], sub, sup, body))
                     continue
                 if name in ("text", "mathrm", "operatorname", "mbox"):
@@ -661,10 +673,20 @@ class _LatexParser:
             i += 1
         return nodes, i
 
+    # ✅ R195（2026-11-09 · P1）：三个组参数解析器此前把 ``_parse_seq`` 已返回的
+    #    ``(nodes, i)`` 元组**再包一层**返回（``return self._parse_seq(...), ni``），
+    #    调用方 ``num, i = ...`` 拿到的是 ``(nodes, idx)``；下游 ``_node_to_omml``
+    #    对该元组取 ``node[0]`` 得到 nodes 列表本身，所有 ``kind == "text"/"op"/...``
+    #    分派全部落空 → 返回 ``""``。实证形态：``\frac{18.5}{0.0225}`` 渲染成
+    #    ``<m:num></m:num><m:den></m:den>``（分子分母静默丢失）、``\sqrt{2}`` 成
+    #    ``<m:e></m:e>``、``\sum_{i=1}^{n}`` 上下限全空 —— 转换不抛异常、无告警，
+    #    属交付内容静默丢失。现统一返回**节点列表**（单层），并在
+    #    ``_node_to_omml`` 入口加列表分派（isinstance(node, list) → join）兜底。
     def _parse_required_group(self, tokens, i):
         inner, ni = _is_group_consume(tokens, i)
         if inner is not None:
-            return self._parse_seq(inner, 0, stop_brace=True), ni
+            nodes, _ = self._parse_seq(inner, 0, stop_brace=True)
+            return nodes, ni
         # 无花括号：单个原子
         if i < len(tokens):
             node, ni = self._parse_atom(tokens, i)
@@ -672,21 +694,36 @@ class _LatexParser:
         return [("text", "")], i
 
     def _parse_optional_bracket(self, tokens, i):
-        """tokens[i] == ('brace', '[') 时解析 [..] 返回（节点列表, 新索引）。"""
-        if i < len(tokens) and tokens[i] == ("brace", "["):
-            j = i + 1
-            inner = []
-            while j < len(tokens) and tokens[j] != ("brace", "]"):
-                inner.append(tokens[j])
-                j += 1
-            return self._parse_seq(inner, 0, stop_brace=True), j + 1
+        """tokens[i] 为 ``[..]`` 形态时解析可选方括号参数，返回（节点列表|None, 新索引）。
+
+        ✅ R195（2026-11-09）：旧实现要求 ``tokens[i] == ("brace", "[")``，
+        但 ``_TOKEN_RE`` 的 brace 组只匹配 ``{``/``}``，``[3]`` 一直被 char 组
+        吞成单个 token —— 本分支是**死代码**，``\\sqrt[3]{x}`` 的 ``[3]`` 被当
+        根号底、``x`` 落到根号外。现识别 char 组产出的 ``[..]`` 形态（方括号
+        内容按纯文本度数处理；tokenizer 不动，避免新增 token 类型破坏
+        ``_parse_seq`` 的穷尽分派）。
+        """
+        if i < len(tokens):
+            t = tokens[i]
+            if t[0] == "char" and t[1].startswith("["):
+                inner = t[1].strip("[]")
+                return ([("text", inner)] if inner else []), i + 1
+            if t == ("brace", "["):  # tokenizer 不产此形态，保守保留（不再双重包裹）
+                j = i + 1
+                inner_tokens = []
+                while j < len(tokens) and tokens[j] != ("brace", "]"):
+                    inner_tokens.append(tokens[j])
+                    j += 1
+                nodes, _ = self._parse_seq(inner_tokens, 0, stop_brace=True)
+                return nodes, j + 1
         return None, i
 
     def _parse_script_arg(self, tokens, i):
-        """解析脚本参数（单个原子或 {组}）。"""
+        """解析脚本参数（单个原子或 {组}），返回节点列表（✅ R195 去双重包裹）。"""
         inner, ni = _is_group_consume(tokens, i)
         if inner is not None:
-            return self._parse_seq(inner, 0, stop_brace=True), ni
+            nodes, _ = self._parse_seq(inner, 0, stop_brace=True)
+            return nodes, ni
         if i < len(tokens):
             node, ni = self._parse_atom(tokens, i)
             return [node], ni
@@ -801,6 +838,12 @@ def _r(txt: str, sty_p: bool = False) -> str:
 
 
 def _node_to_omml(node) -> str:
+    # ✅ R195（2026-11-09）：节点参数存在「单个节点元组 / 节点列表」两种形态
+    #（frac num/den、rad base/deg、nary sub/sup、sSub* 脚本参数统一为列表）。
+    # 旧实现对列表/嵌套元组取 node[0] 当 kind，所有分派落空返回 ""（操作数
+    # 静默丢失的另一半根因）。列表统一在此处 join，单节点走原分派。
+    if isinstance(node, list):
+        return "".join(_node_to_omml(n) for n in node)
     kind = node[0]
     if kind == "text":
         return _r(node[1])

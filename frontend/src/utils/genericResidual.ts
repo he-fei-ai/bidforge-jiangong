@@ -93,3 +93,26 @@ export function genericAutofixFailedNotice(data: unknown): string {
     "若目录中存在「专项6」「总体实施策划（2）」之类的占位标题，请手动改名后重新保存"
   );
 }
+
+/** ✅ R190（FIX-17）：标题清洗（不可见/控制字符）条数提示。
+ *
+ * 背景：R187 起后端在目录写路径落库前清洗标题中的零宽/控制字符
+ * （`sanitize_outline_title`），并以加法式键 `title_sanitized`（整数，仅 >0
+ * 才回传）告知条数 —— 此前前端零消费 ⇒ 清洗**静默生效**，用户以为标题
+ * 原样保存（违反 D-09「自动改写不得静默」纪律）。本函数与
+ * `genericAutofixNotice` 同族，把它变成一句可核对的提示。
+ *
+ * 契约：无键 / 0 / 脏数据 ⇒ 返回空串（旧后端向后兼容，零噪声）。
+ */
+export function titleSanitizedNotice(data: unknown): string {
+  const raw = (data as { title_sanitized?: unknown } | null | undefined)?.title_sanitized;
+  let n = 0;
+  if (typeof raw === "number") {
+    n = Number.isFinite(raw) && raw > 0 ? Math.floor(raw) : 0;
+  } else if (typeof raw === "string" && raw.trim() !== "") {
+    const v = Number(raw);
+    n = Number.isFinite(v) && v > 0 ? Math.floor(v) : 0;
+  }
+  if (!n) return "";
+  return `已自动清理 ${n} 个标题中的不可见/控制字符（只清零宽字符等不可见内容，不改动文字），请核对章节名`;
+}

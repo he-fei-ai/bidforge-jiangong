@@ -465,3 +465,142 @@ export interface FactRetryFailedResponse {
     last_manual_retry_at: string;
   };
 }
+
+// =========================================================================
+// ✅ R193（L-04 收口）：factsApi 写路径与文档链响应类型 —— 此前 12 个方法的
+//    data 是 any（字段改名/类型漂移编译期不可见，R89 ClassificationPanel 读错
+//    字段名同族）。字段按后端实际返回逐字对齐；演进中字段一律可选，旧消费方
+//    零影响。documents 行结构与 utils/workflowDerived::DocRecord 结构等价
+//    （id 必填 + index 签名），可直接赋给 DocRecord[] 状态。
+// =========================================================================
+
+/** POST /global-facts/upload-documents（R191 F1 起含 stale_facts/note） */
+export interface FactUploadDocsResponse {
+  ok: boolean;
+  saved: Array<{ id: string; file_name: string; size?: number }>;
+  saved_count: number;
+  replaced: number;
+  oversize?: string[];
+  unsupported?: string[];
+  signature_invalid?: string[];
+  empty?: string[];
+  too_many?: string[];
+  quota_exceeded?: boolean;
+  quota_files?: string[];
+  write_errors?: string[];
+  warnings?: string[];
+  /** R191：同名替换发生时被置 stale 的事实条数 */
+  stale_facts?: number;
+  note?: string;
+}
+
+/** POST /global-facts/documents/{id}/parse（R193 起短路分支回真实 parse_status） */
+export interface FactParseDocResponse {
+  ok: boolean;
+  already_parsed?: boolean;
+  parse_status: string;
+  text_len: number;
+  reconciled?: boolean;
+  /** R193：failed 短路时附「请使用强制重新解析重试」指引 */
+  note?: string;
+  truncated?: boolean;
+  parse_truncated?: boolean;
+  parse_warnings?: string[];
+  warnings?: string[];
+  parse_duration_ms?: number;
+  parse_engine?: string;
+  /** R203 补录（后端 :1436/:1457 实测回传）：本轮解析把旧事实置 stale 的条数 */
+  stale_facts?: number;
+}
+
+/** POST /global-facts/documents/parse-all（R193 起早退分支带 note/stale_facts） */
+export interface FactParseAllResponse {
+  ok: boolean;
+  parsed: number;
+  failed_count: number;
+  failed: Array<{ file_name?: string; doc_id?: string; reason?: string }>;
+  truncated_count: number;
+  truncated: Array<{ file_name?: string; doc_id?: string; reason?: string }>;
+  reconciled_count?: number;
+  reconciled?: Array<{ doc_id?: string; file_name?: string }>;
+  force?: boolean;
+  note?: string;
+  message?: string;
+  stale_facts?: number;
+}
+
+/** GET /global-facts/categories（后端 CATEGORY_TITLES 单一事实源，:1437） */
+export interface FactCategoriesResponse {
+  categories: Array<{ value: string; label: string }>;
+}
+
+/** GET /global-facts/documents/category-options（doc_categories.category_options 返回 list[str]） */
+export interface FactDocCategoryOptionsResponse {
+  options: string[];
+  auto_keywords?: Array<{ category: string; keywords: string[] }>;
+}
+
+/** GET /global-facts/documents（文档档案列表） */
+export interface FactDocsListResponse {
+  documents: Array<{
+    id: string;
+    text_len?: number;
+    truncated?: boolean;
+    parse_status?: string;
+    [key: string]: unknown;
+  }>;
+  // ✅ R203 清理：truncated_count/all_parsed 两键为此前误登记的幽灵键——
+  //    后端 list_documents 仅回 { documents }（global_facts_docs.py:105 起），
+  //    全前端零消费，声明噪音会诱导后续消费方取 undefined。删除。
+}
+
+/** GET /global-facts/documents/{id}/preview（前 N 字预览，不下载整份文件） */
+export interface FactDocPreviewResponse {
+  ok?: boolean;
+  preview?: string;
+  is_parsed?: boolean;
+  message?: string;
+  file_name?: string;
+  file_type?: string;
+  doc_category?: string;
+  file_size?: number;
+  parse_time?: number;
+  parse_warnings?: string[];
+  parse_truncated?: boolean;
+  max_chars?: number;
+  truncated?: boolean;
+  created_at?: string;
+}
+
+/** DELETE /global-facts/documents/{id}（:314） */
+export interface FactDocDeleteResponse {
+  ok: boolean;
+  stale_facts?: number;
+}
+
+/** PATCH /global-facts/documents/{id}/category（:1880） */
+export interface FactDocCategoryUpdateResponse {
+  ok: boolean;
+  doc_id: string;
+  doc_category: string;
+}
+
+/** POST /global-facts/adjust（预览 apply=false / 应用 apply=true 两态共用） */
+export interface FactAdjustResponse {
+  summary?: string;
+  operations?: Array<{
+    op: string;
+    fact_id?: string;
+    name?: string;
+    value?: string;
+    [key: string]: unknown;
+  }>;
+  ignored?: Array<{
+    index?: number;
+    reason?: string;
+    op?: string;
+    name?: string;
+    [key: string]: unknown;
+  }>;
+  applied?: number;
+}

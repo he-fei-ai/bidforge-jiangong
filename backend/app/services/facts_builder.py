@@ -746,7 +746,8 @@ def _rank_facts_by_basis(rows: list, basis) -> tuple[list, int]:
     为什么按**组**而不是按行排序：``_render_facts_text`` 以 group_title 分组渲染
     （``### 组名``），按行打散会产生重复组标题，破坏上下文连贯性。
     """
-    if basis is None or not rows or not getattr(settings, "outline_basis_relevance", False):
+    # ✅ R188：与 config.py 默认 True 同向（原 False 仅在属性缺失时反向关闭功能）。
+    if basis is None or not rows or not getattr(settings, "outline_basis_relevance", True):
         return rows, 0
     try:
         from app.services.scheme_basis import relevance_score
@@ -896,10 +897,29 @@ def render_outline_chapter_facts(rows: list, chapter: dict, *, max_total: int = 
     _ordered = relevant_first_rows(rows, chapter) if rows else []
     # ✅ L1/BUG-03（R177 · 2026-11-04）：与 build_facts_text 同一分配模型 ——
     #    事实先占保底，数据字典只吃剩余额度；字典超长不会再挤空事实。
+    # ✅ R193（边界收刀）：调用方（目录子级链）按默认 1600 渲染好 dd_block
+    #    传入，而本函数预算（max_total=1000）分摊给字典的 room 常远小于它 ——
+    #    旧实现 dd_block[:_dd_room] 从条目中间腰斩（半条权威值进提示词）且无
+    #    留痕，与 build_facts_text 走 render_data_dictionary_block(max_chars=…)
+    #    的「按条目边界收刀 + 模型可见说明」纪律分叉。dd_block 是已渲染文本、
+    #    签名不持有原始数据，这里按「最后一个完整行」收刀并追加模型可见截断
+    #    说明（与 clip_text_notice 同语义的最小实现，不动调用方热文件）。
     _dd_text = ""
     if dd_block:
         _dd_room = _data_dict_room(budget, _ordered)
-        _dd_text = dd_block[:_dd_room] if _dd_room > 0 else ""
+        if _dd_room <= 0:
+            _dd_text = ""
+        elif len(dd_block) <= _dd_room:
+            _dd_text = dd_block
+        else:
+            # ⚠️ 截断说明必须计入 room 额度内（R193 首版踩坑：说明额外占用
+            #    26 字把事实保底挤成 0，被 R177 契约护栏当场抓获）。
+            _notice = "（数据字典超出本章预算已截断，仅保留靠前条目）"
+            _clipped = dd_block[: max(0, _dd_room - len(_notice) - 1)]
+            _nl = _clipped.rfind("\n")
+            if _nl > 0:
+                _clipped = _clipped[:_nl]
+            _dd_text = _clipped.rstrip() + "\n" + _notice
     _facts_budget = max(0, budget - len(_dd_text) - 1) if _dd_text else budget
     text = _render_facts_text(_ordered, max_total=_facts_budget) if _ordered else ""
     if _dd_text:

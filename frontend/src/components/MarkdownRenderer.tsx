@@ -2,7 +2,7 @@ import { memo, useEffect, useMemo, useRef, useState } from "react";
 import { marked } from "marked";
 import DOMPurify from "dompurify";
 import { chartsApi } from "../api";
-import { ensureMermaid, nextMermaidId } from "./mermaidRuntime";
+import { ensureMermaid, nextMermaidId, sanitizeMermaidSvg } from "./mermaidRuntime";
 import { CHART_TITLE_FALLBACK, RENDERABLE_CHART_TYPES } from "../utils/chartTypes";
 // ✅ R76（2026-10-13）：围栏判据唯一事实源（前端侧），与后端
 //   services/fence_common.py 同一语义。行锚定 + 同种字符 + 信息串必须为空 + 长度容错。
@@ -169,7 +169,9 @@ function MarkdownRenderer({ content, sectionId, onContentReplaced }: MarkdownRen
           json: { chart_type: chartType, title },
         });
       } else if (lang === "ai_image") {
-        // ✅ AI 文生图（对齐 OpenBidKit 的 ai 插图）：生成前显示占位卡片 + 生成按钮
+        // ✅ AI 文生图（对齐 OpenBidKit 的 ai 插图）：显示纯信息占位卡片（无任何
+        //    手动生成按钮 —— v17 全自动口径：真实图片在导出 DOCX 时由后端
+        //    _auto_generate_ai_image_blocks 自动生成。✅ R199 注释修正）
         let prompt = "";
         let style = "engineering_diagram";
         let title = "";
@@ -285,10 +287,15 @@ function MarkdownRenderer({ content, sectionId, onContentReplaced }: MarkdownRen
         //    类型不符时，后端按 (section_id, chart_type) 定位 chart_predictions 必然
         //    查不到行，回写与正文同步全部静默失效。类型由后端按代码本体推断。
         const sid = sectionIdRef.current;
+        // ✅ R200：透传图表围栏序号（0 基）——后端在同章多块同码时按序号精确改写，
+        //    仅在与代码双重吻合时采纳（序号漂移/伪造时后端告警回退首块）
+        const ordAttr = target.getAttribute("data-fix-ordinal");
+        const fenceOrdinal = ordAttr !== null && ordAttr !== "" && !Number.isNaN(Number(ordAttr)) ? Number(ordAttr) : undefined;
         const resp = await chartsApi.fixMermaid({
           code,
           error,
           ...(sid ? { section_id: sid } : {}),
+          ...(fenceOrdinal !== undefined ? { fence_ordinal: fenceOrdinal } : {}),
         });
         const fixed = resp?.data?.code;
         if (fixed && fixed.trim()) {
@@ -298,7 +305,10 @@ function MarkdownRenderer({ content, sectionId, onContentReplaced }: MarkdownRen
             try {
               const renderId = nextMermaidId("mmd-fix");
               const { svg } = await mermaid.render(renderId, fixed);
-              parent.innerHTML = svg;
+              // ✅ R196：SVG 注入前过 DOMPurify —— securityLevel:"loose" 下
+              //    mermaid 允许标签内 HTML，而图表代码源是 LLM 产出；错误文案与
+              //    代码已 sanitize，SVG 本体（innerHTML 注入面）此前裸注入。
+              parent.innerHTML = sanitizeMermaidSvg(svg);
               parent.classList.remove("mmd-err");
               parent.classList.add("mmd-rendered");
             } catch {
@@ -367,6 +377,11 @@ function MarkdownRenderer({ content, sectionId, onContentReplaced }: MarkdownRen
 
         // 找到所有占位 div
         const phDivs = ref.current.querySelectorAll<HTMLDivElement>(".mmd-ph");
+        // ✅ R200：.mmd-ph 只用于图表家族围栏（mermaid/chart-json/ai_image；公式是
+        //    span.math-ph）→ DOM 序即后端 iter_inline_chart_fences 的 0 基围栏序号。
+        //    修复按钮携带该序号，fix-mermaid 按序号精确改写（同章多块同码时不再"点了
+        //    第 2 块却修了第 1 块"）。
+        const phDivArr = Array.from(phDivs);
 
         // ✅ 性能修复：mermaid 块旧实现串行 await 渲染，一张图（弱引擎下数百 ms）
         // 会阻塞后续所有图，长正文中图表逐张出现、总耗时线性叠加。改为并发池（≤4）。
@@ -429,7 +444,9 @@ function MarkdownRenderer({ content, sectionId, onContentReplaced }: MarkdownRen
                 _svgCacheSet(ph.code, svg);
               }
               if (!div.isConnected) continue;
-              div.innerHTML = svg;
+              // ✅ R196：SVG 注入前过 DOMPurify（securityLevel:"loose" 下 LLM 代码
+              //    的内联事件/script 风险面，唯一出口见 mermaidRuntime.sanitizeMermaidSvg）
+              div.innerHTML = sanitizeMermaidSvg(svg);
               div.classList.remove("mmd-ph");
               div.classList.add("mmd-rendered");
             } catch (renderErr: unknown) {
@@ -440,7 +457,7 @@ function MarkdownRenderer({ content, sectionId, onContentReplaced }: MarkdownRen
               div.innerHTML = `<pre style="color:#a00;background:#fff0f0;padding:8px;border-radius:4px;font-size:12px"><b>Mermaid 渲染错误：</b>${DOMPurify.sanitize(
                 rerr?.message || String(renderErr),
               )}\n\n${DOMPurify.sanitize(ph.code)}</pre>
-              <div style="margin-top:6px"><button id="${errId}" data-fix-code="${encodeURIComponent(ph.code)}" data-fix-error="${encodeURIComponent(rerr?.message || "渲染失败")}" style="padding:4px 12px;font-size:12px;border:1px solid #1677ff;border-radius:4px;background:#1677ff;color:#fff;cursor:pointer">AI 自动修复</button></div>`;
+              <div style="margin-top:6px"><button id="${errId}" data-fix-code="${encodeURIComponent(ph.code)}" data-fix-error="${encodeURIComponent(rerr?.message || "渲染失败")}" data-fix-ordinal="${phDivArr.indexOf(div)}" style="padding:4px 12px;font-size:12px;border:1px solid #1677ff;border-radius:4px;background:#1677ff;color:#fff;cursor:pointer">AI 自动修复</button></div>`;
               div.classList.remove("mmd-ph");
               div.classList.add("mmd-err");
             }

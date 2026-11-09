@@ -91,6 +91,8 @@ def test_signature_valid_accepts_all_supported_binaries():
         "tiff": b"II*\x00" + b"\x00" * 8,
         "doc": b"\xd0\xcf\x11\xe0\xa1\xb1\x1a\xe1" + b"\x00" * 8,
         "wps": b"\xd0\xcf\x11\xe0\xa1\xb1\x1a\xe1" + b"\x00" * 8,
+        # WebP = RIFF 容器，四字符码 WEBP 位于偏移 8；用完整 12 字节签名（含长度字段）。
+        "webp": b"RIFF\x99\x00\x00\x00WEBP" + b"\x00" * 4,
     }
     for ext, payload in cases.items():
         assert fp.signature_valid(ext, payload), f"{ext} 的真实文件头被误拒"

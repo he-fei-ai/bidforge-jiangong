@@ -517,7 +517,12 @@ def apply_patches_to_fact_items(items: Sequence, patches: Iterable[FactPatch]) -
         position = _locate_fact_item(patch, key_index, name_index)
         if position >= 0:
             target = result[position]
-            target.value = apply_patch_mode(str(getattr(target, "value", "") or ""), patch.content, patch.mode)
+            # ✅ R193（单一出口）：value 可能是序列（fact_type=process_flow 等序列类
+            #    事实 merge 后仍是有序数组）。旧 str() 直接产出 Python repr
+            #    （"['垫层浇筑', '防水施工']"）再拼补丁内容 → 落库值成 repr+Markdown
+            #    混合体，前端与正文注入全部读到垃圾。value_to_markdown 是本模块
+            #    序列→文本的单一出口（:224），此处是唯一漏用点。
+            target.value = apply_patch_mode(value_to_markdown(getattr(target, "value", "") or ""), patch.content, patch.mode)
             # replace 之后旧的候选值已不存在，继续保留会让前端把它们当成备选值渲染
             if getattr(target, "has_conflict", False) and patch.mode == "replace":
                 target.has_conflict = False

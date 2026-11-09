@@ -1,4 +1,4 @@
-import { useRef, useState } from "react";
+import { useEffect, useRef, useState } from "react";
 import type { Dispatch, MutableRefObject, SetStateAction } from "react";
 import type { ModalFuncProps } from "antd";
 import { complianceApi, consistencyRepairApi } from "../../api";
@@ -19,6 +19,10 @@ export interface ConsistencyConfirmResult {
   restored_sections?: string[];
   /** R179 加法式：快照缺失、正文未真正回滚的章节 */
   restore_skipped_sections?: string[];
+  /** ✅ R197（F4）补契约：无法归因到变更片段、正文未回滚的拒绝项（须显式提示人工核对） */
+  rejected_not_restored?: string[];
+  /** R181 加法式：逐条拒绝的恢复归因明细（conflict_id/section_id/status） */
+  conflict_restore_results?: unknown[];
   rescan_required?: boolean;
 }
 
@@ -231,21 +235,68 @@ export function useReviewAudit(deps: ReviewAuditDeps) {
   //    （仅 hook 消费，不必经 deps 从页面下发），取消按钮经返回的 handler 触发。
   const crScanAbortRef = useRef<AbortController | null>(null);
   const crRepairAbortRef = useRef<AbortController | null>(null);
+  // ✅ R197（F3/F4）：重入/在飞锁（合规检查双击、CR confirm 四按钮共用 handler）
+  const complianceInFlightRef = useRef(false);
+  const [crConfirming, setCrConfirming] = useState(false);
+
+  // ✅ R197（F1/F2）：本域 AbortController 生命周期收口 + 跨方案落地守卫。
+  //    此前页面切方案/卸载清单只 abort 页面持有的 ref，本域五个在飞请求
+  //    （专家论证 / 合规检查 / 一致性审计 / CR 扫描 / CR 修复）全部漏网：
+  //    旧方案 1-10 分钟的 AI 检查返回后直接把结果落到新方案页面（CR 还是
+  //    600s 级长任务，离开页面后继续计费并向已卸载组件 setState）。
+  const schemeIdRef = useRef(id || "");
+  useEffect(() => {
+    schemeIdRef.current = id || "";
+    // 切方案：中止本域全部在飞请求（页面切方案清单不含本域 ref，收口在此）
+    expertAbortRef.current?.abort();
+    checkAbortRef.current?.abort();
+    auditAbortRef.current?.abort();
+    crScanAbortRef.current?.abort();
+    crRepairAbortRef.current?.abort();
+    // ✅ R197（F2）复位本域瞬态：新方案不得残留上一方案的预检/审计/修复结果
+    //    （R191 列表残留 / R193 生成运行态残留同灶同修；残留会让用户据旧结论
+    //    对新方案做导出决策）
+    setExpertResult(null);
+    setComplianceResults([]);
+    setConsistencyResult(null);
+    setCrConflicts([]);
+    setCrSummary(null);
+    setCrRepair(null);
+    setCrScanId("");
+    setCrHistory([]);
+    setCrOpen(false);
+  }, [id]);
+  // 卸载兜底（与 [id] effect 缺一即复活，R191 教训）
+  useEffect(
+    () => () => {
+      expertAbortRef.current?.abort();
+      checkAbortRef.current?.abort();
+      auditAbortRef.current?.abort();
+      crScanAbortRef.current?.abort();
+      crRepairAbortRef.current?.abort();
+    },
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+    [],
+  );
 
   const handleExpertReview = async () => {
     if (!id || expertRunning) return;
+    const sid = id;
     expertAbortRef.current?.abort();
     const controller = new AbortController();
     expertAbortRef.current = controller;
     setExpertRunning(true);
     try {
       const { data } = await complianceApi.expertReview({ scheme_id: id }, controller.signal);
-      if (controller.signal.aborted) return;
+      // ✅ R197（F1）：跨方案落地守卫 —— abort（切方案收口）与 sid 双保险
+      if (controller.signal.aborted || schemeIdRef.current !== sid) return;
       setExpertResult(data);
       msg.success("预检完成");
     } catch (e: unknown) {
       // 结构化窄断言：仅读取 axios 错误对象上真实存在的 name / code / message
       const err = e as { name?: string; code?: string; message?: string };
+      // 切方案触发的中止不再弹「已取消」toast（对用户是噪声）
+      if (controller.signal.aborted || schemeIdRef.current !== sid) return;
       if (err?.name === "AbortError" || err?.code === "ERR_CANCELED") msg.info("已取消预检");
       else msg.error(err.message || "预检失败");
     } finally {
@@ -265,6 +316,11 @@ export function useReviewAudit(deps: ReviewAuditDeps) {
   /** 把多行文本切成检查清单并提交 AI 逐条判定 */
   const handleComplianceCheck = async () => {
     if (!id) return;
+    const sid = id;
+    // ✅ R197（F3）：重入锁 —— 同域其余四个 handler 都有 running 态判定，唯独
+    //    本 handler 入口只判 !id，同帧双击并发两请求（第二个 abort 第一个后，
+    //    第一个的 catch 弹「已取消合规检查」误导用户）
+    if (complianceInFlightRef.current) return;
     const checklist = checklistText
       .split("\n")
       .map((s) => s.trim())
@@ -273,6 +329,7 @@ export function useReviewAudit(deps: ReviewAuditDeps) {
       msg.warning("请至少输入一条检查项");
       return;
     }
+    complianceInFlightRef.current = true;
     // ✅ R106 FIX-5：接 AbortController，运行中可取消（旧实现只能等 AI 跑完）
     checkAbortRef.current?.abort();
     const controller = new AbortController();
@@ -286,7 +343,7 @@ export function useReviewAudit(deps: ReviewAuditDeps) {
         ? { scheme_id: id, rule_ids: aiRules.map((r) => r.rule_id) }
         : { scheme_id: id, checklist };
       const { data } = await complianceApi.check(payload, controller.signal);
-      if (controller.signal.aborted) return;
+      if (controller.signal.aborted || schemeIdRef.current !== sid) return;
       const results = data.results || [];
       setComplianceResults(results);
       // ✅ D-41（R176 · 2026-11-04）：合规检查截断此后端已标记（`partial` +
@@ -316,11 +373,17 @@ export function useReviewAudit(deps: ReviewAuditDeps) {
       loadComplianceHistory();
     } catch (e: unknown) {
       const err = e as { name?: string; code?: string; message?: string };
+      if (controller.signal.aborted || schemeIdRef.current !== sid) return;
       if (err?.name === "AbortError" || err?.code === "ERR_CANCELED") msg.info("已取消合规检查");
       else msg.error(err.message || "合规检查失败（请确认已配置可用的 AI 供应商）");
     } finally {
-      if (checkAbortRef.current === controller) checkAbortRef.current = null;
-      setCheckingCompliance(false);
+      // ✅ R197（F3）：loading 复位收敛进 ref 门禁（对照 handleExpertReview 的
+      //    规范写法）—— 同域并发时早完成者不得关掉在飞请求的 spinner
+      if (checkAbortRef.current === controller) {
+        checkAbortRef.current = null;
+        setCheckingCompliance(false);
+      }
+      complianceInFlightRef.current = false;
     }
   };
 
@@ -331,6 +394,7 @@ export function useReviewAudit(deps: ReviewAuditDeps) {
 
   const handleConsistencyAudit = async () => {
     if (!id || auditRunning) return;
+    const sid = id;
     // ✅ R106 FIX-5：审计是最长的同步 AI 调用（长方案 1-3 分钟），此前无任何取消入口
     auditAbortRef.current?.abort();
     const controller = new AbortController();
@@ -339,7 +403,7 @@ export function useReviewAudit(deps: ReviewAuditDeps) {
     setConsistencyResult(null);
     try {
       const { data } = await complianceApi.consistencyAudit(id, controller.signal);
-      if (controller.signal.aborted) return;
+      if (controller.signal.aborted || schemeIdRef.current !== sid) return;
       setConsistencyResult({
         score: data.score,
         issues: data.issues || [],
@@ -354,11 +418,15 @@ export function useReviewAudit(deps: ReviewAuditDeps) {
       );
     } catch (e: unknown) {
       const err = e as { name?: string; code?: string; message?: string };
+      if (controller.signal.aborted || schemeIdRef.current !== sid) return;
       if (err?.name === "AbortError" || err?.code === "ERR_CANCELED") msg.info("已取消一致性审计");
       else msg.error(err.message || "一致性审计失败");
     } finally {
-      if (auditAbortRef.current === controller) auditAbortRef.current = null;
-      setAuditRunning(false);
+      // ✅ R197（F3）：loading 复位收敛进 ref 门禁
+      if (auditAbortRef.current === controller) {
+        auditAbortRef.current = null;
+        setAuditRunning(false);
+      }
     }
   };
 
@@ -370,8 +438,11 @@ export function useReviewAudit(deps: ReviewAuditDeps) {
   // ===== ✅ 全文一致性 Agent 修复工作台（F-AGENT-CONSISTENCY-REPAIR）=====
   const loadCrConflicts = async (scanId?: string) => {
     if (!id) return;
+    const sid = id;
     try {
       const { data } = await consistencyRepairApi.conflicts(id, scanId);
+      // ✅ R197（F1）：工作台打开期间切方案，迟到的清单不得覆盖新方案面板
+      if (schemeIdRef.current !== sid) return;
       if (data?.exists) {
         setCrConflicts(data.conflicts || []);
         setCrSummary(data.summary || null);
@@ -388,8 +459,10 @@ export function useReviewAudit(deps: ReviewAuditDeps) {
 
   const loadCrHistory = async () => {
     if (!id) return;
+    const sid = id;
     try {
       const { data } = await consistencyRepairApi.repairs(id, 10);
+      if (schemeIdRef.current !== sid) return;
       setCrHistory(data.items || []);
     } catch {
       // 历史修复记录加载失败不阻塞工作台
@@ -404,6 +477,7 @@ export function useReviewAudit(deps: ReviewAuditDeps) {
 
   const handleCrScan = async () => {
     if (!id || crScanning) return;
+    const sid = id;
     // ✅ R168（FIX-10）：接 AbortController，运行中可取消（口径与 R106 FIX-5 一致）
     crScanAbortRef.current?.abort();
     const controller = new AbortController();
@@ -421,7 +495,7 @@ export function useReviewAudit(deps: ReviewAuditDeps) {
         },
         controller.signal,
       );
-      if (controller.signal.aborted) return;
+      if (controller.signal.aborted || schemeIdRef.current !== sid) return;
       setCrConflicts(data.conflicts || []);
       setCrSummary(data.summary || null);
       setCrScanId(data.scan_id || "");
@@ -431,11 +505,15 @@ export function useReviewAudit(deps: ReviewAuditDeps) {
       );
     } catch (e: unknown) {
       const err = e as { name?: string; code?: string; message?: string };
+      if (controller.signal.aborted || schemeIdRef.current !== sid) return;
       if (err?.name === "AbortError" || err?.code === "ERR_CANCELED") msg.info("已取消一致性扫描");
       else msg.error(err.message || "全文一致性扫描失败");
     } finally {
-      if (crScanAbortRef.current === controller) crScanAbortRef.current = null;
-      setCrScanning(false);
+      // ✅ R197（F3）：loading 复位收敛进 ref 门禁
+      if (crScanAbortRef.current === controller) {
+        crScanAbortRef.current = null;
+        setCrScanning(false);
+      }
     }
   };
 
@@ -446,6 +524,7 @@ export function useReviewAudit(deps: ReviewAuditDeps) {
 
   const handleCrRepair = async (opts?: { conflictIds?: string[]; severity?: string }) => {
     if (!id || crRepairing) return;
+    const sid = id;
     // ✅ R168（FIX-10）：接 AbortController，运行中可取消（口径与 R106 FIX-5 一致）
     crRepairAbortRef.current?.abort();
     const controller = new AbortController();
@@ -464,7 +543,7 @@ export function useReviewAudit(deps: ReviewAuditDeps) {
         },
         controller.signal,
       );
-      if (controller.signal.aborted) return;
+      if (controller.signal.aborted || schemeIdRef.current !== sid) return;
       setCrRepair(data);
       await loadCrConflicts();
       await loadCrHistory();
@@ -497,11 +576,15 @@ export function useReviewAudit(deps: ReviewAuditDeps) {
       }
     } catch (e: unknown) {
       const err = e as { name?: string; code?: string; message?: string };
+      if (controller.signal.aborted || schemeIdRef.current !== sid) return;
       if (err?.name === "AbortError" || err?.code === "ERR_CANCELED") msg.info("已取消一致性修复");
       else msg.error(err.message || "全文一致性修复失败");
     } finally {
-      if (crRepairAbortRef.current === controller) crRepairAbortRef.current = null;
-      setCrRepairing(false);
+      // ✅ R197（F3）：loading 复位收敛进 ref 门禁
+      if (crRepairAbortRef.current === controller) {
+        crRepairAbortRef.current = null;
+        setCrRepairing(false);
+      }
     }
   };
 
@@ -516,13 +599,18 @@ export function useReviewAudit(deps: ReviewAuditDeps) {
       .map((i) => i.conflict_id as string);
 
   const handleCrConfirm = async (accepted: string[], rejected: string[]) => {
-    if (!id || !crRepair?.repair_id) return;
+    if (!id || !crRepair?.repair_id || crConfirming) return;
+    const sid = id;
+    // ✅ R197（F4）：在飞锁 —— 「全部接受 / 全部拒绝 / 逐条接受 / 拒绝」四个
+    //    按钮共用本 handler，无锁时双击双发 /consistency/confirm
+    setCrConfirming(true);
     try {
       const { data } = await consistencyRepairApi.confirm(id, {
         repair_id: crRepair.repair_id,
         accepted,
         rejected,
       });
+      if (schemeIdRef.current !== sid) return;
       const result = data as ConsistencyConfirmResult;
       // ✅ R179（E4/E13）：以后端实际受理结果为准展示，而不是回显请求条数 ——
       //    快照缺失时正文并没有回滚，旧文案「已恢复原文」会误导用户放心导出。
@@ -540,6 +628,15 @@ export function useReviewAudit(deps: ReviewAuditDeps) {
           `${restoreSkipped.length} 章因修复快照缺失未回滚正文（仅回写冲突状态），请人工核对后再导出`,
         );
       }
+      // ✅ R197（F4）：消费后端 R181 加法键 rejected_not_restored —— 列出「无法
+      //    归因到变更片段、正文未回滚」的拒绝项，后端契约明言调用方必须显式
+      //    提示人工核对，不得当作已恢复。旧实现零消费 → 用户误以为已恢复原文。
+      const rejectedNotRestored = result.rejected_not_restored ?? [];
+      if (rejectedNotRestored.length > 0) {
+        msg.warning(
+          `${rejectedNotRestored.length} 条拒绝项无法定位到变更片段、正文未回滚，请人工核对后再导出`,
+        );
+      }
       // ✅ G11：拒绝回滚会把章节正文恢复为修复前版本 → 审核结论失效；
       //    R179 起仅在**真的发生了正文回滚**时才宣称「已恢复原文」。
       if (acceptedCount + rejectedCount > 0) {
@@ -552,7 +649,10 @@ export function useReviewAudit(deps: ReviewAuditDeps) {
       }
     } catch (e: unknown) {
       const err = e as { message?: string };
+      if (schemeIdRef.current !== sid) return;
       msg.error(err.message || "确认修复结果失败");
+    } finally {
+      setCrConfirming(false);
     }
   };
 
@@ -601,5 +701,7 @@ export function useReviewAudit(deps: ReviewAuditDeps) {
     crRepairItemIds,
     handleCrConfirm,
     handleCrRollback,
+    /** ✅ R197（F4）：confirm 在飞态 —— 工作台四个确认按钮据此加锁禁用 */
+    crConfirming,
   };
 }

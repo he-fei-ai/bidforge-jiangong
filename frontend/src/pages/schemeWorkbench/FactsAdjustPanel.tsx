@@ -28,17 +28,21 @@ export function FactsAdjustPanel({
   disabled?: boolean;
   /** 外部忙碌（与自身 adjusting 合并，防双击重复提交） */
   busy?: boolean;
-  /** 预览：只生成待确认计划，不落库（后端 apply=false） */
-  preview: (instruction: string) => Promise<Partial<FactsAdjustPlanShape>>;
+  /** 预览：只生成待确认计划，不落库（后端 apply=false）。
+   *  ✅ R193：第二参为中止信号——组件持有 AbortController，切方案/重复触发时
+   *  中止 120s AI 调用（L-06：此前请求不可取消，切方案后白烧计费）。 */
+  preview: (instruction: string, signal?: AbortSignal) => Promise<Partial<FactsAdjustPlanShape>>;
   /** 应用：把用户刚确认的计划一次性写入（后端 apply=true + operations）
    *
    * ✅ 2026-10-08：返回类型放宽为「可回传后端响应」。页面原先返回 void，
    * 组件拿不到 `ignored` —— 而「要求改 3 条只落 2 条」恰恰只在应用后才知道。
    * 返回 void 仍然合法（旧接线零改动），此时按「无丢弃」处理。
+   * ✅ R193：第三参同上（应用同样可中止）。
    */
   apply: (
     operations: FactsAdjustOperation[],
     instruction: string,
+    signal?: AbortSignal,
   ) => Promise<Partial<FactsAdjustPlanShape> | void>;
   /** 业务失败回调（透传后端 detail），缺省时静默降级 */
   onError?: (fallback: string, e: unknown) => void;
@@ -53,12 +57,19 @@ export function FactsAdjustPanel({
   const [ask, setAsk] = useState(false);
   const [text, setText] = useState("");
   const [adjusting, setAdjusting] = useState(false);
+  // ✅ R193（D-03）：apply 在飞态。antd confirm 的取消按钮在 onOk pending 期间
+  //    仍可点击——弹窗销毁但 apply 继续；无锁时用户可在弹窗取消后、落定前再次
+  //    确认 → 同一批 operations 双次落库（改值类 op 重复应用）。
+  const [applying, setApplying] = useState(false);
   const [plan, setPlan] = useState<FactsAdjustPlanShape | null>(null);
   // ✅ 2026-10-08（F3 前端接线）：应用后才知道的丢弃明细（计划已清空，故独立持有）
   const [applyNotice, setApplyNotice] = useState<FactsAdjustIgnoredItem[] | null>(null);
   // 请求期间若已切换方案，丢弃结果（防止旧方案的计划落到新方案上）
   const schemeRef = useRef(schemeId);
   schemeRef.current = schemeId;
+  // ✅ R193：在飞 AI 请求的中止通道（预览与应用共用；切方案 cleanup 中止）。
+  const adjustAbortRef = useRef<AbortController | null>(null);
+  const applyingRef = useRef(false);
 
   // ⚠️ 切换方案 → 丢弃旧方案的全部中间态。与页面此前的
   // setFactsAdjustPlan(null) 同口径，只是归属从页面挪到了组件内。
@@ -67,10 +78,18 @@ export function FactsAdjustPanel({
     setApplyNotice(null);
     setAsk(false);
     setAdjusting(false);
+    setApplying(false);
     setText("");
+    // ✅ R193（L-06）：切方案中止在飞 AI 预览/应用请求（此前 120s AI 调用
+    //    不可取消，切走后组件靠 schemeRef 丢弃结果，但请求本身照跑=白烧计费）。
+    return () => {
+      adjustAbortRef.current?.abort();
+      adjustAbortRef.current = null;
+      applyingRef.current = false;
+    };
   }, [schemeId]);
 
-  const busyNow = Boolean(busy) || adjusting;
+  const busyNow = Boolean(busy) || adjusting || applying;
   const ready = Boolean(schemeId) && !disabled && !busyNow;
   const operations = Array.isArray(plan?.operations) ? plan.operations : [];
   // ⚠️ 先绑定再判数组：`Array.isArray(plan?.ignored)` 不会把 `plan` 收窄成非空，
@@ -89,21 +108,33 @@ export function FactsAdjustPanel({
     const instruction = text.trim();
     setAsk(false);
     if (!schemeId || !instruction) return; // 空指令不下发
+    // ✅ R193（D-04）：门禁与 okButtonProps/disabled 对齐——预览在飞时
+    //    Enter 可再次触发 confirmAsk（双份 AI 预览计费 + 两次 setPlan 竞态）。
+    //    ⚠️ 除 busyNow（渲染闭包值）外必须再读 ref：Modal 关闭动画窗内
+    //    （destroyOnClose + motion）子树 props 冻结，第二次 Enter 可能携带
+    //    上一渲染的旧闭包穿透 state 门禁——ref 是调用时读的唯一可靠信号。
+    if (busyNow || adjustAbortRef.current) return;
     setAdjusting(true);
+    const ac = new AbortController();
+    adjustAbortRef.current = ac;
     try {
-      const data = await preview(instruction);
+      const data = await preview(instruction, ac.signal);
       if (schemeRef.current !== schemeId) return; // 已切方案 → 丢弃
       setPlan(normalizeFactsAdjustPlan(data));
       setApplyNotice(null);
     } catch (e) {
+      if ((e as { name?: string })?.name === "AbortError" || ac.signal.aborted) return;
       submitError("生成调整计划失败", e);
     } finally {
+      if (adjustAbortRef.current === ac) adjustAbortRef.current = null;
       setAdjusting(false);
     }
   };
 
   const requestApply = () => {
     if (!ready || operations.length === 0) return;
+    // ✅ R193（D-03）：apply 在飞时禁止再次打开确认弹窗。
+    if (applyingRef.current) return;
     confirmDialog({
       title: "确认应用事实调整",
       content: (
@@ -130,19 +161,34 @@ export function FactsAdjustPanel({
       cancelText: "取消",
       okButtonProps: { danger: true },
       onOk: async () => {
+        // ✅ R193（D-03）：apply 在飞锁 + 中止信号 + 切方案丢弃守卫。
+        //    旧实现：onOk 无锁（取消弹窗后可再次确认 → 双次落库）、请求不可
+        //    中止、完成回写无方案守卫（applyNotice/成功提示可跨方案残留）。
+        if (applyingRef.current) return;
+        applyingRef.current = true;
+        setApplying(true);
+        const ac = new AbortController();
+        adjustAbortRef.current = ac;
         try {
           const res = await apply(
             operations,
             plan?.summary || `按已确认计划调整（${operations.length} 项）`,
+            ac.signal,
           );
+          if (schemeRef.current !== schemeId) return; // ✅ R193：已切方案 → 丢弃
           // 应用后后端才回传「哪些操作被安全校验丢弃」；返回 void 的旧接线
           // 归一为空数组 → 与收口前逐字一致（不弹提示）。
           const norm = normalizeFactsAdjustPlan(res);
           setApplyNotice(norm.ignored && norm.ignored.length ? norm.ignored : null);
           setPlan(null);
         } catch (e) {
+          if ((e as { name?: string })?.name === "AbortError" || ac.signal.aborted) return;
           submitError("应用调整失败", e);
           throw e; // 抛出 → 弹窗保持打开，用户可重试或取消
+        } finally {
+          if (adjustAbortRef.current === ac) adjustAbortRef.current = null;
+          applyingRef.current = false;
+          setApplying(false);
         }
       },
     });
@@ -162,7 +208,7 @@ export function FactsAdjustPanel({
         AI 调整事实
       </Button>
       {operations.length > 0 && (
-        <Button danger onClick={requestApply} disabled={!ready}>
+        <Button danger onClick={requestApply} disabled={!ready} loading={applying}>
           应用调整计划
           {operations.length > FACTS_ADJUST_PREVIEW_LIMIT ? `（${operations.length} 项）` : ""}
         </Button>
@@ -214,8 +260,10 @@ export function FactsAdjustPanel({
           showCount
           autoFocus
           onPressEnter={(e) => {
-            // Shift+Enter 换行；单独 Enter 才提交（与输入习惯一致）
-            if (!e.shiftKey && text.trim()) {
+            // Shift+Enter 换行；单独 Enter 才提交（与输入习惯一致）。
+            // ✅ R193（D-04）：门禁与 okButtonProps 的 disabled 对齐——预览在飞
+            //    （busyNow）时 Enter 不再重复下发（双份 AI 计费 + setPlan 竞态）。
+            if (!e.shiftKey && text.trim() && !busyNow) {
               e.preventDefault();
               confirmAsk();
             }

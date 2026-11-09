@@ -124,7 +124,10 @@ class TestSwitchDefaultsAndEquivalence:
         事件名齐备。"""
         anchor = '"word_adjust_batch_enabled", False'
         assert anchor in _SSE_SRC
-        seg = _SSE_SRC[_SSE_SRC.index(anchor) : _SSE_SRC.index(anchor) + 12000]
+        # ✅ R194 重锚：FIX-5（over 分支补上下文 / 计数抑制 / 停止出口）使批
+        #    调度块合法增长 ~2.7k 字符，窗口 12000 → 16000（意图不变：整段块
+        #    含四个事件名，窗口必须盖住块尾）。
+        seg = _SSE_SRC[_SSE_SRC.index(anchor) : _SSE_SRC.index(anchor) + 16000]
         assert "build_adjust_plan(_adj_entries)" in seg
         assert "WORD_ADJUST_CONCURRENCY" in seg
         for ev in ("word_adjust_start", "word_adjust_batch_start", "word_adjust_batch_done", "word_adjust_done"):

@@ -80,8 +80,16 @@ def _split_semantic(text: str) -> list[str]:
     def _emit_hard(s: str) -> None:
         nonlocal cur
         while len(s) > SEMANTIC_CHUNK_SIZE:
-            out.append(s[:SEMANTIC_CHUNK_SIZE])
-            s = s[SEMANTIC_CHUNK_SIZE - SEMANTIC_OVERLAP :]
+            # ✅ R203 修复（表格行/普通行不再被腰斩）：优先在切割窗口内找最后
+            #    一个完整换行按行边界切（对齐存储层 _truncate_for_storage 的
+            #    「最后完整换行」口径）——大表（>1600 字）此前被 s[:800] 在任意
+            #    字符位置硬切，doc_chunks 出现半截表格行。窗口（SIZE-200, SIZE）
+            #    内无换行（超长无换行段落）保持原硬切行为，窗口对齐不改变块数。
+            cut = s.rfind("\n", SEMANTIC_CHUNK_SIZE - 200, SEMANTIC_CHUNK_SIZE)
+            if cut <= 0:
+                cut = SEMANTIC_CHUNK_SIZE
+            out.append(s[:cut])
+            s = s[cut - SEMANTIC_OVERLAP :]
         cur = s
 
     for p in [x for x in re.split(r"\n\s*\n", text) if x.strip()]:

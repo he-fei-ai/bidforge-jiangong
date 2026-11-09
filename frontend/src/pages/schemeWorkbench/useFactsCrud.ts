@@ -15,6 +15,17 @@ import type { FactsSegmentStats } from "./workbenchTypes";
 /** 单条事实编辑态（页面 state 同构：条目本体 + 所属分组信息） */
 export type FactItemEditingState = FactItemLike & { groupId?: string; groupTitle?: string };
 
+/**
+ * ✅ R193（D-09）：错误文案与 useDocumentWorkflow 的 requestErrorText 同口径——
+ * axios 的 `err.message` 是英文原文（"Request failed with status code 400"），
+ * 后端 `response.data.detail`（唯一性闸门 / 安全拦截的具体原因）此前全部丢失，
+ * 用户在「新增/编辑/删除/确认/裁决/清空」失败时只能看到笼统英文。
+ */
+function factsRequestErrorText(err: unknown, fallback: string): string {
+  const e = err as { response?: { data?: { detail?: string; message?: string } }; message?: string };
+  return e?.response?.data?.detail || e?.response?.data?.message || e?.message || fallback;
+}
+
 export interface FactsCrudDeps {
   id: string | undefined;
   msg: MessageInstance;
@@ -123,7 +134,7 @@ export function useFactsCrud(deps: FactsCrudDeps): FactsCrudHandlers {
     } catch (e: unknown) {
       const err = e as { message?: string; errorFields?: unknown };
       if (err.errorFields) return;
-      msg.error(err.message || "保存失败");
+      msg.error(factsRequestErrorText(e, "保存失败"));
     } finally {
       setFactSubmitting(false);
     }
@@ -175,7 +186,7 @@ export function useFactsCrud(deps: FactsCrudDeps): FactsCrudHandlers {
     } catch (e: unknown) {
       const err = e as { message?: string; errorFields?: unknown };
       if (err.errorFields) return;
-      msg.error(err.message || "保存失败");
+      msg.error(factsRequestErrorText(e, "保存失败"));
     } finally {
       setFactItemSubmitting(false);
     }
@@ -200,7 +211,7 @@ export function useFactsCrud(deps: FactsCrudDeps): FactsCrudHandlers {
           await loadFacts();
         } catch (e: unknown) {
           const err = e as { message?: string };
-          msg.error(err?.message || "删除失败");
+          msg.error(factsRequestErrorText(e, "删除失败"));
         }
       },
     });
@@ -216,7 +227,7 @@ export function useFactsCrud(deps: FactsCrudDeps): FactsCrudHandlers {
       await loadFacts();
     } catch (e: unknown) {
       const err = e as { message?: string };
-      msg.error(err?.message || "确认失败");
+      msg.error(factsRequestErrorText(e, "确认失败"));
     }
   };
 
@@ -228,7 +239,7 @@ export function useFactsCrud(deps: FactsCrudDeps): FactsCrudHandlers {
       await loadFacts();
     } catch (e: unknown) {
       const err = e as { message?: string };
-      msg.error(err?.message || "裁决失败");
+      msg.error(factsRequestErrorText(e, "裁决失败"));
     }
   };
 
@@ -251,7 +262,7 @@ export function useFactsCrud(deps: FactsCrudDeps): FactsCrudHandlers {
           await loadFacts();
         } catch (e: unknown) {
           const err = e as { message?: string };
-          msg.error(err?.message || "清空失败");
+          msg.error(factsRequestErrorText(e, "清空失败"));
         }
       },
     });

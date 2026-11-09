@@ -43,7 +43,7 @@ _sh = _LazySseHandlers()
 _SENTENCE_END_CHARS = "。！？；\n"
 
 
-def _truncate_context(text: str) -> str:
+def _truncate_context(text: str, limit: int | None = None) -> str:
     """按 context_length_limit 对上下文做**句子边界**截断。
 
     ✅ 默认关闭（limit=0 → 原样返回）：护栏而非默认行为。
@@ -52,10 +52,30 @@ def _truncate_context(text: str) -> str:
     （"第二句内容很长很长很长很长很长"），模型据此续写会顺着半句话编，
     产出与上下文语义不连贯的正文。找不到边界时（超长单句）才硬切，
     并追加省略号提示内容被截断。
+
+    ✅ R202（2026-11-09 · G2 · 模型可见静默截断）：原实现在**找到句末边界**
+    的常见路径上直接 `return window[: cut + 1]` —— 模型收到的是半份上下文，
+    却**看不到任何截断痕迹**，会据此断言「资料里没有提到 X」（实际上有，
+    只是被切掉了）。旧实现只在「找不到边界」的少数路径上追加「…」。
+    现统一走 ``prompt_material_guard.clip_text_notice_at``：切点算法不变
+    （仍是句末边界），但**一律**附加模型可见说明并落日志/指标账目
+    （说明格式与全仓其它裁剪原语逐字一致）。
+    ⚠️ limit<=0（默认）时行为逐字节不变。
+
+    ✅ R204（2026-11-09 · 死旋钮接线）：新增 ``limit`` 形参 —— 此前本函数
+    只能按全局 ``settings.context_length_limit`` 裁剪，**无法**在「多条消息
+    按比例分配」的场景里使用（多消息各按全局上限裁 → 总量 N 倍）。
+    ``limit=None`` 时行为与旧实现逐字一致（读全局配置）。
     """
     if not text:
         return text
-    limit = int(getattr(_sh.settings, "context_length_limit", 0) or 0)
+    if limit is None:
+        limit = int(getattr(_sh.settings, "context_length_limit", 0) or 0)
+    else:
+        try:
+            limit = int(limit or 0)
+        except (TypeError, ValueError):
+            limit = 0
     if limit <= 0 or len(text) <= limit:
         return text
     window = text[:limit]
@@ -64,20 +84,38 @@ def _truncate_context(text: str) -> str:
         pos = window.rfind(ch)
         if pos > cut:
             cut = pos
-    if cut > 0:
-        return window[: cut + 1]
-    return window + "…"
+    try:
+        from app.services.prompt_material_guard import clip_text_notice_at
+
+        keep = window[: cut + 1] if cut > 0 else window
+        return clip_text_notice_at(text, len(keep), "上下文")
+    except Exception:  # noqa: BLE001 - 截断失败绝不阻断生成，退回旧行为
+        _sh.logger.warning("上下文截断记账失败（使用原文继续）", exc_info=True)
+        if cut > 0:
+            return window[: cut + 1]
+        return window + "…"
 
 
-def _apply_prompt_context_budget_report(text: str) -> tuple[str, dict]:
+def _apply_prompt_context_budget_report(text: str, budget: int | None = None) -> tuple[str, dict]:
     """同 :func:`_apply_prompt_context_budget`，但返回逐段账面（``detail``）。
 
     ✅ R186（2026-11-07）：预算削减不往提示词插标记（会吃掉被削减空间），
     需要让用户知道「调整要求被压到多少」的调用方在这里取逐段账面，
     再决定是否回传到响应；其余调用方继续用只取结果的便捷入口。
     ``budget<=0`` 或空文本时返回原文本与 ``applied=False`` 的空报告。
+
+    ✅ R204（2026-11-09 · 多消息按比例分配）：新增 ``budget`` 形参 ——
+    此前只能读全局 ``settings.prompt_context_budget``，导致「多条 user 消息
+    各自套用全量预算」无法实现按比例分配（总量 N 倍）。``budget=None``
+    时行为与旧实现逐字一致（读全局配置）。
     """
-    budget = int(getattr(_sh.settings, "prompt_context_budget", 0) or 0)
+    if budget is None:
+        budget = int(getattr(_sh.settings, "prompt_context_budget", 0) or 0)
+    else:
+        try:
+            budget = int(budget or 0)
+        except (TypeError, ValueError):
+            budget = 0
     if budget <= 0 or not text:
         return text, {"applied": False, "budget": budget, "segments": 0}
     try:
@@ -89,7 +127,7 @@ def _apply_prompt_context_budget_report(text: str) -> tuple[str, dict]:
         return text, {"applied": False, "budget": budget, "error": True}
 
 
-def _apply_prompt_context_budget(text: str) -> str:
+def _apply_prompt_context_budget(text: str, budget: int | None = None) -> str:
     """按 prompt_context_budget 对已标注分段的上下文做预算削减。
 
     ✅ **默认关闭（budget=0 → 原样返回）**：这是护栏而非默认行为，
@@ -101,7 +139,42 @@ def _apply_prompt_context_budget(text: str) -> str:
     逐段账面由 ``allocate_context_budget`` 写日志与指标（按段标签）；
     需要把账面回传给调用方/用户时用 :func:`_apply_prompt_context_budget_report`。
     """
-    return _apply_prompt_context_budget_report(text)[0]
+    return _apply_prompt_context_budget_report(text, budget)[0]
+
+
+def _apply_prompt_context_budget_to_messages(messages: list) -> list:
+    """按 ``prompt_context_budget`` 对**整份请求的 user 上下文**做一次预算分配。
+
+    ✅ R204（2026-11-09 · 预算被系统性放大 N 倍）：旧实现在正文链路对
+    **每条** user 消息**各自**套用**全量**预算::
+
+        for _mi in _user_idx:
+            _txt = _apply_prompt_context_budget(_msg.get("content") or "")
+
+    而分层正文链路的 user 消息有 3 条（稳定段 / 目录树 / 任务段）⇒ 实际可
+    下发 ``3 × prompt_context_budget`` —— 运维配 2 万预算，实际能下发 6 万，
+    护栏被绕过 3 倍，且预算器每次都记「已生效」，**没有任何证据**表明超发。
+
+    现改为：按各条 user 消息长度**比例分配**总预算（单条消息时与旧实现
+    逐字节一致 ⇒ 零行为变化）。
+    """
+    budget = int(getattr(_sh.settings, "prompt_context_budget", 0) or 0)
+    if budget <= 0 or not isinstance(messages, list):
+        return messages
+    idx = [i for i, m in enumerate(messages) if isinstance(m, dict) and m.get("role") == "user"]
+    if not idx:
+        return messages
+    texts = [str(messages[i].get("content") or "") for i in idx]
+    total = sum(len(t) for t in texts)
+    if total <= budget:
+        return messages
+    out = list(messages)
+    for i, txt in zip(idx, texts):
+        if not txt:
+            continue
+        quota = max(1, int(budget * len(txt) / total))
+        out[i] = {**messages[i], "content": _apply_prompt_context_budget(txt, quota)}
+    return out
 
 
 def _guard_external_material(text: str) -> str:
@@ -136,6 +209,40 @@ def _guard_external_material(text: str) -> str:
         return text
 
 
+def _apply_context_length_limit_to_messages(messages: list) -> list:
+    """按 ``context_length_limit`` 对**整份请求的 user 上下文**做上限控制。
+
+    ✅ R204（2026-11-09 · 死旋钮接线）：``context_length_limit`` 此前**全仓零
+    生产调用** —— 只有 ``_truncate_context`` 的定义与单测；运维配置了
+    ``CONTEXT_LENGTH_LIMIT=80000`` 以为正文上下文有上限，实际正文链路
+    （项目概述/全局事实/知识库/目录树/解析提取结果）**全部原样下发** →
+    厂商 400（超上下文）或长时间超时。属「配置项给运维假安全感」。
+
+    多条 user 消息时按长度**比例分配**上限（而不是每条各按全局上限），
+    避免 N 条消息 × 上限 = N 倍预算（与 ``prompt_context_budget`` 逐条各算
+    一份的老问题同族，见 R204 批次 C 修复）。
+
+    ⚠️ limit<=0（默认）时**原样返回同一列表对象**（逐字节不变）。
+    """
+    limit = int(getattr(_sh.settings, "context_length_limit", 0) or 0)
+    if limit <= 0 or not isinstance(messages, list):
+        return messages
+    idx = [i for i, m in enumerate(messages) if isinstance(m, dict) and m.get("role") == "user"]
+    if not idx:
+        return messages
+    texts = [str(messages[i].get("content") or "") for i in idx]
+    total = sum(len(t) for t in texts)
+    if total <= limit:
+        return messages
+    out = list(messages)
+    for i, txt in zip(idx, texts):
+        if not txt:
+            continue
+        quota = max(1, int(limit * len(txt) / total))
+        out[i] = {**messages[i], "content": _truncate_context(txt, quota)}
+    return out
+
+
 def _govern_prompt_text(text: str) -> str:
     """目录/审核/标题修复链路的统一治理入口：先围栏脱敏，再按预算裁剪。
 
@@ -148,10 +255,14 @@ def _govern_prompt_text(text: str) -> str:
 
     两个开关默认关闭（``prompt_injection_defense`` / ``prompt_redact_sensitive``
     / ``prompt_context_budget``），关闭时逐字节返回原文，既有生成行为不变。
+
+    ✅ R204：追加 ``context_length_limit`` 收口（同样默认关闭）—— 目录链路的
+    资料摘要/关键事实同样可能把请求撑爆；本函数处理的是**单条**大文本，
+    故直接按上限截断（无需按比例分配）。
     """
     if not text:
         return text
-    return _apply_prompt_context_budget(_guard_external_material(text))
+    return _truncate_context(_apply_prompt_context_budget(_guard_external_material(text)))
 
 
 # ---------- 长方案分步：子目录取回执行单元（批内并发 / 批内合并） ----------
@@ -187,6 +298,7 @@ async def _finish_stopped_with_partial(task_id: str, holder: dict) -> str:
     outline = holder.get("outline") or []
     failed = holder.get("failed_chapters") or []
     payload = {"event": "stopped", "task_id": task_id}
+    _ckpt_ok = not outline  # 无成果本来就不写 checkpoint，也无需清 holder
     if outline:
         payload["outline"] = outline
         payload["partial"] = True
@@ -195,11 +307,30 @@ async def _finish_stopped_with_partial(task_id: str, holder: dict) -> str:
             payload["failed_count"] = len(failed)
         try:
             await _sh._save_outline_checkpoint(task_id, payload)
+            _ckpt_ok = True
         except Exception:
-            _sh.logger.warning("检查点写入失败（task=%s · 目录生成 · 停止时成果）", task_id, exc_info=True)
-    # 清空 holder：防 finally 兜底把同一份成果再落一次库
-    holder["outline"] = []
-    holder["failed_chapters"] = []
+            # ✅ R188（L8）：旧实现吞异常后无条件清空 holder，而 finish_task 之后
+            #    has_active_task 已 False、finally 兜底短路 → 取消风暴下成果确定性
+            #    丢失且界面仍报「已停止」。现在：① 置终态前做一次幂等二次落库；
+            #    ② 两次都失败则加法式回传 checkpoint_failed=True（payload 自带
+            #    outline，前端可直接拿成果，不依赖 checkpoint）；③ 只有写成功才清
+            #    holder，避免 finally 重复落库。
+            _sh.logger.warning(
+                "检查点写入失败（task=%s · 目录生成 · 停止时成果）→ 保留部分成果并二次兜底",
+                task_id, exc_info=True,
+            )
+            try:
+                await _sh._save_outline_checkpoint(task_id, payload)
+                _ckpt_ok = True
+            except Exception:
+                _sh.logger.error(
+                    "检查点二次兜底失败（task=%s · 停止时成果）→ 回传 checkpoint_failed",
+                    task_id, exc_info=True,
+                )
+                payload["checkpoint_failed"] = True
+    if _ckpt_ok:
+        holder["outline"] = []
+        holder["failed_chapters"] = []
     await _sh.finish_task(task_id, "stopped", "用户已停止")
     return "data: " + json.dumps(payload, ensure_ascii=False) + "\n\n"
 
@@ -1480,20 +1611,82 @@ async def _review_and_fix_outline(
             timeout=_sh.OUTLINE_REVIEW_TIMEOUT,
         )
     except asyncio.TimeoutError:
+        # ✅ R187（2026-11-08）：旧文案「跳过审核直接完成」把「未经审核」写成
+        #    「已审核通过」，日志与 completed 事件双双误导。``passed=True`` 保留
+        #    （前端契约不可破坏），但必须加法式标记 review_skipped / skip_reason，
+        #    供自动确认硬前置（outline_auto_confirm.evaluate）拦截未审目录。
         _sh.logger.warning(
-            "目录审核超时（%ds），跳过审核直接完成（scheme=%s）", _sh.OUTLINE_REVIEW_TIMEOUT, scheme_name
+            "目录审核超时（%ds）：本次目录未经 AI 审核，直接交付（scheme=%s）",
+            _sh.OUTLINE_REVIEW_TIMEOUT, scheme_name,
         )
-        review_obj = {"passed": True, "suggestions": ["审核超时已跳过"]}
+        review_obj = {
+            "passed": True,
+            "suggestions": ["审核超时已跳过"],
+            "review_skipped": True,
+            "skip_reason": "timeout",
+        }
     except Exception as e:
-        _sh.logger.warning("目录审核失败（scheme=%s）: %s，跳过审核直接完成", scheme_name, e)
-        review_obj = {"passed": True, "suggestions": [f"审核失败: {e}"]}
+        _sh.logger.warning("目录审核失败（scheme=%s）：本次目录未经 AI 审核，直接交付: %s", scheme_name, e)
+        review_obj = {
+            "passed": True,
+            "suggestions": [f"审核失败: {e}"],
+            "review_skipped": True,
+            "skip_reason": "error",
+        }
+
+    # ✅ R188（L11 · 裸 issues 数组容忍）：模型常省掉 {"issues":[...]} 包装直接
+    #    返回顶层数组；旧实现把它归入「结构异常 → 跳过且通过」，语义审核结果全丢。
+    #    现按 issues 采纳进 suggestions 供修复链消费，但仍标记 review_skipped
+    #    （未经完整审核，outline_auto_confirm 硬前置照旧拦截），passed=True 保持
+    #    前端契约不变。空数组 / 全非字符串项仍走下方结构异常兜底。
+    if isinstance(review_obj, list):
+        _bare_issues = _sh._coerce_suggestions(review_obj)
+        if _bare_issues:
+            review_obj = {
+                "passed": True,
+                "suggestions": _bare_issues,
+                "review_skipped": True,
+                "skip_reason": "bare_issues_array",
+            }
 
     if not isinstance(review_obj, dict):
         # 弱模型可能把审核结果写成顶层数组/裸值，兜底避免后续 .get 抛 AttributeError
-        review_obj = {"passed": True, "suggestions": ["审核结果结构异常，已跳过"]}
+        review_obj = {
+            "passed": True,
+            "suggestions": ["审核结果结构异常，已跳过"],
+            "review_skipped": True,
+            "skip_reason": "invalid_shape",
+        }
     # ✅ BUG 修复：统一把 passed / suggestions 归一化为 bool / list[str]
     # （字符串 "false" 不再被当作通过；字符串 suggestions 不再被按字符拆分）
     suggestions = _sh._coerce_suggestions(review_obj.get("suggestions"))
+
+    def _recheck_duplicate_titles(outline_, review_obj_) -> None:
+        """✅ R192（FIX-R5 · 审核出口重复标题重检）：AI 审核可能漏报同名章节，
+        修复轮也可能引入新的同名标题；程序化预检（:1296 段 `_dups` 闸门）只覆盖
+        审核前的形态。本闭包在两个出口（审核轮合并修复早退 / 函数尾部主出口）
+        用与预检同一实现（``_sh._detect_duplicate_titles``，无第二套判据）重检，
+        命中即把计数写入 ``review_obj["issue_counts"]["duplicate_titles"]``——
+        ``outline_auto_confirm.evaluate`` 的 `duplicate_titles` 硬前置（R192 同批）
+        据此阻断 8 秒自动确认；前端审核结论区亦可消费。只记账不改 passed 语义
+        （R187 FIX-3 纪律：passed=True 是前端兼容值，语义调整须单独评审）。"""
+        try:
+            _dups_exit = _sh._detect_duplicate_titles(outline_)
+        except Exception as e:  # noqa: BLE001 — 重检失败不影响审核链交付
+            _sh.logger.debug("审核出口重复标题重检失败（忽略）: %s", e)
+            return
+        if not _dups_exit:
+            return
+        _sh.logger.info("AI 审核出口检出 %d 处重复标题，计入 issue_counts 并阻断自动确认", len(_dups_exit))
+        _ic = review_obj_.get("issue_counts")
+        if not isinstance(_ic, dict):
+            _ic = {}
+        try:
+            _ic["duplicate_titles"] = max(int(_ic.get("duplicate_titles") or 0), len(_dups_exit))
+        except (TypeError, ValueError):
+            _ic["duplicate_titles"] = len(_dups_exit)
+        review_obj_["issue_counts"] = _ic
+
     # ✅ 2026-10-10（目录占位/泛化标题收口）：AI 审核可能漏报泛化占位标题与
     #    「（N）」编号冲突后缀（生产实证「专项6」「总体实施策划（2）」）。
     #    ✅ R73 加强：先试**外科式标题重写**（只送占位节点 + 上下文，结构零风险）；
@@ -1588,6 +1781,7 @@ async def _review_and_fix_outline(
                 else:
                     suggestions = ["✅ 已根据审核意见自动修复（审核轮合并输出）"] + suggestions
                 review_obj["suggestions"] = suggestions
+                _recheck_duplicate_titles(outline, review_obj)
                 return outline, review_obj
             _sh.logger.warning("审核轮合并修复结果不可用，回退独立修复调用（scheme=%s）: %s", scheme_name, _issues[:2])
 
@@ -1674,6 +1868,7 @@ async def _review_and_fix_outline(
     review_obj["suggestions"] = suggestions
     # ✅ R73：未走修复采用的出口同样给一个稳定的残留读数（前端/护栏可消费）
     review_obj.setdefault("generic_residual", len(_sh._detect_generic_titles(outline)))
+    _recheck_duplicate_titles(outline, review_obj)
     return outline, review_obj
 
 
@@ -1762,6 +1957,16 @@ async def _build_structured_brief(
                 kept_chars=len(structured),
                 segment_id="structured_brief",
             )
+            # ✅ R204（2026-11-09 · 模型可见截断说明）：此前只记日志 + SSE 事件
+            #   （给**用户**看），**模型**看不到任何痕迹 → 模型会据半份摘要断言
+            #   「资料里没有提到 X」（实际上有，只是被切掉），与「禁止编造 /
+            #   不得写【待补充】」的红线冲突。现补一条模型可见说明（格式与
+            #   全仓裁剪原语一致）；**不改变**既有截断策略与预算口径。
+            structured = (
+                structured
+                + f"\n\n[……项目资料摘要已截断：原文 {_before_len} 字，"
+                f"此处保留 {len(structured)} 字，其余内容已省略]"
+            )
         appendix = ""
         if raw_brief.strip():
             _appendix_src = raw_brief
@@ -1810,7 +2015,7 @@ def _scheme_basis_obj(scheme: dict):
     单点构建：相关性前置（_rank_*_by_basis）、全面性/冗余校验
     （outline_quality）都消费**同一个**对象，避免各处重复解析口径漂移。
     """
-    if not getattr(_sh.settings, "outline_name_basis", False):
+    if not getattr(_sh.settings, "outline_name_basis", True):  # R188: fallback 与 config 默认同向
         return None
     try:
         from app.services.scheme_basis import parse_scheme_basis
@@ -1834,7 +2039,7 @@ def _scheme_is_dangerous(scheme: dict) -> bool:
     """
     if str(scheme.get("type") or "") in _sh.DANGEROUS_TYPES:
         return True
-    if not getattr(_sh.settings, "outline_name_basis", False):
+    if not getattr(_sh.settings, "outline_name_basis", True):  # R188: fallback 与 config 默认同向
         return False
     try:
         from app.services.scheme_basis import parse_scheme_basis
@@ -1860,7 +2065,7 @@ def _outline_construction_scope(scheme: dict) -> str:
     受 settings.outline_name_basis 控制（默认 True）。关闭 / 名称拆不出任何内容项时
     返回空串，提示词对应占位符渲染为空 —— 与该开关引入前的行为逐字一致。
     """
-    if not getattr(_sh.settings, "outline_name_basis", False):
+    if not getattr(_sh.settings, "outline_name_basis", True):  # R188: fallback 与 config 默认同向
         return ""
     try:
         from app.services.scheme_scope import (
@@ -1896,7 +2101,7 @@ def _outline_scheme_basis(scheme: dict) -> str:
     同样受 settings.outline_name_basis 控制；无任何可解析维度时返回空串 =
     整段不注入（保持「信息不足时不得编造」红线）。
     """
-    if not getattr(_sh.settings, "outline_name_basis", False):
+    if not getattr(_sh.settings, "outline_name_basis", True):  # R188: fallback 与 config 默认同向
         return ""
     try:
         from app.services.scheme_basis import parse_scheme_basis
@@ -1938,7 +2143,7 @@ def _outline_standards_text(scheme: dict) -> str:
     受 settings.outline_standards_inject 控制（默认 True）；关闭或异常时
     返回空串，提示词对应占位符渲染为空。
     """
-    if not getattr(_sh.settings, "outline_standards_inject", False):
+    if not getattr(_sh.settings, "outline_standards_inject", True):  # R188: fallback 与 config 默认同向
         return ""
     try:
         return _sh.get_standards_text(str(scheme.get("type") or ""), str(scheme.get("name") or ""))

@@ -175,6 +175,12 @@ export interface FixStats {
   block_render_failed?: number;
   /** 超宽/超长 GFM 表格被截断的次数（成稿可交付但该表内容不完整）。 */
   table_truncated?: number;
+  /** ✅ R195：「项目关键事实」附录渲染失败次数（产物缺附录，本次不写缓存）。 */
+  facts_appendix_dropped?: number;
+  /** ✅ R195：数据来源/知识库补充附录渲染失败次数（产物缺附录，本次不写缓存）。 */
+  sources_appendix_dropped?: number;
+  /** ✅ R195：超长段落被截断的次数（成稿该段不完整，需回查源文）。 */
+  paragraph_truncated?: number;
 }
 
 /** 解析 X-Fix-Stats；头缺失或 JSON 非法返回 null。 */
@@ -202,6 +208,9 @@ export function fixStatsParts(fs: FixStats): string[] {
     parts.push(`内容块降级为纯文本 ${fs.block_render_failed} 处（版式已降级，文字保留）`);
   }
   if (fs.table_truncated) parts.push(`超宽/超长表格截断 ${fs.table_truncated} 处`);
+  if (fs.facts_appendix_dropped) parts.push(`「项目关键事实」附录渲染失败 ${fs.facts_appendix_dropped} 处`);
+  if (fs.sources_appendix_dropped) parts.push(`数据来源附录渲染失败 ${fs.sources_appendix_dropped} 处`);
+  if (fs.paragraph_truncated) parts.push(`超长段落被截断 ${fs.paragraph_truncated} 处（成稿该段不完整，请回查源文）`);
   return parts;
 }
 
@@ -237,6 +246,12 @@ const EXPORT_DEGRADED_TEXT: Record<string, string> = {
   // ✅ R179（2026-11-05）：导出出口闸门检测到终稿仍有无法自动消除的格式残留
   "content-residue":
     "成稿仍存在无法自动消除的格式残留（后端已降级导出，本次不写入缓存），请检查后重新导出",
+  // ✅ R195（2026-11-09）：事实/补充附录渲染失败 → 产物缺附录（本次不写缓存）
+  "appendix-dropped":
+    "「项目关键事实」或数据来源附录渲染失败，成稿缺少对应附录（后端已降级导出，本次不写入缓存），建议修复数据源后重新导出",
+  // ✅ R195（2026-11-09）：章节级渲染失败被 fail-soft 跳过 → 产物缺章
+  "section-dropped":
+    "部分章节渲染失败被跳过，成稿缺少该章内容（后端已降级导出，本次不写入缓存），请检查对应章节内容后重新导出",
 };
 
 /**
@@ -416,10 +431,18 @@ export async function resolveExportError(e: unknown): Promise<ExportErrorResolut
     return { canceled: false, message: rawMessage, generic: false };
   }
   const status = typeof response?.status === "number" ? response.status : undefined;
+  // ✅ R195（2026-11-09）：无错误体时按状态码给可行动文案。
+  //   409（无 export_blocked_high_issues 体）= 生成中导出互斥；503 = PDF 转换锁等待超时。
+  const statusFallback =
+    status === 409
+      ? "导出被拒绝：方案可能正在生成中（事实/目录/正文），请等待生成完成或先停止生成后再导出"
+      : status === 503
+        ? "导出服务繁忙：PDF 转换队列等待超时，请稍后重试；若连续出现请检查 Word 状态"
+        : undefined;
   return {
     canceled: false,
     message: status
-      ? `${GENERIC_EXPORT_FAILURE}（HTTP ${status}），后端未返回可读错误信息`
+      ? (statusFallback ?? `${GENERIC_EXPORT_FAILURE}（HTTP ${status}），后端未返回可读错误信息`)
       : GENERIC_EXPORT_FAILURE,
     generic: true,
   };

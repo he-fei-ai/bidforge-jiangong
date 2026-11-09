@@ -93,6 +93,7 @@ export interface ReviewTabProps {
   setRerunPlan: Dispatch<SetStateAction<ExportRerunPlan | null>>;
   checkingExport: boolean;
   exportCheckIncomplete: boolean;
+  setExportCheckIncomplete: Dispatch<SetStateAction<boolean>>;
   handleExportCheck: () => Promise<void>;
   handlePlaceholderJump: (sectionId: string) => void;
   rerunning: boolean;
@@ -144,6 +145,7 @@ export function ReviewTab({
   setRerunPlan,
   checkingExport,
   exportCheckIncomplete,
+  setExportCheckIncomplete,
   handleExportCheck,
   handlePlaceholderJump,
   rerunning,
@@ -578,11 +580,17 @@ export function ReviewTab({
           <Descriptions column={1} size="small">
             <Descriptions.Item label="就绪度评分">
               <Tag
+                // ✅ R197：score 是可选字段（后端异常兜底路径可能缺省）—— 非空
+                //    断言会让缺失时渲染出「undefined」红色 Tag，兜底为 0 并按低分配色
                 color={
-                  expertResult.score! >= 80 ? "green" : expertResult.score! >= 60 ? "orange" : "red"
+                  (expertResult.score ?? 0) >= 80
+                    ? "green"
+                    : (expertResult.score ?? 0) >= 60
+                      ? "orange"
+                      : "red"
                 }
               >
-                {expertResult.score}
+                {expertResult.score ?? "未返回"}
               </Tag>
             </Descriptions.Item>
             {(expertResult.missing?.length ?? 0) > 0 && (
@@ -625,6 +633,9 @@ export function ReviewTab({
                   setExportPreflight(null);
                   setPlaceholderReport(null);
                   setRerunPlan(null);
+                  // ✅ R197：一并清除上一次 503/read_degraded 的「预检未完成」态，
+                  //    否则与「尚未预检」空态文案叠加显示
+                  setExportCheckIncomplete(false);
                 }}
               >
                 清除结果
@@ -667,8 +678,9 @@ export function ReviewTab({
                       </>
                     ) : (
                       <>
-                        {/* 后端契约：预检 issue 一定携带英文 type 键（ExportIssueItem 未收录） */}
-                        {EXPORT_ISSUE_LABEL[iss.type!] || iss.type}：
+                        {/* 后端契约：预检 issue 一定携带英文 type 键（ExportIssueItem 未收录）；
+                            ✅ R197：缺 type 时兜底，不再渲染「undefined：」 */}
+                        {EXPORT_ISSUE_LABEL[iss.type!] || iss.type || "未知问题"}：
                         <Text strong>{describeExportIssue(iss)}</Text>
                       </>
                     )}

@@ -95,10 +95,12 @@ describe("DocumentParseList", () => {
     expect(btn(container, "解析")).toBeNull();
   });
 
-  it("待解析文档：点击「解析」回调 onParse(id, name)", () => {
+  it("待解析文档：点击「解析」回调 onParse(id, name, false)", () => {
     const { container, onParse } = setup({ docs: [doc({ id: "x", file_name: "a.pdf" })] });
     fireEvent.click(btn(container, "解析")!);
-    expect(onParse).toHaveBeenCalledWith("x", "a.pdf");
+    // ✅ R203 重锚：行内「解析」恒透传第三参 force（failed 行传 true 绕过
+    //    后端短路，见下方 failed 用例；普通待解析行显式 false）
+    expect(onParse).toHaveBeenCalledWith("x", "a.pdf", false);
   });
 
   it("已解析文档：点击「重新解析」回调 onParse(id, name, true)，且出现「预览」", () => {
@@ -179,7 +181,10 @@ describe("DocumentParseList", () => {
     expect(container.textContent || "").toContain("解析失败");
     // 失败文档未解析成功 → 提供「解析」按钮供重试
     fireEvent.click(btn(container, "解析")!);
-    expect(onParse).toHaveBeenCalledWith("f", "f.pdf");
+    // ✅ R203：failed 行点击「解析」带 force=true——正文非空的 failed 文档
+    //    （曾成功→重解析失败）会被后端「正文非空且非 force 短路」分支拦下，
+    //    旧实现发普通解析只得「已解析过」空转，永远无法重试。
+    expect(onParse).toHaveBeenCalledWith("f", "f.pdf", true);
   });
 
   it("解析状态优先于 text_len：parse_status='success' 视为已解析（即便 text_len 缺失）", () => {

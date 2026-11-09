@@ -382,6 +382,20 @@ def _anchor_ai_severity(rule_id: str, ai_severity: str) -> str:
     return _SEVERITY_BY_RANK.get(_rank, "medium")
 
 
+#: ✅ R197（B3）：严重度档位词归一 —— AI 偶发返回中文档位（「高/中/低/阻断」）
+#: 或 "block"，旧实现的 ``(r.get("severity") or "medium").lower()`` 与
+#: ``_SEVERITY_RANK`` 词表都不识别：中文「高」在 ``_anchor_ai_severity`` 被降为
+#: medium（锚定失真），「低」使「疑似低风险不扣分」策略失效（照扣 medium 分），
+#: "block" 在 ``_SEVERITY_RANK`` 合并口径恒判 0。三处消费统一走本函数。
+_SEVERITY_CN_MAP = {"高": "high", "中": "medium", "低": "low", "阻断": "block", "严重": "high"}
+
+
+def normalize_severity_text(value: object) -> str:
+    """把任意来源的严重度档位词归一为注册表词表（high/medium/low/block）。"""
+    s = str(value or "").strip().lower()
+    return _SEVERITY_CN_MAP.get(s, s)
+
+
 def ai_results_to_findings(results: list) -> list:
     """把 AI 规范符合性检查的历史结果转换为统一 finding 结构。
 
@@ -393,7 +407,9 @@ def ai_results_to_findings(results: list) -> list:
         hit = r.get("hit")
         if hit is True:
             continue  # 命中即合规，不产生发现
-        severity = (r.get("severity") or "medium").lower()
+        # ✅ R197（B3）：档位词归一（中文「高/中/低/阻断」→ 注册表词表），
+        #    「疑似低风险不扣分」的判定与 _anchor_ai_severity 的锚定自此对中文输出同样生效。
+        severity = normalize_severity_text(r.get("severity") or "medium")
         # "疑似"且 AI 自报低风险：不扣分，仅提示（用 AI 原始档位判定，
         # 锚定只影响最终计分档位，不改变「疑似低风险不扣分」的策略）
         if hit is None and severity == "low":

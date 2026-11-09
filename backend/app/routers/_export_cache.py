@@ -341,6 +341,9 @@ async def _guard_numbering_consistency(db, scheme_id: str) -> dict:
                 "chapters": int(_outline.get("checked") or 0),
                 "unverifiable": int(_outline.get("unverifiable") or 0),
                 "samples": _outline.get("samples", []),
+                # ✅ R188（L4）：环内不可达节点加法式透传，供严格模式判红。
+                "unmounted": _outline.get("unmounted") or [],
+                "unmounted_count": int(_outline.get("unmounted_count") or 0),
             }
         else:
             _outline_detail = {
@@ -351,11 +354,21 @@ async def _guard_numbering_consistency(db, scheme_id: str) -> dict:
             }
         _body_bad = not _rep["consistent"]
         _outline_bad = bool(_outline_detail["checked"] and not _outline_detail["consistent"])
-        if _body_bad or _outline_bad:
+        # ✅ R188（L4）：环内不可达节点会被 _build_tree 静默丢弃，既有的
+        #    consistent/mismatched 都判绿，但 write_section 根本不写这些章 →
+        #    DOCX 静默缺章。严格模式据此拒绝导出并给出可行动说明。
+        _unmounted_bad = bool(_outline_detail.get("unmounted_count"))
+        if _body_bad or _outline_bad or _unmounted_bad:
             _summary = _summarize_numbering_consistency(_rep)
             if _outline_bad:
                 _outline_note = f"结构编号与树位置不一致={_outline_detail['mismatched']} 章（stored≠树位置）"
                 _summary = f"{_summary}；{_outline_note}" if _body_bad else _outline_note
+            if _unmounted_bad:
+                _unmounted_note = (
+                    f"目录树不可达节点={_outline_detail['unmounted_count']} 章"
+                    "（parent_id 成环/悬挂，导出会缺章）"
+                )
+                _summary = f"{_summary}；{_unmounted_note}" if _summary else _unmounted_note
             detail = {
                 "error": "numbering_inconsistency",
                 "mismatched": _rep["mismatched"],

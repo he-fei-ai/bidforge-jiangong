@@ -268,6 +268,25 @@ class AIConfigIn(BaseModel):
     env: str = Field("", max_length=32)
 
 
+class DuplicateConfigIn(BaseModel):
+    """复制一条已有配置为新配置（模型管理 · 2026-11-09 新增）。
+
+    复制策略（最优安全默认）：
+      - 参数 / 计费方式 / base_url / model / request_mode / enabled 原样复制；
+      - **API Key 以密文直接复制**（同源厂商同账户，复制后立即可用；密钥始终不解密、
+        不暴露明文，安全性与源配置等价）；
+      - 新配置 id 自动生成（UUID，全局唯一，避免与源/其他配置冲突）；
+      - ``is_active=0``（不抢占「当前使用」，需用户显式激活）；
+      - ``priority`` 置于当前最大值之后，不扰乱既有降级链；
+      - ``env`` 缺省沿用源环境，可指定目标环境（多环境友好）；
+      - ``remark`` 缺省沿用源备注，可覆盖。
+    """
+
+    source_id: str = Field(max_length=64)
+    env: str = Field("", max_length=32)
+    remark: str = ""
+
+
 class ConfigEnabledIn(BaseModel):
     """✅ R175（BUG-03）：单条配置的「是否参与真实调用」开关（不影响主配置选择）。"""
 

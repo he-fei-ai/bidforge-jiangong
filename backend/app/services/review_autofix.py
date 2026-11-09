@@ -383,13 +383,27 @@ def _context(content: str, pos: int, length: int) -> str:
     if end < 0:
         end = len(content)
     for _ in range(TARGET_CONTEXT_LINES):
-        prev = content.rfind("\n", 0, start - 1)
-        if prev >= 0:
-            start = prev + 1
+        # ✅ R197（B4）：``start == 0``（命中点在全文第一行）时必须跳过向前扩展
+        #    —— 旧实现 ``rfind("\n", 0, start - 1)`` 即 ``rfind("\n", 0, -1)``，
+        #    等价于在 ``content[:-1]`` 里找**最后一个**换行：只要正文后面还有
+        #    换行，start 直接跳到文末最后一行，回显的「原文上下文」（会作为
+        #    targets 送进 AI 提示词）完全错误。
+        #    prev < 0（上一行即全文首行）时 start 归零 —— 旧实现保持原值，
+        #    命中在第二行时上下文会漏掉第一行。
+        if start > 0:
+            prev = content.rfind("\n", 0, start - 1)
+            start = prev + 1 if prev >= 0 else 0
         nxt = content.find("\n", end + 1)
         if nxt >= 0:
             end = nxt
-    return content[start:end].strip()[:300]
+    # ✅ R202（2026-11-09 · G2 · 模型可见静默截断）：本片段会作为「命中上下文」
+    #    送进 AI 自动修复提示词。旧实现 ``[:300]`` **静默**截断，模型看到的
+    #    是半句话，会据此断言「原文没有这句」并给出错误的改写。现超限时
+    #    追加省略号，让模型知道上下文被截过（改动仅在 >300 字时发生）。
+    snippet = content[start:end].strip()
+    if len(snippet) > 300:
+        return snippet[:300] + "…（上下文已截断）"
+    return snippet
 
 
 #: 句子分隔符（中英文句末 + 全角分号 + 换行）。
@@ -466,7 +480,11 @@ def _value_pattern(value: str) -> re.Pattern | None:
     num = re.escape(m.group(1))
     # 单位：紧跟数值、可含空白、最多 6 个非数字非标点字符（日历天 / 米 / m）。
     # `(?!\d)` 防前缀误命中：evidence「120天」不得命中正文里的「1200 天」。
-    return re.compile(num + r"(?!\d)[ \t　]*[^\d，。；、,;]{0,6}")
+    # ✅ R198：补 `(?!\.)` —— evidence「120天」不得命中「120.5天」（旧模式在
+    #    "." 处通过 (?!\d)、随后 [^\d]{0,6} 吃掉 "."，定位到小数的前半段，
+    #    用户被带到错误的数值上）。evidence 本身含小数（「120.5天」）时
+    #    num="120\.5" 已整体锚定，不受影响。
+    return re.compile(num + r"(?![\d.])[ \t　]*[^\d，。；、,;]{0,6}")
 
 
 def _locate_value(finding: dict, sections: list[dict]) -> list[dict]:
@@ -591,12 +609,12 @@ def _match_ctrl(content: str):
 
 
 def _match_colloquial(content: str):
-    scan = strip_fenced_code_blocks(content)
+    # ✅ R197（B5）：命中项产自**原文**（find_colloquial_hits(content)），定位却
+    #    曾在 strip_fenced_code_blocks 后的文本上 find —— 命中点之前只要有被
+    #    剥离的代码围栏，pos 系统性前移，下游行号/句子/上下文全部错位。
+    #    统一在原文上定位（原 pos<0 回退分支的口径），坐标系唯一。
     for hit in find_colloquial_hits(content):
-        pos = scan.find(hit)
-        if pos < 0:
-            # 命中项被围栏剔除逻辑跳过了位置对齐，退回全文查找
-            pos = content.find(hit)
+        pos = content.find(hit)
         if pos >= 0:
             yield pos, hit
 

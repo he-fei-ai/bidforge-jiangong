@@ -16,6 +16,7 @@ from app.models import (
     AIConfigIn,
     ConfigEnabledIn,
     ConfigImportIn,
+    DuplicateConfigIn,
     FallbackChainUpdate,
 )
 from app.services.ai.provider_factory import (
@@ -161,11 +162,12 @@ async def save_config(data: AIConfigIn, request: Request = None, db=Depends(get_
     if not data.id:
         dup_cur = await db.execute(
             "SELECT id FROM ai_config WHERE provider_name=? AND model=? AND "
-            "COALESCE(base_url,'')=COALESCE(?, '') AND id != ?",
+            "COALESCE(base_url,'')=COALESCE(?, '') AND COALESCE(env,'')=COALESCE(?, '') AND id != ?",
             (
                 data.provider_name,
                 data.model,
                 resolve_config_base_url(data.provider_name, normalize_plan(data.plan), data.base_url or ""),
+                normalize_env(data.env),
                 cid,
             ),
         )
@@ -198,7 +200,91 @@ async def save_config(data: AIConfigIn, request: Request = None, db=Depends(get_
         request=request,
         snapshot={"before": sanitize_config_snapshot(prev), "after": sanitize_config_snapshot(after_row)},
     )
+    # ✅ 修复（本轮审查）：本端点是唯一在写审计后**不提交路由连接**的写接口。
+    #    ``save_ai_config`` 内部走独立的 ``write_tx_conn`` 自行提交（配置行已落库），
+    #    但审计行写在路由的 ``db`` 连接上且 ``commit=False``；请求结束 ``get_db``
+    #    的 finally 会 ``conn.rollback()``，于是**配置变更审计在生产环境被静默回滚丢失**。
+    #    既有单测因「同一连接读自己的未提交事务」仍可见该审计行而通过了验证（假绿），
+    #    但跨连接（如 GET /ai/config/audit-logs 走独立读池）永远看不到。现显式提交。
+    await db.commit()
     return {"id": cid, "ok": True, "warning": warning, "warnings": warnings, "duplicate_hint": duplicate_hint}
+
+
+@router.post("/config/duplicate")
+async def duplicate_config(body: DuplicateConfigIn, request: Request = None, db=Depends(get_db)):
+    """复制一条已有配置为新配置（模型管理 · 2026-11-09 新增）。
+
+    复制策略见 ``DuplicateConfigIn`` docstring（最优安全默认）：参数原样复制、
+    API Key 以密文直接复制、新 id 为 UUID、复制体不抢占「当前使用」、
+    priority 置于现有最大值之后、env/remark 可覆盖。
+
+    ⚠️ 与 ``save_config`` 同口径：**审计写在路由连接上且 commit=False，必须显式
+    ``db.commit()``，否则会被 ``get_db`` 的 finally rollback 静默丢失**（本轮已修复的 P1）。
+    """
+    source_id = body.source_id
+    cur = await db.execute("SELECT * FROM ai_config WHERE id=?", (source_id,))
+    row = await cur.fetchone()
+    if not row:
+        raise HTTPException(404, "源配置不存在")
+    src = dict(row)
+
+    # env 归一（指定则校验，否则沿用源环境；旧库 env 可能为 NULL）
+    try:
+        target_env = normalize_env(body.env) if body.env else (src.get("env") or "")
+    except ValueError:
+        raise HTTPException(400, "环境标签非法")
+
+    # 新 id：UUID4（碰撞概率极低），极小概率碰撞则重试防御
+    new_id = str(uuid.uuid4())
+    for _ in range(3):
+        hit = await (await db.execute("SELECT 1 FROM ai_config WHERE id=?", (new_id,))).fetchone()
+        if not hit:
+            break
+        new_id = str(uuid.uuid4())
+    else:
+        raise HTTPException(500, "生成配置 id 失败，请重试")
+
+    target_remark = body.remark if body.remark else (src.get("remark") or "")
+    now = datetime.now().isoformat()
+
+    # 单条 INSERT…SELECT 复制：API Key 以密文直接搬移（不解密、不暴露明文），
+    # is_active=0（不抢占当前使用），priority 置当前最大值+1（不扰乱降级链）。
+    await db.execute(
+        "INSERT INTO ai_config ("
+        " id, provider_name, plan, api_key_encrypted, base_url, model,"
+        " max_tokens, temperature, timeout, concurrency, request_mode, env,"
+        " is_active, enabled, priority, remark, updated_at"
+        ") SELECT ?, provider_name, plan, api_key_encrypted, base_url, model,"
+        " max_tokens, temperature, timeout, concurrency, request_mode, ?,"
+        " 0, enabled, (SELECT COALESCE(MAX(priority),0)+1 FROM ai_config), ?, ?"
+        " FROM ai_config WHERE id=?",
+        (new_id, target_env, target_remark, now, source_id),
+    )
+    await record_config_audit(
+        db,
+        "duplicate",
+        config_id=new_id,
+        provider_name=src["provider_name"],
+        model=src["model"],
+        detail=(
+            f"复制自 {source_id}：{src['provider_name']}/{src['model']} "
+            f"环境={target_env or '通用'} "
+            f"密钥={'已随复制' if src.get('api_key_encrypted') else '未设置'} "
+            f"激活=否（需手动激活）"
+        ),
+        request=request,
+        snapshot={"source": sanitize_config_snapshot(src), "target_id": new_id},
+    )
+    # ✅ 关键：审计与 INSERT 同属路由连接事务，统一提交（避免 P1 回滚丢失）
+    await db.commit()
+    return {
+        "id": new_id,
+        "ok": True,
+        "source_id": source_id,
+        "env": target_env,
+        "remark": target_remark,
+        "message": "已复制为新配置（未激活，请按需编辑并手动激活）",
+    }
 
 
 @router.delete("/config/{config_id}")
@@ -637,16 +723,17 @@ def _classify_import_item(raw, existing: set, overwrite: bool) -> dict:
     out["clamped"] = bool(clamp_warnings(raw))
     out["request_mode"] = normalize_request_mode(raw.get("request_mode"))
     try:
-        out["env"] = normalize_env(raw.get("env"))
+        env = normalize_env(raw.get("env"))
     except ValueError:
         out.update({"action": "skip", "reason": f"{provider_name}/{model}：环境标签非法"})
         return out
+    out["env"] = env
     # ✅ R181（2026-11-07）：remark 落 ai_configs.remark（TEXT，容量足够）→ 存全文。
     out["remark"] = str(raw.get("remark") or "").strip()
     # ✅ R179（2026-11-05）：导出文件已包含 enabled，但旧导入逻辑完全忽略它 ——
     #    停用配置迁移后会被静默启用（与「降级链不参与的配置」预期相反）。
     out["enabled"] = coerce_enabled_flag(raw.get("enabled"))
-    if (provider_name, model, base_url) in existing:
+    if (provider_name, model, base_url, env) in existing:
         if overwrite:
             out["action"] = "overwrite"
         else:
@@ -752,8 +839,8 @@ async def import_config(body: ConfigImportIn, request: Request = None, db=Depend
     if not body.items:
         raise HTTPException(400, "导入内容为空")
 
-    cur = await db.execute("SELECT provider_name, model, base_url FROM ai_config")
-    existing = {(r[0], r[1], r[2]) for r in await cur.fetchall()}
+    cur = await db.execute("SELECT provider_name, model, base_url, COALESCE(env,'') FROM ai_config")
+    existing = {(r[0], r[1], r[2], r[3]) for r in await cur.fetchall()}
 
     imported, skipped = 0, 0
     clamped_items = 0  # 数值被收敛的条目数（导入文件可能来自旧版本/被手工改过）
@@ -789,15 +876,17 @@ async def import_config(body: ConfigImportIn, request: Request = None, db=Depend
                 dict(r)
                 for r in await (
                     await db.execute(
-                        "SELECT * FROM ai_config WHERE provider_name=? AND model=? AND base_url=?",
-                        (provider_name, model, base_url),
+                        "SELECT * FROM ai_config WHERE provider_name=? AND model=? AND base_url=?"
+                        " AND COALESCE(env,'')=COALESCE(?, '')",
+                        (provider_name, model, base_url, env),
                     )
                 ).fetchall()
             ]
             await db.execute(
                 "UPDATE ai_config SET plan=?, max_tokens=?, temperature=?, timeout=?, concurrency=?,"
                 " request_mode=?, env=?, enabled=COALESCE(?, enabled), remark=?, updated_at=?"
-                " WHERE provider_name=? AND model=? AND base_url=?",
+                " WHERE provider_name=? AND model=? AND base_url=?"
+                " AND COALESCE(env,'')=COALESCE(?, '')",
                 (
                     plan,
                     nums["max_tokens"],
@@ -812,6 +901,7 @@ async def import_config(body: ConfigImportIn, request: Request = None, db=Depend
                     provider_name,
                     model,
                     base_url,
+                    env,
                 ),
             )
             for before_row in before_rows:
@@ -857,7 +947,7 @@ async def import_config(body: ConfigImportIn, request: Request = None, db=Depend
                 remark,
             ),
         )
-        existing.add((provider_name, model, base_url))
+        existing.add((provider_name, model, base_url, env))
         if old_id:
             key_to_new_id[old_id] = new_id
         if not first_new_id:
@@ -971,9 +1061,9 @@ async def import_config_dry_run(body: ConfigImportIn, db=Depends(read_db)):
     ⚠️ 判据单一出口：本端点绝不允许另写一份校验逻辑 —— 否则会出现
     「预演说会通过、真导入却跳过」的静默错配（本仓已多次踩同类陷阱）。
     """
-    cur = await db.execute("SELECT provider_name, model, base_url FROM ai_config")
+    cur = await db.execute("SELECT provider_name, model, base_url, COALESCE(env,'') FROM ai_config")
     # 批内去重与真导入同口径：前一条新增的三元组会挡住后一条同名单元
-    existing = {(r[0], r[1], r[2]) for r in await cur.fetchall()}
+    existing = {(r[0], r[1], r[2], r[3]) for r in await cur.fetchall()}
 
     planned: list[dict] = []
     skipped = clamped_items = invalid_plan_items = 0
@@ -997,7 +1087,7 @@ async def import_config_dry_run(body: ConfigImportIn, db=Depends(read_db)):
         if c["action"] == "overwrite":
             key_to_new_id[old_id] = old_id
         else:
-            existing.add((c["provider_name"], c["model"], c["base_url"]))
+            existing.add((c["provider_name"], c["model"], c["base_url"], c["env"]))
             key_to_new_id[old_id] = "__new__"
         planned.append(
             {

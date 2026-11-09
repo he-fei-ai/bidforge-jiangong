@@ -145,6 +145,10 @@ class Settings(BaseSettings):
     image_download_timeout: float = 30.0
     image_download_max_bytes: int = 20 * 1024 * 1024
     image_download_max_redirects: int = 3
+    # ⚠️ R199（2026-11-09）已核实为**死配置**：全仓（backend/app）无任何读点。
+    #    同族的方案级图片上限实际生效的是 image_engine.apply_image_budget 读的
+    #    max_ai_images（下方 G2 段）。保留键名避免旧 .env / 环境变量报「未知键」，
+    #    但改动本值不会生效 —— 勿再把它当作生效配置接线新功能。
     image_max_per_project: int = 30
     image_price_per_image: float = 0.0
     # ---------- AI 配图全局预算（G2 · 2026-09-30，默认关闭、零迁移） ----------
@@ -396,6 +400,11 @@ class Settings(BaseSettings):
     # 否则一次性直出。调小 => 更多方案走分步（更稳但调用次数更多）；
     # 调大 => 更多方案一次性直出（更快但弱模型下更易截断）。
     outline_stepwise_min_words: int = 50000
+    # ✅ R181（2026-11-08 · G8/T3）：目录识别 AI 兜底送入的原文片段长度上限。
+    #    旧实现在 upload_outline.parse_outline 内硬编码 6000 字符，现 settings 化
+    #    （默认逐字不变）。调大可让超长文档更多参与 AI 识别，调小则更早截断省 token；
+    #    响应照旧回传 truncated_chars 告知用户有多少原文未参与识别。
+    outline_ai_fallback_max_chars: int = 6000
     # ✅ R175 BUG-1（2026-11-03）：目录生成模式开关（唯一判定点见
     #    sse_handlers._use_stepwise_for_budget）。
     #    auto（默认）= 与引入前**逐字一致**：word_budget > outline_stepwise_min_words
@@ -426,6 +435,13 @@ class Settings(BaseSettings):
     #    默认 500 = 与修复前**逐字相同**（不改任何默认行为），仅暴露为可调项：
     #    弱模型/大方案场景可设 OUTLINE_GENERATE_MAX_NODES=1200 与修复轮对齐。
     outline_generate_max_nodes: int = 500
+    # ✅ R204（2026-11-09 · 生成/修复上限口径对称化）：审核骨架节点上限。
+    #    原硬编码 OUTLINE_REVIEW_MAX_NODES=150（sse_handlers.py），与
+    #    outline_generate_max_nodes 已配置化不对称。默认 150 = 与硬编码逐字相同。
+    outline_review_max_nodes: int = 150
+    # ✅ R204：修复轮目录节点上限。原硬编码 OUTLINE_FIX_MAX_NODES=1200，
+    #    默认 1200 = 与硬编码逐字相同。长方案完整目录（30 章 × 20+ 节点）可调高。
+    outline_fix_max_nodes: int = 1200
     # ✅ P1-3（2026-09-27）：把 outline_templates 匹配到的**标准章节模板**注入
     #    目录提示词（24 套模板此前解析出却从未使用）。默认 True = 生效；
     #    置 False 回退到"仅用通用九大章节骨架"的旧行为。
@@ -555,6 +571,15 @@ class Settings(BaseSettings):
     #    仅影响 _word_budget_hint 文案与 word_deviation_of 的 within_band，
     #    不改变 under/over 判定阈值（WORD_UNDER_RATIO / WORD_OVER_RATIO）。
     word_budget_tolerance: float = 0.1
+    # ✅ R204（2026-11-09 · token 上界收口）：单章字数预算的**硬上限**。
+    #    此前 word_budget_override 只校验「> 0」，``10**8`` 这类值会一路成为
+    #    章预算并折算出天文数字的 max_tokens → 厂商 400（整批章节失败）
+    #    + 输出成本失控。超限值被**夹紧**到本上限（不静默丢弃用户意图）。
+    #    正常章节预算（≤ 2 万字）不受影响 ⇒ 默认配置下行为逐字节不变。
+    max_word_budget: int = 20000
+    # 单次 AI 调用**输出** token 的硬上限（provider 请求体的 max_tokens）。
+    #    正常章节折算值（≤2 万字 → ≤2 万 token）远低于该值 ⇒ 逐字节不变。
+    max_output_tokens: int = 32768
     # ✅ 编号统一（2026-09-25）：正文子标题编号落库前规范化（默认开启）。
     #    落库前用与导出 write_section 完全同一套算法（numbering.renumber_section_body_subheadings）
     #    重写正文内 Markdown/纯文本子标题编号，使「前端预览 = 落库正文 = 导出成稿」三处同源，
@@ -576,7 +601,10 @@ class Settings(BaseSettings):
     #    True（默认）= DLV-14（medium 级，不阻断导出，只在预检清单里列出失效引用）；
     #    False = 关闭该预检（旧行为）。真实图号/表号/节号由导出端的 figure_counters/table_counters/
     #    heading_gen.counters 按分配顺序决定，与正文硬编码的「图3-2」可能漂移——本开关只控制预检，
-    #    不做自动改写（改写见 E6 Tier 2 crossref_rewrite_enabled）。
+    #    不做自动改写。（✅ R196 注释诚实化：原注释引用的「E6 Tier 2 crossref
+    #    改写开关」从未落地，全仓无此配置、无 Tier 2 实现 —— 自动改写属产品级
+    #    行为变更，正文硬编码引用的修复路径是预检 DLV-14 提示 + 人工确认，
+    #    勿再据此注释误判有改写能力。）
     crossref_stale_detect_enabled: bool = True
     # ✅ 正文生成采样温度（2026-09-22 引入，对齐 OpenBidKit 可配置温度能力）：
     #    None = 沿用 provider 默认温度（旧行为，确定性由 AI 配置决定），保持向后兼容；
@@ -1097,8 +1125,14 @@ class Settings(BaseSettings):
     #        break**，故把相关事实**前置排序**即等效于"提高可见性"。
     #    ⚠️ 零信息损失：不删除任何条目，未命中时行为与旧版完全一致。
     outline_basis_relevance: bool = True
-    # 相关项的预算份额放大倍数（仅在 outline_basis_relevance=True 时生效）。
-    # 2.0 = 相关项份额约为无关项两倍；调大更激进，调到 1.0 等价于关闭加权。
+    # ⚠️ R188（L12 · 诚实化）：以下字段当前**没有任何读取点**（全仓 grep 仅命中
+    #    定义与本注释）。历史注释承诺「相关小节 ×boost 倍份额」，但
+    #    ``_budgeted_truncate_sections`` 实际只做「相关性前置排序」+ 长度占比
+    #    ``_allocate_char_budgets``，从未做倍率加权。为避免运维按 2.0 调参却
+    #    误以为生效，此处如实标注为**预留字段**；真接线需改预算分配并做 A/B
+    #    （模型可见输入会变），见 docs/目录生成模块遗留收口_R188_20261108.md §五。
+    #    双向 parity 棘轮见 tests/test_outline_legacy_closeout_r188_20261108.py。
+    # 预留：相关项预算份额放大倍数（暂不参与计算，改动不会有任何效果）。
     outline_relevance_boost: float = 2.0
     # ✅ 2026-09-27（要求四 · 全面性）：目录生成后做「方案名称关键词 → 目录章节」
     #    覆盖校验，缺口并入外科式补齐的 missing 列表（复用既有补齐链路，
@@ -1139,6 +1173,16 @@ class Settings(BaseSettings):
     #   「全局事实 > 目录树 > 资料摘要 > 知识库」优先级保重要、削次要。
     #   0（默认）= 关闭，沿用既有「逐章精选 + 组件级截断」行为。
     prompt_context_budget: int = 0
+
+    # ✅ R202（2026-11-09 · G6）：调整指令（「调整要求」）物理上限（字）。
+    #   0（默认）= 自动：按「用户自述的上下文安全上限」context_length_limit
+    #   推导（指令 ≤ 上下文的 1/4，夹到 [600, 6000]）；两者都未配置时恒为
+    #   6000 —— 与引入前**逐字节一致**（既有硬上限 INSTRUCTION_PROMPT_MAX_CHARS）。
+    #   >0 时显式指定，同样夹到 6000（硬天花板，防止「用户自己把上限调到
+    #   10 万字」直接撑爆模型窗口）。
+    #   为什么需要：本仓 ai_config 表不持久化每个模型的上下文窗口，
+    #   6000 的推导锚定 32k 窗口；用户换小窗口模型后该常量不再安全。
+    prompt_instruction_max_chars: int = 0
 
     # AI 配置（主配置 + 降级链 + 场景路由）内存缓存 TTL（秒）。
     # ✅ 2026-09-23 修复：该配置项此前**从未被消费** —— provider_factory 里

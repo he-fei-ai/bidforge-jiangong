@@ -691,7 +691,12 @@ def check_outline_continuity(outline: list) -> dict:
         elif key:
             issues["duplicate_titles"].append({"path": path, "title": title, "first": seen[key]})
         nid = str(node.get("id") or "").strip()
-        if nid and _DOT_ID_RE.fullmatch(nid) and nid != path:
+        # ✅ R203 FIX：盲区收口——旧判据 `_DOT_ID_RE.fullmatch(nid)` 只对点分 id
+        #    判错位，UUID/垃圾 id 不报（历史脏数据漏检）。语义：check_outline_continuity
+        #    在 normalize_outline（renumber）之后调用，此时合法 id 必为点分路径；
+        #    非点分 id（UUID/垃圾）本身就是错位（renumber 未能归一）。
+        #    两分支合并：点分 id 与位置不等、或 id 非点分形态，均报 numbering_mismatch。
+        if nid and (not _DOT_ID_RE.fullmatch(nid) or nid != path):
             issues["numbering_mismatch"].append({"path": path, "id": nid, "expected": path, "title": title})
         children = node.get("children")
         if isinstance(children, list) and children:

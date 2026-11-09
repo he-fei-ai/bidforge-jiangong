@@ -219,6 +219,7 @@ import type {
   OutlineNodeInput,
   SseBaseEvent,
   ContentGenEvent,
+  ContextDegradedEvent,
   SchemeRecord,
   WorkbenchSection,
   MultiSectionHint,
@@ -275,7 +276,7 @@ import {
   buildBatchAckStaleResultCopy,
   buildBatchResolveCopy,
   buildBatchResolveResultCopy,
-  buildFactsCategoryEntries,
+  buildFactsCategoryEntriesFromStats,
   buildFactsPagination,
   buildFactsSummary,
   factAttrTitle,
@@ -418,7 +419,7 @@ export {
   buildBatchResolveCopy,
   buildBatchResolveResultCopy,
   buildFactChapterStats,
-  buildFactsCategoryEntries,
+  buildFactsCategoryEntriesFromStats,
   buildFactsPagination,
   buildFactsSummary,
   factAttrTitle,
@@ -723,13 +724,17 @@ export default function SchemeWorkbenchPage() {
   // ✅ R45 · D5：自然语言调整（预览 → 二次确认 → 应用）的状态机已抽到
   // 模块级 FactsAdjustPanel，页面上不再持有这组瞬态。
   // 分类聚合：左侧分类面板数据源（label 取分类白名单中文名，缺失回退原文）
+  // ✅ R193（L-07 · R189 遗留落地）：数据源从「当前页 20 组聚合」切换为后端
+  //    stats.by_category 全量统计（后端注释明确「分页仅影响 groups，统计基于
+  //    全量」）。>20 组方案面板分类不再缺行、计数徽标与实际一致；排序同源
+  //    （后端 _cat_order）保证面板首项必在当前页分组头部，默认选中不悬空。
   const factCategoryEntries = useMemo(
     () =>
-      buildFactsCategoryEntries(
-        facts,
+      buildFactsCategoryEntriesFromStats(
+        factsSummary,
         (cat) => factCategoryOptions.find((o) => o.value === cat)?.label || "",
       ),
-    [facts, factCategoryOptions],
+    [factsSummary, factCategoryOptions],
   );
   const activeFactCategory = resolveSelectedFactCategory(factCategoryEntries, selectedFactCategory);
   const activeFactGroups = useMemo(
@@ -1191,7 +1196,13 @@ export default function SchemeWorkbenchPage() {
       // treeData / outlineEditTreeData / countGeneratedLeaves / collectAllKeys
       // 全量重算 + 整页重渲。加指纹守卫（对齐 setGenStats 的 statsEqual），
       // 无变化时保留旧引用，React 直接跳过本次渲染。
-      setTree((prev) => (treeFingerprint(prev) === treeFingerprint(newTree) ? prev : newTree));
+      // ✅ R203（P1 · 未落库节点保护）：有 local_/upload_ 临时节点时跳过覆盖。
+      //    旧实现无条件 setTree(newTree)——生成期间字数变化导致指纹必不同，
+      //    整树替换把用户尚未保存的新增章节静默丢弃（B11 同族缺陷的轮询路径）。
+      setTree((prev) => {
+        if (hasUnsavedLocalNodes(prev)) return prev;
+        return treeFingerprint(prev) === treeFingerprint(newTree) ? prev : newTree;
+      });
       const allKeys = collectAllKeys(newTree);
       setExpandedKeys((prev) => (prev.length === 0 ? allKeys : prev));
     } catch {
@@ -1262,7 +1273,34 @@ export default function SchemeWorkbenchPage() {
         setFactsPagination(data.pagination || null);
         setFactsPage(wantPage);
         factsPageRef.current = wantPage;
-        void loadFactsDiagnostics();
+        // ✅ R189（2026-11-08）：把本次列表请求的 signal 透传给诊断链。
+        //    此前 loadFactsDiagnostics 支持 options.signal，却没有任何调用方
+        //    传入 → 切方案/再次 loadFacts 时旧诊断请求继续在飞，
+        //    mergeFactsDiagnosticsSettled 的 aborted 分支永远是死代码。
+        // ✅ R193（D-11）：诊断与页码无关（章节/危大检查基于文档面），仅首屏
+        //    /刷新（offset=0）拉取——旧实现每次翻页都重发 2 个诊断请求
+        //    （danger-check 走 AI 参数核对链路时开销可观）。
+        if (offset === 0) void loadFactsDiagnostics({ signal: ac.signal });
+        // ✅ R189（调用链闭合）：后端 GET /global-facts/cross-conflicts 自 R175
+        //    就把已落库的多来源冲突暴露出来，前端却从未调用 —— 页面一刷新
+        //    「跨段矛盾」横幅只能靠 SSE 内存态，冲突记录仍在 DB 却不可见。
+        //    这里在列表刷新后回读；**仅在本地为空时补齐**，避免覆盖 SSE 本轮
+        //    刚下发的实时结果（两者同源，实时态优先）。失败静默：诊断数据
+        //    不该让事实列表整体加载失败。
+        void (async () => {
+          try {
+            // 独立 async 块：即使测试替身/旧版 api 层没有该方法，同步 TypeError
+            // 也只在这里被吞掉，绝不能冒泡进 loadFacts 的 catch → 误报「加载失败」。
+            const { data } = await factsApi.crossConflicts(requestedSchemeId, { signal: ac.signal });
+            if (!isCurrentSchemeRequest(requestedSchemeId, currentSchemeIdRef.current, ac.signal))
+              return;
+            const conflicts = Array.isArray(data?.conflicts) ? data.conflicts : [];
+            if (conflicts.length) setFactsCrossConflicts((prev) => (prev.length ? prev : conflicts));
+          } catch (e: unknown) {
+            if ((e as { name?: string })?.name === "AbortError" || ac.signal.aborted) return;
+            console.warn("回读已落库跨段矛盾失败（不影响事实列表）:", e);
+          }
+        })();
       } catch (e: unknown) {
         const err = e as { name?: string; message?: string };
         if (err?.name === "AbortError" || ac.signal.aborted) return;
@@ -1370,6 +1408,17 @@ export default function SchemeWorkbenchPage() {
       .expertItems()
       .then(({ data }) => setExpertItems(data.items || []))
       .catch(() => {});
+    // ✅ R193 修复（D-01 · 与 R191 factsDocsListAbortRef 同构漏面）：事实列表
+    //    在飞请求的中止必须收进本 effect 的 cleanup（React 保证 cleanup 先于
+    //    下一轮 body 执行）——「先杀上一轮、再发新一轮」。旧实现把 abort 放在
+    //    [id] 切换 effect 里：同一次 commit 内本 effect 先执行（loadFacts 的
+    //    同步前缀已创建新 AbortController 并发出新方案请求），切换 effect 随后
+    //    abort 的恰是新方案刚发出的请求且无重发路径 → catch 吞掉 AbortError、
+    //    finally 的 isCurrentSchemeRequest（新 id vs 新 id）通过 → factsReady
+    //    误置 true → 事实 Tab 永久空态（分组/分页/诊断/矛盾横幅全空，且无自愈）。
+    return () => {
+      factsListAbortRef.current?.abort();
+    };
   }, [id, load, loadFacts, loadComplianceHistory]);
 
   // 上传配额动态下发：该配置全局通用、与具体方案无关，挂载时拉取一次即可。
@@ -1446,8 +1495,18 @@ export default function SchemeWorkbenchPage() {
   }, [activeTab]);
 
   // ✅ 进入工作台即拉取资料文档列表（按 scheme id 查询，不依赖 project_id 是否已加载）
+  //    ✅ R191 修复（切方案竞态）：本 effect 声明在「切方案清理」effect **之前**，
+  //    React 按声明序执行 body —— id 变化时这里先发出新方案请求
+  //    （factsDocsListAbortRef 已被覆盖为新请求），随后清理 effect 的
+  //    factsDocsListAbortRef.abort() 会**误杀新方案刚发出的请求**且无重发
+  //    → 新方案页面残留上一个方案的文档列表（行内解析/删除还携带旧方案
+  //    docId）。现把中止收进本 effect 的 cleanup：React 保证 cleanup 先于
+  //    下一轮所有 effect body 执行，中止的永远是「上一轮」请求。
   useEffect(() => {
     if (id) loadDocuments();
+    return () => {
+      factsDocsListAbortRef.current?.abort();
+    };
   }, [id, loadDocuments]);
 
   // 「上传解析」/「提取项目」模块的一次性元数据加载（分类选项 + 解析项定义）
@@ -1539,12 +1598,19 @@ export default function SchemeWorkbenchPage() {
       uploadAbortRef.current?.abort();
       parseAbortRef.current?.abort();
       previewAbortRef.current?.abort();
-      factsListAbortRef.current?.abort();
-      factsDocsListAbortRef.current?.abort();
+      // ✅ R191/R193：factsDocsListAbortRef 与 factsListAbortRef 的中止均已收进
+      //    各自「列表加载」effect 的 cleanup（先于本 effect body 执行）——在
+      //    这里 abort 会误杀本 commit 内新方案刚发出的列表请求且无重发。
       baSseAbortRef.current?.abort();
       exportCheckAbortRef.current?.abort();
       cacheAbortRef.current?.abort();
       exportAbortRef.current?.abort();
+      // ✅ R197（F1）：审核与预检域三 ref —— 旧实现切方案不中止，旧方案 1-3 分钟
+      //    的 AI 检查返回后直接把结果落到新方案页面。CR 扫描/修复两 ref 在
+      //    useReviewAudit 内部，由其 [id] effect 收口。
+      expertAbortRef.current?.abort();
+      checkAbortRef.current?.abort();
+      auditAbortRef.current?.abort();
       sseBatcherRef.current?.stop();
       exportBatcherRef.current?.stop();
       exportingRef.current = false;
@@ -1552,8 +1618,25 @@ export default function SchemeWorkbenchPage() {
       setExportPhase("");
       setCheckingExport(false);
       setCacheLoading(false);
+      // ✅ R193 修复（D-02 · 生成运行态跨方案残留）：旧实现切换时只 abort SSE
+      //    与 ++genSeqRef —— 被中止协程 finally 的世代校验（genSeq 不匹配）会
+      //    跳过状态复位 ⇒ generating/genType/taskPaused/taskStopping/
+      //    activeTaskIdRef 全部残留上一方案：新方案永久卡「正在提取全局事实」
+      //    幽灵进度卡、全部事实操作按钮 disabled、停止按钮指向旧方案任务 id，
+      //    且因入口全禁用用户无自愈途径（目录/正文链同灶，同因同修）。
+      //    切换是同步点：++genSeq 已让旧协程不再复位，这里显式复位是唯一权威
+      //    时机；若新方案确有运行中任务，接管轮询会重新置位。
+      setGenerating(false);
+      setGenType("");
+      setTaskPaused(false);
+      setTaskStopping(false);
+      activeTaskIdRef.current = "";
     }
     initialTabDecidedRef.current = false;
+    // ✅ R191 修复（切方案列表残留）：新方案列表请求是异步的，成功回写前
+    //    docList 仍是上一个方案的数据——先清空占位，避免「新方案页面闪现
+    //    旧方案文档」与请求失败时永久残留。
+    setDocList([]);
     setFacts([]);
     setFactsSummary(null);
     setFactsReady(false);
@@ -1564,6 +1647,16 @@ export default function SchemeWorkbenchPage() {
     setFactsCrossConflicts([]);
     setFactsChapterReport(null);
     setFactsDangerReport(null);
+    // ✅ R189（2026-11-08 · 切方案态残留三件套）：
+    //    ① factsPagination 不清 → 新方案首屏可能短暂沿用旧方案的 total/pageSize；
+    //    ② factsPageSchemeRef 不清 → resolveFactsLoadPage 在「切走再切回」时
+    //       把旧方案 id 当成"同方案"，沿用切走前的非首页 offset；
+    //    ③ factsDiagnosticsLoading 不清 → 旧诊断请求 finally 里的
+    //       `requestedSchemeId === currentSchemeIdRef.current` 判据不成立，
+    //       永远没人把 loading 置回 false，新方案诊断面板一直转圈。
+    setFactsPagination(null);
+    factsPageSchemeRef.current = "";
+    setFactsDiagnosticsLoading(false);
     // ✅ BUG-06 前端半边（R176 · 2026-11-04）：页码回第 1 页，与
     //    resolveFactsLoadPage 的「新方案首请求 offset=0」共同保证不再带旧页码。
     factsPageRef.current = 1;
@@ -1626,6 +1719,11 @@ export default function SchemeWorkbenchPage() {
       exportCheckAbortRef.current?.abort();
       cacheAbortRef.current?.abort();
       exportAbortRef.current?.abort();
+      // ✅ R197（F1）：审核与预检域三 ref 卸载兜底（CR 两 ref 由 hook 卸载
+      //    cleanup 收口）—— 离开方案页后 AI 不再继续计费、不再向已卸载组件 setState
+      expertAbortRef.current?.abort();
+      checkAbortRef.current?.abort();
+      auditAbortRef.current?.abort();
       presetListAbortRef.current = null;
       exportCheckAbortRef.current = null;
       cacheAbortRef.current = null;
@@ -1694,6 +1792,7 @@ export default function SchemeWorkbenchPage() {
     modal,
     generating,
     genSeqRef,
+    activeTaskIdRef,
     setGenerating,
     setGenType,
     setTaskPaused,
@@ -1701,6 +1800,24 @@ export default function SchemeWorkbenchPage() {
     setProgressMsg,
     load,
     pollTaskUntilTerminal,
+    // ✅ R194（FIX-16）：content 任务手动接管终态消费 content_result —— 与断线
+    //    重挂路径（handleGenerateContent 的 hit.final 分支）同一对纯函数同口径。
+    //    用 mergeFailedSectionsIntoRef（:1019，声明在前且 useCallback 稳定），
+    //    不用 :2255 的薄包装（声明在后，此处引用会 TDZ）。
+    onContentResult: (fin) => {
+      const _ck = contentResultFailedSections(fin.content_result);
+      if (_ck.sections.length) {
+        mergeFailedSectionsIntoRef(_ck.sections);
+        msg.warning(`后台正文生成有 ${_ck.failedCount} 章失败，已在下方日志列出明细（可逐章重试）`);
+      }
+      const _sum = contentResultSummary(fin.content_result);
+      if (_sum.total > 0) {
+        const _overMsg = _sum.overCount > 0 ? `，${_sum.overCount} 章超字数` : "";
+        // ✅ R199：断线重挂摘要透出配图数（此前图表产出明细重挂后整体丢失）
+        const _chartMsg = _sum.charts > 0 ? `，配图 ${_sum.charts} 张` : "";
+        msg.info(`后台正文生成：已完成 ${_sum.done}/${_sum.total} 章，共 ${_sum.words} 字${_overMsg}${_chartMsg}`);
+      }
+    },
     unknownTaskTypeLabel: UNKNOWN_TASK_TYPE_LABEL,
   });
 
@@ -1755,11 +1872,19 @@ export default function SchemeWorkbenchPage() {
           if (activeTaskIdRef.current === active.id) activeTaskIdRef.current = "";
         };
         let stuckAtFull = 0;
+        // ✅ R194（FIX-12 · C-1 接管轮询韧性）：单次网络失败即静默弃管（旧实现
+        //    catch 块内直接 return）—— generating=true 永久残留（全部生成按钮
+        //    disabled、进度冻结、「完成后自动刷新」失效），与 R174 F2「绝不静默
+        //    回空闲」纪律冲突（该纪律只覆盖了 pollTaskUntilTerminal 调用方，漏了
+        //    这条独立轮询循环）。现对齐 taskPolling 的 5 次连续失败容错：单次失败
+        //    继续轮询；连续失败按未知态收尾（markUnknownTask 横幅 + 手动重接入口）。
+        let pollFailStreak = 0;
         for (let i = 0; i < 400; i++) {
           await new Promise((r) => setTimeout(r, 3000));
           if (cancelled) return;
           try {
             const { data: st } = await tasksApi.status(active.id);
+            pollFailStreak = 0;
             // ✅ F3：接管期间同步暂停态（后台可能被其他入口暂停/恢复）
             if (takenOver) setTaskPaused(st.status === "paused");
             // ✅ R89 S4：接管轮询期间同步进度。旧实现只同步暂停态，用户刷新页面
@@ -1770,6 +1895,28 @@ export default function SchemeWorkbenchPage() {
             //    降级完成的后台任务在这里会被一直判为「仍在跑」。
             if (isTerminalTaskStatus(st.status)) {
               resetTakeover();
+              // ✅ R194（FIX-16 · C-9 三路口径统一）：content 任务的终态此前只走
+              //    「msg + load()」，checkpoint 白名单里的 content_result（失败明细 /
+              //    进度摘要）在接管终态下无人消费 —— 断线重挂路径（handleGenerate
+              //    Content 的 hit.final 分支）与在线 completed 分支都能看到「N 章失败
+              //    / 共 X 字」，刷新接管后 sectionLogs 为空、失败明细永久不可见。
+              //    现与重挂路径同口径消费（同一对纯函数，无第三副本）。
+              if (active.task_type === "content_generation") {
+                const _ck = contentResultFailedSections(st.content_result);
+                if (_ck.sections.length) {
+                  mergeFailedSections(_ck.sections);
+                  msg.warning(`后台正文生成有 ${_ck.failedCount} 章失败，已在下方日志列出明细（可逐章重试）`);
+                }
+                const _sum = contentResultSummary(st.content_result);
+                if (_sum.total > 0) {
+                  const _overMsg = _sum.overCount > 0 ? `，${_sum.overCount} 章超字数` : "";
+                  // ✅ R199：断线重挂摘要透出配图数
+                  const _chartMsg = _sum.charts > 0 ? `，配图 ${_sum.charts} 张` : "";
+                  msg.info(
+                    `后台正文生成：已完成 ${_sum.done}/${_sum.total} 章，共 ${_sum.words} 字${_overMsg}${_chartMsg}`,
+                  );
+                }
+              }
               const ckpt = st.outline_result;
               if (
                 active.task_type === "outline_generation" &&
@@ -1833,9 +1980,28 @@ export default function SchemeWorkbenchPage() {
               stuckAtFull = 0;
             }
           } catch {
-            return;
+            pollFailStreak++;
+            if (pollFailStreak >= 5) {
+              resetTakeover();
+              markUnknownTask({
+                taskId: active.id,
+                genType: gt || genTypeMap[active.task_type] || "content",
+                reason: "接管轮询连续网络失败（5 次），任务状态未知",
+              });
+              return;
+            }
+            // 单次/少量失败：继续轮询（后端重启、网络抖动均可自愈）
           }
         }
+        // ✅ R194（FIX-12）：循环耗尽（400×3s ≈ 20 分钟无终态）—— 旧实现直接
+        //    落出 for 循环无任何收尾，同样把 generating 永久卡死。长正文任务
+        //    （30+ 章轻松超过 20 分钟）每次都必然触发。现按未知态收尾。
+        resetTakeover();
+        markUnknownTask({
+          taskId: active.id,
+          genType: gt || genTypeMap[active.task_type] || "content",
+          reason: "接管轮询超限（400×3s）未获得任务终态",
+        });
       } catch {
         /* 接口异常静默 */
       }
@@ -1905,6 +2071,22 @@ export default function SchemeWorkbenchPage() {
     //    故 return false。单点接线覆盖两链，与事实链既有「日志行 + toast」双通道形态一致。
     if (evt.event === "warning") {
       msg.warning(evt.message || "存在需人工核对的提示");
+      return false;
+    }
+    // ✅ R190（FIX-4）：上下文降级可见信号（D-39）。此前该事件无 message 键，
+    //    通用分支 pushOutlineLog("") 直接整条丢弃 ⇒ 知识库读取失败、装配段截断
+    //    用户全程不可见。现按 field/stage/reason/字符数拼提示（不中断流，仅告警）。
+    if (evt.event === "context_degraded") {
+      const d = evt as ContextDegradedEvent;
+      const what =
+        d.reason === "segment_failed"
+          ? "装配段失败（整段上下文缺席）"
+          : "内容被截断";
+      const span =
+        typeof d.original_chars === "number" && typeof d.kept_chars === "number"
+          ? ` ${d.original_chars}→${d.kept_chars} 字`
+          : "";
+      msg.warning(`上下文降级：${d.field || "未知字段"}（${d.stage || "生成阶段"}）${what}${span}，生成质量可能受影响`);
       return false;
     }
     if (evt.event === "error") {
@@ -1993,6 +2175,16 @@ export default function SchemeWorkbenchPage() {
           snapshot_before: snapshotBefore,
         });
         msg.success(`目录已自动确认保存（${outline.length} 个一级章节已锁定）`);
+        // ✅ R188（L9）：后端 R179 N1 / R187 早已回传 snapshot_id 与 roots_locked，
+        //    此前前端零消费 → 用户不知道「已创建可回退快照」，也不知道一级未锁定。
+        if (data?.snapshot_id) {
+          msg.info(
+            `已创建可回退快照（${String(data.snapshot_id).slice(0, 8)}），可在「目录版本」面板一键回退`,
+          );
+        }
+        if (data?.roots_locked === false) {
+          msg.warning("本次保存未锁定一级章节，后续生成可能改动顶层结构");
+        }
         notifyClearedContent(data);
         notifyGenericResidual(data);
         pushOutlineLog(1, "⚡ 自动确认已生效（保存前已创建可回退的目录快照）");
@@ -2132,8 +2324,12 @@ export default function SchemeWorkbenchPage() {
     // ✅ 性能优化：每次生成任务创建独立的 rAF 批处理器。先把上一次任务的
     //    残留批处理排空并 stop，再启用新实例，确保 stop() 的 stopped 标记
     //    不会污染本次任务的 schedule() 调用。
-    sseBatcherRef.current?.stop();
+    //    ✅ R194（FIX-15 · C-10 顺序对齐）：stop() 内部先 pending.clear() 再置
+    //    stopped —— 旧序「stop(); flushNow();」的 flushNow 恒刷空 Map，「排空
+    //    残留」从未发生，上一任务最后一帧的更新被静默丢弃；与本函数尾部
+    //    （finally）的正确顺序 flushNow→stop 自相矛盾。现对齐。
     sseBatcherRef.current?.flushNow();
+    sseBatcherRef.current?.stop();
     const batcher = createSseBatcher();
     sseBatcherRef.current = batcher;
     setGenerating(true);
@@ -2183,6 +2379,8 @@ export default function SchemeWorkbenchPage() {
     }
 
     let taskId = "";
+    // ✅ R194（FIX-13）：本协程是否执行过重挂回填（退出时只清自己写的 ref）
+    let _reattachBackfilled = false;
     try {
       for await (const raw of sseFetch(`/sse/generate-content/${id}`, body, {
         signal: ac.signal,
@@ -2437,6 +2635,20 @@ export default function SchemeWorkbenchPage() {
           //    failed_sections / failed_count（此前只落 checkpoint，在线路径拿不到）。
           //    与 completed 分支走同一合并入口，停止后立即可见失败明细。
           mergeFailedSections(evt.failed_sections);
+          // ✅ R194（FIX-14 · C-5 stopped 摘要消费）：后端 stopped 载荷刻意携带
+          //    standard_summary / fact_autofix_summary（_sse_content_payloads 注释
+          //    明言「用户中途停止也要看得到修复成效」，R77b 三拼装点字段一致），
+          //    前端 stopped 分支此前不消费 —— 同一事件族 completed/degraded 看
+          //    得到「标准校验 N 章 / 事实修复 M 处」，stopped 看不到。现补齐，
+          //    与 completed 分支同口径（无问题不追加、不制造噪音）。
+          const _stoppedStdHint = standardSummaryHint(evt.standard_summary);
+          if (_stoppedStdHint) {
+            msg.warning(_stoppedStdHint);
+          }
+          const _stoppedFaHint = factAutofixHint(evt.fact_autofix_summary);
+          if (_stoppedFaHint) {
+            msg.info(_stoppedFaHint);
+          }
           finalizeRunningLogs("已停止，未生成完成", "skipped");
           const stoppedFailed = typeof evt.failed_count === "number" ? evt.failed_count : 0;
           msg.info(
@@ -2522,6 +2734,17 @@ export default function SchemeWorkbenchPage() {
         }
         if (hit) {
           taskId = hit.taskId;
+          // ✅ R194（FIX-13 · C-4 控制按钮可达性）：重挂期间回填 activeTaskIdRef。
+          //    旧实现 taskId 只赋局部变量 —— 重挂轮询窗口（200×3s ≈ 10 分钟）内
+          //    停止/暂停按钮可见（generating=true）但 handleControl 读到空 id，
+          //    永远提示「任务正在建立连接，尚未取得任务标识」，用户明知任务在跑
+          //    却无法停止（R106 FIX-8 清空 ref 是为防旧指令打到旧任务，重挂拿到
+          //    **同一任务**的 id 后理应回填）。仅在 ref 为空时回填（SSE 阶段已由
+          //    onSseEvent 写入真实 id 的场景不动），退出时只清自己写入的值。
+          if (!activeTaskIdRef.current) {
+            activeTaskIdRef.current = taskId;
+            _reattachBackfilled = true;
+          }
           const fin = hit.final;
           // 后端早已把「失败哪几章、为什么失败」落进 checkpoint（_CHECKPOINT_KINDS
           // 的 content_generation 白名单 + task_status 的 _attach_checkpoint_result），
@@ -2540,9 +2763,11 @@ export default function SchemeWorkbenchPage() {
           const summary = contentResultSummary(fin?.content_result);
           if (summary.total > 0) {
             const overMsg = summary.overCount > 0 ? `，${summary.overCount} 章超字数` : "";
+            // ✅ R199：断线重挂摘要透出配图数
+            const chartMsg = summary.charts > 0 ? `，配图 ${summary.charts} 张` : "";
             msg.info(
               `后台正文生成：已完成 ${summary.done}/${summary.total} 章，` +
-                `共 ${summary.words} 字${overMsg}`,
+                `共 ${summary.words} 字${overMsg}${chartMsg}`,
             );
           }
           if (fin?.status === "completed") {
@@ -2571,6 +2796,11 @@ export default function SchemeWorkbenchPage() {
       setSseReconnecting(false);
       setGenType("");
       setTaskPaused(false);
+      // ✅ R194（FIX-13）：只清本路径回填的 ref（正常 SSE 流的 ref 由 onSseEvent
+      //    写入、新任务启动时 R106 FIX-8 清空，此处不得越位）。
+      if (_reattachBackfilled && activeTaskIdRef.current === taskId) {
+        activeTaskIdRef.current = "";
+      }
     }
     // ✅ 性能优化：任务结束或异常退出后，排空残余批处理并停止，
     //    避免旧任务的 schedule() 闭包在新任务已开始后才触发，污染 UI 状态。
@@ -2674,6 +2904,8 @@ export default function SchemeWorkbenchPage() {
     setFactsSegmentStats,
     setFactsCrossConflicts,
     missingValueMode,
+    // ✅ R193（D-08）：跨方案污染守卫——提取/重试的点击闭包可能落后于方案切换。
+    currentSchemeIdRef,
     docList,
     factsSummary,
   });
@@ -2987,6 +3219,7 @@ export default function SchemeWorkbenchPage() {
     crRepairItemIds,
     handleCrConfirm,
     handleCrRollback,
+    crConfirming,
   } = useReviewAudit({
     id,
     msg,
@@ -3233,6 +3466,10 @@ export default function SchemeWorkbenchPage() {
           parsingDocs={parsingDocs}
           parsingDocId={parsingDocId}
           handleUploadDocuments={handleUploadDocuments}
+          // ✅ R203（R191 遗留承接）：解析中「停止解析」——中断在途批量/单份解析
+          onStopParse={() => {
+            parseAbortRef.current?.abort();
+          }}
           handleParseDocuments={handleParseDocuments}
           loadDocuments={loadDocuments}
           handleParseDocument={handleParseDocument}
@@ -3382,6 +3619,7 @@ export default function SchemeWorkbenchPage() {
           factsLogs={factsLogs}
           uploadingFacts={uploadingFacts}
           parsingDocs={parsingDocs}
+          parsingDocId={parsingDocId}
           taskPaused={taskPaused}
           taskStopping={taskStopping}
           factsChapterReport={factsChapterReport}
@@ -3546,6 +3784,7 @@ export default function SchemeWorkbenchPage() {
           setRerunPlan={setRerunPlan}
           checkingExport={checkingExport}
           exportCheckIncomplete={exportCheckIncomplete}
+          setExportCheckIncomplete={setExportCheckIncomplete}
           handleExportCheck={handleExportCheck}
           handlePlaceholderJump={handlePlaceholderJump}
           rerunning={rerunning}
@@ -3896,6 +4135,7 @@ export default function SchemeWorkbenchPage() {
         history={crHistory}
         consistencySeverity={consistencySeverity}
         forceFullRepair={forceFullRepair}
+        confirming={crConfirming}
         onForceFullRepairChange={setForceFullRepair}
         onScan={handleCrScan}
         onCancelScan={handleCancelCrScan}

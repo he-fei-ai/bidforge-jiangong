@@ -102,9 +102,9 @@ from app.services.file_parser import (  # noqa: F401  re-export for tests monkey
 )
 from app.services.prompt_governance import instruction_truncation, serialize_bounded_json_array
 from app.services.prompt_material_guard import (
-    INSTRUCTION_PROMPT_MAX_CHARS,
     clip_text_notice_meta,
     clip_text_notice_report,
+    effective_instruction_cap,
 )
 
 # ✅ R184（2026-11-07）：本模块所有异常文本回显统一走脱敏单一出口。
@@ -1731,6 +1731,23 @@ async def check_danger_scheme(
 #: 不抛错、不破坏既有客户端行为。
 _ALLOWED_FACT_CATEGORIES = set(CATEGORY_TITLES.keys()) | {"other"}
 
+#: ✅ R189（2026-11-08 · 分类命名空间统一）：旧 AI 调整提示词下发的 category
+#:    枚举与 ``CATEGORY_TITLES`` **漂移了 5 个键**（material /
+#:    construction_practice / process_flow / design_param / safety），模型按提示词
+#:    原样输出合法值，落到 ``_normalize_fact_category`` 却被静默降级 other，
+#:    连带在九大章节视图里消失。代码模板本轮已对齐，但提示词是 **DB 优先**
+#:    （``_registry.render`` → ``_cache.get_prompt``），已保存的旧模板仍会继续
+#:    下发旧枚举 → 只改模板不能覆盖存量。故在此唯一出口补确定性别名映射，
+#:    保证新旧两套命名都落到同一命名空间；未知值仍 fail-soft 回落 other。
+#:    ⚠️ 不扩 ``_ALLOWED_FACT_CATEGORIES``（那是 R89 parity 锁死的契约键集）。
+_LEGACY_FACT_CATEGORY_ALIASES: dict[str, str] = {
+    "material": "material_mgmt",
+    "construction_practice": "execution",
+    "process_flow": "process",
+    "design_param": "tech_param",
+    "safety": "safety_critical",
+}
+
 
 def _normalize_fact_category(raw) -> str:
     """事实分类白名单归一（唯一出口，fail-soft 回落 ``other``）。
@@ -1739,8 +1756,11 @@ def _normalize_fact_category(raw) -> str:
     AI 调整）。``classify_fact_dimensions`` 的 ``CATEGORY_TO_CHAPTER`` 以
     ``CATEGORY_TITLES`` 为键集，未知分类恒落空串 =「未分类」→ 该事实在
     九大章节视图里不显示 —— 分类写错会**连带**让事实从章节覆盖率里消失。
+    ✅ R189：先做旧枚举别名归一（见上），再走白名单，输出恒属于
+    ``CATEGORY_TITLES`` 键集。
     """
-    cat = str(raw or "").strip()
+    cat = str(raw or "").strip().lower()
+    cat = _LEGACY_FACT_CATEGORY_ALIASES.get(cat, cat)
     return cat if cat in _ALLOWED_FACT_CATEGORIES else "other"
 
 
@@ -3867,7 +3887,7 @@ async def adjust_facts(data: AdjustRequest, db=Depends(get_db)):
         # 本次不渲染提示词 → 不会有预算削减；但「指令本身超单条上限」与路径无关，
         # 照 do_apply=False 的口径回传物理上限账面（纯账面：不截断、不重复留痕）。
         instruction_truncated = instruction_truncation(
-            clip_text_notice_meta(instruction, INSTRUCTION_PROMPT_MAX_CHARS), None
+            clip_text_notice_meta(instruction, effective_instruction_cap()), None
         )
     else:
         # ✅ 2026-11-07（物理上限）：调整指令是任务本体，但不能无界 ——
@@ -3875,9 +3895,10 @@ async def adjust_facts(data: AdjustRequest, db=Depends(get_db)):
         #    超模型窗口（502）。6000 字是与开关无关的物理兜底（推导见
         #    prompt_material_guard.INSTRUCTION_PROMPT_MAX_CHARS）；超限附加
         #    模型可见说明。顺序：物理上限先收，预算器再按优先级分配。
-        instruction, _cap_meta = clip_text_notice_report(
-            instruction, INSTRUCTION_PROMPT_MAX_CHARS, "调整要求"
-        )
+        # ✅ R202（G6）：上限改为**按上下文安全上限联动**（默认仍为 6000，
+        #    未配置 context_length_limit 时逐字节不变；配置后指令 ≤ 上下文 1/4）。
+        _instr_cap = effective_instruction_cap()
+        instruction, _cap_meta = clip_text_notice_report(instruction, _instr_cap, "调整要求")
         prompt = render(
             "global_facts_adjust_system",
             # ✅ 2026-11-07（G-STRUCT）：原 ``json.dumps(...)[:30000]`` 会切在 JSON

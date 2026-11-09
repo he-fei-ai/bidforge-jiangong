@@ -1124,9 +1124,52 @@ class PromptContractError(RuntimeError):
 #: 保存期校验的问题级别 → 中文说明（前端直接展示）。
 PROMPT_ISSUE_LABELS = {
     "unknown_shared_ref": "未注册的共享片段引用",
+    "shared_self_reference": "共享片段引用了自身",
+    "shared_cycle": "共享片段之间存在循环引用",
     "contract_var_removed": "相对出厂默认删掉了契约变量",
     "contract_var_added": "新增了契约表中没有的变量",
 }
+
+
+def _shared_refs_of(text: str) -> list[str]:
+    """取正文里引用的共享片段 key（去重、保序）。"""
+    out: list[str] = []
+    for k in re.findall(r"\{(SHARED_[A-Z0-9_]+)\}", text or ""):
+        if k not in out:
+            out.append(k)
+    return out
+
+
+def detect_shared_cycle(key: str, text: str) -> list[str]:
+    """检测共享片段的**互引成环**（A→B→A），返回环路径（空 = 无环）。
+
+    ✅ R204（2026-11-09）：旧保存期校验只判**自引用**（``{SHARED_X}`` 里含
+    ``{SHARED_X}``），**不判互引** —— 用户把两个共享片段改成互相引用即可
+    落库，运行时才会爆 ``RecursionError``（详见 ``_cache._resolve_shared_keys``
+    的注释）。本函数把「互引」提前到保存期拦截（level=error → 400）。
+
+    判据说明：只有**共享片段自身**才可能成环（宿主模板引用片段是单向的，
+    片段无法引用宿主），故仅对 ``SHARED_*`` 的 key 生效。引用到的其它片段
+    内容取**注册表当前 content**（``update_prompt`` 会同步改写它），
+    因此「先改 A 再改 B」与「先改 B 再改 A」两种顺序都能在**后保存的那次**
+    被检出。
+    """
+    if not key.startswith("SHARED_"):
+        return []
+    seen = {key}
+    frontier: list[tuple[str, str]] = [(key, text or "")]
+    while frontier:
+        cur_key, cur_text = frontier.pop(0)
+        for sk in _shared_refs_of(cur_text):
+            if sk == key:
+                return [cur_key, sk]
+            if sk in seen:
+                continue
+            seen.add(sk)
+            meta = _ALL_PROMPTS.get(sk) or {}
+            body = str(meta.get("content") or meta.get("default_content") or "")
+            frontier.append((sk, body))
+    return []
 
 
 def validate_prompt_content(
@@ -1204,6 +1247,24 @@ def validate_prompt_content(
                 }
             )
             break
+
+    # ②-b 共享片段**互引**成环（A→B→A）—— 保存期直接拒绝（error → 400）。
+    #     运行时虽已由环检测兜底（保留字面量 + WARNING，不崩），但让用户在
+    #     保存时就知道「这两个片段不能互相引用」，比事后每轮生成刷 WARNING
+    #     更符合治理预期。
+    _cycle = detect_shared_cycle(key, text)
+    if _cycle:
+        issues.append(
+            {
+                "level": "error",
+                "code": "shared_cycle",
+                "message": (
+                    f"共享片段 {key} 与 {' → '.join(_cycle[1:])} 存在循环引用，"
+                    f"会造成展开递归；请去掉其中一侧的引用"
+                ),
+                "detail": _cycle,
+            }
+        )
 
     # ③ 契约变量增删（相对出厂默认的占位符集合）
     #    ✅ 判据收敛（2026-09-30）：**必须复用 `_is_false_positive`**。

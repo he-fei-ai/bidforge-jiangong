@@ -623,7 +623,13 @@ function ReviewWorkflowPanel({ schemeId, refreshKey = 0, onChanged }: ReviewWork
               <Progress
                 percent={summary.progress}
                 size="small"
-                status={summary.reviewed_all ? "success" : "active"}
+                // ✅ R197：reviewed_all = 全部审完（含驳回）—— 全驳回也标绿色
+                //    「success」会误导；success 仅在全部通过时点亮
+                status={
+                  summary.reviewed_all && summary.approved_sections === summary.total_sections
+                    ? "success"
+                    : "active"
+                }
               />
             </Col>
             <Col span={14}>

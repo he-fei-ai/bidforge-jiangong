@@ -21,6 +21,7 @@ import re
 
 import app.routers._chart_pipeline as CP
 import app.routers.sse_handlers as SH
+import pytest
 from app.routers._chart_pipeline import (
     _CHART_PER_SECTION_LIMIT,
     _CHART_SCHEME_TYPE_DEFAULT_LIMIT,
@@ -34,6 +35,7 @@ VALID_FLOW = "flowchart TD\n    A --> B\n    B --> C"
 VALID_AI = json.dumps({"prompt": "现场平面布置剖面图", "title": "现场平面布置图"}, ensure_ascii=False)
 
 # 删图理由封闭枚举 —— 新增理由必须同时进这个集合，否则下面的静态护栏会红。
+# ✅ R199：补 R196 引入的 min_words（短章不配图实际字数闸）。
 DROP_REASONS = {
     "per_section_limit",
     "scheme_type_limit",
@@ -43,6 +45,7 @@ DROP_REASONS = {
     "invalid_json",
     "insert_failed",
     "insert_none",
+    "min_words",
 }
 
 
@@ -71,6 +74,15 @@ class FakeDb:
 
 def plan(content, **kw):
     return build_inline_chart_plan("scheme-1", "sec-1", content, enforce_limits=True, **kw)
+
+
+@pytest.fixture(autouse=True)
+def _r199_disable_min_words_gate(monkeypatch):
+    """✅ R199 重锚：R196 在 enforce 链路引入「实际成文 <200 字删图」闸
+    （_CHART_MIN_WORDS），本文件的 fixture 正文均远短于 200 字 —— 该闸会在
+    各测试目标理由之前先删块。本文件测的是**删图可观测语义**而非 min_words
+    闸本身（R196 自有护栏），故置 0 恢复各用例原判据。"""
+    monkeypatch.setattr(CP, "_CHART_MIN_WORDS", 0)
 
 
 # =========================================================================

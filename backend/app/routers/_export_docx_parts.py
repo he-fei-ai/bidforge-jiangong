@@ -19,17 +19,42 @@ _INLINE_RE = _sh.re.compile(
 #: 路径此前**直写用户输入**，表单里混入一个 ``\x00`` 即让整单导出 500
 #: （连同已生成内容全部作废）。现统一经 ``_xml_safe_text`` 剥除非法字符
 #: （合法空白 \t/\n/\r 原样保留），并由 ``_safe_add_run`` 作为唯一出口。
-_XML_ILLEGAL_RE = _sh.re.compile("[\x00-\x08\x0b\x0c\x0e-\x1f\x7f\ufffe\uffff\ud800-\udfff]")
+_XML_ILLEGAL_RE = _sh.re.compile(
+    "[\x00-\x08\x0b\x0c\x0e-\x1f\x7f\ufffe\uffff\ud800-\udfff\u200b\u200c\u200d\u2060\ufeff]"
+)
 
 
 def _xml_safe_text(text) -> str:
-    """剥除 XML 非法字符；``None`` → 空串，非字符串按 ``str`` 转换。"""
+    """剥除 XML 非法字符与零宽字符；``None`` → 空串，非字符串按 ``str`` 转换。
+
+    ✅ R195 收口（P2）：补 U+200B/200C/200D（零宽空格族）/U+2060（词连接符）/
+    U+FEFF（BOM 残留）—— AI 正文夹带的零宽字符旧实现原样印进成稿（Word 不可见
+    但复制/检索错位），且可打断检出正则使失效引用静默漏报。
+    """
     if text is None:
         return ""
     s = text if isinstance(text, str) else str(text)
     if not s:
         return s
     return _XML_ILLEGAL_RE.sub("", s)
+
+
+def _clamp_paragraph_text(text: str) -> str:
+    """超长段落 fail-soft 截断（与表格尺寸上限同口径）。
+
+    ✅ R195 收口：单段字符数超过 ``_PARAGRAPH_MAX_CHARS``（病理级，正常段落恒不触发）
+    时截断到上限，并递增线程局部 ``paragraph_truncated`` 计数 + 告警，避免巨大裸段落
+    拖垮 python-docx / Word 解析甚至 OOM。返回裁剪后的文本（调用方照常渲染）。
+    """
+    if text and len(text) > _PARAGRAPH_MAX_CHARS:
+        _sh._fix_stats()["paragraph_truncated"] = _sh._fix_stats().get("paragraph_truncated", 0) + 1
+        _sh.logger.warning(
+            "导出：超长段落已截断（原始 %d 字符 → %d 字符上限），成稿该段不完整，请回查源文",
+            len(text),
+            _PARAGRAPH_MAX_CHARS,
+        )
+        return text[:_PARAGRAPH_MAX_CHARS]
+    return text
 
 
 def _safe_add_run(paragraph, text):
@@ -412,6 +437,18 @@ _FIX_STATS_KEYS = (
     #   被拆分还原的次数（普通表恒为 0）。加法式扩展：既有键语义
     #   与取值一字未动。
     "table_unstacked",
+    # ✅ R195（2026-11-09 · P2 附录坏缓存守卫）：事实/补充附录渲染失败
+    #   （TypeError 编程错误与运行期波动两路）计数。此前仅 WARNING/ERROR
+    #   日志，产物缺附录仍写 export_cache —— 指纹含事实行集，下次同事实
+    #   导出命中这份**永久缺附录**的缓存且零信号。现计入降级判据
+    #   （X-Export-Degraded: appendix-dropped → 不写缓存），明细随
+    #   X-Fix-Stats 下发。加法式扩展：既有键语义与取值一字未动。
+    "facts_appendix_dropped",
+    "sources_appendix_dropped",
+    # ✅ R195 收口（超长段落上限）：单段超过 _PARAGRAPH_MAX_CHARS 被截断的次数
+    #   （正常段落恒为 0）。与 table_truncated 同口径的 fail-soft，明细随
+    #   X-Fix-Stats 下发，前端可提示「成稿存在被截断的超长段落」。
+    "paragraph_truncated",
 )
 _FIX_STATS_LOCAL = _sh.threading.local()
 
@@ -563,8 +600,14 @@ def _add_table_caption(doc, text: str, font_name: str = "宋体", font_size: flo
     return p
 
 
-#: 表题开头「表 X-Y」/「表：」等编号前缀（剥离后再由导出统一编号，避免叠写）。
-_LEADING_TABLE_NUM_RE = _sh.re.compile(r"^表\s*(?:[:：]\s*|[0-9一二三四五六七八九十][0-9.\-–—]*[\s、.：:]+)")
+#: 表题开头「表 X-Y」/「表：」/「表格 X-Y」等编号前缀（剥离后再由导出统一编号，避免叠写）。
+#: ✅ R195 收口（P3）：补两类漏网形态 —— ①「表格 6-1 …」（「表」后是「格」，旧
+#:    ``\s*`` 不匹配 → 复现「表 X-Y 表格 X-Y」叠写）；②全角数字「表６-１」；
+#:    ③「表」与编号间夹带零宽字符（Cf 格式字符，\s 不匹配）。
+_ZW = r"[\s\u200b\u200c\u200d\u2060\ufeff]*"
+_LEADING_TABLE_NUM_RE = _sh.re.compile(
+    r"^表" + _ZW + r"格?" + _ZW + r"(?:[:：]" + _ZW + r"|[0-9０-９一二三四五六七八九十][0-9０-９.\-–—]*" + _ZW + r"[、.：:\s\u200b\u200c\u200d\u2060\ufeff]+)"
+)
 
 
 def _strip_leading_table_number(text: str) -> str:
@@ -593,6 +636,12 @@ def _strip_leading_table_number(text: str) -> str:
 _TABLE_MAX_COLS = 63  # Word 表格硬上限即 63 列
 _TABLE_MAX_ROWS = 400
 _TABLE_MAX_CELLS = 12000
+#: ✅ R195 收口（超长段落上限）：表格侧有尺寸上限，段落侧无 —— 单段异常超长
+#:    （AI 把整章灌进一个段落 / 一次 Markdown 渲染产出数万字符的裸段落）会拖慢
+#:    python-docx 且增大 Word 解析负担甚至 OOM。阈值取 100k 字符（正常段落 ≪ 此值，
+#:    逐字不变；仅病理级单段触发截断），截断后递增 paragraph_truncated 计数并告警，
+#:    成稿可交付但该段不完整（与 table_truncated 同口径的 fail-soft）。
+_PARAGRAPH_MAX_CHARS = 100_000
 
 
 def _unstack_or_trim_table_rows(rows: list[list[str]]) -> list[list[str]]:
@@ -1322,8 +1371,45 @@ def _figure_chapter_num(heading_gen) -> int:
 _DOCX_SAFE_IMAGE_FORMATS = frozenset({"PNG", "JPEG", "GIF", "BMP", "TIFF"})
 
 
+def _chart_probe(img_bytes):
+    """图像字节单次探测：格式白名单 + 全文件结构校验 + 尺寸 + DPI。
+
+    ✅ R200（2026-11-09 · 遗留项「每图 3 次 PIL 解码」收口）：导出链旧路径对
+    同一份字节做 3 次 PIL 打开 —— ``_chart_ok``（verify）/ ``_insert_image_
+    with_caption``（尺寸/DPI 头部探测）/ ``doc.add_picture``（python-docx 内部
+    解析，不可避免）。本函数把前两次合并为**一次打开**（verify 后 im 不可再
+    解码，但尺寸/DPI 在 verify 前从头部读取），由调用方（export 图表/AI 配图
+    分支）算好后经 ``probe=`` 形参透传给插入函数，探测结果全程只算一次。
+
+    Returns:
+        ``{"w": int, "h": int, "dpi": float}``（可用）或 ``None``（缺失/过小/
+        格式不安全/文件损坏）。失败口径与 ``_image_format_supported`` 逐字一致。
+    """
+    try:
+        if not (img_bytes and len(img_bytes.getvalue()) > 100):
+            return None
+    except Exception:  # pragma: no cover - BytesIO 异常即视为渲染失败
+        return None
+    try:
+        from PIL import Image as PILImage
+
+        # ⚠️ 探测流必须独立于 add_picture 流（Pillow 12.2 close 连带关闭共享 fp）
+        with PILImage.open(_sh.BytesIO(img_bytes.getvalue())) as im:
+            if (im.format or "").upper() not in _sh._DOCX_SAFE_IMAGE_FORMATS:
+                return None
+            _w, _h = im.size
+            _dpi = _sh._read_image_dpi(im.info.get("dpi"))
+            im.verify()  # 全文件结构校验（截断/损坏在此抛出；verify 后 im 不可再解码）
+            return {"w": _w, "h": _h, "dpi": _dpi}
+    except Exception:
+        # ✅ R179（2026-11-05）：debug 级别在默认日志配置下不可见，图片被跳过时
+        #    运维只看到「成稿少了一张图」。升级为 warning（仍按不支持处理）。
+        _sh.logger.warning("图片格式探测失败（按不支持处理，对应图表/配图将被跳过）", exc_info=True)
+        return None
+
+
 def _image_format_supported(img_bytes) -> bool:
-    """图片字节流是否为 docx 可安全插入的格式。
+    """图片字节流是否为 docx 可安全插入的格式（``_chart_probe`` 的布尔包装）。
 
     ✅ BUG 修复（2026-09-27 · P1）：``_chart_ok`` 原先只验"是不是图片 + 长度 > 100"，
     不验"docx 能不能插入"。实测 WEBP 通过校验后，图号已被自增占用，
@@ -1332,17 +1418,17 @@ def _image_format_supported(img_bytes) -> bool:
     ``render_stats["failed"]=0`` 而**被写入 export_cache**，服务恢复后永久命中坏产物。
 
     与 ``_chart_ok`` 同口径：判定必须发生在**占用图号之前**，否则又是虚跳编号。
-    """
-    try:
-        from PIL import Image as PILImage
 
-        with PILImage.open(_sh.BytesIO(img_bytes.getvalue())) as im:
-            return (im.format or "").upper() in _sh._DOCX_SAFE_IMAGE_FORMATS
-    except Exception:
-        # ✅ R179（2026-11-05）：debug 级别在默认日志配置下不可见，图片被跳过时
-        #    运维只看到「成稿少了一张图」。升级为 warning（仍按不支持处理）。
-        _sh.logger.warning("图片格式探测失败（按不支持处理，对应图表/配图将被跳过）", exc_info=True)
-        return False
+    ✅ R199（2026-11-09）：补全文件结构校验（``im.verify()``）。旧实现只
+    ``PILImage.open`` 读**头部**（format 判定），不校验文件体 —— HTTP 渲染
+    服务被代理截断 / 上游 5xx 返回残片时，101+ 字节的半张 PNG 头部仍能通过
+    format 判定 → ``_chart_ok`` 放行 → ``doc.add_picture`` 嵌入坏图（Word 打开
+    报「图片无法显示」），且产物写入 export_cache 后**永久命中**。verify()
+    校验整个文件结构（含 PNG CRC / IEND 尾），截断文件在此抛 OSError。
+    ✅ R200：实现上收 ``_chart_probe``（单次探测），本函数保留为既有调用方
+    （``_add_illustration_from_bytes`` 兜底路径等）的兼容出口。
+    """
+    return _chart_probe(img_bytes) is not None
 
 
 def _chart_ok(img_bytes) -> bool:
@@ -1350,14 +1436,9 @@ def _chart_ok(img_bytes) -> bool:
 
     单独抽出是因为"跳过 vs 占位"的决策必须发生在**占用图号之前**，
     否则会出现"图 1-2 却没有 1-1"的虚跳编号。
+    ✅ R200：等价于 ``_chart_probe(img_bytes) is not None``。
     """
-    try:
-        if not (img_bytes and len(img_bytes.getvalue()) > 100):
-            return False
-    except Exception:  # pragma: no cover - BytesIO 异常即视为渲染失败
-        return False
-    # 格式白名单：PIL 能解码 ≠ docx 能插入（见 _image_format_supported）
-    return _sh._image_format_supported(img_bytes)
+    return _chart_probe(img_bytes) is not None
 
 
 # ---------------------------------------------------------------------------
@@ -1527,6 +1608,7 @@ def _insert_image_with_caption(
     font_size: float = 10.5,
     log_label: str = "图片",
     log_height_scale: bool = False,
+    probe: dict | None = None,
 ) -> bool:
     """DOCX 位图插入的**唯一实现**：尺寸换算 → 居中插图 → 居中图题。
 
@@ -1538,6 +1620,11 @@ def _insert_image_with_caption(
     使「返回 False ⇒ 未写入任何元素」这一图号回退契约也只有一份。
 
     失败时用 ``_DocxBodyRollback`` 删除本次写入的元素，保证调用方可以安全回退图号。
+
+    ✅ R200：``probe``（``_chart_probe`` 的返回值）非 None 时跳过自身的 PIL
+    尺寸/DPI 探测（调用方已在占号判定时单次探测过，直接复用）—— happy path
+    从「verify 1 次 + 头部探测 1 次」降为「verify 1 次」。probe 为 None
+    （坏字节/兼容路径）时行为与旧实现逐字一致。
     """
     from docx.enum.text import WD_ALIGN_PARAGRAPH
     from docx.shared import Cm
@@ -1547,14 +1634,27 @@ def _insert_image_with_caption(
         from PIL import Image as PILImage
 
         stream = _sh.BytesIO(img_bytes.getvalue())
-        try:
-            _im = PILImage.open(stream)
-            _iw_px, _ih_px = _im.size
-            _dpi = _sh._read_image_dpi(_im.info.get("dpi"))
-        except Exception:
-            _sh.logger.debug("%s 尺寸/DPI 读取失败（按默认 DPI 兜底）", log_label, exc_info=True)
-            _iw_px = _ih_px = 0
-            _dpi = 0.0
+        if probe is not None:
+            # ✅ R200：复用调用方单次探测结果（w/h/dpi），不再二次打开 PIL
+            _iw_px, _ih_px, _dpi = probe["w"], probe["h"], probe["dpi"]
+        else:
+            try:
+                # ✅ R199：尺寸/DPI 探测使用**独立 probe 流**并显式 close（大图解码
+                #    缓存滞留会推高导出期内存峰值）。⚠️ 不能复用下方 add_picture 的
+                #    stream 做探测再 close —— Pillow 12.2 实测 ``Image.close()`` 会
+                #    连带关闭非独占底层 fp，probe 与正文共用一流时 add_picture 必然
+                #    抛「I/O operation on closed file」整图插入失败。
+                _probe_io = _sh.BytesIO(img_bytes.getvalue())
+                _im = PILImage.open(_probe_io)
+                try:
+                    _iw_px, _ih_px = _im.size
+                    _dpi = _sh._read_image_dpi(_im.info.get("dpi"))
+                finally:
+                    _im.close()
+            except Exception:
+                _sh.logger.debug("%s 尺寸/DPI 读取失败（按默认 DPI 兜底）", log_label, exc_info=True)
+                _iw_px = _ih_px = 0
+                _dpi = 0.0
         # ✅ 2026-09-25：按「栏宽 16cm × 高度 22cm」双上限等比缩放。
         #    旧实现只按 96dpi 估宽 + 仅宽度封顶，纵向长图（700×4070px）
         #    会被撑到 16×93cm，远超页面高度（Letter 22.94cm / A4 24.7cm）。
@@ -1595,6 +1695,7 @@ def _add_inline_chart_from_bytes(
     font_name: str = "宋体",
     font_size: float = 10.5,
     placeholder: bool = False,
+    probe: dict | None = None,
 ):
     """在 DOCX 中插入已渲染的图表图片（预渲染字节流）+ 规范图题。
 
@@ -1618,9 +1719,12 @@ def _add_inline_chart_from_bytes(
     占位红字形态、以及按图表类型的缩放日志。
     """
     caption_text = f"图 {figure_num} {default_title}".strip()
-    # 可用性判据：字节缺失/过小。此处**不**重复校验格式白名单 —— 调用方
-    # （write_section）已用 _chart_ok（= 长度 + 格式）先行判定，避免重复 IO；
-    # 若调用方绕过 _chart_ok，格式问题会在 add_picture 抛错并被回滚。
+    # 可用性判据：字节缺失/过小。**不**重复校验格式白名单 —— 调用方（write_section）
+    # 已用 ``_chart_probe``（= 长度 + 格式 + verify + 尺寸/DPI **一次**探测）先行判定，
+    # 避免重复 IO；probe 非 None 时其结果直接透传给插入实现（免二次 PIL 打开），
+    # probe 为 None（兼容路径 / 调用方绕过）时下方按旧口径自行探测并回滚。
+    # ⚠️ 长度兜底保留：probe 与插入之间字节流理论上可被替换（极低概率），
+    #    过小字节会让 add_picture 抛错并被回滚 —— 这里提前拦下并写占位红字。
     if not (img_bytes and len(img_bytes.getvalue()) > 100):
         if placeholder:
             _sh._write_chart_placeholder_line(doc, caption_text, "渲染失败")
@@ -1633,6 +1737,7 @@ def _add_inline_chart_from_bytes(
         font_size=font_size,
         log_label=f"图表({chart_type})",
         log_height_scale=True,
+        probe=probe,
     ):
         return True
     if placeholder:
@@ -1648,6 +1753,7 @@ def _add_illustration_from_bytes(
     font_name: str = "宋体",
     font_size: float = 10.5,
     placeholder: bool = False,
+    probe: dict | None = None,
 ):
     """在 DOCX 中插入 AI 配图（文生图，已下载的位图字节流）+ 规范图题。
 
@@ -1662,14 +1768,26 @@ def _add_illustration_from_bytes(
     本次写入的文档元素**再返回 ``False``，由调用方回退图号 + 回收孤儿引导语，
     与 chart 分支同口径；否则会出现「图片已在文档里、图号却回退」的重号。
     ``placeholder`` 形参保留仅为签名一致（AI 配图分支当前无占位模式）。
+
+    ✅ R200：``probe`` 非 None 时调用方已完成格式白名单+verify+尺寸/DPI 单次
+    探测，直接复用（跳过 ``_image_format_supported`` 重复打开与插入侧二次探测）。
     """
     from docx.shared import Cm
 
     caption_text = f"图 {figure_num} {alt or '配图'}".strip()
-    if not (img_bytes and len(img_bytes.getvalue()) > 100 and _sh._image_format_supported(img_bytes)):
+    if probe is None:
+        if not (img_bytes and len(img_bytes.getvalue()) > 100 and _sh._image_format_supported(img_bytes)):
+            return False
+    elif not (img_bytes and len(img_bytes.getvalue()) > 100):
         return False
     if _sh._insert_image_with_caption(
-        doc, img_bytes, caption_text, font_name=font_name, font_size=font_size, log_label=f"AI 配图({caption_text})"
+        doc,
+        img_bytes,
+        caption_text,
+        font_name=font_name,
+        font_size=font_size,
+        log_label=f"AI 配图({caption_text})",
+        probe=probe,
     ):
         return True
     if placeholder:

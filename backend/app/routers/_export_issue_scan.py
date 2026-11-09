@@ -3,25 +3,57 @@
 import ast
 import hashlib
 import inspect
+import json
+import logging
+import re
 import textwrap
 from datetime import date
 
-import app.routers.export as _sh  # noqa: F401 — facade 命名空间延迟绑定（monkeypatch 兼容）
-from app.services.fence_common import is_fence_close  # ✅ R168：闭合判据唯一事实源（叶子模块，无成环）
+from app.services.content_blocks import (  # ✅ R198：叶子直引（原经 export facade 绕路）
+    INLINE_CHART_FENCE_LANGS,
+    _compute_subheading,
+    _parse_content_blocks,
+    _strip_duplicate_leading_title,
+    _strip_title_number,
+)
+from app.services.content_utils import section_sort_order_key
 
-_AUDIT_RULES: tuple[tuple[str, str, str, _sh.re.Pattern], ...] = (
+# ✅ R168：闭合判据唯一事实源（叶子模块，无成环）
+from app.services.fence_common import is_fence_close, parse_fence_line
+
+#: 与 export.py 同名（日志聚合口径不变）
+logger = logging.getLogger("export")
+
+_CHART_FENCE_LANGS = INLINE_CHART_FENCE_LANGS
+
+
+def _sh():
+    """export facade 延迟解析（✅ R198 断环）。
+
+    本模块被 ``export.py`` 中部转发 import（``from ._export_issue_scan import
+    _AUDIT_RULES``），顶部 ``import app.routers.export`` 会形成初始化环：
+    首触本模块（不经 export）时回引未初始化完成的 export → 立即 ImportError。
+    真依赖已全部改直引叶子，仅剩的 2 个 export 侧名字（``_section_number_prefix``
+    / ``_figure_chapter_num``）改为**调用时**导入解析（此时 export 已初始化完成）
+    —— 既有 monkeypatch 语义（facade 命名空间延迟绑定）不变。
+    """
+    import app.routers.export as _ex
+
+    return _ex
+
+_AUDIT_RULES: tuple[tuple[str, str, str, re.Pattern], ...] = (
     # (key, 人类可读名, 级别, 正则)
     (
         "placeholder",
         "数据占位符（××/xx/【待补充】）",
         "warn",
-        _sh.re.compile(r"××+|(?<![A-Za-z0-9])[xX]{2}(?![A-Za-z0-9])|【待补充"),
+        re.compile(r"××+|(?<![A-Za-z0-9])[xX]{2}(?![A-Za-z0-9])|【待补充"),
     ),
     (
         "html_tag",
         "HTML 标签残留（应使用 GFM 表格）",
         "error",
-        _sh.re.compile(r"</?(?:table|thead|tbody|tr|td|th|div|span|p|br)\b[^>]*>", _sh.re.I),
+        re.compile(r"</?(?:table|thead|tbody|tr|td|th|div|span|p|br)\b[^>]*>", re.I),
     ),
     # ✅ 新增：Excel/Word 剪贴板表格占位标记（<fcel>/<lcel>/<ucel>/<xc>/<nl>）——
     #    导出渲染时已降级为纯文本（不再印进成稿），此处仍计入体检供用户回改源文。
@@ -29,14 +61,14 @@ _AUDIT_RULES: tuple[tuple[str, str, str, _sh.re.Pattern], ...] = (
         "clipboard_table",
         "剪贴板表格残留标记（粘贴表格带入，应改用 GFM 表格）",
         "error",
-        _sh.re.compile(r"</?(?:fcel|lcel|ucel|xc|nl)\s*/?>", _sh.re.I),
+        re.compile(r"</?(?:fcel|lcel|ucel|xc|nl)\s*/?>", re.I),
     ),
-    ("latex_square", "LaTeX 空参数占位 \\square", "error", _sh.re.compile(r"\\square")),
+    ("latex_square", "LaTeX 空参数占位 \\square", "error", re.compile(r"\\square")),
     (
         "bidding_terms",
         "投标场景用语（专项方案不应引用）",
         "warn",
-        _sh.re.compile(r"招标文件|投标文件|评标办法|评分标准|废标条件|投标须知"),
+        re.compile(r"招标文件|投标文件|评标办法|评分标准|废标条件|投标须知"),
     ),
     # ✅ R50 新增（2026-10-07）：中英混杂 —— 中文句子里夹连续两个小写英文单词
     #    （如"签署 material acceptance records 后方可"）。规范编号（GB/JGJ 大写）、
@@ -45,12 +77,12 @@ _AUDIT_RULES: tuple[tuple[str, str, str, _sh.re.Pattern], ...] = (
         "mixed_language",
         "中英混杂（中文段落中夹英文短语）",
         "warn",
-        _sh.re.compile(r"[\u4e00-\u9fa5]\s*[a-z]{4,}(?:\s+[a-z]{3,})+\s*[\u4e00-\u9fa5]"),
+        re.compile(r"[\u4e00-\u9fa5]\s*[a-z]{4,}(?:\s+[a-z]{3,})+\s*[\u4e00-\u9fa5]"),
     ),
 )
 # 图表家族围栏（未闭合即视为生成被截断，残片渲染必失败）——
 # 统一定义在 _chart_pipeline.INLINE_CHART_FENCE_LANGS，避免两端分叉。
-_CHART_FENCE_LANGS = _sh.INLINE_CHART_FENCE_LANGS
+_CHART_FENCE_LANGS = _CHART_FENCE_LANGS
 
 
 def _count_unclosed_chart_fences(content: str) -> int:
@@ -74,7 +106,7 @@ def _count_unclosed_chart_fences(content: str) -> int:
         # ✅ 2026-09-24 修复：围栏检测改用 _chart_pipeline.parse_fence_line（与登记/
         #    改写/解析三侧同源）。旧实现 `startswith("```") + [3:]` 漏检波浪号围栏、
         #    且对 4 反引号围栏取到错误 lang —— 与 _parse_content_blocks 的同一根因。
-        pf = _sh.parse_fence_line(lines[i])
+        pf = parse_fence_line(lines[i])
         if pf is None:
             i += 1
             continue
@@ -97,8 +129,8 @@ def _count_unclosed_chart_fences(content: str) -> int:
             i += 1
         if not closed:
             n += 1
-            if lang not in _sh._CHART_FENCE_LANGS:
-                _sh.logger.warning("正文含未闭合的普通代码围栏（lang=%s），" "其后正文存在被当代码块输出的风险", lang)
+            if lang not in _CHART_FENCE_LANGS:
+                logger.warning("正文含未闭合的普通代码围栏（lang=%s），" "其后正文存在被当代码块输出的风险", lang)
     return n
 
 
@@ -137,7 +169,7 @@ _STANDARD_TITLES: dict[str, str] = {
 }
 #: 「编号 + 《名称》」紧跟形态才做配对校验——编号单独出现不校验
 #: （读者自会核对，误报面大）
-_STANDARD_PAIR_RE = _sh.re.compile(r"\b((?:GB|JGJ|CJJ)\s*\d{2,5})\s*[《〈]([^》〉\n]{4,60})[》〉]")
+_STANDARD_PAIR_RE = re.compile(r"\b((?:GB|JGJ|CJJ)\s*\d{2,5})\s*[《〈]([^》〉\n]{4,60})[》〉]")
 
 #: 同义术语组（报告实证 4 组；「安全生产」组刻意剔除——正式场合两种
 #: 表述各有语义侧重，不算混用）
@@ -164,7 +196,7 @@ def _norm_ref_text(text: str) -> str:
     """规范名称归一（去空白/标点、全半角统一），供配对比对。"""
     s = str(text or "")
     s = s.replace("（", "(").replace("）", ")").replace("，", ",").replace("、", "").replace("　", "")
-    return _sh.re.sub(r"[\s()（）,，.-]+", "", s)
+    return re.sub(r"[\s()（）,，.-]+", "", s)
 
 
 def _detect_standard_pairing(content: str) -> dict | None:
@@ -176,7 +208,7 @@ def _detect_standard_pairing(content: str) -> dict | None:
     """
     found: list[str] = []
     for m in _STANDARD_PAIR_RE.finditer(content):
-        code = _sh.re.sub(r"\s+", "", m.group(1)).upper()
+        code = re.sub(r"\s+", "", m.group(1)).upper()
         expected = _STANDARD_TITLES.get(code)
         if not expected:
             continue
@@ -218,7 +250,7 @@ def _detect_filler_phrases(content: str) -> dict | None:
     total = 0
     samples: list[str] = []
     for label, pattern in _FILLER_PATTERNS:
-        cnt = len(_sh.re.findall(pattern, content))
+        cnt = len(re.findall(pattern, content))
         if cnt:
             total += cnt
             if len(samples) < 3:
@@ -243,11 +275,17 @@ def _detect_filler_phrases(content: str) -> dict | None:
 # ---------------------------------------------------------------------------
 
 #: 工期声明（只吃「工期/日历天」语境，避免「养护 28 天」「龄期 7 天」误命中）。
-_SCHEDULE_TOTAL_RE = _sh.re.compile(r"(?:总工期|建设工期|合同工期|工期)[^，。；\n]{0,8}?(\d{2,4})\s*(?:日历)?天")
+#: ✅ R195（2026-11-09）：兜底分支「工期」加负向断言 ``(?<![\u4e00-\u9fff])``
+#: —— 旧写法会把任何「XX工期NN天」复合词（如「基坑降水工期不少于14天」的
+#: 分项工期）并入「总工期声明」，分项工期≠总工期即误报 error 级
+#: 「工期声明自相矛盾」（进度计划类方案分项+总工期并存是常态写法）。
+#: 负向断言后「工期」只在其前无汉字（独立词）时命中，「总工期/建设工期/
+#: 合同工期」三个全等前缀不受影响。
+_SCHEDULE_TOTAL_RE = re.compile(r"(?:(?<![\u4e00-\u9fff])工期|总工期|建设工期|合同工期)[^，。；\n]{0,8}?(\d{2,4})\s*(?:日历)?天")
 
 #: 里程碑「名称 日期」：名称 ≤16 字（含中文括号/±/斜杠），日期为
 #: 20xx-x-x / 20xx年x月x日 / 20xx.x.x 三种形态。
-_MILESTONE_RE = _sh.re.compile(
+_MILESTONE_RE = re.compile(
     r"([\u4e00-\u9fa5A-Za-z0-9±（）()\s/、－-]{1,16})" r"(20\d{2}[-年/.]\d{1,2}[-月/.]\d{1,2}日?)"
 )
 #: 二次结构 / 外架拆除 工序逻辑参照（二次结构及抹灰须在外部脚手架拆除前完成）。
@@ -262,9 +300,9 @@ _MILESTONE_SCAFFOLD_UP = ("搭设", "安装", "提升", "爬升", "附着")
 def _parse_milestone_date(text: str) -> date | None:
     """解析里程碑日期（20xx-x-x / 20xx年x月x日 / 20xx.x.x），非法返回 None。"""
     s = str(text or "").strip()
-    m = _sh.re.match(r"^(20\d{2})[-/.](\d{1,2})[-/.](\d{1,2})", s)
+    m = re.match(r"^(20\d{2})[-/.](\d{1,2})[-/.](\d{1,2})", s)
     if not m:
-        m = _sh.re.match(r"^(20\d{2})年(\d{1,2})月(\d{1,2})日?", s)
+        m = re.match(r"^(20\d{2})年(\d{1,2})月(\d{1,2})日?", s)
     if not m:
         return None
     y, mo, d = (int(x) for x in m.groups())
@@ -369,14 +407,14 @@ def audit_content(sections: list[dict], *, fences_fixed: int = 0) -> dict:
         title = sec.get("title") or ""
         if not content:
             continue
-        for key, label, level, rx in _sh._AUDIT_RULES:
+        for key, label, level, rx in _AUDIT_RULES:
             found = len(rx.findall(content))
             if found:
                 slot = hits.setdefault(key, {"key": key, "label": label, "level": level, "count": 0, "sections": []})
                 slot["count"] += found
                 if len(slot["sections"]) < 3 and title not in slot["sections"]:
                     slot["sections"].append(title)
-        unclosed = _sh._count_unclosed_chart_fences(content)
+        unclosed = _count_unclosed_chart_fences(content)
         if unclosed:
             slot = hits.setdefault(
                 "unclosed_fence",
@@ -464,7 +502,7 @@ def _ast_digest(fn) -> str:
 def audit_rules_fingerprint() -> str:
     """审计规则自身的稳定指纹（规则数据 + 判定代码），供导出旁车失效判定。"""
     parts = ["rules"]
-    for key, label, level, rx in _sh._AUDIT_RULES:
+    for key, label, level, rx in _AUDIT_RULES:
         parts.append(f"{key}|{label}|{level}|{rx.pattern}|{rx.flags}")
     parts.append("code:" + _ast_digest(audit_content))
     parts.append("code:" + _ast_digest(_count_unclosed_chart_fences))
@@ -503,7 +541,7 @@ def _count_child_namespace_subheadings(blocks: list[dict], section_prefix: str) 
     n = 0
     if not section_prefix:
         return 0
-    pat = _sh.re.compile(r"^" + _sh.re.escape(section_prefix) + r"\.(\d+(?:\.\d+)*)\s")
+    pat = re.compile(r"^" + re.escape(section_prefix) + r"\.(\d+(?:\.\d+)*)\s")
     for block in blocks or []:
         if block.get("type") != "heading":
             continue
@@ -542,7 +580,7 @@ def _section_sort_key(sec: dict):
         level = int(sec.get("level") or 1)
     except (TypeError, ValueError):
         level = 1
-    so, sid = _sh.section_sort_order_key(sec.get("sort_order"), sec.get("id"))
+    so, sid = section_sort_order_key(sec.get("sort_order"), sec.get("id"))
     return (so, level, sid)
 
 
@@ -560,6 +598,14 @@ def _detect_duplicate_sections(sections: list[dict]) -> list[dict]:
     这里按与 ``write_section`` 完全一致的顺序模拟编号（含渲染端的计数器前移修复），
     凡同一章作用域内出现相同编号即判重复——正常文档不会误报，且若未来有人破坏
     渲染端的修复，本检测会重新报出，作为回归护栏。
+
+    ✅ parity 不变量（R203 修复）：``_count_child_namespace_subheadings`` 必须经
+    ``export`` 模块命名空间**晚绑定**解析（而非本模块局部名称），使 monkeypatch
+    渲染端引用 = monkeypatch 预检端引用。旧实现两处各走各的模块全局表——测试
+    patch ``export._count_child_namespace_subheadings`` 后渲染端产生重复、预检端
+    仍按原函数计数 → parity 破裂（假阴）。test_export_numbering_parity 的反向
+    用例（``test_detector_reports_when_pre_advance_removed`` / ``test_parity_holds_
+    in_every_configuration[False-False]``）即为本缺陷的锁。
     """
     by_id: dict = {s.get("id"): s for s in sections if s.get("id")}
     children_map: dict = {}
@@ -570,11 +616,17 @@ def _detect_duplicate_sections(sections: list[dict]) -> list[dict]:
             children_map.setdefault(pid, []).append(s)
         else:
             roots.append(s)
-    roots.sort(key=_sh._section_sort_key)
+    roots.sort(key=_section_sort_key)
     for lst in children_map.values():
-        lst.sort(key=_sh._section_sort_key)
+        lst.sort(key=_section_sort_key)
 
+    # ✅ R203 parity 不变量：经 export 模块命名空间晚绑定解析计数器函数，
+    #    monkeypatch export._count_child_namespace_subheadings 同时影响渲染端
+    #    与预检端，消除两份引用各走各的模块全局表导致的 parity 破裂（假阴）。
+    from app.routers import export as _export_mod
     from app.services.ai.heading_v2 import HeadingNumberingGeneratorV2
+
+    _count_fn = getattr(_export_mod, "_count_child_namespace_subheadings", _count_child_namespace_subheadings)
 
     gen = HeadingNumberingGeneratorV2()
     seen: dict[tuple, str] = {}  # (章作用域, 渲染编号) -> 首次出现标题
@@ -602,7 +654,7 @@ def _detect_duplicate_sections(sections: list[dict]) -> list[dict]:
         if level == 1:
             chapter_id = sec.get("id")
         scope = chapter_id if level >= 2 else None
-        pure = _sh._strip_title_number(title)
+        pure = _strip_title_number(title)
         num = gen.update_counter(level, parent_id)
         if num:
             flag(num, scope, title, sec.get("id"))
@@ -610,11 +662,11 @@ def _detect_duplicate_sections(sections: list[dict]) -> list[dict]:
         n_child_ns = 0
         content = sec.get("content") or ""
         if content and num:
-            section_prefix = _sh._section_number_prefix(f"{num} {pure}".strip())
-            blocks = _sh._parse_content_blocks(content)
+            section_prefix = _sh()._section_number_prefix(f"{num} {pure}".strip())
+            blocks = _parse_content_blocks(content)
             # 与 write_section 同口径：剥离正文开头与本节标题重复的块
             # （AI 常在正文首行自引用本节标题；渲染端会剥掉，检测器不剥会假阳性）
-            blocks = _sh._strip_duplicate_leading_title(blocks, pure, f"{num} {pure}".strip())
+            blocks = _strip_duplicate_leading_title(blocks, pure, f"{num} {pure}".strip())
             # ✅ 加固（2026-10-06 · D4）：`_compute_subheading` 的 `has_children`
             #    必须与渲染端同口径。渲染端在「本节有 DB 子章节 **且**
             #    body_subheading_demote_with_children 开启」时把正文子标题降级为
@@ -638,8 +690,8 @@ def _detect_duplicate_sections(sections: list[dict]) -> list[dict]:
                 if block.get("type") != "heading":
                     continue
                 md_lv = block.get("level", 1)
-                bpure = _sh._strip_title_number(block.get("text", ""))
-                text, _style = _sh._compute_subheading(
+                bpure = _strip_title_number(block.get("text", ""))
+                text, _style = _compute_subheading(
                     section_prefix,
                     level,
                     md_lv,
@@ -649,12 +701,12 @@ def _detect_duplicate_sections(sections: list[dict]) -> list[dict]:
                     has_children=has_children_demoted,
                 )
                 block["_fixed_text"] = text
-            n_child_ns = _sh._count_child_namespace_subheadings(blocks, section_prefix)
+            n_child_ns = _count_fn(blocks, section_prefix)
             for block in blocks:
                 if block.get("type") != "heading":
                     continue
                 fixed = str(block.get("_fixed_text") or "")
-                m = _sh.re.match(r"^(\d+(?:\.\d+)*)\s", fixed)
+                m = re.match(r"^(\d+(?:\.\d+)*)\s", fixed)
                 if m:
                     # 内容子标题统一挂在「章作用域」下：章自身内容的 "1.1" 与
                     # 其子孙章节的 "1.1" 在读者眼里同为 "1.1"，属于同一判重宇宙。
@@ -710,16 +762,16 @@ def _detect_section_number_mismatch(sections: list[dict]) -> list[dict]:
             children_map.setdefault(pid, []).append(s)
         else:
             roots.append(s)
-    roots.sort(key=_sh._section_sort_key)
+    roots.sort(key=_section_sort_key)
     for lst in children_map.values():
-        lst.sort(key=_sh._section_sort_key)
+        lst.sort(key=_section_sort_key)
 
     issues: list[dict] = []
 
     def walk(ns: list, prefix: str):
         for idx, sec in enumerate(ns, 1):
             expected = f"{prefix}.{idx}" if prefix else str(idx)
-            stored = _sh._stored_outline_number(sec)
+            stored = _stored_outline_number(sec)
             if stored and stored != expected:
                 issues.append(
                     {
@@ -742,13 +794,17 @@ def _detect_section_number_mismatch(sections: list[dict]) -> list[dict]:
 
 
 # ✅ E6 Tier 1 · 失效交叉引用检测（DLV-14）—— 2026-09-25
-# 图号引用正则：「图 X-Y」（允许零宽空格/全角空格）
-_STALE_FIG_REF_RE = _sh.re.compile(r"图\s*(\d+-\d+)")
+# 图号引用正则：「图 X-Y」（允许空白/全角空格）
+# ✅ R195 收口（P2）：\s 不匹配 U+200B/200C/200D/U+2060/U+FEFF（属 Cf 格式字符
+#    非 Unicode 空白类）—— AI 正文在「图/表」与编号间夹带零宽字符即可绕过检出
+#    （失效引用静默漏报）。显式纳入零宽族。
+_ZW_SP = r"[\s\u200b\u200c\u200d\u2060\ufeff]*"
+_STALE_FIG_REF_RE = re.compile(r"图" + _ZW_SP + r"(\d+-\d+)")
 # 表号引用正则：「表 X-Y」
-_STALE_TBL_REF_RE = _sh.re.compile(r"表\s*(\d+-\d+)")
+_STALE_TBL_REF_RE = re.compile(r"表" + _ZW_SP + r"(\d+-\d+)")
 # 节号引用正则：「第X节」/「第X.X节」/「见X.X节」/「参考X」等
 # 捕获组 1=「第…节」里的纯数字路径；组 2=「见/参考/根据」引导的数字路径
-_STALE_SEC_REF_RE = _sh.re.compile(
+_STALE_SEC_REF_RE = re.compile(
     r"第\s*(\d+(?:\.\d+)*)\s*节" r"|(?:见|参考|根据|详见)\s*(?:第)?(\d+(?:\.\d+)+)\s*(?:节|章节)?"
 )
 
@@ -763,7 +819,7 @@ def _detect_body_subheading_namespace_conflict(sections: list[dict]) -> list[dic
     本预检在导出前检测这类残留冲突，严重度 high（阻断导出）。
     """
     # 正则：Markdown 井号后接 X.X 点分编号，或纯文本子标题自带 X.X
-    _HEADING_WITH_DOTTED_NUM_RE = _sh.re.compile(r"^\s*(?:#{1,6}\s+|\*\*?)?\d+(?:\.\d+)+(?:\.{1,})?\s+")
+    _HEADING_WITH_DOTTED_NUM_RE = re.compile(r"^\s*(?:#{1,6}\s+|\*\*?)?\d+(?:\.\d+)+(?:\.{1,})?\s+")
 
     # 构建 parent_ids 倒排索引
     parent_ids = {s.get("parent_id") for s in sections if s.get("parent_id")}
@@ -773,7 +829,7 @@ def _detect_body_subheading_namespace_conflict(sections: list[dict]) -> list[dic
 
         _demote = _s.body_subheading_demote_with_children
     except Exception:
-        _sh.logger.debug("读取 body_subheading_demote_with_children 失败（沿用默认 True）", exc_info=True)
+        logger.debug("读取 body_subheading_demote_with_children 失败（沿用默认 True）", exc_info=True)
         _demote = True
     # 只有配置开启降级时才报（关闭时计数器前移处理撞号，属旧预期行为）
     if not _demote:
@@ -788,10 +844,27 @@ def _detect_body_subheading_namespace_conflict(sections: list[dict]) -> list[dic
         if not content.strip():
             continue
         # 扫逐行，检测正文里的点分子标题
+        # ✅ R195（2026-11-09）：围栏感知 —— 代码围栏内的「1.1 xxx」形态行
+        # （枚举示例/示例文本）不是子标题（渲染端 _parse_content_blocks 不会
+        # 把围栏内行当标题），旧裸逐行扫描会产出「预检说有、成稿没有」的假
+        # DLV-13 high 阻断（409 可阻断导出）。状态机与
+        # _count_unclosed_chart_fences 同款：parse_fence_line 开栏 +
+        # fence_common.is_fence_close 闭栏（单一判据）。围栏未闭合时其余行
+        # 一并跳过（DLV-07 另行上报未闭合本身；此处宁漏报不误报）。
         conflicts: list[str] = []
+        _fence_char: str | None = None
+        _fence_len = 0
         for line in content.split("\n"):
-            if _HEADING_WITH_DOTTED_NUM_RE.search(line):
-                conflicts.append(line.strip()[:80])
+            if _fence_char is None:
+                _pf = parse_fence_line(line)
+                if _pf is not None:
+                    _fence_char, _fence_len, _pf_lang = _pf
+                    continue
+                if _HEADING_WITH_DOTTED_NUM_RE.search(line):
+                    conflicts.append(line.strip()[:80])
+                continue
+            if is_fence_close(line, _fence_char, _fence_len, tolerant_length=True):
+                _fence_char = None
         if conflicts:
             issues.append(
                 {
@@ -880,19 +953,19 @@ def collect_figure_table_number_superset(sections: list[dict]) -> dict[str, set[
         tbl_last: dict[int, int] = {}
 
         def walk(secs: list, parent_id: str) -> None:
-            for sec in sorted(secs, key=_sh._section_sort_key):
+            for sec in sorted(secs, key=_section_sort_key):
                 try:
                     level = max(1, min(int(sec.get("level") or 1), 8))
                 except (TypeError, ValueError):
                     level = 1
                 # 只推进计数器（标题传空串即可，编号语义与标题无关）
                 gen.format_heading(level, "", parent_id)
-                chapter_num = _sh._figure_chapter_num(gen)
+                chapter_num = _sh()._figure_chapter_num(gen)
                 try:
-                    blocks = _sh._parse_content_blocks(sec.get("content") or "")
+                    blocks = _parse_content_blocks(sec.get("content") or "")
                 except Exception:
                     # 单章解析失败不影响其它章（与渲染端逐块 fail-soft 同精神）
-                    _sh.logger.debug(
+                    logger.debug(
                         "章节 %s 正文块解析失败（图号/表号集合推导按空内容处理）", sec.get("id") or "", exc_info=True
                     )
                     blocks = []
@@ -918,7 +991,7 @@ def collect_figure_table_number_superset(sections: list[dict]) -> dict[str, set[
         walk(roots, "")
         return {"fig": fig_nums, "tbl": tbl_nums}
     except Exception:
-        _sh.logger.warning("图号/表号真实集合推导失败（DLV-14 图/表分支按无集合降级）", exc_info=True)
+        logger.warning("图号/表号真实集合推导失败（DLV-14 图/表分支按无集合降级）", exc_info=True)
         return empty
 
 
@@ -964,9 +1037,9 @@ def _detect_stale_cross_references(sections: list[dict], real_nums: dict[str, se
                 sid = str(oj.get("id") or "")
             else:
                 try:
-                    sid = str(_sh.json.loads(oj).get("id") or "")
+                    sid = str(json.loads(oj).get("id") or "")
                 except Exception:
-                    _sh.logger.debug(
+                    logger.debug(
                         "outline_json 解析失败（该章节号不入真实集合，" "可能影响 stale 引用检测）", exc_info=True
                     )
                     sid = ""
@@ -1014,7 +1087,7 @@ def _detect_stale_cross_references(sections: list[dict], real_nums: dict[str, se
 
         # 图号
         if real_nums["fig"]:
-            for m in _sh._STALE_FIG_REF_RE.finditer(content):
+            for m in _STALE_FIG_REF_RE.finditer(content):
                 ref = m.group(1)
                 full_ref = f"图{ref}"
                 if full_ref not in real_nums["fig"]:
@@ -1030,7 +1103,7 @@ def _detect_stale_cross_references(sections: list[dict], real_nums: dict[str, se
 
         # 表号
         if real_nums["tbl"]:
-            for m in _sh._STALE_TBL_REF_RE.finditer(content):
+            for m in _STALE_TBL_REF_RE.finditer(content):
                 ref = m.group(1)
                 full_ref = f"表{ref}"
                 if full_ref not in real_nums["tbl"]:
@@ -1044,7 +1117,7 @@ def _detect_stale_cross_references(sections: list[dict], real_nums: dict[str, se
                     )
 
         # 节号（内部总是推导 sec 集合）
-        for m in _sh._STALE_SEC_REF_RE.finditer(content):
+        for m in _STALE_SEC_REF_RE.finditer(content):
             # 两个捕获组：组 1=「第…节」形式；组 2=引导词形式
             ref = (m.group(1) or m.group(2) or "").strip()
             if not ref:

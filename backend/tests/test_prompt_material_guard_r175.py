@@ -74,8 +74,13 @@ def test_redaction_enabled_masks_credentials_but_keeps_numbers_and_units():
         assert keep in out, f"正常文本被误脱敏: {keep}"
 
 
-def test_redact_outbound_messages_covers_user_role_only(monkeypatch):
-    """出站收口：user 消息脱敏，system/assistant 模板不受影响。
+def test_redact_outbound_messages_covers_all_roles(monkeypatch):
+    """出站收口：**所有角色**（含 system）都脱敏。
+
+    ✅ R204（2026-11-09 · 契约变更）：旧口径只脱敏 ``role=="user"``，
+    system 原样放行 —— 但本仓大量外部资料被放进 **system**（合规检查的章节正文、
+    专家评审的全局事实、事实提取的招标文件全文、目录链路的资料摘要…），
+    于是「已开启脱敏」是假绿。现所有角色统一脱敏。
 
     注入防护显式关闭：否则 ``redaction_enabled()`` 恒真（开关为「或」关系），
     「关闭时返回原对象」这半段就测不到。
@@ -85,10 +90,14 @@ def test_redact_outbound_messages_covers_user_role_only(monkeypatch):
     msgs = [
         {"role": "system", "content": "你是投标分析专家（模板，不含资料）"},
         {"role": "user", "content": _CRED_SAMPLE},
+        # ✅ R204：system 里装外部资料（章节正文/招标文件全文）是本仓既有形态
+        {"role": "system", "content": f"以下为项目资料：{_CRED_SAMPLE}"},
     ]
     out = pmg.redact_outbound_messages(msgs)
-    assert out[0]["content"] == msgs[0]["content"]
+    assert out[0]["content"] == msgs[0]["content"]  # 不含凭据的 system 不受影响
     assert "sk-abcdef1234567890abcdef" not in out[1]["content"]
+    assert "sk-abcdef1234567890abcdef" not in out[2]["content"]
+    assert "P@ssw0rd" not in out[2]["content"]
 
     monkeypatch.setattr(settings, "prompt_redact_sensitive", False)
     same = pmg.redact_outbound_messages(msgs)

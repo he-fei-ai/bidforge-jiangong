@@ -148,6 +148,8 @@ class MermaidServiceClient:
         # 与读取端 (loop, client) 不一致导致的 AttributeError
         self._clients_by_loop: dict[int, tuple[asyncio.AbstractEventLoop, httpx.AsyncClient, float]] = {}
         self._clients_lock = threading.Lock()
+        # ✅ R199：后台 aclose 任务持有集合（防 fire-and-forget task 被 GC 中途回收）
+        self._bg_tasks: set = set()
 
         # 内部状态缓存（带时间戳）
         self._backend_available: dict[MermaidRenderBackend, bool | None] = {
@@ -218,7 +220,13 @@ class MermaidServiceClient:
                                     logger.debug("[silent-except] mermaid_service.py: line 201 - %s", _e)
 
                             try:
-                                asyncio.get_running_loop().create_task(_aclose())
+                                # ✅ R199（2026-11-09）：create_task 返回值必须持引用 ——
+                                #    事件循环只持弱引用，fire-and-forget 的 task 可能被
+                                #    GC 中途回收，连接池永不关闭（每次批量渲染触发
+                                #    "Unclosed AsyncClient"）。挂到实例集合，完成后自清。
+                                _t = asyncio.get_running_loop().create_task(_aclose())
+                                self._bg_tasks.add(_t)
+                                _t.add_done_callback(self._bg_tasks.discard)
                             except RuntimeError:
                                 pass
 
@@ -412,6 +420,24 @@ class MermaidServiceClient:
         if not probed:
             return None
         return any(probed)
+
+    def all_backends_probed_unavailable(self) -> bool:
+        """所有后端均在 TTL 有效期内被探测为**不可用**（同步，零网络请求）。
+
+        ✅ R199（2026-11-09）：供渲染器在重试循环前短路 —— 默认部署（未配置
+        MERMAID_SERVICE_URL / Railway 且未装 mmdc）下，每张 Mermaid 语法图都
+        会空转 2 次失败重试 + 2×1s 同步 sleep（占用 to_thread 线程），批量导出
+        几十张图累计可观。与 :meth:`is_available` 不同：本方法要求**每个**后端
+        都在 TTL 内被探测过且均为 False —— 任一后端未探测/缓存过期返回 False
+        （保守，保持原渲染行为），避免「部分探测状态」误杀可用后端。TTL 过期
+        后下一次渲染自然重新探测，不会永久锁死。
+        """
+        for backend in MermaidRenderBackend:
+            if not self._is_cache_valid(backend):
+                return False
+            if self._backend_available[backend]:
+                return False
+        return True
 
     # ---------------------------------------------------------------
     # 核心渲染方法

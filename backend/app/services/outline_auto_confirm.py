@@ -15,10 +15,26 @@ logger = logging.getLogger(__name__)
 
 
 def _count(review: dict[str, Any], key: str) -> int:
+    """读取缺陷计数：顶层列表 / 顶层 issue_counts / quality.continuity.issue_counts。
+
+    ✅ R187（2026-11-08 · 跨模块字段层级错位）：``_attach_quality_report`` 把
+    ``check_outline_continuity`` 的 ``issue_counts`` 放在
+    ``review["quality"]["continuity"]["issue_counts"]``（见
+    ``_sse_outline_review.py`` 的 report 构造），而旧实现只读顶层 —— 于是
+    ``numbering_mismatch`` / ``level_gaps`` 恒为 0，「编号/层级不连续」硬前置
+    形同虚设（generic_titles 有 detect 兜底、empty_parents 有 outline 兜底，
+    唯独编号没有）。顶层优先保持向后兼容，嵌套仅作回退。
+    """
     value = review.get(key)
     if isinstance(value, list):
         return len(value)
     counts = review.get("issue_counts") or {}
+    if not counts:
+        quality = review.get("quality")
+        continuity = quality.get("continuity") if isinstance(quality, dict) else None
+        counts = continuity.get("issue_counts") if isinstance(continuity, dict) else None
+    if not isinstance(counts, dict):
+        return 0
     try:
         return int(counts.get(key) or 0)
     except (TypeError, ValueError):
@@ -84,6 +100,17 @@ def evaluate(
         if numbering > 0:
             block("numbering_invalid", f"编号/层级不连续 {numbering} 处", numbering)
 
+        # ✅ R192（FIX-R5 · 重复标题硬前置）：重复标题此前只有程序化预检早退闸门
+        #    （_sse_outline_review 预检出口）一处消费——AI 审核跑完后只重检泛化标题、
+        #    从不重检重复标题；AI 审核漏报或修复轮引入新同名章节时，弱审核 passed=true
+        #    即可让同名章节落库并被 8 秒倒计时自动确认。现复用同一 ``_count`` 判据
+        #    （顶层 issue_counts / quality.continuity.issue_counts，R187 FIX-4 口径）
+        #    读取计数进 blockers——计数由审核出口重检（FIX-R5 另半）与质量报告供给，
+        #    本函数不新增第二套检出实现（单一实现纪律）。
+        duplicate = _count(review, "duplicate_titles")
+        if duplicate > 0:
+            block("duplicate_titles", f"存在 {duplicate} 个重复标题（同名章节）", duplicate)
+
         empty = _count(review, "empty_parents") or _empty_parent_count(outline)
         if empty > 0:
             block("empty_chapters", f"存在 {empty} 个空壳父章节", empty)
@@ -91,6 +118,13 @@ def evaluate(
     failed = len(failed_chapters or [])
     if failed > 0:
         block("failed_sections", f"{failed} 个章节生成失败", failed)
+
+    # ✅ R187（2026-11-08）：审核超时/失败/结构异常时 ``_sse_outline_review``
+    #    加法式标记 review_skipped，意味着目录**未经 AI 审核**（``passed=True``
+    #    只是前端兼容值）。不得让 8 秒倒计时把未审目录自动落库。
+    #    旧事件无该键时 ready 判定逐字不变。
+    if review.get("review_skipped"):
+        block("review_skipped", "目录未经 AI 审核（审核超时/失败），禁止自动确认", 1)
 
     # ⚠️ 硬红线：项目已有正文 → 永不自动确认（避免自动确认/回退覆盖人工成果）
     if has_content:
@@ -102,6 +136,7 @@ def evaluate(
         "counts": {
             "generic_titles": generic,
             "numbering": _count(review, "numbering_mismatch") + _count(review, "level_gaps"),
+            "duplicate_titles": _count(review, "duplicate_titles"),
             "empty_parents": _count(review, "empty_parents"),
             "failed_chapters": failed,
             "has_content": 1 if has_content else 0,

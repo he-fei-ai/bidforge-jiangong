@@ -153,6 +153,16 @@ async def propose_defect_fix(defect_id: str, body: ProposalIn, db=Depends(get_db
 async def apply_defect_fix(defect_id: str, body: ApplyIn | None = None, db=Depends(get_db)):
     """执行权（自动路径）：受保护缺陷 409，且任何写库之前拦截。"""
     _require_enabled()
+    # ✅ R192（FIX-R16 · 守卫补面）：缺陷执行经 ledger._write_section 以 after_text
+    #    **整章覆盖** sections.content/word_count/word_status——正文生成中执行会与
+    #    ``_persist_section`` 的无条件 UPDATE 互相覆盖（丢失更新）。R98 守卫家族
+    #    补面（先查归属再判生成态；缺陷不存在时走下方既有 404，语义不变）。
+    _drow = await db.execute("SELECT scheme_id FROM scheme_defects WHERE id=?", (defect_id,))
+    _d = await _drow.fetchone()
+    if _d and _d["scheme_id"]:
+        from app.routers.sections import ensure_no_generation_write
+
+        ensure_no_generation_write(str(_d["scheme_id"]), "缺陷修复执行")
     body = body or ApplyIn()
     try:
         result = await ledger.apply_fix(db, defect_id, applied_by=body.applied_by)
@@ -176,6 +186,14 @@ async def apply_defect_fix(defect_id: str, body: ApplyIn | None = None, db=Depen
 async def decide_defect_fix(defect_id: str, body: DecisionIn, db=Depends(get_db)):
     """人的裁决权：受保护缺陷的唯一执行通道。"""
     _require_enabled()
+    # ✅ R192（FIX-R16）：与 /apply 同族守卫（decision 同样经 _execute_defect
+    #    → _write_section 整章覆盖正文）。
+    _drow = await db.execute("SELECT scheme_id FROM scheme_defects WHERE id=?", (defect_id,))
+    _d = await _drow.fetchone()
+    if _d and _d["scheme_id"]:
+        from app.routers.sections import ensure_no_generation_write
+
+        ensure_no_generation_write(str(_d["scheme_id"]), "缺陷修复裁决")
     try:
         result = await ledger.decide_fix(
             db,

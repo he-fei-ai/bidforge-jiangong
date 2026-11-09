@@ -356,6 +356,16 @@ async def run_fullbook_repair(
                         _wc = text_word_count(persist_content)
                 except Exception as _re:  # noqa: BLE001 - 登记失败保留原回包正文
                     logger.warning("[整卷修复] 第 %s 章图表重登记失败（保留回包正文）: %s", sid, _re)
+            # ✅ R203（2026-11-09 · 编号归一化补链）：整卷修复整章改写正文，
+            #    UPDATE 前须补 normalize_section_content_subheadings 归一化子标题编号。
+            #    fail-soft 不阻断修复落库。
+            try:
+                from app.services.numbering import normalize_section_content_subheadings
+
+                persist_content, _ = await normalize_section_content_subheadings(db, scheme_id, sid, persist_content)
+                _wc = text_word_count(persist_content)
+            except Exception as _ne:  # noqa: BLE001 - 编号规范化失败不得阻断修复落库
+                logger.warning("[整卷修复] 第 %s 章编号规范化失败（保留修复正文）: %s", sid, _ne)
             # ✅ R168 原子性：只缓冲不 commit，与冲突状态回写、save_repair 留痕
             #    同事务一次性提交（中途异常 → 调用方 get_db 归还前回滚，零半生效）。
             await db.execute(

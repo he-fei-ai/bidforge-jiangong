@@ -55,13 +55,43 @@ clip_ledger_failures: Counter = Counter()
 repair_triggered: Counter = Counter()
 #: AI 调用失败/降级次数（key = 业务场景 scene）。
 ai_failure_by_scene: Counter = Counter()
+#: 出站消息**注入手法扫描**次数（key = 扫描角色，如 ``user``）。
+#: ✅ 2026-11-09（G1 · 检测与围栏解耦）：注入防护此前整体挂在
+#:   ``prompt_injection_defense``（默认 False）之下 → 默认部署下**既无围栏、
+#:   也无任何注入检测**，运维完全看不到「用户上传的资料里带了越狱指令」。
+#:   现把**检测**从围栏开关里拆出来：检测是**只读**行为（不改任何提示词
+#:   字节），因此可安全地默认常开；围栏仍受开关控制（改字节，需显式开启）。
+prompt_injection_scans: Counter = Counter()
+#: 出站消息注入手法命中次数（key = 手法名，见
+#: ``prompt_governance.INJECTION_PATTERNS`` 的 name 字段，如 ``ignore_previous``）。
+prompt_injection_hits: Counter = Counter()
+
+
+#: 单个计数器的 **key 上限**（防无界增长）。
+#: ✅ R204（2026-11-09 · 计数器 key 无界）：部分计数器的 key 含**动态值**
+#:   （资料文件名 / 章节标题，如 ``项目资料正文（招标文件.pdf）``）—— 长期运行的
+#:   服务每遇到一个新文件/新章节就新增一个 key、永不回收 ⇒ 进程内 Counter
+#:   无界增长，且 ``GET /system/prompt-metrics`` 的响应体随之膨胀
+#:   （几十万 key → 几十 MB 级响应，运维页直接超时）。
+#:   现对**每个计数器**统一限流：达到上限后，新 key 归入 ``__overflow__``
+#:   （保留「有增长」的事实，丢失逐条定位能力 —— 可接受的取舍）。
+_MAX_COUNTER_KEYS = 256
+#: 超过上限后的归并桶名。
+_OVERFLOW_KEY = "__overflow__"
 
 
 def _inc(counter: Counter, key: str) -> None:
-    """一行自增；任何异常吞掉并 debug 级留痕（观测指标不得阻断主流程）。"""
+    """一行自增；任何异常吞掉并 debug 级留痕（观测指标不得阻断主流程）。
+
+    ✅ R204：新增 key 上限保护（见 ``_MAX_COUNTER_KEYS``）。
+    """
     try:
-        if key:
-            counter[key] += 1
+        if not key:
+            return
+        if key not in counter and len(counter) >= _MAX_COUNTER_KEYS:
+            counter[_OVERFLOW_KEY] += 1
+            return
+        counter[key] += 1
     except Exception:  # noqa: BLE001
         logger.debug("prompt metrics counter increment failed", exc_info=True)
 
@@ -116,13 +146,32 @@ def record_ai_failure(scene: str) -> None:
     _inc(ai_failure_by_scene, scene or "unknown")
 
 
+def record_injection_scan(role: str) -> None:
+    """记一次出站消息注入扫描（key = 被扫描的角色，如 ``user``）。
+
+    ✅ 2026-11-09（G1）：与 :func:`record_injection_hit` 配对使用 ——
+    「扫了多少」与「命中多少」分开计数，运维才能区分「没有风险」与
+    「根本没扫」。
+    """
+    _inc(prompt_injection_scans, role or "unknown")
+
+
+def record_injection_hit(pattern: str) -> None:
+    """记一次注入手法命中（key = 手法名，如 ``ignore_previous``）。"""
+    _inc(prompt_injection_hits, pattern or "unknown")
+
+
 def get_snapshot() -> dict:
     """导出结构化快照（全部为 dict 拷贝，调用方持有后修改不影响内部计数）。
 
-    顶层固定 10 个键：9 个计数器 dict + ``registered_keys``（注册表全部 key，
-    供运维对照「哪些模板从无人渲染过」）。
+    顶层为「若干计数器 dict + ``registered_keys``（注册表全部 key，供运维对照
+    「哪些模板从无人渲染过」）」。计数器数量随功能演进**加法式增加**，此处
+    **不再硬编码键数**（旧 docstring 写「固定 10 个键」，R202 加到 12 个后即
+    与实现不符，运维按文档解析会漏字段）。
     2026-11-07 新增 ``render_missing_vars`` / ``token_budget_omitted_chars`` /
     ``token_budget_not_applied`` / ``clip_ledger_failures``（加法式，不改动既有键）。
+    2026-11-09（G1）新增 ``prompt_injection_scans`` / ``prompt_injection_hits``
+    （加法式；默认部署下的注入**检测**恒开，这两个键回答「扫了多少/命中多少」）。
     """
     from app.services.ai.prompts._registry import (
         _ALL_PROMPTS,
@@ -147,6 +196,8 @@ def get_snapshot() -> dict:
         "clip_ledger_failures": dict(clip_ledger_failures),
         "repair_triggered": dict(repair_triggered),
         "ai_failure_by_scene": dict(ai_failure_by_scene),
+        "prompt_injection_scans": dict(prompt_injection_scans),
+        "prompt_injection_hits": dict(prompt_injection_hits),
         "registered_keys": registered,
     }
 
@@ -163,6 +214,8 @@ def reset() -> None:
         clip_ledger_failures,
         repair_triggered,
         ai_failure_by_scene,
+        prompt_injection_scans,
+        prompt_injection_hits,
     ):
         try:
             c.clear()

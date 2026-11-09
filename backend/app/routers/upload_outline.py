@@ -8,6 +8,7 @@ from datetime import datetime
 
 from fastapi import APIRouter, Depends, File, HTTPException, Query, UploadFile
 
+from app.config import settings
 from app.db import get_db, safe_rowcount
 from app.services import facts_extractor as _fe
 from app.services.ai.json_response import (
@@ -18,7 +19,6 @@ from app.services.ai.prompts._registry import render
 from app.services.bid_section_detector import detect_bid_sections
 from app.services.content_utils import DEFAULT_WORD_BUDGET
 from app.services.file_parser import (
-    MAX_UPLOAD_BYTES,
     SUPPORTED_EXTENSIONS,
     ParseError,
     dump_parse_warnings,
@@ -192,8 +192,14 @@ async def parse_outline(
             if not chunk:
                 break
             total += len(chunk)
-            if total > MAX_UPLOAD_BYTES:
-                _mb = MAX_UPLOAD_BYTES // (1024 * 1024)
+            # ✅ R191（H1）：上限改运行时读模块属性（对齐 global_facts_docs 与
+            #    /system/upload-limits 的动态读取口径）——静态 from-import 是
+            #    import 时快照，settings.upload_max_bytes 运行期变更或测试
+            #    monkeypatch 时「目录识别上传」与「资料上传」限额判定分叉。
+            from app.services import file_parser as _fp
+
+            if total > _fp.MAX_UPLOAD_BYTES:
+                _mb = _fp.MAX_UPLOAD_BYTES // (1024 * 1024)
                 raise HTTPException(
                     413, f"文件过大，请上传 {_mb}MB 以内的文件" if _mb else "文件过大，请上传更小的文件"
                 )
@@ -263,20 +269,35 @@ async def parse_outline(
     # - 规则法识别但扁平大纲：0.65（有效但不够好）
     # - AI 兜底识别：0.75（质量取决于 AI 表现）
     # - 图片/OCR 文件：在上述基础上 -0.1（OCR 噪声影响）
-    is_image = ftype in ("png", "jpg", "jpeg", "bmp", "tiff")
+    is_image = ftype in ("png", "jpg", "jpeg", "bmp", "tiff", "webp")
     outline = simple_parse_outline(raw_text)
     used_ai = False
     # ✅ R176 B2-2（2026-11-04）：AI 兜底正文被截掉的字符数（未走 AI 兜底或未截断为 0）。
-    #    旧实现 raw_text[:6000] 截断完全无痕，用户误以为整份文件都参与了识别。
+    #    旧实现 raw_text[:settings.outline_ai_fallback_max_chars]（默认 6000）截断完全无痕，用户误以为整份文件都参与了识别。
     ai_text_truncated = 0
     if not _outline_seems_valid(outline) and raw_text and len(raw_text) > 50:
         try:
             # ✅ R175（2026-11-03 · BUG-1 接线）：上传文档正文是外部不可信原文，
             #   截断前先统一治理（围栏 → 凭据脱敏；预算由截断本身承担）。
-            #   三个开关默认关闭时 raw_text[:6000] 与修复前完全一致。
+            #   三个开关默认关闭时 raw_text[:settings.outline_ai_fallback_max_chars] 与修复前完全一致（默认 6000）。
             from app.services.prompt_material_guard import govern_blob
 
-            _ai_raw = raw_text[:6000]
+            # ✅ R188（L14 · 截断留痕）：R181 把硬编码 5000 换成配置化上限后，
+            #    切片的 upper 变成 Attribute，既有「裸切 AST 棘轮」不再命中；
+            #    但截断本身仍无**日志账目**（响应侧 ai_text_truncated /
+            #    truncated_chars 只回传给用户，运维在后台日志里看不到）。
+            #    ⚠️ 刻意不调用 clip_text_logged：R186 护栏
+            #    ``test_clip_text_logged_only_in_allowlisted_internal_scopes``
+            #    限定它只用于「只喂正则/关键词判定、插标记会改变匹配结果」的
+            #    内部串，本处文本直接进模型请求，语义不符；也不用
+            #    clip_text_notice（会往提示词插说明，改变 AI 输入与预算）。
+            #    故补一条等价的显式 WARNING，不插标记、不改返回值。
+            _ai_raw = raw_text[: settings.outline_ai_fallback_max_chars]
+            if len(raw_text) > settings.outline_ai_fallback_max_chars:
+                logger.warning(
+                    "上传目录识别 AI 兜底正文截断（仅日志）：%d → %d 字，已省略 %d 字",
+                    len(raw_text), len(_ai_raw), len(raw_text) - len(_ai_raw),
+                )
             # 截断口径：以「实际送入 AI 的原文片段」为准（治理不改长度预算），
             # 供响应回传「有多少原文没参与识别」。
             ai_text_truncated = max(0, len(raw_text) - len(_ai_raw))
@@ -411,6 +432,38 @@ async def parse_outline(
     return result
 
 
+@router.get("/{upload_id}/diagnostics")
+async def get_upload_diagnostics(upload_id: str, db=Depends(get_db)):
+    """✅ R181（2026-11-08 · T4）：回放目录识别上传的诊断信息（加法式只读端点）。
+
+    uploaded_outlines 的 parse_warnings 已落库但此前无回放入口，用户/前端无法事后
+    核对「这份识别结果是怎么来的 / 有哪些内容不完整告警」。本端点只读回传，不修改
+    任何状态、不改变既有契约（与 R171 起 raw_text 存全文、不再回传 raw_text_truncated
+    的口径一致：此处仅暴露真正持久化的 parse_warnings）。
+    """
+    cur = await db.execute(
+        "SELECT id, file_name, file_type, status, parse_warnings FROM uploaded_outlines WHERE id=?",
+        (upload_id,),
+    )
+    if cur is None:
+        raise HTTPException(status_code=503, detail="数据库暂不可用，请稍后重试")
+    row = await cur.fetchone()
+    if row is None:
+        raise HTTPException(status_code=404, detail="未找到该上传记录")
+    warnings_raw = row["parse_warnings"] or ""
+    try:
+        parse_warnings = json.loads(warnings_raw) if warnings_raw else []
+    except Exception:
+        parse_warnings = []
+    return {
+        "upload_id": row["id"],
+        "file_name": row["file_name"],
+        "file_type": row["file_type"],
+        "status": row["status"],
+        "parse_warnings": parse_warnings,
+    }
+
+
 @router.post("/{upload_id}/save-as-outline")
 async def save_as_outline(upload_id: str, body: dict, db=Depends(get_db)):
     """保存识别结果为方案目录（写入 sections 表）"""
@@ -472,6 +525,27 @@ async def save_as_outline(upload_id: str, body: dict, db=Depends(get_db)):
     outline = normalize_outline(outline)
     if not outline:
         raise HTTPException(400, "outline 节点格式非法（应为对象数组）")
+
+    # ✅ R192（FIX-R3 · fail-closed 闸门补面）：normalize_outline 内部
+    #    renumber_outline 抛异常会被吞掉（仅 ERROR 日志），返回「已裁剪但未编号」
+    #    的树 —— 本路径自建 DELETE/INSERT 不经 `_save_outline_to_db` 的落库闸门
+    #    （sections.py 编号校验），脏编号 outline_json 会静默入库（前端双重编号、
+    #    正文提示词编号缺失）。现与 save-outline 手动链路同一判据、同一 400 口径
+    #    （R187 FIX-5 家族补面；快照回退路径保持刻意豁免 + `_outline_structure_report`
+    #    告警，不在本闸门范围）。
+    from app.services.outline_utils import validate_outline_numbering
+
+    _numbering_problems = validate_outline_numbering(outline)
+    if _numbering_problems:
+        logger.warning(
+            "上传目录保存拒绝：编号/标题校验未通过（scheme=%s · %d 项）: %s",
+            scheme_id[:8], len(_numbering_problems), "；".join(_numbering_problems[:5]),
+        )
+        raise HTTPException(
+            400,
+            "上传目录编号校验未通过（自动重排可能失败），请检查识别结果后重试："
+            + "；".join(_numbering_problems[:3]),
+        )
 
     # ✅ R175 G-3 补接线（2026-11-03）：空壳一级章闸门 —— 本路径此前不经该闸门
     #    （自建 DELETE/INSERT、不走 `_save_outline_to_db`，与 R89 G1 修复前的
@@ -667,13 +741,23 @@ async def save_as_outline(upload_id: str, body: dict, db=Depends(get_db)):
     updates: list[tuple] = []
     new_inserts: list[tuple] = []
     counter = {"n": 0}
+    _title_sanitized_n = 0
 
     def collect_rows(nodes: list, parent_id: str, path_parts: tuple, idx_path: tuple = ()):
-        nonlocal preserved_count
+        nonlocal preserved_count, _title_sanitized_n
         for i, node in enumerate(nodes):
             if not isinstance(node, dict):
                 continue
             title = node.get("title", "")
+            # ✅ R190（FIX-3）：落库前清洗不可见/控制字符（与 sections.create/update
+            #    / _save_outline_to_db 同口径）—— 上传文档标题本身可能含零宽字符，
+            #    原样入库后编制要求覆盖判据与重复标题判据再次失效。
+            if isinstance(title, str) and title:
+                from app.services.outline_utils import sanitize_outline_title
+
+                title, _tsan = sanitize_outline_title(title)
+                if _tsan:
+                    _title_sanitized_n += 1
             nt = _norm_title(title)
             # ✅ 遗留 1：**匹配身份**优先取「自动改写前的原标题」（按索引路径查
             #    pre_nt_index），展示与落库标题仍用改写后的 title —— 二者解耦，
@@ -946,6 +1030,9 @@ async def save_as_outline(upload_id: str, body: dict, db=Depends(get_db)):
     if preserved_count:
         result["preserved_content"] = preserved_count
         result["note"] = f"已通过标题匹配保留 {preserved_count} 个章节的已有正文内容"
+    if _title_sanitized_n:
+        # ✅ R190（FIX-3）：与 save-outline 的 title_sanitized 同口径（加法式）。
+        result["title_sanitized"] = _title_sanitized_n
     if cleared_content:
         result["cleared_content_sections"] = cleared_content
         result["note"] = (

@@ -29,6 +29,10 @@ from app.services.ai.prompts._norm_dicts import (
 
 logger = logging.getLogger("facts_cross_validators")
 
+#: ✅ R193：LCS dp 矩阵规模闸（元素对上限）——500×500=25 万格已远超任何真实
+#:    工序流长度，超闸按「无公共子序列」处理（矛盾仍登记，仅严重级降档）。
+_LCS_CELL_CAP = 250_000
+
 
 def _safe_confidence(v, default: float = 1.0) -> float:
     """置信度容错：脏值/None/NaN 回落默认，避免落库 float() 抛异常。
@@ -349,6 +353,16 @@ def _split_flow(value: str | list) -> list[str]:
 
 
 def _lcs_len(a: list[str], b: list[str]) -> int:
+    # ✅ R193（规模闸）：dp 矩阵 O(n·m)，序列来自模型输出——畸形长序列
+    #    （数千元素 × 数千元素 → 数亿元素列表）可在单段交叉校验内把内存峰值
+    #    拖垮整个事件循环进程。超闸按 0 处理（sim=0 → 矛盾仍登记但降档），
+    #    方向安全（低档不漏报，只影响严重级）。
+    if len(a) * len(b) > _LCS_CELL_CAP:
+        logger.warning(
+            "流程序列 LCS 规模超闸（%d×%d>%d），按无公共子序列处理",
+            len(a), len(b), _LCS_CELL_CAP,
+        )
+        return 0
     dp = [[0] * (len(b) + 1) for _ in range(len(a) + 1)]
     for i in range(1, len(a) + 1):
         for j in range(1, len(b) + 1):

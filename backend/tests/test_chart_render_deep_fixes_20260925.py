@@ -347,8 +347,13 @@ def test_pipeline_drop_dangling_lead_in_scope_guard():
     assert out == ["正文段落。"], out
 
 
-def test_pipeline_limit_trim_also_drops_second_lead_in():
+def test_pipeline_limit_trim_also_drops_second_lead_in(monkeypatch):
     """每章≤1 上限裁剪第 2 块时，其引导语同样回收（第 1 块的保留）。"""
+    # ✅ R199 重锚：R196 引入 min_words 闸（本 fixture 正文 <200 字会被先删），
+    #    本用例测的是 per_section_limit 裁剪 + 引导语回收，置 0 恢复原判据。
+    import app.routers._chart_pipeline as _CP
+
+    monkeypatch.setattr(_CP, "_CHART_MIN_WORDS", 0)
     db = FakeDb()
     first = "flowchart TD\n    A --> B\n    B --> C"
     second = "flowchart LR\n    C --> D"

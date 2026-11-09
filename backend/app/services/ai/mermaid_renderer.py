@@ -405,6 +405,21 @@ def render_mermaid_to_bytes(
     if not _http_renderable:
         logger.info("[渲染] Level 1.5 跳过: JSON 数据载荷直接走 PIL v2 (chart_type=%s)", chart_type)
     _mermaid_client = get_mermaid_service_client(timeout=30)
+    # ✅ R199（2026-11-09）：探测缓存（TTL 内）显示所有后端均不可用时短路整个
+    #    HTTP 重试循环。默认部署（未配置 MERMAID_SERVICE_URL / Railway、未装
+    #    mmdc）下旧实现每张 Mermaid 图都空转 2 次失败重试 + 2×1s 同步 sleep
+    #    （占 to_thread 线程），批量导出几十张图累计可观。零网络请求、任一
+    #    后端未探测/缓存过期则保持原行为（见 all_backends_probed_unavailable）。
+    if _http_renderable and getattr(_mermaid_client, "all_backends_probed_unavailable", None) is not None:
+        try:
+            if _mermaid_client.all_backends_probed_unavailable():
+                logger.info(
+                    "[渲染] Level 1.5 跳过: 探测缓存（TTL 内）显示所有 HTTP 后端不可用 (chart_type=%s)",
+                    chart_type,
+                )
+                _http_renderable = False
+        except Exception as _e:
+            logger.debug("[silent-except] mermaid_renderer.py: probe-shortcut - %s", _e)
     _http_bytes: bytes | None = None
     _max_retries = 2
     # BUG-F-02 修复：为整段 HTTP 尝试设置总预算（20s）。
@@ -779,6 +794,29 @@ def render_mermaid_to_bytes(
 #      详见 _render_cache_key 上方注释；此处仅保留说明，不再重复定义。）
 
 
+def _cached_bytes_ok(content: bytes) -> bool:
+    """✅ R199（2026-11-09）：磁盘缓存命中内容的最小完整性校验。
+
+    长度 >100 字节且 PIL 能完成**全文件结构校验**（verify() 含 PNG CRC / IEND
+    尾校验，截断/半文件在此抛出）。与导出侧 ``_export_docx_parts.
+    _image_format_supported`` 的 R199 加固同口径 —— 两端任一端拒收，坏图都
+    进不了成稿；缓存端自愈（删除重渲）先行，可避免每次导出重复校验失败。
+    任何异常（PIL 缺失等）按坏文件处理 —— 代价只是多渲染一次，好过永久命中坏产物。
+    """
+    if not content or len(content) <= 100:
+        return False
+    try:
+        import io as _io
+
+        from PIL import Image as _PILImage
+
+        with _PILImage.open(_io.BytesIO(content)) as _im:
+            _im.verify()
+        return True
+    except Exception:
+        return False
+
+
 class ChartCache:
     """图表渲染缓存 - 基于 Mermaid 代码/JSON 数据的哈希值
 
@@ -840,6 +878,10 @@ class ChartCache:
         order: dict[str, float | str] = {}
         try:
             for f in self.cache_dir.glob("*.*"):
+                # ✅ R199：跳过原子写残留的 .tmp 文件（{key}.{pid}.tmp）——
+                #    进程被强杀时的孤儿 tmp 会被永久计入 500MB 配额并参与淘汰。
+                if f.suffix.lower() == ".tmp":
+                    continue
                 try:
                     stat = f.stat()
                 except OSError:
@@ -1046,6 +1088,24 @@ class ChartCache:
             cached_content = None
             if cache_path.exists():
                 cached_content = cache_path.read_bytes()
+                # ✅ R199（2026-11-09）：磁盘命中补最小完整性校验（长度 + PIL
+                #    全文件 verify）。写侧虽是 tmp+os.replace 原子写，但历史遗留
+                #    （非原子写时代产物）/磁盘异常/手工放置的 0 字节与截断文件会
+                #    被每次命中 —— 坏字节进 rendered_bytes 后图被跳过，下次导出
+                #    还是先命中同一坏文件，**永不重渲**（只能手工清缓存目录）。
+                #    现校验失败即删除坏文件并走重渲（自愈）；不重演 hits/日LRU。
+                if not _cached_bytes_ok(cached_content):
+                    logger.warning(
+                        "ChartCache: 磁盘缓存命中但内容损坏（len=%d），删除坏文件并重渲 %s",
+                        len(cached_content),
+                        cache_key[:12],
+                    )
+                    cached_content = None
+                    try:
+                        cache_path.unlink()
+                    except OSError:
+                        pass
+            if cached_content is not None:
                 self._stats["hits"] += 1
                 # ✅ R183（2026-11-07）：与 get() 同口径 —— 命中必须刷新 LRU 时间戳。
                 #    get_or_render 是预览/导出的主路径，旧实现只统计 hits 不刷新，
@@ -1071,14 +1131,28 @@ class ChartCache:
             _signaled = waiter.wait(timeout=120.0)
             if not _signaled:
                 logger.warning("ChartCache: 等待同图渲染超时（120s），降级为自行渲染 %s", cache_key[:12])
+            # ✅ R199：_corrupt_cache —— follower 命中的是坏文件（已删除）。
+            #    此时不能按「leader 成功」返回 None（leader 实际写出了坏文件或
+            #    坏文件是遗留物），必须降级为自行渲染，否则该图永久失败。
+            _corrupt_cache = False
             with self._lock:
                 if cache_path.exists():
-                    self._stats["hits"] += 1
-                    # ✅ R183：follower 从缓存命中同样刷新 LRU 时间戳
-                    self._access_order[cache_key] = time.time()
-                    return BytesIO(cache_path.read_bytes())
-            if not _signaled:
-                # leader 已失联：清理残留 in-flight 登记，自行承担渲染
+                    _fb = cache_path.read_bytes()
+                    if _cached_bytes_ok(_fb):
+                        self._stats["hits"] += 1
+                        # ✅ R183：follower 从缓存命中同样刷新 LRU 时间戳
+                        self._access_order[cache_key] = time.time()
+                        return BytesIO(_fb)
+                    _corrupt_cache = True
+                    logger.warning(
+                        "ChartCache: follower 命中坏缓存（len=%d），删除并自行渲染 %s", len(_fb), cache_key[:12]
+                    )
+                    try:
+                        cache_path.unlink()
+                    except OSError:
+                        pass
+            if not _signaled or _corrupt_cache:
+                # leader 已失联 / 命中坏缓存：清理残留 in-flight 登记，自行承担渲染
                 with self._inflight_lock:
                     if self._inflight.get(cache_key) is waiter:
                         self._inflight.pop(cache_key, None)

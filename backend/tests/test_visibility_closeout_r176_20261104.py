@@ -126,11 +126,15 @@ class TestSingleOutlineWritePathGuard:
         它同样是「DELETE 全表 + 逐行 INSERT」的整树重建，故必须纳入闸门判据；
         与另两条的差异是：回退语义为还原用户此前确认过的状态，空壳清单**只回传
         不阻断**（阻断会把撤销功能锁死），但闸门实现必须是同一个（禁止各写一份）。
+
+        ✅ R190（2026-11-09）重锚：快照回退主体拆到 `_restore_locked`
+        （外层函数负责 BEGIN IMMEDIATE 写锁事务语义），INSERT/DELETE 与
+        空壳一级章闸门都在拆分后的主体内，判据意图不变。
         """
         allowed = {
             ("routers/sections.py", "_save_outline_to_db"),
             ("routers/upload_outline.py", "save_as_outline"),
-            ("services/outline_versions.py", "restore_outline_snapshot"),
+            ("services/outline_versions.py", "_restore_locked"),
         }
         found = set()
         for path in APP_DIR.rglob("*.py"):

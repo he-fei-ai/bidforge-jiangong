@@ -256,14 +256,34 @@ async def build_global_facts_text(db, scheme_id: str, limit: int = 5000) -> str:
         return ""
 
 
-async def build_project_docs_text(db, project_id: str, *, doc_type: str = "", limit: int = 4000) -> str:
-    """项目资料 / 设计文件摘要（project_documents.parsed_markdown 聚合截断）。"""
+async def build_project_docs_text(db, project_id: str, *, doc_category: str = "", limit: int = 4000) -> str:
+    """项目资料 / 设计文件摘要（project_documents.parsed_markdown 聚合截断）。
+
+    ✅ R191 修复（键名错位致「设计文件」上下文恒空）：入参原为 ``doc_type``
+    并查 ``doc_type=?`` 列——但 doc_type 列的唯一写入值是 '全局事实上传'
+    （global_facts_docs.upload_documents），「设计文件」是 doc_category 的
+    合法分类。键位错位使 include_design_docs 分支恒返回 ""（前端勾选
+    「包含设计文件」完全无效、扫描上下文静默缺一整块依据）。现按
+    ``doc_category`` 过滤（调用方 consistency_scanner 已同步改参）。
+
+    ✅ R191（B4）：补 ``IFNULL(parsed_markdown,'')<>''``（空正文文档占
+    3000 字预算却无内容，可能把有内容的文档挤出）与
+    ``ORDER BY created_at, id``（与其余消费链固定序对齐——旧行序不定时
+    ``total+len>limit: break`` 的选入集合非确定）。
+    """
     try:
-        sql = "SELECT file_name, doc_type, parsed_markdown FROM project_documents " "WHERE project_id=?"
+        # ⚠️ 拼接顺序：条件必须追加在 ORDER BY 之前（R191 护栏首跑实证：
+        #    AND 追加到 ORDER BY 之后会被 SQLite 解析成「排序布尔表达式」，
+        #    过滤静默失效且无语法错误）。
+        sql = (
+            "SELECT file_name, doc_type, parsed_markdown FROM project_documents "
+            "WHERE project_id=? AND IFNULL(parsed_markdown,'')<>''"
+        )
         params: list = [project_id]
-        if doc_type:
-            sql += " AND doc_type=?"
-            params.append(doc_type)
+        if doc_category:
+            sql += " AND doc_category=?"
+            params.append(doc_category)
+        sql += " ORDER BY created_at, id"
         cur = await db.execute(sql, params)
         rows = await cur.fetchall()
     except Exception as e:
@@ -1155,7 +1175,9 @@ async def run_scan(
     facts = await build_global_facts_text(db, scheme_id) if include_global_facts else ""
     project_docs = await build_project_docs_text(db, project_id, limit=3000) if include_project_docs else ""
     design_docs = (
-        await build_project_docs_text(db, project_id, doc_type="设计文件", limit=3000) if include_design_docs else ""
+        await build_project_docs_text(db, project_id, doc_category="设计文件", limit=3000)
+        if include_design_docs
+        else ""
     )
     standards = build_standards_text(scheme_name, scheme_type)
 

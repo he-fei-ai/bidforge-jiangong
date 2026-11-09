@@ -28,6 +28,10 @@
 import { describe, it, expect, vi, afterEach } from "vitest";
 import { render, fireEvent, cleanup } from "@testing-library/react";
 import React from "react";
+// ✅ R193：buildFactsCategoryEntries 的权威出处是 factsShared（页面侧数据源已
+//    切换为 buildFactsCategoryEntriesFromStats 全量口径，本测试钉住的是页内
+//    聚合纯函数本体，仍从单一事实源导入）。
+import { buildFactsCategoryEntries } from "../pages/schemeWorkbench/factsShared";
 import {
   applyFactsFilter,
   FactsGroupList,
@@ -38,7 +42,6 @@ import {
   FactsExtractProgressCard,
   FactsSegmentFailuresAlert,
   FactsDiagnosticsPanel,
-  buildFactsCategoryEntries,
   resolveSelectedFactCategory,
   filterFactsGroupsByCategory,
   FactsCategoryPanel,

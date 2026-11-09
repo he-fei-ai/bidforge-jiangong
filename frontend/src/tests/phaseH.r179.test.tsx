@@ -271,7 +271,8 @@ describe("DossierExportCard 底稿导出", () => {
       </App>,
     );
     fireEvent.click(screen.getByTestId("dossier-export"));
-    await waitFor(() => expect(dossierApi.export).toHaveBeenCalledWith("s1"));
+    // ✅ R195 重锚：在飞请求带 AbortSignal（切方案/卸载可中止）
+    await waitFor(() => expect(dossierApi.export).toHaveBeenCalledWith("s1", expect.anything()));
     await waitFor(() => expect(clickSpy).toHaveBeenCalledTimes(1));
     clickSpy.mockRestore();
   });
@@ -285,5 +286,37 @@ describe("DossierExportCard 底稿导出", () => {
     );
     fireEvent.click(screen.getByTestId("dossier-export"));
     expect(await screen.findByText("可复核底稿导出未启用")).toBeTruthy();
+  });
+
+  // ✅ R195：409 互斥 / 503 转换繁忙走 resolveExportError 差异化文案（不裸抛 message）
+  it("409（生成互斥）展示差异化文案", async () => {
+    (dossierApi.export as any).mockRejectedValue({
+      message: "Request failed with status code 409",
+      response: { status: 409, data: undefined },
+    });
+    render(
+      <App>
+        <DossierExportCard schemeId="s1" />
+      </App>,
+    );
+    fireEvent.click(screen.getByTestId("dossier-export"));
+    expect(await screen.findByText(/生成中/)).toBeTruthy();
+  });
+
+  it("卸载/切方案时中止在飞请求", async () => {
+    let captured: AbortSignal | undefined;
+    (dossierApi.export as any).mockImplementation((_sid: string, signal?: AbortSignal) => {
+      captured = signal;
+      return new Promise(() => {}); // 永不 resolve，模拟在飞
+    });
+    const { unmount } = render(
+      <App>
+        <DossierExportCard schemeId="s1" />
+      </App>,
+    );
+    fireEvent.click(screen.getByTestId("dossier-export"));
+    await waitFor(() => expect(captured).toBeTruthy());
+    unmount();
+    expect(captured!.aborted).toBe(true);
   });
 });

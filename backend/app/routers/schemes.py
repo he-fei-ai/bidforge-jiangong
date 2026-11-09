@@ -139,7 +139,22 @@ async def _apply_library_on_create(db, scheme_id: str, library_ids: list[str]) -
         try:
             from app.routers.sections import _save_outline_to_db
 
-            result = await _save_outline_to_db(db, scheme_id, outline, source="目录库")
+            # ✅ R192（FIX-R8 · SAVEPOINT 隔离）：`_save_outline_to_db` 在
+            #    inherited 事务模式下（本调用方已带未提交的 schemes INSERT）
+            #    中途抛异常时自身不回滚；旧 except 吞掉异常返回 None 后，
+            #    create_scheme 照常 `db.commit()` —— 半套脏章节写（executemany
+            #    已执行、级联 DELETE 未执行等撕裂态）与 schemes INSERT 一起落库，
+            #    新方案带脏目录且响应 applied=None 用户无感知。SAVEPOINT 把
+            #    套用写入圈成可独立回滚的子事务：失败只损失套用（保持
+            #    「失败不影响方案创建」的既有设计意图），方案主行不再携带半成品。
+            await db.execute("SAVEPOINT apply_library_on_create")
+            try:
+                result = await _save_outline_to_db(db, scheme_id, outline, source="目录库")
+            except Exception:
+                await db.execute("ROLLBACK TO SAVEPOINT apply_library_on_create")
+                await db.execute("RELEASE SAVEPOINT apply_library_on_create")
+                raise
+            await db.execute("RELEASE SAVEPOINT apply_library_on_create")
         except Exception as e:
             logger.warning("创建方案时套用目录库失败（降级为手动套用）: %s", e)
             return None
@@ -298,6 +313,18 @@ async def duplicate_scheme(project_id: str, scheme_id: str, db=Depends(get_db)):
     if not src:
         raise HTTPException(404, "方案不存在")
     src = dict(src)
+    # ✅ R190（FIX-14）：源方案目录/正文生成中不得复制。旧实现无任何守卫
+    #    （delete 有 cancel_and_wait，copy 没有）—— 目录生成闸门重建期间
+    #    复制，副本可能固化生成中间态（半棵树 / 与提交后不一致的快照）。
+    #    口径与 upload_outline / outline_library 的生成中守卫一致（只拦 running/paused）。
+    from app.routers.sections import content_generation_in_progress, outline_generation_in_progress
+
+    _cg = content_generation_in_progress(scheme_id)
+    if _cg:
+        raise HTTPException(409, f"本方案正文正在后台生成中（{_cg}），请等待生成完成（或先停止任务）后再复制")
+    _og = outline_generation_in_progress(scheme_id)
+    if _og:
+        raise HTTPException(409, f"本方案目录正在后台生成中（{_og}），请等待生成完成（或先停止任务）后再复制")
     new_id = str(uuid.uuid4())
     await db.execute(
         "INSERT INTO schemes (id, project_id, name, type, profession, status, word_budget, outline_source, config_json)"
@@ -456,12 +483,29 @@ async def duplicate_scheme(project_id: str, scheme_id: str, db=Depends(get_db)):
     # 副本章节 `status="empty"`、正文不复制，没有任何子标题需要重算；接了只是
     # 白跑一次全表扫描。fail-soft：重排失败只告警，**绝不阻断复制**（用户拿到
     # 的仍是一个可用副本，只是编号可能未对齐）。
+    _renumber_failed = None
     try:
         from app.routers.sections import renumber_sections_after_reorder
 
         await renumber_sections_after_reorder(db, new_id)
     except Exception as e:  # noqa: BLE001
-        logger.warning("方案复制后章节编号重排失败（副本编号可能与源方案不一致，scheme=%s）: %s", new_id, e)
+        _renumber_failed = str(e)
+        logger.error("方案复制后章节编号重排失败（scheme=%s）: %s", new_id, e)
+    if _renumber_failed:
+        # ✅ R188（L3）：旧实现吞掉 renumber 异常后照常 commit + 200，把「编号
+        #    可能与源方案不一致」的脏副本伪装成可用副本（导出前零告警）。
+        #    现用与 save-outline / 严格模式导出守卫**同源**的结构自检判定：
+        #    干净 → 保留 fail-soft 语义（仍 200）；脏 → 整事务回滚 + 409。
+        #    renumber 成功的正常路径零额外查询、零行为变化。
+        from app.routers.sections import _outline_structure_report
+
+        _report = await _outline_structure_report(db, new_id)
+        if not _report.get("consistent") or _report.get("unmounted_count"):
+            await db.rollback()
+            raise HTTPException(409, "副本章节编号校验未通过，复制已回滚，请重试")
+        logger.warning(
+            "方案复制重排失败但编号仍一致，保留可用副本（scheme=%s）: %s", new_id, _renumber_failed
+        )
     await db.commit()
     return {"id": new_id, "conflicts_marked": conflicts_marked}
 
@@ -578,6 +622,20 @@ async def instantiate_scheme_outline(project_id: str, scheme_id: str, dry_run: b
 
     if dry_run:
         return {"enabled": True, "dry_run": True, **res}
+
+    # ✅ R192（FIX-R7 · 守卫补面）：dry_run=false 走 `_save_outline_to_db`
+    #    整表重建，但守卫在 save-outline 路由层——本端点直呼服务函数绕过了它。
+    #    目录/正文生成中实例化会与确认闸门/生成落库互踩（与 R190 FIX-14 给
+    #    duplicate_scheme 修掉的缺口同型；apply-and-save 在 outline_library
+    #    :753/762 已同款修过）。与 duplicate_scheme 逐字同口径（只拦 running/paused）。
+    from app.routers.sections import content_generation_in_progress, outline_generation_in_progress
+
+    _cg = content_generation_in_progress(scheme_id)
+    if _cg:
+        raise HTTPException(409, f"本方案正文正在后台生成中（{_cg}），请等待生成完成（或先停止任务）后再实例化目录")
+    _og = outline_generation_in_progress(scheme_id)
+    if _og:
+        raise HTTPException(409, f"本方案目录正在后台生成中（{_og}），请等待生成完成（或先停止任务）后再实例化目录")
 
     from app.routers.sections import _save_outline_to_db
 

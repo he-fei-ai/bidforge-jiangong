@@ -1347,7 +1347,17 @@ def flowchart_json_to_mermaid(data: dict) -> str:
         # 节点定义
         for node in norm_nodes:
             nid = node["id"]
-            label = node["label"].replace('"', "'")
+            # ✅ R196（2026-11-09）：label 强制 str（数字 label 旧实现 .replace 直接
+            #    AttributeError → 整段转换被外层吞掉返回空串）；剥 `|`（会破坏
+            #    `A -->|label| B` 边定界）与换行（Mermaid 标签内非法）。
+            label = (
+                str(node.get("label") or "")
+                .replace('"', "'")
+                .replace("|", "/")
+                .replace("\r", " ")
+                .replace("\n", " ")
+                .strip()
+            )
             ntype = node["type"]
             if ntype in ("start", "end"):
                 lines.append(f'    {nid}(["{label}"])')
@@ -1360,7 +1370,9 @@ def flowchart_json_to_mermaid(data: dict) -> str:
         for edge in norm_edges:
             f = edge["from"]
             t = edge["to"]
-            label = edge.get("label", "")
+            # ✅ R196：边 label 同口径剥 `|`/换行 —— 旧实现原样内插，含 `|` 的
+            #    label 产出 `A -->|a|b| B` 形态的非法语法（定界符被内容截断）。
+            label = str(edge.get("label") or "").replace("|", "/").replace("\r", " ").replace("\n", " ").strip()
             if label:
                 lines.append(f"    {f} -->|{label}| {t}")
             else:

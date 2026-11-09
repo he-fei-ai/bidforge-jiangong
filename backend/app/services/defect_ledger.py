@@ -19,12 +19,15 @@ import difflib
 import hashlib
 import inspect
 import json
+import logging
 import uuid
 from datetime import datetime
 
 from app.services.content_utils import text_word_count, word_status_for
 from app.services.facts_extractor import resolve_scheme_project_id
 from app.services.fix_policy import classify_fix_policy
+
+logger = logging.getLogger(__name__)
 
 # 三态结论（缺参/检查器失败一律 undetermined，绝不折算为“通过”）
 VERDICT_YES = "yes"
@@ -325,11 +328,22 @@ async def propose_fix(db, defect_id: str, *, after_text: str, suggestion: str = 
 
 
 async def _write_section(db, section_id: str, after_text: str) -> bool:
-    cur = await db.execute("SELECT word_budget FROM sections WHERE id=?", (section_id,))
+    cur = await db.execute("SELECT word_budget, scheme_id FROM sections WHERE id=?", (section_id,))
     row = await cur.fetchone()
     if not row:
         raise DefectStateError("缺陷指向的章节不存在，无法执行")
-    budget = int(dict(row).get("word_budget") or 0)
+    _row = dict(row)
+    budget = int(_row.get("word_budget") or 0)
+    # ✅ R203（2026-11-09 · 编号归一化补链）：缺陷修复整章改写正文，UPDATE 前须补
+    #    normalize_section_content_subheadings 归一化子标题编号。fail-soft 不阻断。
+    _scheme_id = _row.get("scheme_id") or ""
+    if _scheme_id:
+        try:
+            from app.services.numbering import normalize_section_content_subheadings
+
+            after_text, _ = await normalize_section_content_subheadings(db, _scheme_id, section_id, after_text)
+        except Exception as _ne:  # noqa: BLE001 - 编号规范化失败不得阻断缺陷修复落库
+            logger.warning("缺陷修复落库：章节 %s 编号规范化失败（保留修复正文）: %s", section_id[:8], _ne)
     count = text_word_count(after_text)
     await db.execute(
         "UPDATE sections SET content=?, word_count=?, word_status=?, updated_at=? WHERE id=?",

@@ -62,7 +62,11 @@ async def create_outline_snapshot(
         "INSERT INTO scheme_snapshots (id, scheme_id, type, sections, created_at) VALUES (?,?,?,?,?)",
         (snapshot_id, scheme_id, snapshot_type, json.dumps(payload, ensure_ascii=False, default=str), _now()),
     )
-    # 保留最近 5 条（同方案、同类型族），防无限膨胀
+    # ✅ R190（注释诚实化）：保留最近 KEEP_SNAPSHOTS 条 —— 配额按 scheme_id
+    #    **全类型共享**（不含 type 维度）。⚠️ 后果：一次自动确认 + 两三次回退
+    #    即可把「回退前（可撤销）」快照挤出窗口，撤销链路缩短。这是**当前实现
+    #    的真实语义**（旧注释宣称「同类型族」与 SQL 不符，已修正），如需按
+    #    type 分配配额属行为变更，须单独评审。
     await db.execute(
         "DELETE FROM scheme_snapshots WHERE scheme_id=? AND id NOT IN ("
         " SELECT id FROM scheme_snapshots WHERE scheme_id=? ORDER BY created_at DESC, rowid DESC LIMIT ?)",
@@ -115,7 +119,28 @@ async def restore_outline_snapshot(db, scheme_id: str, snapshot_id: str) -> dict
 
     返回 ``{ok, restored_sections, empty_top_chapters}``；缓存失效与图表重挂
     由路由层编排（services 不得依赖 routers）。快照不存在/不属于该方案 → ValueError。
+
+    ✅ R190（FIX-2）：首个决策读之前 BEGIN IMMEDIATE 取 RESERVED 写锁
+    （与 R184 _save_outline_to_db 同口径）。回退是「读快照 → DELETE 全表 →
+    逐行 INSERT」复合写，两路并发回退到不同快照时旧实现各自基于自己读到的
+    旧状态组装，最后 commit 者胜，先者的 undo 快照链与最终状态可能对不上。
     """
+    _owns_lock = not getattr(db, "in_transaction", False)
+    if _owns_lock:
+        await db.execute("BEGIN IMMEDIATE")
+    try:
+        return await _restore_locked(db, scheme_id, snapshot_id)
+    except Exception:
+        if _owns_lock:
+            try:
+                await db.rollback()
+            except Exception:  # noqa: BLE001 — 回滚失败不再遮蔽原异常
+                pass
+        raise
+
+
+async def _restore_locked(db, scheme_id: str, snapshot_id: str) -> dict[str, Any]:
+    """restore_outline_snapshot 的加锁主体（事务语义见上层函数注释）。"""
     cur = await db.execute(
         "SELECT scheme_id, sections FROM scheme_snapshots WHERE id=? AND scheme_id=?",
         (snapshot_id, scheme_id),
@@ -168,9 +193,14 @@ async def restore_outline_snapshot(db, scheme_id: str, snapshot_id: str) -> dict
             restored += 1
 
     review_status = str(payload.get("review_status") or "")
+    # ✅ R190（FIX-11）：快照恢复是整表重建，schemes.word_count 必须按恢复后的
+    #    章节正文重算 —— 旧实现只更新 review_status，回退到「正文为空」快照后
+    #    方案列表/头部仍显示回退前的总字数，直到下一次正文写路径才自愈。
     await db.execute(
-        "UPDATE schemes SET review_status=?, updated_at=? WHERE id=?",
-        (review_status, _now(), scheme_id),
+        "UPDATE schemes SET review_status=?,"
+        " word_count=(SELECT COALESCE(SUM(word_count),0) FROM sections WHERE scheme_id=?),"
+        " updated_at=? WHERE id=?",
+        (review_status, scheme_id, _now(), scheme_id),
     )
     await db.commit()
     # 缓存失效与图表重挂由路由层统一编排（services 不得依赖 routers）。

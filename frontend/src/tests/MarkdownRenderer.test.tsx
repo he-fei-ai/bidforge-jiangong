@@ -33,6 +33,9 @@ const { renderMock, ensureMermaidMock, nextMermaidIdMock, chartsRenderMock, char
 vi.mock("../components/mermaidRuntime", () => ({
   ensureMermaid: ensureMermaidMock,
   nextMermaidId: nextMermaidIdMock,
+  // ✅ R199：组件侧 DOMPurify 出口 sanitizeMermaidSvg（mermaidRuntime.ts 导出），
+  //    mock 缺该导出会让所有走 SVG 注入分支的用例直接报 mock 漂移
+  sanitizeMermaidSvg: (svg: string) => svg,
 }));
 
 vi.mock("../api", () => ({
@@ -110,6 +113,27 @@ describe("MarkdownRenderer P1-6 优化行为", () => {
     expect(ensureMermaidMock).toHaveBeenCalledTimes(1);
   });
 
+  it("AI 修复请求透传图表围栏序号 fence_ordinal（R200）", async () => {
+    // 首次 render 失败 → 错误卡 + 修复按钮；点击后 fix-mermaid 必须带 fence_ordinal
+    renderMock.mockRejectedValueOnce(new Error("bad syntax"));
+    chartsFixMock.mockResolvedValue({
+      data: { code: "flowchart TD\n    X[1] --> Y[2] --> Z[3]", written_back: false, content_updated: false, new_content: "", word_count: 0 },
+    });
+    const { container } = render(<MarkdownRenderer content={"```mermaid\nflowchart TD\n    A --> B\n```"} />);
+    const btn = (await waitFor(() => {
+      const el = container.querySelector<HTMLButtonElement>("button[data-fix-code]");
+      expect(el).not.toBeNull();
+      return el;
+    })) as HTMLButtonElement;
+    // 单图表章：围栏序号 0（0 基，与后端 iter_inline_chart_fences 同口径）
+    expect(btn.getAttribute("data-fix-ordinal")).toBe("0");
+    fireEvent.click(btn);
+    await waitFor(() => expect(chartsFixMock).toHaveBeenCalledTimes(1));
+    const payload = chartsFixMock.mock.calls[0][0] as { code: string; fence_ordinal?: number };
+    expect(payload.code).toBe("flowchart TD\n    A --> B");
+    expect(payload.fence_ordinal).toBe(0);
+  });
+
   it("chart-json 数据块：走后端渲染引擎出图（不经过 mermaid）", async () => {
     const { container } = render(
       <MarkdownRenderer content={'```chart-json\n{"type":"labor","title":"劳动力结构"}\n```'} />,
@@ -157,11 +181,13 @@ describe("MarkdownRenderer P1-6 优化行为", () => {
     });
     fireEvent.click(fixBtn);
     // ✅ 请求带 section_id，且不再硬编码 chart_type（类型由后端按代码推断）
+    // ✅ R200：带图表围栏序号 fence_ordinal（0 基，单图表章恒为 0）
     await waitFor(() => {
       expect(chartsFixMock).toHaveBeenCalledWith({
         code: badCode,
         error: "Parse error on line 2",
         section_id: "sec-abc",
+        fence_ordinal: 0,
       });
     });
     // ✅ 后端已重写正文 → 通知父组件同步预览状态（带后端权威字数，供优先取用）
@@ -196,7 +222,7 @@ describe("MarkdownRenderer P1-6 优化行为", () => {
     });
     fireEvent.click(fixBtn);
     await waitFor(() => {
-      expect(chartsFixMock).toHaveBeenCalledWith({ code: badCode, error: "Parse error" });
+      expect(chartsFixMock).toHaveBeenCalledWith({ code: badCode, error: "Parse error", fence_ordinal: 0 });
     });
     expect(onContentReplaced).not.toHaveBeenCalled();
   });

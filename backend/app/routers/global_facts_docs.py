@@ -25,6 +25,7 @@ from app.services.facts_extractor import (
     invalidate_export_cache,
     row_field,
 )
+from app.services.facts_write_guard import project_facts_inproc_guard
 from app.services.file_parser import (
     SUPPORTED_EXTENSIONS,
     ParseError,
@@ -265,13 +266,11 @@ async def delete_document(doc_id: str, db=Depends(get_db)):
     # 避免删除接口被利用为任意文件删除器。
     fpath = row["file_path"] if "file_path" in row.keys() else ""
     candidate = _managed_upload_path(fpath)
-    if candidate and candidate.exists():
-        try:
-            candidate.unlink()
-        except OSError as e:
-            logger.warning("删除原始文件失败（忽略）: %s", e)
-    elif fpath:
-        logger.warning("拒绝删除上传目录外的文档路径: %s", fpath)
+    # ✅ R191 修复（先删文件后提交）：unlink 原在 DELETE/commit **之前**——
+    #    DELETE 503 / rowcount 0 / 进程崩溃时，库行仍在而原件已失 → 列表可见、
+    #    解析必败。现挪到 commit 成功之后（与本文件 upload 路径「旧文件
+    #    commit 成功后再删」的既有正确范式一致）；unlink 失败仍只告警继续
+    #    （与旧行为一致，DB 是权威源）。
     # ✅ R13 写路径补漏（2026-10-05）：DELETE 未生效仍回 ok=True 是「假成功」
     #    —— 前端提示已删除、列表却仍在，且四层产物与事实 stale 都被错误清理。
     del_doc_cur = await db.execute("DELETE FROM project_documents WHERE id=?", (doc_id,))
@@ -286,6 +285,13 @@ async def delete_document(doc_id: str, db=Depends(get_db)):
         logger.warning("删除文档 0 行生效（并发已删），doc=%s", doc_id)
         raise HTTPException(404, "文档不存在或已被删除")
     await db.commit()
+    if candidate and candidate.exists():
+        try:
+            candidate.unlink()
+        except OSError as e:
+            logger.warning("删除原始文件失败（忽略）: %s", e)
+    elif fpath:
+        logger.warning("拒绝删除上传目录外的文档路径: %s", fpath)
     # ✅ 四层存储清理：解析层/提取层/语义层目录 + doc_chunks/doc_extractions/
     #    doc_validation_reports 关联行 + 文档索引条目（项目级事实不删，多文档共享）
     proj_id = row["project_id"] if "project_id" in row.keys() else ""
@@ -295,9 +301,15 @@ async def delete_document(doc_id: str, db=Depends(get_db)):
         except Exception:
             logger.exception("文档 %s 四层产物清理失败（记录已删除）", doc_id)
         # ✅ 跨模块链路收敛：删除源文档后旧事实立即退出生成链路，并失效所有方案缓存。
-        stale_count = await _mark_project_facts_stale(db, proj_id)
-        await db.commit()
-        await _invalidate_project_export_caches(db, proj_id)
+        #    ✅ R191（F10）：档案行已 commit——失效步骤自身失败只告警，不把整个
+        #    请求变 500（客户端重试会得到 404，体验混乱）。
+        try:
+            stale_count = await _mark_project_facts_stale(db, proj_id)
+            await db.commit()
+            await _invalidate_project_export_caches(db, proj_id)
+        except Exception:
+            stale_count = 0
+            logger.exception("删除文档后标记项目 %s 事实 stale 失败（档案已删除，不阻断响应）", proj_id)
         logger.info("删除文档 %s，标记项目 %s 的 %d 条事实为 stale", doc_id, proj_id, stale_count)
     return {"ok": True, "stale_facts": stale_count if proj_id else 0}
 
@@ -591,6 +603,14 @@ async def upload_documents(
     #    必须点名到文件并给出可操作提示，而不是让 OSError 冒到外层泛化成
     #    「上传保存失败」500。加法式新增响应字段，旧消费方零影响。
     write_errors: list[str] = []
+    # ✅ R193 修复（R191① 交互回归）：本请求内已生成 doc_id 的集合。同一批
+    #    files 含两个同名文件时，第二个的 SELECT（同连接未提交读）会看见第一个
+    #    刚 INSERT 的行——那不是「替换旧文件」，是「同批后者覆盖前者」。旧实现
+    #    把它计入 replaced → R191① 的 `if replaced: 全项目事实置 stale` 被误触发
+    #    （与该文档无关的既有事实全部停止注入）+ 响应谎报「替换了 1 个同名旧文件」。
+    #    清理集合（purged_old_doc_ids / old_paths_to_delete）保持收集——被覆盖行
+    #    的磁盘与四层产物确为孤儿；仅 replaced 计数排除本请求产生的 doc_id。
+    request_doc_ids: set[str] = set()
 
     try:
         for _idx, f in enumerate(files):
@@ -613,7 +633,17 @@ async def upload_documents(
                 signature_invalid.append(raw_name)
                 continue
             doc_id = str(uuid.uuid4())
+            # ✅ R193：先于 INSERT 登记（同批后续同名文件的 SELECT 在本连接上
+            #    可见未提交行，必须能识别「这是本请求刚产生的行」）。
+            request_doc_ids.add(doc_id)
             fpath = _doc_file_path(real_pid, doc_id, fname)
+            # ✅ R191 修复（半写文件孤儿）：fpath 在开写**之前**登记进 written。
+            #    旧实现在落盘成功后才 append（L667 原位），`_stream_to_disk` 内
+            #    抛非 OSError（典型：客户端中途断连的 ClientDisconnect）时，
+            #    fpath 不在任何清理集合 → 半写文件永久残留。提前登记后，外层
+            #    except 的统一清理（written.unlink）覆盖一切开过写的文件；
+            #    written 仅在异常路径消费，正常路径零影响。
+            written.append(fpath)
             # ✅ 优化：流式落盘（分块），旧实现 `await f.read()` 会把整份文件
             #    读入内存——多文件同时上传时峰值 = N × 30MB，易触发 OOM。
             try:
@@ -663,7 +693,6 @@ async def upload_documents(
                 quota_files.extend((x.filename or "uploaded_file") for x in files[_idx + 1 :])
                 break
             total_bytes += size
-            written.append(fpath)
 
             # 同名替换：旧文件延迟到 DB commit 成功后清理；若后续失败，rollback
             # 后旧记录和旧文件仍可用。档案行的替换不再走「先 DELETE 再 INSERT」，
@@ -689,7 +718,11 @@ async def upload_documents(
                 # ✅ R13：旧档案行由 upsert 的 DO UPDATE 覆盖（不再单独 DELETE），
                 #    其 doc_chunks / 四层产物仍按旧 doc_id 在 commit 后 purge。
                 purged_old_doc_ids.append((str(old["id"]), real_pid))
-                replaced += 1
+                # ✅ R193：replaced 只数「本请求之前就存在的旧档案行」。本请求内
+                #    被后续同名覆盖的 doc_id 仍进清理集合（其产物确为孤儿），但不
+                #    触发 stale 标记——见 request_doc_ids 注释。
+                if str(old["id"]) not in request_doc_ids:
+                    replaced += 1
             # 落库（parsed_markdown 留空 = 待解析）
             # ✅ 增强：自动文件分类 + 文件大小记录（供前端「文件导入」Tab 展示）
             # ✅ R175 · BUG-1：并发同名上传在旧「SELECT→DELETE→INSERT」三步窗口内
@@ -757,6 +790,12 @@ async def upload_documents(
                         )
             except Exception:
                 logger.exception("文档 %s 原文层入库失败（不影响上传）", fname)
+            # ✅ R191 修复（同请求重名虚报）：同一批 files 里两个同名文件时，
+            #    第二个的 upsert 覆盖第一个（唯一索引冲突 → id 换新），终态库中
+            #    1 行正确，但 saved 已含第一个（已死）id —— saved_count 虚增、
+            #    前端拿该 id 直发解析会 404。upsert 语义即「后者覆盖前者」，
+            #    此处剔除被覆盖的旧条目，saved 与库内终态一致。
+            saved[:] = [s for s in saved if s.get("file_name") != fname]
             saved.append({"id": doc_id, "file_name": fname, "size": size})
     except Exception:
         # ✅ BUG 修复（悬空事务）：循环中途抛异常时，此前执行的 DELETE（同名替换）
@@ -770,6 +809,24 @@ async def upload_documents(
             logger.debug("文档上传失败路径 rollback 失败（连接损坏时忽略）: %s", rb_err)
         # ✅ 修复：旧实现在循环中抛异常时，已写盘的文件没有对应 DB 记录，
         #    成为永久孤儿文件（占空间且无法在界面删除）。异常时统一清理。
+        #    ✅ R191 修复（四层孤儿）：已 ingest_upload 的文件还在
+        #    data/projects/{pid}/documents/{doc_id}/ 落了原文层与索引条目——
+        #    DB 回滚后这些 doc_id 无档案行，磁盘树成孤儿（项目删除时才兜底
+        #    清理）。按本批已保存条目逐个清理磁盘树与索引（失败仅告警）。
+        for s in saved:
+            try:
+                await doc_pipeline.purge_document(db, doc_id=s["id"], project_id=real_pid)
+            except Exception:
+                logger.warning("清理孤儿四层产物失败（doc=%s），留待项目删除兜底", s.get("id"))
+        # ✅ R193（孤儿对称）：批内同名覆盖剔除出 saved 的 doc_id（后者覆盖前者）
+        #    在回滚后同样无档案行、四层产物成孤儿。只清本请求产生的 id——
+        #    pre-existing 被替换行的档案行在 rollback 后依然存活，其产物不可清理。
+        for _sid, _spid in purged_old_doc_ids:
+            if _sid in request_doc_ids:
+                try:
+                    await doc_pipeline.purge_document(db, doc_id=_sid, project_id=_spid)
+                except Exception:
+                    logger.warning("清理同请求被覆盖孤儿 %s 的四层产物失败（留待项目删除兜底）", _sid)
         for p in written:
             try:
                 p.unlink()
@@ -778,7 +835,32 @@ async def upload_documents(
         logger.exception("上传保存失败，已回滚 %d 个已落盘文件", len(written))
         raise
 
-    await db.commit()
+    # ✅ R191 修复（commit 裸奔）：上方 try/except 做了 rollback + 清理
+    #    written，但 commit 自身抛异常（磁盘 I/O / 锁）时既不 rollback 也不
+    #    清文件——正是本函数异常注释自己描述的「悬空事务→幽灵提交」危害，
+    #    只是换了个触发点。现纳入同一保护：rollback + 清已落盘文件 + 503。
+    try:
+        await db.commit()
+    except Exception:
+        try:
+            await db.rollback()
+        except Exception as rb_err:
+            logger.debug("上传提交失败路径 rollback 失败（连接损坏时忽略）: %s", rb_err)
+        # ✅ R193（孤儿对称）：commit 失败回滚后 saved 条目无档案行，与循环
+        #    异常路径同口径需要 purge 四层产物（此前只清了 written 磁盘文件，
+        #    ingest_upload 落的原文层树与索引条目成孤儿）。
+        for s in saved:
+            try:
+                await doc_pipeline.purge_document(db, doc_id=s["id"], project_id=real_pid)
+            except Exception:
+                logger.warning("清理孤儿四层产物失败（doc=%s），留待项目删除兜底", s.get("id"))
+        for p in written:
+            try:
+                p.unlink()
+            except OSError:
+                pass
+        logger.exception("上传保存提交失败，已回滚并清理 %d 个已落盘文件", len(written))
+        raise HTTPException(503, "文档服务暂时不可用，请稍后重试") from None
     # 新记录已提交后再删除旧文件；删除失败不影响已提交的数据库状态。
     for old_path in old_paths_to_delete:
         try:
@@ -791,6 +873,23 @@ async def upload_documents(
             await doc_pipeline.purge_document(db, doc_id=old_doc_id, project_id=old_pid)
         except Exception:
             logger.warning("清理被替换旧文档 %s 的四层产物失败", old_doc_id)
+    # ✅ R191 修复（F1 · 上传替换缺下游失效）：同名替换的 upsert 把旧档案行
+    #    parsed_markdown=''/parse_status='pending' 整列重置——旧解析文本就此
+    #    退出 load_parsed_docs 输入集，但**已提取的全局事实仍以 is_stale=0
+    #    继续注入目录/正文/导出**，直到用户重新点解析（首次解析分支才补标
+    #    stale）。若替换后不重解析，窗口期无限长且用户零感知。现与 parse/
+    #    delete 路径同口径：替换发生即置 stale + 失效导出缓存 + 响应透传
+    #    stale_facts/note（复用 parse-all 文案口径；R189 进程内事实写锁天然
+    #    兼容——_mark_project_facts_stale 已自带）。失败不阻断上传响应
+    #    （档案已提交，属下游失效步骤，与 B-F10 同一容错口径）。
+    replaced_stale = 0
+    if replaced:
+        try:
+            replaced_stale = await _mark_project_facts_stale(db, real_pid)
+            await db.commit()
+            await _invalidate_project_export_caches(db, real_pid)
+        except Exception:
+            logger.exception("上传替换后标记项目 %s 事实 stale/失效导出缓存失败（不阻断响应）", real_pid)
     result: dict = {"ok": True, "saved": saved, "saved_count": len(saved), "replaced": replaced}
     warnings: list[str] = []
     if oversize:
@@ -828,6 +927,12 @@ async def upload_documents(
         )
     if replaced:
         warnings.append(f"替换了 {replaced} 个同名旧文件")
+        # ✅ R191（F1）：加法式回传，前端据此提示重新解析/重提事实。
+        result["stale_facts"] = replaced_stale
+        result["note"] = (
+            f"替换了 {replaced} 个同名旧文件，旧解析内容已清空；"
+            "请重新执行「解析」与「AI 提取事实」，否则旧事实可能继续注入"
+        )
     if warnings:
         result["warnings"] = warnings
     return result
@@ -959,10 +1064,16 @@ async def _reconcile_parse_status(db, doc_id: str) -> bool:
     :return: 是否实际执行了修正（True = 本次把状态从非 success 改为 success）。
     """
     try:
+        # ✅ R191 修复（F3）：WHERE 原为「状态非 success 即修」——包含 'failed'。
+        #    触发链：force 重解析失败 → _mark_parse_failed 置 failed（不清旧正文）
+        #    → 用户点非 force 解析 → 正文非空短路命中 → 本函数把 failed 翻回
+        #    success，上次「解析失败：原因」的状态不可见，且非 force 永远无法
+        #    重试失败的重解析。reconcile 的初衷是修存量 pending/空状态行，
+        #    显式失败必须保留，排除 'failed'。
         cur = await db.execute(
             "UPDATE project_documents SET parse_status='success' "
             "WHERE id=? AND parsed_markdown IS NOT NULL AND parsed_markdown<>'' "
-            "AND (parse_status IS NULL OR parse_status<>'success')",
+            "AND (parse_status IS NULL OR (parse_status<>'success' AND parse_status<>'failed'))",
             (doc_id,),
         )
         await db.commit()
@@ -976,6 +1087,13 @@ async def _reconcile_parse_status(db, doc_id: str) -> bool:
         #    （0 is False 恒为 False → 调用方与断言双双失真）。
         return bool(safe_rowcount(cur, what="单文档 parse_status 修正为 success"))
     except Exception:
+        # ✅ R203（commit 裸奔家族收口）：UPDATE 已发出后 commit/rowcount 任一
+        #    环节抛异常，悬空写会随连接池下一个请求固化（幽灵提交）。本函数
+        #    契约是失败可忽略（return False），但悬空事务必须显式回滚。
+        try:
+            await db.rollback()
+        except Exception as rb_err:
+            logger.debug("单文档状态修正失败路径 rollback 失败（连接损坏时忽略）: %s", rb_err)
         logger.exception("修正文档 %s 的解析状态失败（可忽略）", doc_id)
         return False
 
@@ -988,17 +1106,25 @@ async def _reconcile_parse_status_all(db, project_id: str) -> int:
     只动"正文非空 + 状态非 success"的行；返回值供响应回传修正条数。
     """
     try:
+        # ✅ R191 修复（F3）：与 _reconcile_parse_status 同口径排除 'failed'
+        #    （显式失败状态不得被批量修正翻回 success）。
         cur = await db.execute(
             "UPDATE project_documents SET parse_status='success' "
             "WHERE project_id=? AND parsed_markdown IS NOT NULL "
             "AND parsed_markdown<>'' AND (parse_status IS NULL "
-            "OR parse_status<>'success')",
+            "OR (parse_status<>'success' AND parse_status<>'failed'))",
             (project_id,),
         )
         await db.commit()
         # ✅ 2026-09-30 同上：收敛到 safe_rowcount（R13 静默失败 → WARNING）
         return safe_rowcount(cur, what="项目级 parse_status 批量修正")
     except Exception:
+        # ✅ R203（commit 裸奔家族收口）：同 _reconcile_parse_status——失败可
+        #    忽略（return 0），但悬空事务必须显式回滚。
+        try:
+            await db.rollback()
+        except Exception as rb_err:
+            logger.debug("批量状态修正失败路径 rollback 失败（连接损坏时忽略）: %s", rb_err)
         logger.exception("批量修正项目 %s 的解析状态失败（可忽略）", project_id)
         return 0
 
@@ -1014,9 +1140,27 @@ async def _mark_parse_failed(db, doc_id: str, reason: str) -> None:
     失败写入独立于主解析链路；即便写入本身异常也不影响已经抛出的解析错误。
     """
     try:
+        # ✅ R193 修复：旧实现整列覆盖 parse_warnings —— 历史解析器级截断告警
+        #    （PDF 截页 / 表格截行）被失败原因冲掉，失败期间 doc_is_truncated 的
+        #    第④信号（告警兜底）失效。改为「保留既有告警 + 追加失败原因」；
+        #    旧告警缺失/损坏时按空表处理（fail-soft，与原行为一致）。
+        _prev: list[str] = []
+        try:
+            _cur = await db.execute("SELECT parse_warnings FROM project_documents WHERE id=?", (doc_id,))
+            if _cur is not None:
+                _row = await _cur.fetchone()
+                if _row and _row[0]:
+                    import json as _json
+
+                    _decoded = _json.loads(_row[0])
+                    if isinstance(_decoded, list):
+                        _prev = [str(x) for x in _decoded if x]
+        except Exception:
+            _prev = []
+        _warn = list(dict.fromkeys(_prev + [f"解析失败：{reason}"]))
         cur = await db.execute(
             "UPDATE project_documents SET parse_status='failed', " "parse_warnings=? WHERE id=?",
-            (dump_parse_warnings([f"解析失败：{reason}"]), doc_id),
+            (dump_parse_warnings(_warn), doc_id),
         )
         if cur is None:
             logger.warning("解析失败状态落库未生效（db.execute 返回 None，R13），失败原因未留痕：%s", doc_id)
@@ -1076,6 +1220,18 @@ async def _persist_parse_result(
         # ⚠️ 不 commit：没有成功的语句要提交，提交只会把上一次语句的残留
         #    事务上下文固化（见 doc_pipeline.py:322 同款告警的理由）。
         return False
+    # ✅ R13 写生效第二层（2026-11-08 收口）：UPDATE 执行了但 0 行生效 =
+    #    目标行在「读取→落库」之间被并发删除（单份解析首查 404 后、锁内复核前；
+    #    或批量 parse-all 锁内复核拿到 None 仍继续解析）。旧实现只拦 None 游标、
+    #    漏掉 0 行分支，会回 True 让调用方当成「解析成功」—— parse_document
+    #    回 ok+text_len、parse_all_documents 计入 parsed，用户以为保存成功、刷新
+    #    后正文为 0 字且文档仍「待解析」。与 update_document_category / _r13_write
+    #    同口径：0 行即视为未生效，由调用方 503（单份）/ 计入 failed（批量）兜底。
+    #    ⚠️ 必须在 commit 之前取 rowcount（与 _r13_write 口径一致），避免个别驱动
+    #    在事务提交后清空 rowcount 判定失真。
+    if safe_rowcount(cur, what=f"落库解析结果 {doc_id}") != 1:
+        logger.warning("解析结果落库 0 行生效（目标文档可能已被删除），正文未写入：%s", doc_id)
+        return False
     await db.commit()
     return True
 
@@ -1089,12 +1245,20 @@ async def _mark_project_facts_stale(db, project_id: str) -> int:
     """
     if not project_id:
         return 0
-    cur = await db.execute(
-        "UPDATE global_facts SET is_stale=1, "
-        "updated_at=datetime('now','localtime') WHERE project_id=? AND is_stale=0",
-        (project_id,),
-    )
-    return safe_rowcount(cur, what="项目级事实批量置 stale")
+    # ✅ R189（2026-11-08 · T-04 第三条写入源）：本 UPDATE 落在事实表上，
+    #    此前既未走 REST 的 _facts_write_guard_dependency 也未走 SSE 的
+    #    acquire_project_facts_write，与 AI 提取落库并发时会丢 stale 标记。
+    #    复用同一把项目进程内锁（不申请 DB 租约，避免 _acquire_lease 的
+    #    db.commit() 提前提交 docs 调用方未提交的事务）。
+    async with project_facts_inproc_guard(project_id, holder="docs.stale") as acquired:
+        if not acquired:
+            logger.warning("项目事实批量置 stale 未获得写锁（project=%s），按降级路径继续", project_id)
+        cur = await db.execute(
+            "UPDATE global_facts SET is_stale=1, "
+            "updated_at=datetime('now','localtime') WHERE project_id=? AND is_stale=0",
+            (project_id,),
+        )
+        return safe_rowcount(cur, what="项目级事实批量置 stale")
 
 
 async def _invalidate_project_export_caches(db, project_id: str) -> None:
@@ -1160,12 +1324,14 @@ async def parse_document(doc_id: str, force: bool = False, db=Depends(get_db)):
     #    一次（重复 OCR + 后写覆盖）。锁内再查一次，已解析且非强制则直接返回。
     #    解析结束（含异常）后由 _doc_parse_guard 自动回收锁字典条目（防内存泄漏）。
     async with _doc_parse_guard(doc_id):
-        cur = await db.execute("SELECT parsed_markdown FROM project_documents WHERE id=?", (doc_id,))
+        cur = await db.execute(
+            "SELECT parsed_markdown, parse_status FROM project_documents WHERE id=?", (doc_id,)
+        )
         # ✅ P1（R13 漏改 · 2026-10-05）：读路径判空。直接 fetchone →
         #    AttributeError → 500（且用户只看到「解析失败」的裸错误，看不出是
         #    数据库瞬时故障还是文件问题）。503 = 可重试，与 _load_doc 同口径。
         if cur is None:
-            logger.warning("读取解析状态失败（db.execute 返回 None），doc=%s", doc_id)
+            logger.warning("读取解析状态失败（db.execute 返回 None，R13），doc=%s", doc_id)
             raise HTTPException(503, "文档服务暂时不可用，请稍后重试")
         _cur = await cur.fetchone()
         if _cur and _cur["parsed_markdown"] and not force:
@@ -1173,14 +1339,23 @@ async def parse_document(doc_id: str, force: bool = False, db=Depends(get_db)):
             #    （存量文档正文非空但状态仍为 pending → 前端恒显「待解析」、
             #    点解析永远「已解析过」却无任何变化，体感「解析结果丢失」）。
             reconciled = await _reconcile_parse_status(db, doc_id)
+            # ✅ R193 修复：此处曾硬编码 "success" —— R191②（reconcile 排除
+            #    'failed'）落地后，force 重解析失败保留下来的非空正文 + failed
+            #    状态会命中本短路，响应谎报 success 与列表「解析失败」直接矛盾，
+            #    且非 force 永远无法重试失败的重解析（正文非空 → 恒短路）。
+            #    现回传真实状态：reconciled=True 表示本次刚把 pending 修成
+            #    success；否则取库内实际值（failed 保持 failed）。
+            _short_status = "success" if reconciled else ((_cur["parse_status"] or "") or "pending")
             result = {
                 "ok": True,
                 "already_parsed": True,
-                "parse_status": "success",
+                "parse_status": _short_status,
                 "text_len": len(_cur["parsed_markdown"]),
             }
             if reconciled:
                 result["reconciled"] = True
+            if _short_status == "failed":
+                result["note"] = "该文档上次解析失败，请使用「强制重新解析」重试"
             return result
         if not safe_path or not safe_path.exists():
             raise HTTPException(400, f"原始文件缺失（{fname}），请重新上传")
@@ -1261,11 +1436,16 @@ async def parse_document(doc_id: str, force: bool = False, db=Depends(get_db)):
             )
         if force:
             # 强制重解析改变了源文本：旧事实立即退出目录/正文/导出生成链路。
-            stale_count = await _mark_project_facts_stale(db, row["project_id"])
-            await db.commit()
-            # ✅ 跨模块链路收敛：强制重解析改变了源文本 → 失效该项目所有方案的
-            #    导出缓存，避免下游导出陈旧 docx（导出缓存默认关闭时为 no-op）。
-            await _invalidate_project_export_caches(db, row["project_id"])
+            # ✅ R191（F10）：解析结果已 commit，失效步骤失败只告警不 500。
+            try:
+                stale_count = await _mark_project_facts_stale(db, row["project_id"])
+                await db.commit()
+                # ✅ 跨模块链路收敛：强制重解析改变了源文本 → 失效该项目所有方案的
+                #    导出缓存，避免下游导出陈旧 docx（导出缓存默认关闭时为 no-op）。
+                await _invalidate_project_export_caches(db, row["project_id"])
+            except Exception:
+                stale_count = 0
+                logger.exception("强制重解析后标记项目事实 stale 失败（不阻断响应）")
             result["stale_facts"] = stale_count
             result["note"] = (
                 f"文档已重新解析，{stale_count} 条旧事实已停止注入；" "请重新执行「AI 提取事实」更新全局事实"
@@ -1279,9 +1459,14 @@ async def parse_document(doc_id: str, force: bool = False, db=Depends(get_db)):
             #    实际漏掉整份文档，且响应里没有任何提示。
             #    首次解析时事实通常尚未提取（本步为空操作）；若已提取过，
             #    此处按 force 同口径补齐，代价是一次幂等 UPDATE + 一次 DELETE。
-            stale_count = await _mark_project_facts_stale(db, row["project_id"])
-            await db.commit()
-            await _invalidate_project_export_caches(db, row["project_id"])
+            #    ✅ R191（F10）：同上，失效步骤失败不阻断响应。
+            try:
+                stale_count = await _mark_project_facts_stale(db, row["project_id"])
+                await db.commit()
+                await _invalidate_project_export_caches(db, row["project_id"])
+            except Exception:
+                stale_count = 0
+                logger.exception("首次解析后标记项目事实 stale 失败（不阻断响应）")
             result["stale_facts"] = stale_count
             result["note"] = "文档解析成功，已纳入项目资料全集；" "如已提取过全局事实，请重新执行「AI 提取事实」"
         return result
@@ -1314,8 +1499,18 @@ async def parse_all_documents(
     #    早退，用户看到的还是「待解析」。放在 SELECT 之前使两个分支都正确。
     reconciled_count = await _reconcile_parse_status_all(db, real_pid)
     sql = "SELECT id, project_id, file_name, file_path FROM project_documents " "WHERE project_id=?"
+    # ✅ R203 修复（failed 重试假动作）：旧选取口径只取「正文为空」的文档——
+    #    「曾解析成功 → force 重解析失败」的文档（parse_status='failed' 且
+    #    parsed_markdown 非空）不被选中，而前端批量按钮在此情形下文案恰为
+    #    「重试失败文档（N）」且注释宣称「failed 文档也在其中」——用户点了
+    #    得到「所有文档均已解析」的假话，为一个失败文档付出「全部重解析」
+    #    （force=true 全量含已解析文档重跑 OCR）的整批代价。现补
+    #    OR parse_status='failed'，与按钮宣称对齐。
     if not force:
-        sql += " AND (parsed_markdown='' OR parsed_markdown IS NULL)"
+        sql += (
+            " AND (parsed_markdown='' OR parsed_markdown IS NULL"
+            " OR parse_status='failed')"
+        )
     # ✅ 顺序固定：批量解析进度与失败列表按上传先后给出，避免 SQLite 返回顺序漂移
     sql += " ORDER BY created_at, id"
     cur = await db.execute(sql, (real_pid,))
@@ -1343,6 +1538,14 @@ async def parse_all_documents(
             # reconciled/reconciled_count，前端才能用统一判据做提示。
             "reconciled_count": reconciled_count,
             "reconciled": [],
+            # ✅ R191 修复（F11 契约漂移）：补 force 键与主分支对齐——
+            #    任何按主分支形状取值的消费方不再拿 undefined。
+            "force": force,
+            # ✅ R193（契约补齐）：主分支回传 note/stale_facts，早退分支此前缺
+            #    这两键 —— 前端统一按主分支形状取值时拿 undefined（提示降级）。
+            #    早退无解析发生，stale_facts 恒 0；note 与 message 同文案。
+            "note": _msg,
+            "stale_facts": 0,
             "message": _msg,
         }
 
@@ -1364,9 +1567,21 @@ async def parse_all_documents(
         #    后由 _doc_parse_guard 自动回收锁字典条目（防内存泄漏）。
         async with _doc_parse_guard(doc["id"]):
             try:
-                cur = await db.execute("SELECT parsed_markdown FROM project_documents WHERE id=?", (doc["id"],))
+                # ✅ R203：复核 SELECT 补 parse_status 列——failed 文档虽已进
+                #    选取集（R203 修复），此处仍须放行（旧条件 parsed_markdown
+                #    非空即 continue 会把刚选进来的 failed 文档拦在解析之前，
+                #    修复变成空转）。
+                cur = await db.execute(
+                    "SELECT parsed_markdown, parse_status FROM project_documents WHERE id=?",
+                    (doc["id"],),
+                )
                 _c = await cur.fetchone()
-                if _c and _c["parsed_markdown"] and not force:
+                if (
+                    _c
+                    and _c["parsed_markdown"]
+                    and _c["parse_status"] != "failed"
+                    and not force
+                ):
                     # ✅ BUG 修复（2026-09-25）：与单份解析同口径，短路前自修复
                     #    陈旧的 parse_status —— 否则「解析全部」对存量文档回
                     #    「所有文档均已解析」却不改状态，前端列表恒显「待解析」。
@@ -1507,11 +1722,16 @@ async def parse_all_documents(
         # ✅ R79 A-4：force 与否**只要本轮有新文本落库**，事实与导出缓存的
         #    输入全集就变了 —— 旧实现只在 `force and parsed` 时处理，
         #    非强制批量解析（最常规的「上传后点解析全部」）从不刷新下游。
-        stale_count = await _mark_project_facts_stale(db, real_pid)
-        await db.commit()
-        # ✅ 跨模块链路收敛：重解析整批文档 → 失效该项目所有方案导出缓存
-        #    （避免下游导出陈旧 docx；导出缓存默认关闭时为 no-op）。
-        await _invalidate_project_export_caches(db, real_pid)
+        #    ✅ R191（F10）：批内逐条已 commit，失效步骤失败只告警不 500。
+        try:
+            stale_count = await _mark_project_facts_stale(db, real_pid)
+            await db.commit()
+            # ✅ 跨模块链路收敛：重解析整批文档 → 失效该项目所有方案导出缓存
+            #    （避免下游导出陈旧 docx；导出缓存默认关闭时为 no-op）。
+            await _invalidate_project_export_caches(db, real_pid)
+        except Exception:
+            stale_count = 0
+            logger.exception("批量解析后标记项目事实 stale 失败（不阻断响应）")
         result["stale_facts"] = stale_count
         if force:
             result["note"] = f"已强制重新解析，{stale_count} 条旧事实已停止注入；" "请重新执行「③ AI 提取事实」"
@@ -1574,7 +1794,8 @@ async def preview_document(doc_id: str, max_chars: int = Query(5000, ge=100, le=
     """
     cur = await db.execute(
         "SELECT id, file_name, file_type, parsed_markdown, doc_category, "
-        "file_size, parse_time, parse_warnings, parse_truncated, created_at "
+        "file_size, parse_time, parse_warnings, parse_truncated, created_at, "
+        "parse_status "
         "FROM project_documents WHERE id=?",
         (doc_id,),
     )
@@ -1609,6 +1830,11 @@ async def preview_document(doc_id: str, max_chars: int = Query(5000, ge=100, le=
             "parse_time": row["parse_time"],
             "parse_warnings": _decode_parse_warnings(row.get("parse_warnings")),
             "created_at": row["created_at"],
+            # ✅ R203（加法式）：failed 残留旧正文语义——force 重解析失败不清
+            #    旧正文，正文非空时走下方 is_parsed=True 分支返回完好内容，
+            #    前端无 parse_status 无从叠加「上次解析失败，以下为上次成功
+            #    结果」警示。两条返回路径都回传（契约对称由既有测试钉住）。
+            "parse_status": row["parse_status"],
             "preview": "",
             "text_len": 0,
             "is_parsed": False,
@@ -1643,7 +1869,9 @@ async def preview_document(doc_id: str, max_chars: int = Query(5000, ge=100, le=
         # ✅ 补齐契约对称：未解析分支回 is_parsed=False，已解析分支旧实现
         #    漏回该字段 —— 前端用 `data.is_parsed === true` 硬判断时会退到
         #    「未解析」分支。现两条返回路径字段集合一致。
+        # ✅ R203（加法式）：parse_status 随正文态透传（见未解析分支注释）。
         "is_parsed": True,
+        "parse_status": row["parse_status"],
         "preview_truncated": truncated,
         "truncated": doc_truncated,
         "message": "（预览仅显示前 {0} 字，完整内容请到「结构化解析」中使用或重新解析）".format(max_chars)
@@ -1660,7 +1888,11 @@ async def update_document_category(doc_id: str, body: dict, db=Depends(get_db)):
     展示侧按分类映射 Tag 颜色），写入未知值会让这些口径静默退化。
     故只接受 category-options 登记的合法分类（含「其他」）。
     """
-    category = body.get("doc_category", "").strip()
+    # ✅ R191 修复（F4）：body 是裸 dict，{"doc_category": 123} / 显式 null 时
+    #    int/None 无 .strip() → AttributeError → 500。收敛为 str 安全转换。
+    #    ⚠️ R193 注释订正：非字符串值经 str() 后（如 123 → "123"）实际命中的是
+    #    下方「未知分类（123）」400，而非「不能为空」—— 文案口径以实际分流为准。
+    category = str(body.get("doc_category") or "").strip()
     if not category:
         raise HTTPException(400, "doc_category 不能为空")
     valid_categories = {cat for cat, _ in _DOC_CATEGORY_KEYWORDS} | {"其他"}

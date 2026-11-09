@@ -13,6 +13,8 @@
  * - 并发调用共享同一个 pending Promise，避免重复加载与重复 initialize。
  */
 
+import DOMPurify from "dompurify";
+
 /**
  * mermaid 动态导入实例的最小 API 面。
  * mermaid 为 ESM/CJS 双构建且版本演进快（第三方库版本不可控），完整类型面不稳定；
@@ -67,4 +69,25 @@ export async function ensureMermaid(): Promise<MermaidRuntime> {
 /** 生成全局唯一的渲染 id。mermaid.render 要求 id 唯一，复用会引发节点冲突。 */
 export function nextMermaidId(prefix = "mmd"): string {
   return `${prefix}-${Date.now()}-${Math.random().toString(36).slice(2, 8)}`;
+}
+
+/**
+ * ✅ R196（2026-11-09）：SVG 注入前的安全清洗（唯一出口）。
+ *
+ * 背景：initialize 用 securityLevel:"loose"（htmlLabels/<br/> 等富标签渲染
+ * 依赖它，R66 三轨同款配色与渲染保真的刻意选择），LLM 产出的图表代码经
+ * mermaid.render 产出的 SVG 可能携带内联事件（onerror 等）或 script 类节点。
+ * 所有 `innerHTML = svg` 注入点（正文渲染 / 修复回填）必须先过本函数：
+ * 默认 profile 剔除 script 与 on* 事件属性，ADD_TAGS/ADD_ATTR 保留 mermaid
+ * 合法视觉结构（foreignObject / 样式属性 / xmlns），渲染保真不受影响。
+ */
+export function sanitizeMermaidSvg(svg: string): string {
+  if (!svg) return "";
+  return DOMPurify.sanitize(svg, {
+    USE_PROFILES: { html: true, svg: true, svgFilters: true },
+    ADD_TAGS: ["foreignObject"],
+    ADD_ATTR: ["xmlns", "style", "class", "transform", "dominant-baseline", "text-anchor"],
+    // mermaid 生成的 id/class 带下划线与连字符（mmd-xxx），默认正则已允许；
+    // data-* 与 aria-* 默认放行，保持可访问性结构。
+  });
 }

@@ -8,6 +8,8 @@
 import asyncio
 import json
 
+import app.routers._chart_pipeline as _CP
+import pytest
 from app.routers._chart_pipeline import (
     _rewrite_code_block,
     _validate_inline_chart,
@@ -15,6 +17,14 @@ from app.routers._chart_pipeline import (
     has_inline_charts,
     register_inline_charts,
 )
+
+
+@pytest.fixture(autouse=True)
+def _r199_disable_min_words_gate(monkeypatch):
+    """✅ R199 重锚：R196 在 enforce 链路引入「实际成文 <200 字删图」闸，本文件
+    的短 fixture 会被该闸先删。本文件测的是登记/裁剪/修复语义（min_words 闸
+    由 R196 自有护栏覆盖），置 0 恢复原判据。"""
+    monkeypatch.setattr(_CP, "_CHART_MIN_WORDS", 0)
 
 # ---------- 工具 ----------
 

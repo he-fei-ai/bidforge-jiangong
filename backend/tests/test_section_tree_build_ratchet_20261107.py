@@ -66,6 +66,17 @@ REGISTRY: dict[str, tuple[str, str]] = {
         "unified",
         "_outline_structure_report 先调 _build_tree，入参树已无自父/环，DFS 不会成环",
     ),
+    "routers/sections.py::_outline_structure_report._collect_mounted": (
+        "guard",
+        "R188：只遍历 _build_tree 输出的可达树收集 id（树内已无环），用于与全表 id "
+        "求差得出不可达节点；不建树、不丢节点，且正是环内节点的检测出口",
+    ),
+    "routers/sections.py::_repair_outline_structure_numbering._collect_mounted": (
+        "guard",
+        "R203：与 _outline_structure_report._collect_mounted 同口径——只遍历 "
+        "_build_tree 输出的可达树收集 id，与全表求差得出不可达节点后重挂为根；"
+        "不建树、不丢节点，且是环/悬挂节点的自动处置出口",
+    ),
     # ---- 有等价守卫 ----
     "routers/sections.py::_save_outline_to_db": (
         "guard",

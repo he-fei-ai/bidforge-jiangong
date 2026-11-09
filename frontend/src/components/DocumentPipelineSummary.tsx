@@ -39,6 +39,10 @@ export type DocumentPipelineStatusLike = {
   meta_on_disk?: boolean;
   /** 各层产物文件名清单：{ raw: [...], parsed: [...], extracted: [...], semantic: [...] } */
   layers?: Record<string, unknown>;
+  /** ✅ R191（C1）：各层失败/陈旧描述（后端按磁盘事实派生，键=层名）。
+   *  R186-R188 加的「用户可感知失败语义」此前前端零消费——Tag 只显示中性
+   *  计数，失败层与正常层不可区分。 */
+  layer_errors?: Record<string, string>;
   [k: string]: unknown;
 };
 
@@ -67,7 +71,10 @@ export const PIPELINE_LAYERS: Array<{ key: string; label: string; hint: string }
   { key: "raw", label: "原文层", hint: "原件副本 + 文件指纹（MD5/SHA256）" },
   { key: "parsed", label: "解析层", hint: "Markdown 正文 + 页/表/图结构化产物" },
   { key: "extracted", label: "提取层", hint: "按类别的 AI 结构化提取结果（含溯源）" },
-  { key: "semantic", label: "语义层", hint: "分块与语义索引（供目录/事实提取定位）" },
+  // ✅ R191（C3）：hint 与后端边界声明对齐（doc_storage.py：语义层当前无任何
+  //    读取方，为预留归档，不参与目录/正文生成）——旧文案会让用户误以为语义层
+  //    缺失影响生成。
+  { key: "semantic", label: "语义层", hint: "预留归档（向量检索未接入，不参与生成链路）" },
 ];
 
 /**
@@ -246,9 +253,16 @@ export default function DocumentPipelineSummary({
         <Space size={4} wrap>
           {PIPELINE_LAYERS.map((layer) => {
             const count = layerFileCount(status.layers, layer.key);
+            // ✅ R191（C1）：失败/陈旧层渲染 volcano 警示 Tag，tooltip 直接给
+            //    后端派生的失败描述与重建指引（R186-R188 的失败语义自此可达用户）。
+            const layerError =
+              status.layer_errors && typeof status.layer_errors[layer.key] === "string"
+                ? status.layer_errors[layer.key]
+                : "";
             return (
-              <Tooltip key={layer.key} title={layer.hint}>
-                <Tag color={count > 0 ? "blue" : "default"}>
+              <Tooltip key={layer.key} title={layerError || layer.hint}>
+                <Tag color={layerError ? "volcano" : count > 0 ? "blue" : "default"}>
+                  {layerError ? "⚠ " : ""}
                   {layer.label} {count}
                 </Tag>
               </Tooltip>

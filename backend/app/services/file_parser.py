@@ -41,6 +41,11 @@ SUPPORTED_EXTENSIONS = {
     #    旧实现只登记 tiff，用户上传 .tif 会被「不支持的文件格式」400 拒绝，
     #    与已支持的 tiff 解析能力（多帧 OCR）完全等价，属于纯白名单缺口。
     "tif",
+    # ✅ R181 补齐（2026-11-08 · G2-webp）：WebP 是 RIFF 容器图片，经 PIL.Image.open
+    #    解码后走既有 OCR 通道（现代 Pillow 内置 webp 解码，零新增依赖）。旧实现只
+    #    登记 png/jpg/jpeg/bmp/tiff，用户上传 .webp 会被「不支持的文件格式」400 拒绝，
+    #    与已支持的图片解析能力完全等价，属纯白名单缺口；前端镜像见 uploadAccept.ts。
+    "webp",
     # ✅ 2026-09-22 新增（对齐 OpenBidKit 招标文件解析模块）：旧版 Word 二进制格式。
     #    招投标场景仍有大量招标文件是 .doc/.wps，旧实现直接以「不支持的文件格式」
     #    400 拒绝，用户必须自己另存为 .docx；现由 services/legacy_office.py
@@ -75,6 +80,22 @@ def _ole_content_kind(content: bytes) -> str:
     return ""  # 双标记/无标记：交回调用方按原逻辑兜底
 
 
+# ✅ R191 修复（加密文档误导性报错）：OOXML（.docx/.xlsx）设置打开密码后，
+#    容器会从 ZIP 变成 OLE 复合文档（ECMA-376 Agile Encryption），正文打包在
+#    EncryptedPackage 流里。旧实现对该容器：xlsx 路径 `_ole_kind or "xls"`
+#    强改走 xlrd → 报「XLS 文件已损坏」；docx 路径改走 .doc 通道，装有
+#    Word COM 的机器会被 Word「文本恢复」转出乱码正文并当成功落库（无任何
+#    告警）。现按流名直接识别加密容器，入口即给可行动的明确报错。
+_OLE_ENCRYPTED_MARKER = "EncryptedPackage".encode("utf-16-le")
+
+
+def _ole_encrypted(content: bytes) -> bool:
+    """OLE 容器是否为加密 OOXML（含 EncryptedPackage 流）。"""
+    if content[:8] not in OLE_COMPOUND_HEADERS:
+        return False
+    return _OLE_ENCRYPTED_MARKER in content
+
+
 # ✅ 公共文件头签名：仅对**二进制格式**做轻量校验（文本类不做限制）。
 #    提取到解析模块统一维护，供两条上传链路（global-facts 资料上传、
 #    upload-outline 目录识别）复用 —— 旧实现只在资料上传处校验，目录识别
@@ -95,6 +116,11 @@ _BINARY_SIGNATURES: dict[str, tuple[bytes, ...]] = {
     "bmp": (b"BM",),
     "tiff": (b"II*\x00", b"MM\x00*"),
     "tif": (b"II*\x00", b"MM\x00*"),
+    # ✅ R181（2026-11-08 · G2-webp）：WebP 是 RIFF 容器，四字符码 WEBP 固定在偏移 8，
+    #    中间 4 字节为文件长度（不可预测），无法用单一前缀 startswith 表达；
+    #    真实校验见 signature_valid 的 webp 专用分支（RIFF 头 + 偏移 8 的 WEBP）。
+    #    此处保留一个标记条目，仅用于满足「每个二进制格式都必须有签名」契约（=WEBP）。
+    "webp": (b"WEBP",),
 }
 
 
@@ -104,7 +130,20 @@ def signature_valid(ftype: str, prefix: bytes) -> bool:
     只读取极小前缀（调用方读 16 字节即可），不解析内容，开销可忽略。
     未登记的扩展名（txt/md/csv 等文本类）一律放行，保持兼容。
     """
-    sigs = _BINARY_SIGNATURES.get((ftype or "").lower())
+    ftype = (ftype or "").lower()
+    if ftype == "webp":
+        # ✅ R181（2026-11-08 · G2-webp）：WebP 是 RIFF 容器，四字符码 WEBP 固定在
+        #    偏移 8，中间 4 字节为文件长度（不可预测），无法用单一前缀 startswith
+        #    表达；故按「RIFF 头 + 偏移 8 的 WEBP」判定。既放行真实 webp，又把
+        #    wav/avi 等其它 RIFF 容器与 webp 区分开（防 .wav 改名 .webp 绕过校验）。
+        return prefix[:4] == b"RIFF" and prefix[8:12] == b"WEBP"
+    if ftype == "bmp":
+        # ✅ R191 修复（与 _binary_format_for_text_guard 同口径）："BM" 仅 2 字节，
+        #    "BMW maintenance manual…" 等任意 BM* 文本都能通过 2 字节弱签名白跑
+        #    OCR。按 BMP 规范补判保留字段（偏移 6..9 必须为 0）——与文件内
+        #    text-guard 的既有 BMP 判据逐字同步，两处口径不再分叉。
+        return prefix[:2] == b"BM" and len(prefix) >= 10 and prefix[6:10] == b"\x00\x00\x00\x00"
+    sigs = _BINARY_SIGNATURES.get(ftype)
     if not sigs:
         return True
     return any(prefix.startswith(s) for s in sigs)
@@ -134,10 +173,16 @@ def _sniff_type(content: bytes) -> str:
         return "png"
     if content[:3] == b"\xff\xd8\xff":
         return "jpg"
-    if content[:2] == b"BM":
+    # ✅ R203 修复：BMP 对齐 signature_valid / text-guard 的强签名口径（保留
+    #    字段偏移 6..9 必须为 0）——"BMW maintenance manual" 这类以 "BM" 开头
+    #    的纯文本此前被嗅探成 bmp 送进 OCR 通道白跑，最终得到误导性的
+    #    「OCR 失败」而非文本解析（同名文件改 .txt 则被 text-guard 放行）。
+    if content[:2] == b"BM" and content[6:10] == b"\x00\x00\x00\x00":
         return "bmp"
     if content[:4] in (b"II*\x00", b"MM\x00*"):
         return "tiff"
+    if content[:4] == b"RIFF" and content[8:12] == b"WEBP":
+        return "webp"
     if content[:8] in OLE_COMPOUND_HEADERS:
         # ✅ 修复（2026-09-25）：旧实现把所有 OLE 一律判为 doc，改名的旧版
         #    .xls 会被送进 LibreOffice→docx 转换通道（次优路径）。现按 OLE
@@ -211,6 +256,11 @@ def _binary_format_for_text_guard(content: bytes) -> str:
         return "JPEG 图片"
     if head[:4] in (b"II*\x00", b"MM\x00*"):
         return "TIFF 图片"
+    # ✅ R203 修复（防御深度对齐）：signature_valid 在 R181 为 webp 补了
+    #    「RIFF + 偏移8 WEBP」专用分支，text-guard 漏配——RIFF 容器（webp/wav）
+    #    改名 .txt 上传时只能依赖字节分布统计兜底，属概率性拦截而非结构性拦截。
+    if head[:4] == b"RIFF" and head[8:12] in (b"WEBP", b"WAVE"):
+        return "RIFF 媒体文件"
     if head[:2] == b"BM" and head[6:10] == b"\x00\x00\x00\x00":
         return "BMP 图片"
     return ""
@@ -385,9 +435,18 @@ MAX_ARCHIVE_UNCOMPRESSED_BYTES = _env_int(
     "BIDFORGE_MAX_ARCHIVE_UNCOMPRESSED_BYTES", 400 * 1024 * 1024
 )  # 单归档最大解压总量（400MB）
 MAX_COMPRESSION_RATIO = _env_int("BIDFORGE_MAX_COMPRESSION_RATIO", 200)  # 最大允许压缩比（解压总量 / 压缩总量）
+# ✅ R203 修复（误杀合法大表）：默认值 64MB → 400MB（对齐总量闸）。
+#    旧默认 64MB 按**中央目录声明值**逐条拦截，而 OOXML 的主内容集中在 1-2 个
+#    XML 条目、deflate 压缩比常达 10-15x——30MB 的工程量清单 xlsx 解压出
+#    250-300MB 的 sheet XML 完全现实，总量闸放行、单条目闸先拒，把上传上限内
+#    的合法大型表格（本平台最高价值资料）误判为攻击文件。
+#    语义澄清：本常量真正不可替代的防护是 ``_read_zip_entry_limited`` 的
+#    **实际读出**上限（防中央目录谎报大小绕过声明值闸）——谎报者声明 10MB
+#    却解出数 GB，读出闸无论 64MB 还是 400MB 都拦得住。声明值汇总由总量闸
+#    （400MB）兜底，单条目压缩比闸（炸弹语义核心）不受影响。
 MAX_ARCHIVE_ENTRY_BYTES = _env_int(
-    "BIDFORGE_MAX_ARCHIVE_ENTRY_BYTES", 64 * 1024 * 1024
-)  # 单条目「实际读出」上限（防中央目录谎报大小）
+    "BIDFORGE_MAX_ARCHIVE_ENTRY_BYTES", 400 * 1024 * 1024
+)  # 单条目「实际读出」上限（防中央目录谎报大小；声明值汇总由总量闸兜底）
 
 
 class ParseError(RuntimeError):
@@ -445,6 +504,11 @@ def parse_file_content_ex(content: bytes, fname: str) -> tuple[str, dict]:
             )
         else:
             ftype = "txt"
+    # ✅ R191 修复（加密文档明确报错）：加密 OOXML 的 OLE 容器（EncryptedPackage
+    #    流）在进入任何解析通道前拦截——旧实现会被误路由到 xlrd / Word COM
+    #    通道，分别得到误导性的「XLS 已损坏」与「COM 恢复出乱码正文当成功」。
+    if _ole_encrypted(content):
+        raise ParseError("文件已加密（Office 打开密码）：请解除密码后另存为普通文件再重新上传")
     # ✅ 增强（2026-09-22，对齐易标 convert.mjs 的文件头路由）：
     #    OLE 复合文档头（D0 CF 11 E0）不可能是真正的 .docx（OOXML 是 ZIP 容器）。
     #    扩展名声称 .docx 而内容为 OLE 的文件（旧版 Word「另存为 docx」失败、
@@ -515,7 +579,7 @@ def parse_file_content_ex(content: bytes, fname: str) -> tuple[str, dict]:
         #    ParseError（可读文案），ParseError 原样透传（压缩炸弹/加密/缺依赖
         #    等既有语义与文案一字不改）。
         if ftype == "docx":
-            raw_text = _parse_docx(content)
+            raw_text = _parse_docx(content, diag)
         elif ftype == "pdf":
             raw_text = _parse_pdf(content, diag, fname=fname)
         elif ftype in ("md", "txt"):
@@ -525,7 +589,7 @@ def parse_file_content_ex(content: bytes, fname: str) -> tuple[str, dict]:
             raw_text = _parse_csv(content, diag)
         elif ftype in ("xlsx", "xls"):
             raw_text = _parse_excel(content, ftype, diag)
-        elif ftype in ("png", "jpg", "jpeg", "bmp", "tiff", "tif"):
+        elif ftype in ("png", "jpg", "jpeg", "bmp", "tiff", "tif", "webp"):
             raw_text = _parse_image_ocr(content, ftype, diag)
         elif ftype in ("doc", "wps"):
             raw_text = _parse_legacy_word(content, fname, diag)
@@ -722,13 +786,28 @@ def _read_zip_entry_limited(z, name: str, limit: int | None = None) -> bytes:
 
 
 _UTF16_BOMS: tuple[tuple[bytes, str, str], ...] = (
-    (b"\xff\xfe", "utf-16-le", "UTF-16LE"),
-    (b"\xfe\xff", "utf-16-be", "UTF-16BE"),
+    # ✅ R191 修复：UTF-32 BOM 必须排在 UTF-16 之前（**长 BOM 优先**）——
+    #    UTF-32LE BOM (\xff\xfe\x00\x00) 以 \xff\xfe 开头，若 UTF-16 条目在前
+    #    会被抢判为 UTF-16LE，按 utf-16 解出一半 NUL，再被
+    #    _reject_binary_text_ext 当二进制拒绝（合法 UTF-32 文本被误杀 400）。
+    (b"\xff\xfe\x00\x00", "utf-32", "UTF-32LE"),
+    (b"\x00\x00\xfe\xff", "utf-32", "UTF-32BE"),
+    # ✅ R191 修复：BOM 分支 codec 用 BOM-aware 的 "utf-16"（自动剥 BOM），
+    #    旧值 "utf-16-le"/"utf-16-be" 会把 BOM 解成首字符 U+FEFF，虽被
+    #    _normalize_invisible 删除，却触发「含不可见控制字符/零宽字符」假告警
+    #    （文件本身并没有零宽字符问题，污染 parse_warnings 语义）。
+    (b"\xff\xfe", "utf-16", "UTF-16LE"),
+    (b"\xfe\xff", "utf-16", "UTF-16BE"),
 )
+
+#: ✅ R191 性能修复：无 BOM 探测的采样窗口。NUL 字节分布是全局统计特征，
+#:    采样头部 64KB 足以判定（30MB 文件的旧全量双扫描实测 ~4.2s 纯 CPU，
+#:    采样后 <10ms）。BOM 判定本来就只看头部，不受影响。
+_UTF16_PROBE_BYTES = 65536
 
 
 def _detect_utf16(content: bytes) -> tuple[str, str] | None:
-    """探测 UTF-16，返回 ``(codec, 展示名)``；不匹配返回 ``None``。
+    """探测 UTF-16/UTF-32，返回 ``(codec, 展示名)``；不匹配返回 ``None``。
 
     ✅ 修复（R175 · BUG-2）：旧实现编码回退链只有 UTF-8/GBK/GB18030，
     Windows 记事本「Unicode」保存的 UTF-16 文件会被 GBK **逐字节解成功**
@@ -736,13 +815,17 @@ def _detect_utf16(content: bytes) -> tuple[str, str] | None:
     信息量告警 —— 招投标场景大量 txt/csv 来自记事本，属高风险静默数据流。
 
     两级判定：
-    1. **BOM 精确判定**：``\\xff\\xfe`` = UTF-16LE、``\\xfe\\xff`` = UTF-16BE
-       （记事本「Unicode」必带 BOM，这是最可靠的一级）；
+    1. **BOM 精确判定**：``\\xff\\xfe`` = UTF-16LE、``\\xfe\\xff`` = UTF-16BE、
+       ``\\xff\\xfe\\x00\\x00`` = UTF-32LE、``\\x00\\x00\\xfe\\xff`` = UTF-32BE
+       （记事本「Unicode」必带 BOM，这是最可靠的一级；UTF-32 必须**先**于
+       UTF-16 判定，见 _UTF16_BOMS 注释）；
     2. **无 BOM 探测**：只认「ASCII 为主的 UTF-16」——ASCII 字符高字节为
        0x00，LE 时落在奇数位、BE 时落在偶数位。要求「一侧 NUL 占比 ≥ 0.5
        且另一侧 ≤ 0.1」双条件，且长度为偶数、≥ 8 字节。纯 CJK 无 BOM 的
        UTF-16 两字节均非 0，无法与 GBK 可靠区分，**故意不猜测**，仍走原
        回退链并保留告警（宁可告警也不误判）。
+
+    ✅ R191 性能修复：无 BOM 探测只采样头部 _UTF16_PROBE_BYTES 字节。
     """
     if not content:
         return None
@@ -752,9 +835,11 @@ def _detect_utf16(content: bytes) -> tuple[str, str] | None:
     n = len(content)
     if n < 8 or n % 2:
         return None
-    pairs = n // 2
-    even_nul = sum(1 for i in range(0, n, 2) if content[i] == 0)
-    odd_nul = sum(1 for i in range(1, n, 2) if content[i] == 0)
+    probe = content if n <= _UTF16_PROBE_BYTES else content[:_UTF16_PROBE_BYTES]
+    pn = len(probe)
+    pairs = pn // 2
+    even_nul = sum(1 for i in range(0, pn, 2) if probe[i] == 0)
+    odd_nul = sum(1 for i in range(1, pn, 2) if probe[i] == 0)
     if odd_nul / pairs >= 0.5 and even_nul / pairs <= 0.1:
         return "utf-16-le", "UTF-16LE（无 BOM，按字节分布推测）"
     if even_nul / pairs >= 0.5 and odd_nul / pairs <= 0.1:
@@ -810,6 +895,19 @@ def _decode_text_ex(content: bytes) -> tuple[str, list[str]]:
             except UnicodeDecodeError:
                 continue
             warnings.append(f"文本非 UTF-8，已按 {enc} 解码（可能存在乱码，建议确认源文件编码）")
+            # ✅ R203 修复（乱码正文静默入库）：GBK/GB18030 对任意字节流的接受
+            #    度接近 utf-8(errors="ignore")——Big5/Shift-JIS 等编码的源文件
+            #    也会「解码成功」并产出私用区/生僻字乱码正文（实测 Big5 样本
+            #    解出 \ue61b 类私用区码点），仅靠上面一句弱告警用户无从判断
+            #    内容是否可信。现复用 UTF-16 通道的码点质量闸门：可疑码点占比
+            #    超阈值时追加定向告警（正文照常落库——回退其他编码只会更糟，
+            #    告警指向真实修复动作「另存为 UTF-8」）。
+            if not _utf16_text_is_plausible(text):
+                warnings.append(
+                    "按 GBK/GB18030 解码后的文本可疑字符占比异常（源文件可能为 "
+                    "Big5/Shift-JIS 等其他编码），正文可能大面积乱码，"
+                    "建议将源文件另存为 UTF-8 后重新上传"
+                )
             break
         if text is None:
             # UTF-8 / GBK 均失败：以 UTF-8 容错解码，保证不崩、乱码可控（但需告警）
@@ -1057,13 +1155,18 @@ def _docx_bold_heading_level(p_el) -> int:
     return 0
 
 
-def _parse_docx(content: bytes) -> str:
+def _parse_docx(content: bytes, diag: dict | None = None) -> str:
     """DOCX 解析（增强版）：直接解析 OOXML，输出结构化 Markdown。
 
     - 标题样式（Heading/标题）→ "#/##/###" 层级，
       与事实提取的分段器（按 # 切分）联动，章节语义完整
     - 表格 → "【表格】" + 竖线分隔行，避免单元格内容糊成一团
     - 解析失败自动回退 docx2python
+
+    ✅ R191（可观测性对齐）：回退 docx2python 此前只写日志——PDF 通道的
+    OCR 兜底/加密提示都会持久化到 parse_warnings，docx 的「正文来自回退
+    通道的纯文本（无标题层级/表格结构）」却无任何持久化痕迹。现补
+    ``_note_info``（diag 由调用方透传）。
     """
     import io as _io
     import xml.etree.ElementTree as ET
@@ -1080,6 +1183,7 @@ def _parse_docx(content: bytes) -> str:
         raise
     except Exception as e:
         logger.warning("DOCX OOXML 解析失败，回退 docx2python: %s", e)
+        _note_info(diag, "DOCX 结构化解析失败，已回退 docx2python 纯文本通道（无标题层级/表格结构）")
         return _parse_docx_fallback(content)
 
     def para_text(p) -> str:
@@ -1119,6 +1223,7 @@ def _parse_docx(content: bytes) -> str:
     text = "\n".join(parts)
     if not text.strip():
         logger.warning("DOCX 结构化解析结果为空，回退 docx2python")
+        _note_info(diag, "DOCX 结构化解析结果为空，已回退 docx2python 纯文本通道（无标题层级/表格结构）")
         return _parse_docx_fallback(content)
     return text
 
@@ -1159,7 +1264,7 @@ def _parse_legacy_word(content: bytes, fname: str, diag: dict | None = None) -> 
     docx_bytes, backend = convert_legacy_word_to_docx(content, fname)
     # 转换产物同样是 ZIP 容器：过一遍归档闸门，避免异常容器绕过统一防护
     _guard_zip_archive(docx_bytes, "docx")
-    text = _parse_docx(docx_bytes)
+    text = _parse_docx(docx_bytes, diag)
     _note_info(diag, f"已通过 {backend} 将旧版 Word 文件转换为 .docx 后解析")
     return text
 
@@ -1649,6 +1754,13 @@ def _parse_pdf_fallback(content: bytes) -> tuple[str, int]:
             os.unlink(tmp.name)
 
 
+#: ✅ R191：单页 OCR 渲染像素总量上限（宽×高像素）。50M 像素 ≈ RGB 位图
+#: ~150MB，是「正常 A4@200dpi（~9M 像素）」的 5 倍余量；超限先降 DPI、连最低
+#: DPI 也超 4 倍限值则跳过该页。零新增配置项（模块常量，与压缩炸弹阈值
+#: 环境变量化通道不同：该值只防崩溃不防业务，无需运维调节）。
+_OCR_RENDER_MAX_PIXELS = 50_000_000
+
+
 def _pdf_ocr_fallback(content: bytes, max_pages: int | None = None, diag: dict | None = None) -> str:
     """扫描件 PDF 的 OCR 兜底：PyMuPDF 渲染页面 → ocr 模块（多引擎识别）。
 
@@ -1686,7 +1798,39 @@ def _pdf_ocr_fallback(content: bytes, max_pages: int | None = None, diag: dict |
                 )
             for page in doc.pages(0, max_pages):
                 try:
-                    png = page.get_pixmap(dpi=dpi).tobytes("png")
+                    _page_dpi = dpi
+                    # ✅ R191 修复（渲染像素闸）：MediaBox 超大页（如 72000×72000pt）
+                    #    按 200dpi 渲染约需 12 万像素边长 / 理论 ~120GB 位图，当前
+                    #    版本靠 PyMuPDF malloc 失败兜底（overcommit 环境可能真 OOM）。
+                    #    渲染前按页面尺寸估算像素总量，超上限自动降 DPI；页面本身
+                    #    巨大连最低 DPI 也超限时跳过该页并留告警（不中断整份解析）。
+                    #    ⚠️ 防御式取 rect：取不到（mock/异常形态）时维持旧行为
+                    #    （不启用闸），闸只对真实 fitz 页面生效。
+                    _rect = getattr(page, "rect", None)
+                    _est_px = (
+                        (_rect.width / 72.0 * dpi) * (_rect.height / 72.0 * dpi)
+                        if _rect is not None
+                        else 0
+                    )
+                    if _est_px > _OCR_RENDER_MAX_PIXELS:
+                        _scale = (_OCR_RENDER_MAX_PIXELS / _est_px) ** 0.5
+                        _page_dpi = max(48, int(dpi * _scale))
+                        _est_px = (_rect.width / 72.0 * _page_dpi) * (_rect.height / 72.0 * _page_dpi)
+                        if _est_px > _OCR_RENDER_MAX_PIXELS * 4:
+                            logger.warning(
+                                "PDF OCR 第 %d 页尺寸过大（%sx%s pt），已跳过",
+                                page.number,
+                                _rect.width,
+                                _rect.height,
+                            )
+                            _note_info(
+                                diag,
+                                f"扫描件第 {page.number + 1} 页尺寸过大，已跳过该页 OCR"
+                                "（建议拆分或压缩源文件后重新上传）",
+                            )
+                            continue
+                        logger.info("PDF OCR 第 %d 页尺寸过大，DPI 降至 %d", page.number, _page_dpi)
+                    png = page.get_pixmap(dpi=_page_dpi).tobytes("png")
                     res = ocr_bytes_sync(png)
                 except OcrUnavailableError as oe:
                     raise ParseError(str(oe)) from oe
@@ -1699,6 +1843,16 @@ def _pdf_ocr_fallback(content: bytes, max_pages: int | None = None, diag: dict |
         raise
     except Exception as e:
         logger.warning("PDF OCR 整体失败: %s", e)
+        # ✅ R203 修复（失败语义与单页失败对齐）：循环级异常（PyMuPDF 内部
+        #    错误等）此前只写 WARNING、零 diag 留痕——单页失败有 _note_info，
+        #    整体中断反而静默。已积累页仍会返回（内容不丢），但用户应知道
+        #    「到第 N 页为止」而非以为全文识别完毕。
+        if ocr_parts:
+            _note_truncation(
+                diag,
+                f"PDF OCR 在第 {ocr_parts[-1][0] + 1} 页后中断"
+                f"（{str(e)[:80]}），仅保留前 {len(ocr_parts)} 页识别结果",
+            )
     if skipped_pages and not ocr_parts:
         # 全部超限页都未产出内容：上面已记录截断告警，这里只补一条日志便于排查
         logger.warning("PDF OCR 未产出任何文本（页数上限 %d，共跳过 %d 页）", max_pages, skipped_pages)
@@ -1870,21 +2024,30 @@ def _scan_xlsx_sheet_meta(path: str) -> dict[str, dict]:
                 has_formula = False
                 in_merges = False
                 merge_buf = b""
+                # ✅ R203 修复（标签跨 64KB chunk 边界漏判）：<mergeCells 与
+                #    <f> 标签字面量都可能被 64KB 切在中间（概率 ~11/65536 每
+                #    边界，多 sheet 大文件累积可测）——命中即静默降级（该 sheet
+                #    merges=[] / has_formula=False，R180 的合并表头展开、公式
+                #    占位回填失效且无告警）。保留上一 chunk 尾部 16 字节拼接
+                #    后再判定（最长标签 <mergeCells 共 11 字节，16 字节余量充足）。
+                _tail = b""
                 try:
                     with z.open(name) as fh:
                         while True:
                             chunk = fh.read(65536)
                             if not chunk:
                                 break
-                            if not has_formula and re.search(rb"<f[ >/]", chunk):
+                            _look = _tail + chunk
+                            _tail = chunk[-16:]
+                            if not has_formula and re.search(rb"<f[ >/]", _look):
                                 has_formula = True
                             if in_merges:
                                 merge_buf += chunk
                             else:
-                                pos = chunk.find(b"<mergeCells")
+                                pos = _look.find(b"<mergeCells")
                                 if pos < 0:
                                     continue
-                                merge_buf = chunk[pos:]
+                                merge_buf = _look[pos:]
                                 in_merges = True
                             end = merge_buf.find(b"</mergeCells>")
                             if end >= 0:
@@ -2062,7 +2225,17 @@ def _parse_excel(content: bytes, ftype: str, diag: dict | None = None) -> str:
         #    "=SUM(...)" 这类公式原文（机械统计表的合计列常为公式）。
         wb = load_workbook(tmp.name, read_only=True, data_only=True)
         # ✅ R180：仅在存在公式时才二次加载（回填公式原文，避免静默空值）
-        formula_wb = load_workbook(tmp.name, read_only=True, data_only=False) if _has_formula else None
+        # ✅ R203 修复（句柄泄漏 + Windows 临时文件残留）：formula_wb 是独立
+        #    的 load_workbook 调用，加载失败（文件损坏 / 杀软锁定窗口）时异常
+        #    直接冒出，wb 已打开但未进入下方 try/finally —— 句柄不关闭，外层
+        #    finally 的 os.unlink 在 Windows 上抛 PermissionError（被 except
+        #    OSError 按 debug 级静默吞掉）→ 临时文件永久残留。现单独包
+        #    try/except：失败时先关闭 wb 再上抛。
+        try:
+            formula_wb = load_workbook(tmp.name, read_only=True, data_only=False) if _has_formula else None
+        except Exception:
+            wb.close()
+            raise
         # ✅ BUG 修复（Windows 致命）：read_only 模式下 openpyxl 会持续持有
         #    文件句柄，必须显式 close()。旧实现从不关闭 → 下方 finally 删除
         #    临时文件时抛 PermissionError（WinError 32），异常从 finally 冒出，
@@ -2116,32 +2289,75 @@ def _parse_excel(content: bytes, ftype: str, diag: dict | None = None) -> str:
                 logger.debug("临时文件清理失败（忽略）: %s", e)
 
 
-def _split_tiff_frames(content: bytes) -> list[bytes]:
-    """把多页 TIFF 逐帧转为 PNG 字节；单帧 / 缺 Pillow / 解码失败时返回空列表。
+def _split_tiff_frames(content: bytes, diag: dict | None = None) -> list[bytes]:
+    """把多页 TIFF 逐帧转为 PNG 字节；单帧 / 缺 Pillow / 首帧即失败时返回空列表。
 
     ✅ BUG 修复（内容静默丢失）：旧实现把整个 TIFF 交给 OCR 通道，而
     `ocr._preprocess` 用 `PIL.Image.open(...)` 只读**第 1 帧** —— 多页 TIFF
     （扫描仪常见的图纸/多页清单形态）从第 2 页起的内容全部被静默丢弃，
     且不会产生任何告警，用户以为"文件已解析成功"。
+
+    ✅ R191 修复（帧数无上限 + 中途失败静默丢帧）：
+      - 旧实现 ``for i in range(n)`` 对帧数无任何上限——损坏/伪造的多页
+        TIFF 可声明数百帧，每帧全量转 PNG 驻留内存（先于任何 OCR 闸门），
+        OCR 次数也无上限。现对齐 PDF 通道 ``OCR_PDF_MAX_PAGES`` 口径：
+        只拆前 N 帧，超限记截断告警（含「可调大」引导，文案与 PDF 一致）。
+      - 旧实现中途解码失败仅 ``logger.debug`` 且 ``return []``（或丢弃已
+        积累帧），后续帧静默丢失且上层 ``got < len(frames)`` 对账失效。
+        现改为：返回**已积累**的帧 + 记截断告警（第 k 帧失败、共 N 帧），
+        让上层「仅部分帧识别出文本」的对账告警与 diag 可见。
     """
     try:
         from PIL import Image
     except ImportError:
         return []
+    from app.config import settings  # 局部导入，与同文件其它 _resolve_* 同风格
+
     frames: list[bytes] = []
+    total_frames = 0
     try:
         with Image.open(io.BytesIO(content)) as img:
             n = getattr(img, "n_frames", 1)
             if n <= 1:
                 return []
-            for i in range(n):
+            total_frames = n
+            max_frames = getattr(settings, "ocr_pdf_max_pages", 20) or 20
+            for i in range(min(n, max_frames)):
                 img.seek(i)
+                # ✅ R203 修复（内存防护）：单帧像素闸（对齐 PDF 通道口径）——
+                #    n_frames 来自文件 tag 完全不可信，超大帧 convert("RGB")
+                #    会物化 GB 级位图。超限帧等比降采样后仍参与识别（不丢内容）。
+                _w, _h = img.size
                 buf = io.BytesIO()
-                img.convert("RGB").save(buf, format="PNG")
+                if _w * _h > _OCR_RENDER_MAX_PIXELS:
+                    _scale = (_OCR_RENDER_MAX_PIXELS / (_w * _h)) ** 0.5
+                    _nw, _nh = max(1, int(_w * _scale)), max(1, int(_h * _scale))
+                    img.convert("RGB").resize((_nw, _nh)).save(buf, format="PNG")
+                    _note_info(
+                        diag,
+                        f"多页 TIFF 第 {i + 1} 帧尺寸过大（{_w}×{_h}），"
+                        f"已降采样至 {_nw}×{_nh} 后识别",
+                    )
+                else:
+                    img.convert("RGB").save(buf, format="PNG")
                 frames.append(buf.getvalue())
-    except Exception as e:  # pragma: no cover - 依赖 Pillow 行为
-        logger.debug("多页 TIFF 拆帧失败（按单帧识别）: %s", e)
-        return []
+            if n > max_frames:
+                _note_truncation(
+                    diag,
+                    f"多页 TIFF 共 {n} 帧，仅取前 {max_frames} 帧参与识别"
+                    "（可调大 OCR_PDF_MAX_PAGES 或拆分文件后重新上传）",
+                )
+    except Exception as e:
+        # ✅ R191：拆帧失败不再静默——返回已积累的帧（首帧失败时为空，上层
+        #    回落整图单帧识别的旧行为），并留截断告警点明「第几帧失败、丢了几帧」。
+        logger.warning("多页 TIFF 拆帧在第 %s 帧失败: %s", len(frames) + 1, e)
+        if total_frames > 1 and frames:
+            _note_truncation(
+                diag,
+                f"多页 TIFF 共 {total_frames} 帧，拆帧在第 {len(frames) + 1} 帧失败，"
+                f"仅前 {len(frames)} 帧参与识别",
+            )
+        return frames
     return frames
 
 
@@ -2196,6 +2412,35 @@ def _mineru_image_fallback(content: bytes, ftype: str, diag: dict | None = None)
     return ""
 
 
+def _downscale_image_bytes(content: bytes, diag: dict | None = None) -> bytes:
+    """单帧图片超像素闸时等比降采样（对齐 PDF 通道 ``_OCR_RENDER_MAX_PIXELS`` 口径）。
+
+    ✅ R203 修复（内存防护与 PDF 通道对齐）：PDF OCR 有 50M 像素闸，图片/
+    TIFF 单帧通道此前无任何尺寸判定——50000×50000 的超大图 ``convert("RGB")``
+    会物化 GB 级位图（连 ParseError 都来不及抛，可能连带杀掉全部在飞请求）。
+    探测/重编码失败时回落原字节（OCR 通道自行报错，不在预处理环节制造新故障）。
+    """
+    try:
+        from PIL import Image
+    except ImportError:
+        return content
+    try:
+        with Image.open(io.BytesIO(content)) as img:
+            w, h = img.size
+            if w * h <= _OCR_RENDER_MAX_PIXELS:
+                return content
+            scale = (_OCR_RENDER_MAX_PIXELS / (w * h)) ** 0.5
+            nw, nh = max(1, int(w * scale)), max(1, int(h * scale))
+            resized = img.convert("RGB").resize((nw, nh))
+            buf = io.BytesIO()
+            resized.save(buf, format="PNG")
+        _note_info(diag, f"图片尺寸过大（{w}×{h}），已降采样至 {nw}×{nh} 后识别")
+        return buf.getvalue()
+    except Exception as e:
+        logger.debug("图片降采样预检失败（按原字节处理）: %s", e)
+        return content
+
+
 def _parse_image_ocr(content: bytes, ftype: str, diag: dict | None = None) -> str:
     """图片 OCR（多层引擎：tesseract / RapidOCR / 视觉大模型）。
 
@@ -2210,7 +2455,7 @@ def _parse_image_ocr(content: bytes, ftype: str, diag: dict | None = None) -> st
     from app.services.ocr import OcrUnavailableError, ocr_bytes_sync
 
     if ftype in ("tiff", "tif"):
-        frames = _split_tiff_frames(content)
+        frames = _split_tiff_frames(content, diag)
         if len(frames) > 1:
             pages: list[tuple[int, str]] = []
             for idx, frame in enumerate(frames):
@@ -2249,7 +2494,9 @@ def _parse_image_ocr(content: bytes, ftype: str, diag: dict | None = None) -> st
             return _add_page_markers(pages)
 
     try:
-        res = ocr_bytes_sync(content)
+        # ✅ R203 修复（内存防护）：单帧路径与多页 TIFF 共用像素闸（超限先
+        #    降采样再识别），MinerU 云端兜底仍用原字节（云端自行处理尺寸）。
+        res = ocr_bytes_sync(_downscale_image_bytes(content, diag))
     except OcrUnavailableError as e:
         # ✅ 无本地引擎：先试云端兜底，仍不可用才按原错误抛出（旧行为不变）
         cloud = _mineru_image_fallback(content, ftype, diag)
@@ -2276,7 +2523,7 @@ def _parse_image_ocr(content: bytes, ftype: str, diag: dict | None = None) -> st
 # 目录识别（降级解析）正则：模块级预编译，避免每次调用重复编译
 # （simple_parse_outline 上传识别时调用，编号 pattern 较多）
 # ---------------------------------------------------------------------------
-_OUTLINE_CN_NUMS = "一二三四五六七八九十"
+_OUTLINE_CN_NUMS = "一二三四五六七八九十百"
 _MD_HEADING_RE = re.compile(r"^(#{1,6})\s+(.*)")
 # 页码 / 分隔符行（"第 12 页"、"第12页/24"、"- 12 -"、"12 / 24"），需跳过
 _PAGE_MARKER_RE = re.compile(r"^(第\s*\d+\s*页(\s*/\s*\d+)?|[-—]\s*\d+\s*[-—]|\d+\s*/\s*\d+)$")
@@ -2286,11 +2533,44 @@ _PAGE_MARKER_RE = re.compile(r"^(第\s*\d+\s*页(\s*/\s*\d+)?|[-—]\s*\d+\s*[-�
 #   下列 pattern 在编号与分隔符之间允许 \s*，显著提升上传目录识别准确率
 #   （PRD 9.2：OCR 噪声原需大量人工校正，现自动容错）。
 #   注意：点分编号的层级按"去空格后"的点号数计算，避免 "1 . 1" 被误判为三级。
+# ✅ R191 修复：点分编号数值量词负向表——"3.5万元包干" "1.5米，采用C30混凝土"
+#    这类「小数数值 + 单位量词」开头的正文行，配合无分隔符点分分支会形成伪
+#    标题（编号 3.5 + 标题"万元包干"）。仅对**点分编号**（raw_id 含 "."，数值
+#    特征）生效：单数字编号（"1 总则"）大多是序号而非数值，不受影响。
+#    表只收金额/尺寸/时长核心单位；真标题极少以这些词开头（"天线安装"这类
+#    以单字量词开头的标题属罕见形态，且带空格分隔的写法不受影响）。
+_OUTLINE_DOT_QUANTIFIER_RE = re.compile(
+    r"^(?:万元|亿元|千元|毫米|厘米|公里|千米|平方米|立方米|小时|个月|元|米|吨|天|%|‰)"
+)
+# ✅ R191 修复：日期形态编号判据——"2024.05.12 第一次工地会议纪要" 的编号是
+#    日期而非章节号，既有 4 位年份护栏（标题首字 年/月/日/度）拦不住标题不以
+#    年月日开头的形态。raw_id 去空格后命中即视为正文行。
+_OUTLINE_DATE_ID_RE = re.compile(
+    r"^\d{4}[.．]\d{1,2}(?:[.．]\d{1,2})?$"  # 2024.05.12 / 2024.5
+    r"|^\d{4}[-/]\d{1,2}(?:[-/]\d{1,2})?$"  # 2024-05-12 / 2024/5/1
+    r"|^\d{4}年\d{1,2}月?$"  # 2024年5月 / 2024年5
+)
+# ✅ R203 修复：行首「点分数值」形态判据（1.5 / 2.4 / 2024.05）——用于识别
+#    「点分 pattern 全部不命中、被单数字 pattern 撕碎」的正文行（见
+#    simple_parse_outline 内 R203 护栏注释）。
+_OUTLINE_DOT_NUM_LINE_RE = re.compile(r"^\d+\s*\.\s*\d")
+
 _OUTLINE_PATTERNS = [
     # 中文数字章节编号（含 章/节/篇/部分，容忍 第 与 编号 之间的空格）
     (1, re.compile(rf"^第\s*([{_OUTLINE_CN_NUMS}]+)\s*(?:部分|章|节|篇)\s*(.*)")),
     # 阿拉伯数字章节编号（"第 1 章"/"第 2 节"/"第 3 部分"）
     (1, re.compile(r"^第\s*(\d+)\s*(?:部分|章|节|篇)\s*(.*)")),
+    # ✅ R191 修复（点分后无分隔符，直接跟汉字："1.1工程概况"——PDF 文字层
+    #    提取经常丢空格，中文文档高频形态）：旧实现本条缺失，该形态会回退被
+    #    下面的单数字 pattern 吞掉第一段（"1.1工程概况" → L1 title="1工程概况"，
+    #    层级丢失 + 编号错撕双输）。本条在点分编号后用前瞻直接放行汉字标题。
+    #    ⚠️ 必须排在「点分编号（要求分隔符）」之前：后者对 "1.1.1施工准备"
+    #    会**回溯命中**（raw_id="1.1" + 吃掉分隔点 + title="1施工准备"），
+    #    更具体的无分隔符形态永远轮不到。
+    #    配套防误判见 simple_parse_outline 内的三道 R191 护栏（数值量词 /
+    #    日期形态 / 句读）——"3.5万元包干" 这类金额行由护栏拦截，不会因本条
+    #    变成伪标题。
+    (None, re.compile(r"^(\d+(?:\s*\.\s*\d+)+)(?=[\u4e00-\u9fff])(.*)")),
     # 点分编号（容忍编号内空格：1 . 1 / 1.1.1）
     (None, re.compile(r"^(\d+(?:\s*\.\s*\d+)+)\s*[、.\s]\s*(.*)")),
     # 单数字编号（"1 总则" / "1. 总则" / "1、总则"）
@@ -2410,6 +2690,41 @@ def simple_parse_outline(text: str) -> list:
             #    （年份样式）且标题以 年/月/日/度 开头时，视为正文行，不生成节点。
             #    规则足够窄，不会误伤 "1 年度计划"（编号仅 1 位）等正常标题。
             if len(raw_id) >= 4 and title[:1] in ("年", "月", "日", "度"):
+                break
+
+            # ✅ R191 修复（点分编号三道防误判护栏，仅对 raw_id 含 "." 生效——
+            #    点分数字是数值/日期特征；单数字编号多为序号不受影响）：
+            #    ① 日期形态编号（"2024.05.12 第一次工地会议纪要"）——编号是日期，
+            #       既有年份护栏只查标题首字，拦不住标题不以年月日开头的形态；
+            #    ② 数值量词开头（"3.5万元包干" / "1.5米，采用C30混凝土"）——
+            #       小数数值 + 单位量词的正文行，旧实现被单数字 pattern 错撕成
+            #       "5万元包干" / "5米，…"；
+            #    ③ 标题前 4 字内含句读标点（"3.5 万元，包干价"）——真标题开头
+            #       极少出现句读。命中任一即按正文行跳过，不再生成伪节点
+            #       （伪节点会落库成「有标题无正文」的空章节）。
+            if "." in raw_id:
+                _compact_id = raw_id.replace(" ", "")
+                if _OUTLINE_DATE_ID_RE.match(_compact_id):
+                    break
+                if _OUTLINE_DOT_QUANTIFIER_RE.match(title):
+                    break
+                if re.search(r"[，。；,;]", title[:4]):
+                    break
+
+            # ✅ R203 修复（R191 三护栏的适用条件盲区）：点分数值 + 英文单位/
+            #    符号形态（"1.5MPa直接浇筑混凝土" / "2.4GHz无线传输" /
+            #    "3.5%的利润率下浮"）——编号后既非汉字（无分隔符点分分支的前瞻
+            #    不命中）也非分隔符（点分分隔符分支不命中），被**单数字 pattern**
+            #    吃掉首个数字撕成 raw_id="1" + title="5MPa…"。此时 raw_id 不含
+            #    "."，上方三护栏整体跳过（量词表里的 % 对撕剩标题也永远轮不到）。
+            #    判据：行首是点分数值形态、且撕剩的标题以数字开头（正常单数字
+            #    标题的编号与文字之间有分隔符，撕剩部分不以数字开头；点分编号
+            #    本尊走上方含点分支不受影响）。按正文行跳过，不再生成伪节点。
+            if (
+                "." not in raw_id
+                and _OUTLINE_DOT_NUM_LINE_RE.match(line)
+                and re.match(r"\s*\d", title)
+            ):
                 break
 
             # ✅ 修复（2026-09-19）：正文行防误判（第二道防线）——列举条目/正文句

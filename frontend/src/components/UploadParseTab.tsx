@@ -38,7 +38,7 @@ import {
 import DocumentParseList, { type DocumentParseItem } from "./DocumentParseList";
 import ParseResultCategoryPanel, { type ParsePanelSharedState } from "./ParseResultCategoryPanel";
 import { computeDocStats, type WorkflowTabKey } from "../utils/workflowDerived";
-import { MAX_UPLOAD_BYTES, UPLOAD_FILE_ACCEPT, partitionUploadFiles } from "../utils/uploadAccept";
+import { MAX_UPLOAD_BYTES, UPLOAD_FILE_ACCEPT, partitionUploadFiles, resolveMaxUploadBytes } from "../utils/uploadAccept";
 import type { BaGroup, BaStoredItem } from "../utils/bidAnalysis";
 
 const { Text } = Typography;
@@ -70,6 +70,10 @@ export type UploadParseTabProps = {
   parsingDocs: boolean;
   parsingDocId: string | null;
   onUploadFiles: (files: File[]) => void;
+  /** ✅ R203（R191 遗留承接）：解析中「停止解析」入口——中断在途批量/单份
+   *  解析请求（页面层 parseAbortRef.abort()）。不传时不渲染按钮（向后兼容，
+   *  既有测试/调用方零影响）。 */
+  onStopParse?: () => void;
   onParseAll: () => void;
   onReparseAll: () => void;
   onRefresh: () => void;
@@ -126,6 +130,7 @@ export default function UploadParseTab({
   uploadedFiles,
   parsingDocs,
   parsingDocId,
+  onStopParse,
   onUploadFiles,
   onParseAll,
   onReparseAll,
@@ -164,8 +169,10 @@ export default function UploadParseTab({
     allParsed: allDocsParsed,
   } = computeDocStats(docs);
   // ✅ 2026-09-24 B4：批量按钮文案区分「有待解析」与「仅剩失败可重试」两种情形。
-  //    后端 parse-all（force=false）会处理所有 parsed_markdown 为空的文档
-  //    （含 failed），故按钮可用条件与计数统一用 actionableCount。
+  //    后端 parse-all（force=false）处理「正文为空」及「parse_status='failed'」
+  //    的文档（✅ R203 补齐后者：曾成功→重解析失败的文档正文非空，旧口径不
+  //    选取导致「重试失败文档」按钮假动作），按钮可用条件与计数统一用
+  //    actionableCount。
   const parseAllLabel =
     pendingDocCount > 0
       ? `解析全部待解析（${actionableDocCount}）`
@@ -175,7 +182,10 @@ export default function UploadParseTab({
   const busy = generating || uploadingFacts || parsingDocs || !!parsingDocId;
   // 实际生效上限：非法（非正数）下发值回落兜底默认，避免误关闭守卫。
   const effectiveMaxBytes =
-    typeof maxUploadBytes === "number" && maxUploadBytes > 0 ? maxUploadBytes : MAX_UPLOAD_BYTES;
+    // ✅ R191（C-F7）：非法上限回落收敛到唯一口径 resolveMaxUploadBytes
+    //    （额外挡 Infinity/NaN——`Infinity > 0` 为 true，旧写法会显示
+    //    「不能超过 InfinityMB」且大文件全放行）。
+    resolveMaxUploadBytes(typeof maxUploadBytes === "number" ? maxUploadBytes : undefined);
   const maxMb = formatMb(effectiveMaxBytes);
 
   return (
@@ -253,9 +263,12 @@ export default function UploadParseTab({
         <Card size="small" style={{ marginBottom: 12 }} styles={{ body: { padding: "8px 12px" } }}>
           <div style={{ display: "flex", gap: 16, alignItems: "center" }}>
             <div style={{ flex: "0 0 320px" }}>
-              {/* ✅ 修复：旧实现硬编码 percent={50}，与真实上传进度无关
-                  （axios 单请求拿不到上传进度）。改为满值 + active 条纹
-                  动画表示「进行中」，不再显示虚假百分比。 */}
+              {/* ✅ 修复：旧实现硬编码 percent={50}，与真实上传进度无关。
+                  改为满值 + active 条纹动画表示「进行中」，不再显示虚假
+                  百分比。（R191 注释纠错：axios 本身支持 onUploadProgress，
+                  旧注释「单请求拿不到上传进度」不成立——是否接入真进度条
+                  属产品决策，见 R191 报告登记；factsApi.uploadDocuments
+                  尚未传 onUploadProgress，当前满值条纹仍是诚实表达。） */}
               <Progress percent={100} status="active" showInfo={false} />
             </div>
             <div style={{ flex: 1, minWidth: 0 }}>
@@ -306,6 +319,15 @@ export default function UploadParseTab({
           <Space>
             <Spin size="small" />
             <Text strong>正在解析文档，扫描件 OCR 较慢，请勿关闭页面...</Text>
+            {/* ✅ R203（R191 遗留承接）：parseAbortRef 取消通道早已齐备（卸载/
+                  切方案 cleanup 均在 abort），唯独没有用户主动触发的入口——
+                  解析请求挂上 3~20 分钟 OCR，误点长扫描件后用户只能干等。
+                  点击后请求中断，finally 复位运行态（取消 = 不再等）。 */}
+            {onStopParse && (
+              <Button size="small" danger onClick={onStopParse}>
+                停止解析
+              </Button>
+            )}
           </Space>
         </Card>
       )}
@@ -429,6 +451,7 @@ export default function UploadParseTab({
           docs={docs}
           parsingDocs={parsingDocs}
           parsingDocId={parsingDocId}
+          uploadingFacts={uploadingFacts}
           categoryOptions={categoryOptions}
           onParse={onParse}
           onPreview={onPreview}

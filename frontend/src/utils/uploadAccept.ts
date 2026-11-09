@@ -24,6 +24,7 @@ export const UPLOAD_FILE_EXTENSIONS: string[] = [
   "bmp",
   "tiff",
   "tif", // ✅ R179 补齐：扫描仪/相机直出的 TIFF 常见后缀（后端同步支持）
+  "webp", // ✅ R181 补齐：WebP 图片（后端 file_parser.SUPPORTED_EXTENSIONS 同步支持）
   "doc",
   "wps", // 旧版 Word（需本地 Office 组件转换，见后端 legacy_office.py）
 ];

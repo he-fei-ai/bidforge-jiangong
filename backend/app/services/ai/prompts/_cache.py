@@ -58,6 +58,8 @@ _loaded_db_mtime: float | None = None
 #    变新时再查一次廉价水印（COUNT+MAX，走不到百行的表），水印未变 = 他表写入，
 #    只刷新 mtime 不重载。水印无法记录（极旧库缺列/查询失败）→ 逐字回退旧行为。
 _loaded_db_watermark: tuple[int, str] | None = None
+#: ✅ R202（G5 · 可观测化）：「水印不可用」只告警一次，避免每次探测刷屏。
+_watermark_warned = False
 # ✅ R179（2026-11-05）：记录上次加载时库文件**确实不存在**。
 #    ``_loaded_db_mtime is None`` 有两种来源：①库文件从未出现（需要「出现即重载」）；
 #    ②调用方显式预置缓存/内存态（不得自动重载，见 test_prompt_module_r38 的
@@ -126,11 +128,11 @@ def _resolve_shared_keys(prompt: str, _depth: int = 0, _chain: tuple[str, ...] =
             )
             return m.group(0)
         try:
-            resolved = _resolve_shared_keys(get_prompt(key), _depth + 1, (*_chain, key))
+            sub_text, sub_status = _raw_prompt_text(key)
         except Exception as e:
             logger.warning("解析共享提示词 %s 失败: %s", key, _sanitize_error(e))
             return m.group(0)
-        if not resolved:
+        if sub_status == "missing" or not sub_text:
             # key 未注册（拼写错误或已下架）——保留字面量并明确告警
             logger.warning(
                 "共享提示词 %s 不存在（未注册），{ %s } 已按字面量保留；" "请检查拼写。可用共享片段：%s",
@@ -139,9 +141,61 @@ def _resolve_shared_keys(prompt: str, _depth: int = 0, _chain: tuple[str, ...] =
                 sorted(k for k in _ALL_PROMPTS if k.startswith("SHARED_")),
             )
             return m.group(0)
+        resolved = _resolve_shared_keys(sub_text, _depth + 1, (*_chain, key))
+        if not resolved:
+            return m.group(0)
         return resolved
 
     return _SHARED_KEY_RE.sub(_repl, prompt)
+
+
+def _raw_prompt_text(key: str) -> tuple[str, str]:
+    """取模板**原始文本**（DB 缓存优先 → 注册表出厂默认）。
+
+    :return: ``(text, status)``；``status`` ∈ ``{"db", "db_empty", "default", "missing"}``。
+
+    ✅ R204（2026-11-09 · SHARED 环检测击穿 → RecursionError/500）：
+    本函数**不做** ``{SHARED_*}`` 展开、也**不做**变量渲染 ——
+    它是 :func:`_resolve_shared_keys` 的**唯一取数入口**。
+
+    旧实现里 ``_resolve_shared_keys`` 直接调用 ``get_prompt(key)``，而
+    ``get_prompt`` 内部又会再调一次 ``_resolve_shared_keys(prompt)``（默认
+    ``_depth=0`` / ``_chain=()``）—— 于是**跨 get_prompt 边界时深度与解析链
+    被重置**：SHARED 片段**互引**（A→B→A）时环检测永远不命中 → 无限递归
+    → ``RecursionError`` → 目录/正文生成整体 500。也就是说 2026-09-27 的
+    「BUG-P0-2 递归防护」被 ``get_prompt`` 的重入**自我抵消**了。
+    改为走本函数后，``_depth`` / ``_chain`` 在整条解析链上唯一累积，
+    环检测与深度上限才真正生效（命中即保留字面量 + WARNING）。
+    """
+    with _cache_lock:
+        cached = _get_prompt_cache().get(key)
+    if cached is not None and cached.strip():
+        return cached, "db"
+    meta = _ALL_PROMPTS.get(key)
+    if not meta:
+        # ✅ R39 T1：先惰性补注册「定义在包外」的提示词（投标分析域 19 条），
+        #   再判定是否真的未知键。
+        try:
+            from app.services.ai.prompts._registry import register_lazy_prompts
+
+            register_lazy_prompts()
+        except Exception as e:  # noqa: BLE001 - 补注册失败不得影响读取
+            logger.warning("惰性补注册失败: %s", _sanitize_error(e))
+        meta = _ALL_PROMPTS.get(key)
+    if not meta:
+        return "", "missing"
+    # ⚠️ R204（2026-11-09 · **回退**：保持既有「出厂默认优先」语义）。
+    #   探查曾指出这里取 ``default_content or content`` 是「语义反转」
+    #   （``content`` 才是当前生效正文，``default_content`` 是永不修改的基线），
+    #   本轮一度改为 ``content or default_content`` —— 但既有护栏
+    #   （test_prompt_module_r38 的出厂默认优先用例）明确锁定「出厂默认优先」，
+    #   且该顺序还承担着「注册表 content 被就地改写时仍以出厂基线为准」的
+    #   兜底语义。**内存态编辑是否应即时生效**属产品级取舍，需专项裁决，
+    #   本轮登记为遗留项，不在此处擅自改变契约。
+    text = meta.get("default_content") or meta.get("content", "")
+    # 「DB 里有行但内容为空」与「DB 无此行」对调用方是可区分的（前者要告警
+    # 「已回退到出厂默认」，后者是未知 key）。
+    return text, ("db_empty" if cached is not None else "default")
 
 
 def _current_db_path() -> str | None:
@@ -195,6 +249,11 @@ def _query_prompt_watermark(db_path: str) -> tuple[int, str] | None:
 
     只读连接、单条聚合查询（表体量 ≤ 百行，微秒~毫秒级）。表/列不存在
     （极旧库）或任何 IO 错误 → None，由调用方按「保守重载」处理。
+
+    ✅ R202（2026-11-09 · G5 · 可观测化）：失败此前只打 DEBUG —— 默认日志
+    级别下**完全不可见**，运维无法知道「表级水印不可用 → 每次库变新都全量
+    重载」（R108 修掉的重载风暴在极旧库上会静默回归）。现首次失败记一条
+    WARNING（只打一次，不刷屏），把「水印不可用」这一事实暴露到常规日志面。
     """
     try:
         import sqlite3
@@ -206,8 +265,22 @@ def _query_prompt_watermark(db_path: str) -> tuple[int, str] | None:
         finally:
             conn.close()
     except Exception as e:
-        logger.debug("读取 prompt_templates 水印失败（保守回退）: %s", e)
+        _warn_watermark_unavailable(e)
         return None
+
+
+def _warn_watermark_unavailable(err: Exception | None = None) -> None:
+    """「prompt_templates 表级水印不可用」的一次性 WARNING（R202 · G5）。"""
+    global _watermark_warned
+    if _watermark_warned:
+        return
+    _watermark_warned = True
+    logger.warning(
+        "prompt_templates 表级水印不可用（表/列不存在或读取失败：%s）："
+        "缓存失效判据将退回「库 mtime 变新即全量重载」——极旧库上可能出现"
+        "重载放大。建议执行 schema 迁移补齐 updated_at 列。",
+        _sanitize_error(err) if err is not None else "未知原因",
+    )
 
 
 def _needs_reload_by_watermark(db_path: str) -> bool:
@@ -291,8 +364,10 @@ def _load_prompt_cache_sync():
                         "SELECT COUNT(*), COALESCE(MAX(updated_at), '')" " FROM prompt_templates"
                     ).fetchone()
                     _loaded_db_watermark = (int(wrow[0]), str(wrow[1])) if wrow else None
-                except Exception:
+                except Exception as e:
+                    # ✅ R202（G5）：水印取不到 → 记一次性 WARNING（原先完全静默）。
                     _loaded_db_watermark = None
+                    _warn_watermark_unavailable(e)
                 logger.info("Prompt cache loaded: %d templates from DB", len(local_cache))
             finally:
                 conn.close()
@@ -367,39 +442,21 @@ def get_prompt(key: str, **kwargs) -> str:
     #    绝不吞异常。未知 key 仍返回空串（兼容行为不变），但会计入
     #    render_errors —— 传错 key 属于真实的「读不到模板」错误，必须可观测（R181）。
     try:
-        with _cache_lock:
-            cached = _get_prompt_cache().get(key)
-        # 关键：仅当缓存内容包含有效字符时才采用 DB 版本
-        if cached is not None and cached.strip():
-            prompt = cached
-        else:
-            meta = _ALL_PROMPTS.get(key)
-            if not meta:
-                # ✅ R39 T1：先惰性补注册「定义在包外」的提示词（投标分析域 19 条），
-                #   再判定是否真的未知键。否则提示词管理页会列不出
-                #   这批模板，而提取侧也拿不到 DB 覆盖。
-                try:
-                    from app.services.ai.prompts._registry import register_lazy_prompts
-
-                    register_lazy_prompts()
-                except Exception as e:  # noqa: BLE001 - 补注册失败不得影响读取
-                    logger.warning("惰性补注册失败: %s", _sanitize_error(e))
-                meta = _ALL_PROMPTS.get(key)
-            if not meta:
-                # ✅ 2026-11-07（裁决）：行为保持 fail-soft（返回空串，不把文案
-                #    配置问题升级为 500），但日志级别从 warning 升到 error：
-                #    空系统提示词会让模型在无约束状态下产文，属于「配置错但
-                #    任务照跑」的高危静默，必须能在 ERROR 级别被检索到。
-                logger.error("Prompt key '%s' not found in registry or cache", key)
-                # ✅ R181（2026-11-06 · N-02 遗留）：未知 key 此前直接 return ""，
-                #    不计入任何指标 —— 调用方传错 key 时只会得到空提示词，
-                #    运维侧也看不到「谁在反复读不存在的模板」。保持返回空串
-                #    的兼容行为不变，同时计入 render_errors（可观测）。
-                record_render_error(key)
-                return ""
-            if cached is not None and not cached.strip():
-                logger.warning("Prompt '%s' 在数据库中内容为空，已回退到出厂默认（避免下发空提示词）", key)
-            prompt = meta.get("default_content") or meta.get("content", "")
+        # ✅ R204：取数统一走 _raw_prompt_text（DB 缓存优先 → 注册表），
+        #    顺带把「DB 有行但内容为空 → 回退出厂默认」与「未知 key」区分开。
+        prompt, _status = _raw_prompt_text(key)
+        if _status == "missing":
+            # ✅ 2026-11-07（裁决）：行为保持 fail-soft（返回空串，不把文案
+            #    配置问题升级为 500），但日志级别从 warning 升到 error：
+            #    空系统提示词会让模型在无约束状态下产文，属于「配置错但
+            #    任务照跑」的高危静默，必须能在 ERROR 级别被检索到。
+            logger.error("Prompt key '%s' not found in registry or cache", key)
+            # ✅ R181（2026-11-06 · N-02 遗留）：未知 key 计入 render_errors
+            #    （可观测），保持返回空串的兼容行为不变。
+            record_render_error(key)
+            return ""
+        if _status == "db_empty":
+            logger.warning("Prompt '%s' 在数据库中内容为空，已回退到出厂默认（避免下发空提示词）", key)
 
         # ✅ 先动态解析 {SHARED_*} 占位符（避免其被误报为 missing 变量）
         prompt = _resolve_shared_keys(prompt)

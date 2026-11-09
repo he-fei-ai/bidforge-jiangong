@@ -26,6 +26,7 @@ update_section 无环检测、外部脚本直改库、旧快照回退/方案复�
 
 import ast
 import json
+import os
 import subprocess
 import sys
 import textwrap
@@ -166,7 +167,13 @@ def _run_in_subprocess(tmp_path: Path, src: str, call: str, rows: list[dict]) ->
                     .replace("__CALL__", call))
     script = tmp_path / "runner.py"
     script.write_text(runner, encoding="utf-8")
-    proc = subprocess.run([sys.executable, str(script)], capture_output=True, timeout=8)
+    # ✅ R187（2026-11-08 · 基线红灯）：子进程 ``print(json.dumps(..., ensure_ascii=False))``
+    #    按宿主 locale 输出（中文 Windows 默认 cp936/GBK），而下方按 UTF-8 decode
+    #    → 中文冒号「：」变成两个 \\ufffd，断言 ``- A：da`` 恒假（R184 在 UTF-8
+    #    代码页下通过、换 GBK 环境即假红）。显式固定子进程 stdout 编码，护栏在
+    #    任意代码页下结论一致，断言强度不降。
+    _env = {**os.environ, "PYTHONIOENCODING": "utf-8"}
+    proc = subprocess.run([sys.executable, str(script)], capture_output=True, timeout=8, env=_env)
     assert proc.returncode == 0, proc.stderr.decode("utf-8", "replace")[-800:]
     return proc.stdout.decode("utf-8", "replace").strip()
 

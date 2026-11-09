@@ -388,9 +388,15 @@ def test_reset_clears_token_budget_not_applied():
 def test_snapshot_has_ten_top_level_keys():
     snap = _metrics.get_snapshot()
     # 9 个计数器 dict + registered_keys（第 5 条为 clip_ledger_failures 再 +1）。
-    assert len(snap) == 10, sorted(snap)
+    # ✅ R202（G1 · 检测与围栏解耦）：新增 2 个注入检测计数器
+    #   （prompt_injection_scans / prompt_injection_hits）→ 11 计数器 + 1 = 12 键。
+    assert len(snap) == 12, sorted(snap)
     assert "token_budget_not_applied" in snap
     assert "clip_ledger_failures" in snap
+    assert "prompt_injection_scans" in snap
+    assert "prompt_injection_hits" in snap
     assert snap["token_budget_not_applied"] == {}
     assert snap["clip_ledger_failures"] == {}
+    assert snap["prompt_injection_scans"] == {}
+    assert snap["prompt_injection_hits"] == {}
 

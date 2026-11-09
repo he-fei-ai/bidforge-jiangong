@@ -233,6 +233,90 @@ def _parse_thresholds(raw: str | None) -> dict | None:
     return obj
 
 
+async def scoring_coverage_state(db, scheme_id: str) -> dict:
+    """评分项覆盖**轻量状态**（✅ R198 · R197 遗留②：就绪度第七源复用核心）。
+
+    与 ``/scoring-coverage`` 同源（同一 ``scoring_items.build_coverage_report``
+    判据，不复制第二份口径），但只取聚合态、不构建逐项 UI 报告：
+
+    - ``applicable=False``：评分项体系**从未启用**（该项目没有提取运行记录）
+      —— 这不是「该查未查」，调用方（总检）不得据此计分（向后兼容：既有
+      未用评分项功能的方案，总检分数与放行判定逐字不变）；
+    - ``applicable=True, status="undetermined"``：体系已启用但本次不可判定
+      （提取 failed/running、或 0 条评分项）—— 调用方应计入 partial_sources；
+    - 其余：``status=ok|partial`` + ``coverage_rate`` + missing 清单（前若干项
+      名称供总检 finding 文案）。
+
+    读库异常**不吞** —— 由调用方按 failed_sources 处置（与总检其它来源
+    同一容错口径）。纯读函数，无写副作用。
+    """
+    scheme = await _get_scheme(db, scheme_id)
+    if not scheme:
+        return {
+            "applicable": False,
+            "status": "not_applicable",
+            "undetermined_reason": "no_scheme",
+            "coverage_rate": None,
+            "total_items": 0,
+            "missing_count": 0,
+            "missing_names": [],
+        }
+    project_id = svc._row(scheme, "project_id", 1) or ""
+    items = await svc.load_active_items(db, project_id) if project_id else []
+    run = await svc.load_latest_run(db, project_id) if project_id else None
+    if run is None:
+        return {
+            "applicable": False,
+            "status": "not_applicable",
+            "undetermined_reason": "no_extraction",
+            "coverage_rate": None,
+            "total_items": len(items),
+            "missing_count": 0,
+            "missing_names": [],
+        }
+    if not items:
+        # 有运行记录但 0 条激活评分项：体系「启用过」，本次覆盖无从谈起
+        reason = "extraction_failed" if run.get("status") in ("failed", "running") else "empty_items"
+        return {
+            "applicable": True,
+            "status": "undetermined",
+            "undetermined_reason": reason,
+            "coverage_rate": None,
+            "total_items": 0,
+            "missing_count": 0,
+            "missing_names": [],
+            "run_status": run.get("status"),
+        }
+    extraction_status = "success"
+    if run.get("status") in ("partial", "empty"):
+        extraction_status = "partial"
+    outline_rows = await _load_outline_rows(db, scheme_id)
+    tree = svc.build_outline_tree(outline_rows)
+    sections = svc.flatten_outline(tree)
+    section_texts = {str(r.get("id") or ""): str(r.get("content") or "") for r in outline_rows}
+    report = svc.build_coverage_report(
+        items=items,
+        sections=sections,
+        section_texts=section_texts,
+        thresholds=svc.threshold_config_from_settings(),
+        extra_whitelist=_whitelist(),
+        extraction_status=extraction_status,
+        failed_sources=(run or {}).get("failed_sources") or [],
+    )
+    return {
+        "applicable": True,
+        "status": report["status"],
+        "undetermined_reason": report.get("undetermined_reason"),
+        "coverage_rate": report["summary"]["coverage_rate"],
+        "total_items": report["summary"]["total_items"],
+        "missing_count": report["summary"]["missing"],
+        "missing_names": [
+            str(i.get("item_name") or "") for i in report["items"] if i.get("status") == "missing"
+        ][:10],
+        "run_status": run.get("status"),
+    }
+
+
 @router.get("/api/v1/schemes/{scheme_id}/scoring-coverage")
 async def scoring_coverage(scheme_id: str, thresholds: str | None = None, db=Depends(get_db)):
     scheme = await _get_scheme(db, scheme_id)

@@ -145,6 +145,10 @@ def build_content_checkpoint(
         #    run_words = 本次实际生成字数；over_count = 超字数章节数。
         "run_words": ckpt.get("run_words", 0),
         "over_count": ckpt.get("over_count", 0),
+        # ✅ R199（2026-11-09）：本次运行配图总数（章节成功落库时逐章累加），
+        #    断线重挂摘要经 contentResultSummary 透出「配图 N 张」。缺键回退 0
+        #    （加法式，旧 checkpoint 兼容）。
+        "charts": int(ckpt.get("charts", 0) or 0),
         # ✅ R66（2026-10-11）：逐章目标/实际/偏差明细 + 达标统计
         #    （word_audit_summary 结构，断线重挂与审核预检同读本键）。
         "word_audit": ckpt.get("word_audit", {}),

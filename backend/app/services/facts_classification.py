@@ -565,7 +565,12 @@ SOURCE_KIND_RULES: list[tuple[tuple[str, ...], str]] = [
     (("勘察", "地勘", "地质报告", "土工试验"), "survey"),
     (("施工图", "图纸", "设计文件", "蓝图"), "drawing"),
     (("施工组织设计", "总体施工组织", "实施性施工组织", "施工组织总设计"), "overall_plan"),
-    (("手动", "手工", "录入", "补充", "manual", "hand"), "manual"),
+    # ✅ R193：「补充」从 manual 关键词摘除 —— 招标序列文件名「答疑补充通知」
+    #    含「补充」，先于 bid_doc 命中被误判为 manual（用户手工录入）。
+    #    手工语义由 手动/手工/录入/manual/hand 承载（「用户补充录入」仍命中
+    #    「录入」），规则优先级顺序（勘察 > 施工图 > 施工组织设计 > 手工 >
+    #    项目文件）保持不变。
+    (("手动", "手工", "录入", "manual", "hand"), "manual"),
     (("招标", "标书", "投标", "答疑", "补充通知"), "bid_doc"),
 ]
 
@@ -707,11 +712,26 @@ def _extract_number_with_unit(text: str):
 
 
 def _to_meter(num: float, unit: str):
-    """把长度类单位换算为米；无法识别单位时返回 None（调用方按原值处理）。"""
+    """把长度类单位换算为米；无法识别单位时返回 None（调用方按原值处理）。
+
+    ✅ R193：单位后缀词兜底。_NUM_RE 的单位字符类含中文（\u4e00-\u9fff），
+    「4500毫米以上」「5000毫米范围内」这类「数值+合法单位+中文后缀」形态
+    （招标/地质文本高频）整段被捕获为 got_unit="毫米以上"，全等匹配失败 →
+    返回 None → 数值被按米原样参与危大阈值比较（4500 毫米误当 4500 米，
+    恒判超危大/超规模，方向保守但误报真实存在）。现补最长前缀匹配：
+    「毫米以上」以「毫米」开头 → 按毫米换算。精确匹配优先（逐字不变），
+    前缀匹配按单位键长度降序（防「米」抢在「毫米」前命中）。
+    """
     low = (unit or "").lower()
     for u, ratio in _UNIT_TO_METER.items():
         if low == u.lower() or low.replace(" ", "") == u:
             return num * ratio
+    # R193 前缀兜底：仅对「单位 + 后缀词」形态生效（单位键按长度降序试）。
+    low_nospace = low.replace(" ", "")
+    if low_nospace:
+        for u, ratio in sorted(_UNIT_TO_METER.items(), key=lambda kv: -len(kv[0])):
+            if len(u) < len(low_nospace) and low_nospace.startswith(u.lower()):
+                return num * ratio
     return None
 
 

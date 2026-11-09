@@ -187,7 +187,19 @@ class TestSharedRecursionGuard:
             "SHARED_T_TYPO": "T {SHARED_T_NOT_EXIST}",
             "SHARED_T_OK": "PLAIN",
         }
-        monkeypatch.setattr(_cache, "get_prompt", lambda k: table.get(k, ""))
+        # ✅ R204（2026-11-09 · 预置入口随实现收口）：旧实现用 monkeypatch
+        #   ``get_prompt`` 预置共享片段内容 —— 而 ``_resolve_shared_keys`` 正是
+        #   通过调用 ``get_prompt`` 取子片段内容的，**这条耦合本身就是缺陷根因**
+        #   （get_prompt 内部会再展开一次 SHARED → 解析链/深度被重置 →
+        #   环检测永不命中 → SHARED 互引打爆调用栈）。
+        #   现实现改走 ``_raw_prompt_text``（只取原文、不展开、不渲染），
+        #   预置入口随之改为 monkeypatch 该函数；**测试意图（递归/成环/拼错
+        #   必须安全降级）完全不变**。
+        monkeypatch.setattr(
+            _cache,
+            "_raw_prompt_text",
+            lambda k: (table.get(k, ""), "db" if k in table else "missing"),
+        )
         yield
 
     def test_self_reference_does_not_recurse(self):
@@ -213,7 +225,7 @@ class TestSharedRecursionGuard:
         """
         table = {f"SHARED_T_L{i}": f"L{i} {{SHARED_T_L{i + 1}}}" for i in range(3)}
         table["SHARED_T_L3"] = "END"
-        monkeypatch.setattr(_cache, "get_prompt", lambda k: table.get(k, ""))
+        monkeypatch.setattr(_cache, "_raw_prompt_text", lambda k: (table.get(k, ""), "db" if k in table else "missing"))
         assert _cache._resolve_shared_keys("{SHARED_T_L0}") == "L0 L1 L2 END"
 
     def test_depth_limit_allows_exactly_max_depth_refs(self, monkeypatch):
@@ -221,7 +233,7 @@ class TestSharedRecursionGuard:
         n = _cache._SHARED_MAX_DEPTH
         table = {f"SHARED_T_D{i}": f"D{i} {{SHARED_T_D{i + 1}}}" for i in range(n - 1)}
         table[f"SHARED_T_D{n - 1}"] = "TAIL"
-        monkeypatch.setattr(_cache, "get_prompt", lambda k: table.get(k, ""))
+        monkeypatch.setattr(_cache, "_raw_prompt_text", lambda k: (table.get(k, ""), "db" if k in table else "missing"))
         out = _cache._resolve_shared_keys("{SHARED_T_D0}")
         assert "TAIL" in out, f"深度上限误伤合法链：{out}"
 
@@ -230,7 +242,7 @@ class TestSharedRecursionGuard:
         n = _cache._SHARED_MAX_DEPTH + 3
         table = {f"SHARED_T_D{i}": f"D{i} {{SHARED_T_D{i + 1}}}" for i in range(n - 1)}
         table[f"SHARED_T_D{n - 1}"] = "TAIL"
-        monkeypatch.setattr(_cache, "get_prompt", lambda k: table.get(k, ""))
+        monkeypatch.setattr(_cache, "_raw_prompt_text", lambda k: (table.get(k, ""), "db" if k in table else "missing"))
         out = _cache._resolve_shared_keys("{SHARED_T_D0}")
         assert "D0" in out, "已展开的部分不得被丢弃"
         assert "{SHARED_T_D" in out, "超深部分应保留字面量而非消失"

@@ -162,6 +162,15 @@ async def _load_task_checkpoint(task_id: str, kind: str) -> dict | None:
     try:
         data = json.loads(row[0])
     except (TypeError, ValueError):
+        # ✅ R192（FIX-R11）：损坏静默吞（DB/WAL 损坏或手改库）会让「白跑几分钟后
+        #    无成果」不可归因。留 WARNING 点名（载荷前 80 字符），不改既有返回语义。
+        logger.warning(
+            "任务 %s 的 checkpoint_json 解析失败（kind=%s，长度=%d），按无成果处理: %.80s",
+            task_id,
+            kind,
+            len(row[0]),
+            str(row[0]),
+        )
         return None
     if isinstance(data, dict) and data.get("kind") == kind:
         return data
@@ -177,6 +186,11 @@ async def _checkpoint_partial_outline(task_id: str, outline, failed_chapters, *,
     if not outline and not failed_chapters:
         return False
     payload = {"event": event, "task_id": task_id, "outline": outline}
+    # ✅ R197（B10，R89 S3 同口径）：本函数只服务「部分成果」场景（断线兜底 /
+    #    用户停止），必须带 ``partial: True`` —— 缺省时前端 buildPartialOutlineHint
+    #    收到 partial=undefined，把半份目录当成完整目录（sse_handlers 在线三处
+    #    部分成果出口均已带，唯独本兜底路径漏）。白名单 checkpoint_schema 已登记。
+    payload["partial"] = True
     if failed_chapters:
         payload["failed_chapters"] = list(failed_chapters)
         payload["failed_count"] = len(failed_chapters)

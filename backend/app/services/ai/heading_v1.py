@@ -57,6 +57,11 @@ class HeadingNumberingGenerator:
         if level not in HEADING_MANAGED_LEVELS:
             return title
         number = cls.generate_number(level, counters)
+        # ✅ R203 修复：generate_number 对 L6/L7/L8（或未管理级）返回空串，
+        #    旧实现仍拼 punctuation → 产出「、标题」脏前缀。空编号时直接返回
+        #    裸标题，不拼任何标点。
+        if not number:
+            return title
         config = HEADING_STYLE_CONFIG[level]
         punct = config.get("punctuation", "")
         return f"{number}{punct}{title}"

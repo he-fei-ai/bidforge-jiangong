@@ -76,6 +76,12 @@ CHECKPOINT_KINDS: dict[str, tuple[str, tuple[str, ...]]] = {
             # ✅ R77b（2026-10-15）：事实冲突定点修复终态汇总（sections /
             #    fixed_sections / conflicts / applied / rejected；无冲突时全 0）。
             "fact_autofix_summary",
+            # ✅ R194（FIX-7 · R105 断线通道收口）：生成顺序校验 / 事实注入留痕
+            #    汇总由唯一拼装点随全部终态回填（R105 起在产），白名单补键后
+            #    断线重挂经 task_status 才能读到（与 routers/sse_handlers 侧
+            #    副本同步，parity 锁拦分叉）。
+            "order_check",
+            "fact_injection_summary",
         ),
     ),
     # ✅ R89（2026-10-17）：facts 归入单一事实源（此前只存在于 routers 侧手写副本，
@@ -112,6 +118,9 @@ CHECKPOINT_FIELD_TYPES: dict[str, dict[str, str]] = {
         "over_count": "int",
         "word_audit": "dict",
         "fact_autofix_summary": "dict",
+        # ✅ R194（FIX-7）：R105 留痕键补类型（dict）。
+        "order_check": "dict",
+        "fact_injection_summary": "dict",
     },
     # ✅ R89：与页面内联副本逐项对齐（前端 applyFactsCompletedEvent 只按数组消费
     #    cross_conflicts，具体形态由 facts_extractor 决定，故用 list[dict] → unknown[]）。

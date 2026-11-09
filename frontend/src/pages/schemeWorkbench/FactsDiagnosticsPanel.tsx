@@ -78,7 +78,16 @@ export function FactsDiagnosticsPanel({
       size="small"
       title="九大章节完整性 · 危大诊断"
       extra={
-        <Button size="small" icon={<ReloadOutlined />} loading={loading} onClick={onRefresh}>
+        <Button
+          size="small"
+          icon={<ReloadOutlined />}
+          loading={loading}
+          // ✅ R193（D-11）：不把 MouseEvent 当 options 透传——旧写法
+          //    `onClick={onRefresh}` 会把事件对象传进 loadFactsDiagnostics 的
+          //    `options?: { signal }` 形参（.signal 读到 undefined，侥幸无害
+          //    但属契约噪声）。
+          onClick={() => void onRefresh()}
+        >
           刷新诊断
         </Button>
       }

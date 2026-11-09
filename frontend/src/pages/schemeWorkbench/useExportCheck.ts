@@ -1,3 +1,4 @@
+import { useEffect, useRef } from "react";
 import type { Dispatch, SetStateAction } from "react";
 import { exportApi, sectionsApi } from "../../api";
 import type { ExportPreflight, ExportRerunPlan, ExportStats } from "./useExportPresets";
@@ -172,13 +173,26 @@ export function useExportCheck(deps: ExportCheckDeps) {
    *   - 规范符合性检查：内容层 —— 是否覆盖规范条目（AI 逐条判定）
    *   - 质量自检：文字层 —— 口语化/AI 腔残留、引用了已废止或被替代的标准编号
    */
+  // ✅ R195（FIX-9 · 2026-11-09）：质量自检专用 abort —— 质量自检是后端全量
+  //    扫描正文的长请求，此前无 abort、无跨方案守卫：请求在飞时切方案 →
+  //    await 返回后旧方案的统计与问题清单 setQualityResult 落到**新方案页**，
+  //    toast 归属错乱；卸载后 setState。与 handleExportCheck 的
+  //    exportCheckAbortRef 同型（独立 ref，不与预检互相取消）。
+  const qualityAbortRef = useRef<AbortController | null>(null);
+  useEffect(() => () => qualityAbortRef.current?.abort(), []);
+
   const handleQualityCheck = async () => {
     // ✅ R168（FIX-10）：重入锁 —— 同帧双击此前可并发两个请求（checkingQuality 是
     //    异步置位，挡不住连点），结果相互覆盖；与同页其它预检入口的 running 态口径一致。
     if (!id || checkingQuality) return;
+    const sid = id;
+    const controller = new AbortController();
+    qualityAbortRef.current?.abort();
+    qualityAbortRef.current = controller;
     setCheckingQuality(true);
     try {
-      const { data } = await sectionsApi.quality(id);
+      const { data } = await sectionsApi.quality(sid, { signal: controller.signal });
+      if (controller.signal.aborted || currentSchemeIdRef.current !== sid) return;
       setQualityResult(data);
       const s = data.summary || {};
       // ✅ R183（2026-11-07 · 三态口径修复）：checked=0 表示**没有可检查的正文**
@@ -202,6 +216,8 @@ export function useExportCheck(deps: ExportCheckDeps) {
       }
     } catch (e: unknown) {
       const err = e as { message?: string };
+      // ✅ R195：中止/跨方案到达的错误不弹（旧请求的失败不属于当前方案）。
+      if (controller.signal.aborted || currentSchemeIdRef.current !== sid) return;
       msg.error(err.message || "质量自检失败");
     } finally {
       setCheckingQuality(false);

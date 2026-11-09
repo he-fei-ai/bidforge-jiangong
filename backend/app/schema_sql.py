@@ -83,6 +83,11 @@ CREATE TABLE IF NOT EXISTS sections (
     comparison_json TEXT DEFAULT '',
     layout_json TEXT DEFAULT '',
     timeline_json TEXT DEFAULT '',
+    -- ✅ R200（2026-11-09）死列标注：inlined_chart_json 全仓**零业务读写**（仅
+    --    sections.py 方案删除清理置空），是 2026-09「双写架构」（独立图表管线
+    --    Phase2-4，2026-09-13 整体移除并入正文同步生成）的残留列。保留列位
+    --    避免 ALTER TABLE 迁移风险；新代码禁止读写（R200 棘轮锁 tests/
+    --    test_chart_r200_20261109.py 锁定唯一三处出现点）。
     inlined_chart_json TEXT DEFAULT '',
     -- ✅ D1（2026-10-11）：离散正文编排阶段产出的结构化编排决策（JSON 文本，默认空）。
     plan_json TEXT DEFAULT '',

@@ -27,8 +27,7 @@ import re
 from dataclasses import dataclass, field
 from decimal import Decimal, InvalidOperation
 
-#: 代码围栏整体跳过（含 mermaid / chart-json）。
-_FENCE_RE = re.compile(r"```.*?```", re.DOTALL)
+from app.services.fence_common import fence_char_ranges
 
 #: 非「正文数值」的文本片段（掩码后不再参与抽取）。
 _MASK_RES = (
@@ -84,7 +83,15 @@ class NumericToken:
 
 
 def _masked_text(text: str) -> str:
-    """把围栏与编号类片段替换为空格（保持字符下标不变）。"""
+    """把围栏与编号类片段替换为空格（保持字符下标不变）。
+
+    ✅ R19x（2026-11-09）：围栏掩码改走 ``fence_common.fence_char_ranges``
+    （R76 单一事实源）。旧的本地三反引号非贪婪正则有两处缺口：
+    ① ``~~~`` 波浪围栏完全不掩 —— 图内数值被当正文数值参与比对；
+    ② 非贪婪配对对「未闭合块 + 后续另一处围栏」会把两块间的**正文**
+    一起掩掉、块内代码反而滑出保护区；行级判据（看信息串 + 长度容错）
+    对两类围栏与未闭合块都给出正确区间。
+    """
     chars = list(text or "")
 
     def _blank(start: int, end: int) -> None:
@@ -92,8 +99,8 @@ def _masked_text(text: str) -> str:
             if chars[i] != "\n":
                 chars[i] = " "
 
-    for match in _FENCE_RE.finditer(text or ""):
-        _blank(match.start(), match.end())
+    for start, end in fence_char_ranges(text or ""):
+        _blank(start, end)
     for pattern in _MASK_RES:
         # 掩码会改变文本内容，故每轮都基于当前字符数组重新匹配。
         for match in pattern.finditer("".join(chars)):

@@ -370,17 +370,18 @@ class TestFix7AuditReachability:
 
     @pytest.mark.parametrize("name", AUDIT_ONLY)
     def test_audit_only_capability_still_present(self, name):
-        from app.routers import export_audit
+        # ✅ R198：export_audit.py 已删除，7 项能力迁入生产模块 _export_issue_scan.py
+        from app.routers import _export_issue_scan
 
-        assert hasattr(export_audit, name), f"{name} 消失（收敛时误删？）"
+        assert hasattr(_export_issue_scan, name), f"{name} 消失（收敛时误删？）"
 
     def test_registration_is_explicit(self):
         """反向锁：一旦有人把任一独有判据接进生产，登记必须同步 ——
         否则「零行为覆盖」的假设会静默失效。"""
-        from app.routers import export_audit
+        from app.routers import _export_issue_scan
 
         for name in self.AUDIT_ONLY:
-            fn = getattr(export_audit, name)
+            fn = getattr(_export_issue_scan, name)
             assert callable(fn)
 
 
@@ -396,7 +397,6 @@ class TestStaticHygiene:
             "services/outline_quality.py",
             "routers/sections.py",
             "routers/upload_outline.py",
-            "routers/export_audit.py",
             "services/numbering.py",
             "services/ai/heading_templates.py",
         ],

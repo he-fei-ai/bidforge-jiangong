@@ -17,6 +17,19 @@ logger = logging.getLogger("outline_utils")
 
 MAX_OUTLINE_DEPTH = 3
 
+# ✅ R187（2026-11-08 · 编号命名空间护栏）：落库前 fail-closed 校验的唯一判据。
+# 与 numbering.renumber_outline_nodes 的结构口径一致（点分数字、子承父系、
+# 段数=层级），但**只校验不改写** —— 让「重排失败」不再静默产出脏编号。
+_DOTTED_ID_RE = re.compile(r"^\d+(?:\.\d+)*$")
+# 不可见字符 / C0 控制字符：来源真实（Word / 网页复制、AI 偶发零宽）。
+# 与 outline_quality._INVISIBLE_RE 同一字符族，另补 C0 控制字符（它们会
+# 破坏 DOCX XML 与提示词模板）。只用于写路径清洗，检测侧仍用原判据。
+_INVISIBLE_TITLE_RE = re.compile(
+    r"[\u200b-\u200f\u2060\ufeff\u00ad\u180e\u034f\x00-\x08\x0b\x0c\x0e-\x1f]+"
+)
+#: 章节标题长度上限（超出按「可行动 400」拒绝，绝不静默截断用户数据）。
+OUTLINE_TITLE_MAX_LEN = 200
+
 # 已合并过的"（含：...）"后缀（用于重复裁剪时替换而非叠加）
 _MERGE_SUFFIX_RE = re.compile(r"（含：[^（）]*）\s*$")
 # 无父描述时写入的裸"含：..."形式
@@ -55,8 +68,84 @@ def normalize_outline(outline: list[dict], max_depth: int = MAX_OUTLINE_DEPTH) -
 
         renumber_outline(clamped)
     except Exception as e:  # pragma: no cover - renumber 失败不应阻断主流程
-        logger.warning("目录重排编号失败（保留裁剪结果）: %s", e)
+        # ✅ R187：从 WARNING 升为 ERROR。旧文案「保留裁剪结果」掩盖了「编号未重排」
+        #   这一事实；落库口另有 validate_outline_numbering fail-closed 兜底，
+        #   这里必须让「重排失败」在日志里可被检索到。
+        logger.error("目录重排编号失败（返回未编号树，落库口须拒绝）: %s", e, exc_info=True)
     return clamped
+
+
+def validate_outline_numbering(outline: list) -> list[str]:
+    """落库前编号合法性校验（纯函数，**只校验不改写**）。
+
+    ✅ R187（2026-11-08 · 编号命名空间 fail-closed）：``normalize_outline`` 的
+    ``renumber_outline`` 被 try/except 吞掉后，会返回「已裁剪但未编号」的树；
+    ``_process_nodes`` 又把 ``node["id"]`` 原样写进 ``outline_json``，于是脏/重复
+    编号落库、前端双重编号、正文与导出编号分叉都无告警。本函数返回问题列表
+    （空列表 = 合法），由落库口据此以 400 拒绝，绝不静默放行。
+
+    判据与 ``numbering.renumber_outline_nodes`` 同一结构口径：
+      1. id 必须是点分数字串，段数 ≤ MAX_OUTLINE_DEPTH；
+      2. 全树 id 唯一；
+      3. 子承父系 + 等级正传：id 等于其树位置期望号，level 等于段数；
+      4. 标题长度不超过 OUTLINE_TITLE_MAX_LEN（超限给可行动 400，不静默截断）。
+    ⚠️ 不可见/控制字符由 ``sanitize_outline_title`` 在写路径剥离，不在此判红。
+    """
+    problems: list[str] = []
+    if not isinstance(outline, list):
+        return ["目录不是数组"]
+    seen: dict[str, str] = {}
+
+    def _walk(nodes: list, prefix: str, path: str) -> None:
+        for idx, node in enumerate(nodes, 1):
+            if not isinstance(node, dict):
+                problems.append(f"{path}[{idx}] 不是字典节点")
+                continue
+            nid = str(node.get("id") or "").strip()
+            loc = f"{path}/{nid or '(空编号)'}"
+            expect = f"{prefix}.{idx}" if prefix else str(idx)
+            if not _DOTTED_ID_RE.fullmatch(nid):
+                problems.append(f"{loc}：编号格式非法（应为点分数字，如 {expect}）")
+            else:
+                segs = nid.count(".") + 1
+                if segs > MAX_OUTLINE_DEPTH:
+                    problems.append(f"{loc}：编号层级 {segs} 超过 {MAX_OUTLINE_DEPTH} 级")
+                elif nid != expect:
+                    problems.append(f"{loc}：编号与树位置不一致（应为 {expect}）")
+                if "level" in node:
+                    try:
+                        if int(node["level"]) != segs:
+                            problems.append(f"{loc}：level={node['level']} 与编号段数 {segs} 不一致")
+                    except (TypeError, ValueError):
+                        problems.append(f"{loc}：level 不是数字")
+            if nid in seen:
+                problems.append(f"{loc}：编号重复（与 {seen[nid]} 冲突）")
+            else:
+                seen[nid] = loc
+            title = str(node.get("title") or "")
+            if len(title) > OUTLINE_TITLE_MAX_LEN:
+                problems.append(f"{loc}：标题 {len(title)} 字超过 {OUTLINE_TITLE_MAX_LEN} 字上限")
+            children = node.get("children") or []
+            if not isinstance(children, list):
+                problems.append(f"{loc}：children 不是数组")
+                continue
+            _walk(children, expect, loc)
+
+    _walk(outline, "", "outline")
+    return problems
+
+
+def sanitize_outline_title(title) -> tuple[str, bool]:
+    """写路径标题清洗：剥离不可见/控制字符，返回 ``(清洗后, 是否改变)``。
+
+    ✅ R187：这些字符用户完全不可见，却会让编制要求覆盖判据、重复标题判据失效，
+    并原样进入 DOCX XML（控制字符可致导出件损坏）。
+    ⚠️ 刻意**不**做 NFKC 归一、不截断长度 —— 归一/截断属于改写用户可见数据，
+    长度超限交由 ``validate_outline_numbering`` 以可行动 400 拒绝。
+    """
+    original = str(title or "")
+    cleaned = _INVISIBLE_TITLE_RE.sub("", original)
+    return cleaned, cleaned != original
 
 
 def normalize_outline_json(payload, default: str = "[]") -> str:

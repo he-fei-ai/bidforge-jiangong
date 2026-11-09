@@ -43,6 +43,10 @@ class ContentPlanData:
     - fact_titles: 建议优先引用的全局事实标题（必须落在候选池内）
     - table_needed: 是否建议本章使用表格
     - table_purpose: 为何需要表格（无需时为空串）
+    - chart_needed: ✅ R196（2026-11-09）编排步图表维度 —— 是否建议本章配图
+    - chart_types: 建议的图表类型（必须落在 7 种数据图白名单内；ai_image 计费
+      敏感且由导出期独立预算管控，不进编排建议）
+    - chart_note: 建议配图的理由/内容要点（无需时为空串）
     """
 
     writing_focus: str = ""
@@ -50,6 +54,9 @@ class ContentPlanData:
     fact_titles: list[str] = field(default_factory=list)
     table_needed: bool = False
     table_purpose: str = ""
+    chart_needed: bool = False
+    chart_types: list[str] = field(default_factory=list)
+    chart_note: str = ""
 
     @classmethod
     def empty(cls) -> "ContentPlanData":
@@ -63,6 +70,9 @@ class ContentPlanData:
                 "fact_titles": self.fact_titles,
                 "table_needed": self.table_needed,
                 "table_purpose": self.table_purpose,
+                "chart_needed": self.chart_needed,
+                "chart_types": self.chart_types,
+                "chart_note": self.chart_note,
             },
             ensure_ascii=False,
         )
@@ -94,6 +104,11 @@ class ContentPlanData:
             fact_titles=ft,
             table_needed=bool(tn),
             table_purpose=str(d.get("table_purpose") or "").strip(),
+            chart_needed=bool(d.get("chart_needed") or False),
+            chart_types=[str(x).strip() for x in (d.get("chart_types") or []) if str(x).strip()]
+            if isinstance(d.get("chart_types"), list)
+            else [],
+            chart_note=str(d.get("chart_note") or "").strip(),
         )
 
     @classmethod
@@ -135,12 +150,39 @@ class ContentPlanData:
 
         table_purpose = str(d.get("table_purpose") or "").strip()
 
+        # ✅ R196：编排步图表维度 —— chart_types 只保留 7 种数据图白名单内的类型
+        #    （模型编造/超纲类型一律丢弃，与素材/事实池同一「白名单钳制」思想）；
+        #    chart_needed 为假时类型清零（无图建议）。ai_image 不进白名单。
+        _CHART_TYPE_WHITELIST = (
+            "flowchart",
+            "gantt",
+            "architecture",
+            "labor",
+            "comparison",
+            "layout",
+            "timeline",
+        )
+        cn = d.get("chart_needed", False)
+        if isinstance(cn, str):
+            cn = cn.strip().lower() in ("true", "是", "yes", "1")
+        cn = bool(cn)
+        ct_raw = d.get("chart_types") or []
+        if not isinstance(ct_raw, list):
+            ct_raw = []
+        ct = [str(x).strip() for x in ct_raw if str(x).strip()]
+        ct = [x for x in ct if x in _CHART_TYPE_WHITELIST]
+        if not cn:
+            ct = []
+
         return cls(
             writing_focus=writing_focus,
             knowledge_names=kn,
             fact_titles=ft,
             table_needed=tn,
             table_purpose=table_purpose,
+            chart_needed=cn,
+            chart_types=ct,
+            chart_note=str(d.get("chart_note") or "").strip(),
         )
 
 
@@ -163,6 +205,11 @@ def render_content_plan_guidance(plan: ContentPlanData | None) -> str:
         parts.append(f"- 建议本章使用表格{why}")
     else:
         parts.append("- 本章可不强制使用表格")
+    # ✅ R196：编排步图表建议 —— 软建议形态（与 R58「配额只是约束不是指令」同立场）：
+    #    编排步判定本章是否适合配图、配哪种类型，正文生成步仍按图表规范自主裁量。
+    if plan.chart_needed and plan.chart_types:
+        _note = f"（{plan.chart_note}）" if plan.chart_note else ""
+        parts.append(f"- 建议本章配图：{'、'.join(plan.chart_types)}{_note}；最终按图表规范自主判定，不适配则不配")
     return "\n".join(parts) + "\n"
 
 

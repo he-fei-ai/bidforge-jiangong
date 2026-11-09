@@ -25,6 +25,8 @@ export interface content_result {
   over_count?: number;
   word_audit?: Record<string, unknown>;
   fact_autofix_summary?: Record<string, unknown>;
+  order_check?: Record<string, unknown>;
+  fact_injection_summary?: Record<string, unknown>;
 }
 
 export interface facts_result {

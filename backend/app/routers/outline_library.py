@@ -1,6 +1,7 @@
 """专项方案目录库路由"""
 
 import json
+import logging
 import uuid
 from datetime import datetime
 
@@ -8,6 +9,8 @@ from fastapi import APIRouter, Depends, HTTPException, Query
 
 from app.db import get_db, get_read_conn, release_read_conn, safe_rowcount
 from app.models import OutlineLibraryCreate, OutlineLibraryUpdate
+
+logger = logging.getLogger(__name__)
 
 router = APIRouter(prefix="/api/v1/outline-library", tags=["outline_library"])
 
@@ -333,6 +336,24 @@ async def review_library(library_id: str, body: dict, db=Depends(get_db)):
 
 @router.post("/{library_id}/new-version")
 async def new_version(library_id: str, body: dict, db=Depends(get_db)):
+    # ✅ R190（FIX-2）：归档旧版本 → INSERT → UPDATE 主表是读改写复合写，
+    #    与 restore-version 同族。旧实现无写锁：两请求并发 new-version 时
+    #    各自基于自己读到的旧状态归档/覆盖，最后提交者胜。
+    _owns_lock = not getattr(db, "in_transaction", False)
+    if _owns_lock:
+        await db.execute("BEGIN IMMEDIATE")
+    try:
+        return await _new_version_locked(library_id, body, db)
+    except Exception:
+        if _owns_lock:
+            try:
+                await db.rollback()
+            except Exception:  # noqa: BLE001 — 回滚失败不遮蔽原异常
+                pass
+        raise
+
+
+async def _new_version_locked(library_id: str, body: dict, db) -> dict:
     cur = await db.execute("SELECT outline_json, version FROM outline_library WHERE id=?", (library_id,))
     row = await cur.fetchone()
     if not row:
@@ -370,7 +391,27 @@ async def restore_version(library_id: str, body: dict, db=Depends(get_db)):
     """回滚到某个历史版本（回滚前把当前版本再次归档，保证任何一步可逆）。
 
     请求体：{"version_id": "xxx"} 或 {"version": "v1.0"}
+
+    ✅ R190（FIX-2）：与 new-version 同族读改写。旧实现「归档去重查询 →
+    INSERT → UPDATE 主表」无写锁：两请求同时回滚时去重查询都查不到对方
+    未提交的归档行 → 同一 version 重复归档，且最终主表版本取决于提交顺序。
+    现于首个决策读之前 BEGIN IMMEDIATE（R184 同口径）。
     """
+    _owns_lock = not getattr(db, "in_transaction", False)
+    if _owns_lock:
+        await db.execute("BEGIN IMMEDIATE")
+    try:
+        return await _restore_version_locked(library_id, body, db)
+    except Exception:
+        if _owns_lock:
+            try:
+                await db.rollback()
+            except Exception:  # noqa: BLE001 — 回滚失败不遮蔽原异常
+                pass
+        raise
+
+
+async def _restore_version_locked(library_id: str, body: dict, db) -> dict:
     cur = await db.execute("SELECT * FROM outline_library WHERE id=?", (library_id,))
     lib = await cur.fetchone()
     if not lib:
@@ -406,10 +447,17 @@ async def restore_version(library_id: str, body: dict, db=Depends(get_db)):
             (str(uuid.uuid4()), library_id, lib.get("version") or "v1.0", lib.get("outline_json") or "[]"),
         )
 
+    # ✅ R188（L2）：写回主表前与 new_version 同口径规范化。
+    #    normalize_outline_json 对已规范 JSON 是恒等变换（重排点分编号 + 裁剪三级），
+    #    干净版本逐字节不变；脏历史版本落到方案时也不会再绕过 _save_outline_to_db
+    #    的 R187 编号校验。历史版本「逐字回滚」的语义对规范数据完全保持。
+    from app.services.outline_utils import normalize_outline_json
+
+    _restored_json = normalize_outline_json(target.get("outline_json"))
     await db.execute(
         "UPDATE outline_library SET outline_json=?, version=?, review_status='待审核', updated_at=?" " WHERE id=?",
         (
-            target.get("outline_json") or "[]",
+            _restored_json,
             target.get("version") or lib.get("version"),
             datetime.now().isoformat(),
             library_id,
@@ -468,10 +516,18 @@ async def create_from_scheme(body: dict, db=Depends(get_db)):
             _wb = r.get("word_budget")
             if isinstance(_wb, int) and _wb > 0:
                 node["word_budget"] = _wb
-            if node["title"]:
-                out.append(node)
+            if not node["title"]:
+                # ✅ R190（FIX-15）：空标题节点不再连坐丢弃整棵子树 —— 旧实现
+                #    直接不 append，该节点 build 好的 children 全部静默消失，
+                #    目录库与源方案不一致且无任何告警（历史脏数据防御）。
+                #    占位重命名保留节点与子树，加法式回传计数。
+                node["title"] = "未命名章节"
+                nonlocal _empty_titles_filled
+                _empty_titles_filled += 1
+            out.append(node)
         return out
 
+    _empty_titles_filled = 0
     outline = build("", 1)
     if not outline:
         raise HTTPException(400, "目录解析结果为空")
@@ -500,7 +556,11 @@ async def create_from_scheme(body: dict, db=Depends(get_db)):
     )
     await db.commit()
     cur = await db.execute(f"SELECT {_LIST_COLS} FROM outline_library WHERE id=?", (new_id,))
-    return dict(await cur.fetchone())
+    _lib_row = dict(await cur.fetchone())
+    if _empty_titles_filled:
+        _lib_row["placeholder_titles_filled"] = _empty_titles_filled
+        logger.warning("方案 %s 沉淀目录库：%d 个空标题章节已占位为「未命名章节」（子树保留）", scheme_id[:8], _empty_titles_filled)
+    return _lib_row
 
 
 @router.post("/{library_id}/duplicate")
@@ -703,9 +763,60 @@ async def apply_library_and_save(library_id: str, body: dict, db=Depends(get_db)
         raise HTTPException(409, "本方案目录正在后台生成中，请等待生成完成（或先停止任务）后再套用目录库")
 
     # 复用 sections 模块的核心保存逻辑（智能保留已有正文）
+    # ✅ R203（套用目录库保留正文）：目录库节点 id 是编号（1/1.1）而非 sections
+    #    主键，_save_outline_to_db 按 __original_id 匹配时全部 is_new → 整表重建
+    #    级联删除已生成正文。现复用 upload_outline 的「归一化标题 + 结构位置」
+    #    匹配思路，为目录库节点注入 __original_id = 已有 section 的 DB 主键，
+    #    使 _save_outline_to_db 能匹配旧章节、保留 content/word_count/status。
+    #    匹配不到的节点不注入（仍为 is_new → 正常 INSERT）。
+    import re as _re
+
     from app.routers.sections import _save_outline_to_db, passthrough_additive
 
+    def _norm_title(t: str) -> str:
+        return _re.sub(r"\s+", "", str(t or "")).strip()
+
+    _cur_existing = await db.execute(
+        "SELECT id, title FROM sections WHERE scheme_id=?", (scheme_id,)
+    )
+    _existing_by_title: dict[str, str] = {}
+    for _r in await _cur_existing.fetchall():
+        _nt = _norm_title(dict(_r).get("title", ""))
+        if _nt and _nt not in _existing_by_title:
+            _existing_by_title[_nt] = str(dict(_r).get("id") or "")
+
+    _matched = 0
+
+    def _inject_original_ids(nodes: list) -> None:
+        nonlocal _matched
+        for node in nodes:
+            if not isinstance(node, dict):
+                continue
+            if not node.get("__original_id"):
+                _nt = _norm_title(node.get("title", ""))
+                _db_id = _existing_by_title.get(_nt, "")
+                if _db_id:
+                    node["__original_id"] = _db_id
+                    _matched += 1
+            _kids = node.get("children")
+            if isinstance(_kids, list) and _kids:
+                _inject_original_ids(_kids)
+
+    _inject_original_ids(outline_data)
+    if _matched:
+        logger.info(
+            "方案 %s 套用目录库 %s：%d 个节点按标题匹配已有章节（保留正文）",
+            scheme_id[:8], library_id[:8], _matched,
+        )
+
+    logger.info(
+        "方案 %s 套用目录库 %s：开始整表重建（%d 顶层节点，source=目录库）",
+        scheme_id[:8],
+        library_id[:8],
+        len(outline_data),
+    )
     result = await _save_outline_to_db(db, scheme_id, outline_data, source="目录库")
+    logger.info("方案 %s 套用目录库 %s：整表重建完成", scheme_id[:8], library_id[:8])
 
     # 更新引用计数
     await db.execute("UPDATE outline_library SET ref_count=ref_count+1 WHERE id=?", (library_id,))

@@ -62,10 +62,41 @@ _MAX_PROMPT_FACTS = 300
 #: 单条事实送给 AI 的 value 截断长度。
 _VALUE_CLIP = 300
 
+#: ✅ R204（2026-11-09）：因「回写值是原值截断」而被拒绝的条数（进程内累计，
+#:   可观测：出现 >0 即说明 AI 确实在回显截断输入）。
+_REJECTED_TRUNCATED_WRITES = 0
+
 
 def _clip(value: Any, limit: int = _VALUE_CLIP) -> str:
     text = str(value or "").strip()
     return text if len(text) <= limit else text[:limit] + "…"
+
+
+def _looks_truncated(original: str, new: str, limit: int = _VALUE_CLIP) -> bool:
+    """判断「回写值」是否只是原值的**截断回显**（或原值的前缀）。
+
+    ✅ R204（2026-11-09 · 数据损坏防护）：事实「最终整理」阶段送 AI 的
+    ``value`` 被 :func:`_clip` 截到 300 字（+``…``），AI 回传该截断值时，
+    :func:`apply_finalize_result` 仅凭「与原值不同」判定为改写 → **把 300 字
+    截断值覆盖回原值** → 长事实后半段**永久丢失**（账面上却显示"改写 1 条"，
+    看起来像正常业务行为）。
+
+    本函数给出两条保守判据（命中任一即拒绝回写并保留原值）：
+      1. 回写值与「送 AI 的截断值」逐字相同（纯回显）；
+      2. 回写值是原值的**严格前缀**（去掉尾部 ``…`` 后），且更短
+         （AI 基于截断输入改写后仍以原开头，本质仍是截断）。
+    合法「同义改写」（长度不短于原值或非前缀）不受影响。
+    """
+    old = str(original or "").strip()
+    new = str(new or "").strip()
+    if not old or not new:
+        return False
+    if new == _clip(old, limit):
+        return True
+    core = new[:-1] if new.endswith("…") else new
+    if len(core) < len(old) and old.startswith(core):
+        return True
+    return False
 
 
 def items_to_prompt_json(items: Sequence) -> list[dict]:
@@ -81,7 +112,10 @@ def items_to_prompt_json(items: Sequence) -> list[dict]:
             {
                 "fact_key": str(getattr(it, "key", "") or getattr(it, "fact_key", "") or ""),
                 "name": _clip(getattr(it, "name", ""), 40),
-                "value": _clip(getattr(it, "value", "")),
+                # ✅ R193（单一出口）：序列类事实 value 是数组，str() 会把 Python
+                #    repr 喂给模型（"['a', 'b']"）。与 apply_finalize_result /
+                #    补丁合并统一走 value_to_markdown 出口。
+                "value": _clip(value_to_markdown(getattr(it, "value", ""))),
             }
         )
     return out
@@ -228,6 +262,7 @@ def apply_finalize_result(items: list, obj: Any) -> tuple[list, int]:
         by_name[str(getattr(it, "name", "") or "")] = it
 
     changed = 0
+    rejected = 0
     for raw in obj["facts"][:_MAX_FINALIZE_FACT]:
         if not isinstance(raw, dict):
             continue
@@ -241,9 +276,30 @@ def apply_finalize_result(items: list, obj: Any) -> tuple[list, int]:
             # 整理阶段**不新增事实**：模型臆造的事实一律丢弃（防事实库被撑大）
             continue
         new_value = value.strip()
-        if str(getattr(target, "value", "") or "").strip() != new_value:
+        # ✅ R193（同族口径）：旧 str() 把 list value 的 repr 与 Markdown 比较，
+        #    同义改写恒判「已变化」→ 每轮整理都无谓改写。比较两侧统一走
+        #    value_to_markdown 单一出口。
+        old_value = value_to_markdown(getattr(target, "value", "") or "").strip()
+        if old_value != new_value:
+            # ✅ R204（数据损坏防护）：拒绝把「截断回显值」写回事实库。
+            #    送 AI 的 value 已被截到 300 字，AI 原样回传时旧实现会把
+            #    截断值覆盖原值 → 长事实后半段永久丢失。命中即保留原值并留痕。
+            if _looks_truncated(old_value, new_value):
+                rejected += 1
+                logger.warning(
+                    "事实整理拒绝回写截断值（fact_key=%s，原 %d 字 → 回写 %d 字）："
+                    "回写值是原值的截断/前缀，保留原值以免事实库丢数据",
+                    key or name,
+                    len(old_value),
+                    len(new_value),
+                )
+                continue
             target.value = new_value
             changed += 1
+    if rejected:
+        global _REJECTED_TRUNCATED_WRITES
+        _REJECTED_TRUNCATED_WRITES += rejected
+        logger.warning("事实整理共拒绝 %d 条截断值回写（保留原值，避免事实库丢数据）", rejected)
     return items, changed
 
 

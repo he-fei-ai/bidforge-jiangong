@@ -496,6 +496,7 @@ def renumber_section_body_subheadings(
     has_db_children: bool = False,
     *,
     section_id: str = "",
+    legacy_titles: list[str] | tuple[str, ...] = (),
 ) -> tuple[str, list[dict]]:
     """把章节正文内的子标题编号规范化为导出口径（幂等、无损）。
 
@@ -549,7 +550,19 @@ def renumber_section_body_subheadings(
         _strip_title_number,
         strip_subitem_ordinal_prefix,
     )
+    from app.services.content_sanitize import normalize_raw_content
 
+    # ✅ R192（FIX-R1 · P1 · src_line 行基准统一）：_parse_content_blocks 解析前
+    #    会先跑 normalize_raw_content（2026-11-05「防回归第一道闸」：字面 \n 还原 /
+    #    分页标记与页脚整行删除 / 表题粘连行拆分 —— 三者都会**改变行数**），块内
+    #    src_line 按**归一化后**行表计数。旧实现用**未归一化**的原始 content 切行、
+    #    再按 src_line 索引重写：行数一变 src_line 即错位 —— 重写会落到标题行
+    #    之前/之后的任意一行上（原文被整行替换成标题、真标题残留旧号），第二遍
+    #    剥号与 R190 第三遍 legacy 改写同样暴露。现把归一化提前到本函数入口：
+    #    切行 / 解析 / 重写三者共用同一份文本。返回值即归一化后正文（与导出渲染
+    #    侧同源，落库正文自此不再残留分页杂质）；幂等性不变（normalize 自身幂等，
+    #    归一化后再次进入零改动）。changes 里的行号自此按归一化后文本计数。
+    content, _sanitize_stats = normalize_raw_content(content)
     lines = content.split("\n")
     blocks = _parse_content_blocks(content)
     if not blocks:
@@ -571,6 +584,23 @@ def renumber_section_body_subheadings(
     #    导出侧会整块剔除这类重复标题；若落库侧仍给它占号，其后所有子标题
     #    会整体错位一格 —— 前端预览（读落库正文）与被剔除后的成稿编号不一致。
     #    此处只跳过计数（不删正文行），保证编号序列与成稿完全一致。
+    # ✅ R190（FIX-9 · 改名残留）：改名**前**旧标题的同名子标题行（AI 常在正文
+    #    里自引用本节标题）在此不再命中当前标题排除名单 —— 旧实现会让它从
+    #    「不占号」翻转为占号，其后所有子标题编号整体错位一格，且该行被写上
+    #    新编号（成稿出现「新编号+旧标题」）。调用方（update_section 改名路径）
+    #    传入 legacy_titles：命中旧行**就地改写为当前标题**（自引用行跟随改名），
+    #    随后自然落入下方当前标题排除名单 —— 落库/导出/预览三处同源。
+    _legacy_norms = {_norm_heading_text(str(t or "")) for t in legacy_titles}
+    _legacy_norms.discard("")
+    _legacy_blocks: list[dict] = []
+    _pure_current = pure_title or bare_title
+    if _legacy_norms and _pure_current:
+        for b in blocks:
+            if b.get("type") == "heading" and _norm_heading_text(b.get("text", "")) in _legacy_norms:
+                b["_orig_text"] = str(b.get("text") or "")
+                b["text"] = _pure_current
+                _legacy_blocks.append(b)
+
     _sec_title_norms = {_norm_heading_text(t) for t in (bare_title, full_title, pure_title)}
     _sec_title_norms.discard("")
     if _sec_title_norms:
@@ -651,6 +681,26 @@ def renumber_section_body_subheadings(
         rewrites[src] = new_line
         changes.append({"line": src + 1, "old": orig_text, "new": fixed})
 
+    # ✅ R190（FIX-9）：旧标题自引用行第三遍改写 —— 这些块已被当前标题排除
+    #    名单从编号管线剔除（不占号），但源行仍留在正文里；不改写的话落库
+    #    仍是旧标题，导出端（按当前标题剔除/比对）与预览持续不同源。
+    #    改写保留原井号形态与缩进；幂等（改写后行文本 == 目标文本，零改动）。
+    for b in _legacy_blocks:
+        _src_i = b.get("src_line")
+        if not isinstance(_src_i, int) or not (0 <= _src_i < len(lines)):
+            continue
+        _line = lines[_src_i]
+        _indent = _line[: len(_line) - len(_line.lstrip())]
+        _body = _line.lstrip().lstrip("\ufeff").lstrip()
+        _m_hash = re.match(r"^(#{1,6})\s+", _body)
+        if _m_hash:
+            _new_line = f"{_indent}{_m_hash.group(1)} {_pure_current}"
+        else:
+            _new_line = f"{_indent}{'#' * min(int(b.get('level') or 2), 6)} {_pure_current}"
+        if _new_line != _line:
+            rewrites[_src_i] = _new_line
+            changes.append({"line": _src_i + 1, "old": b.get("_orig_text") or "", "new": _pure_current})
+
     if not rewrites:
         return content, []
     for idx, new_line in rewrites.items():
@@ -723,7 +773,13 @@ async def load_scheme_section_index(db, scheme_id: str) -> dict:
     return {"meta": meta, "has_children": has_children}
 
 
-def _normalize_from_meta(content: str, info: dict, has_db_children: bool, section_id: str = "") -> tuple[str, bool]:
+def _normalize_from_meta(
+    content: str,
+    info: dict,
+    has_db_children: bool,
+    section_id: str = "",
+    legacy_titles: list[str] | tuple[str, ...] = (),
+) -> tuple[str, bool]:
     """用已预取的元数据执行规范化（纯计算，无 IO）。
 
     与 `normalize_section_content_subheadings` 的查库之后那半段**逐行等价**，
@@ -737,6 +793,7 @@ def _normalize_from_meta(content: str, info: dict, has_db_children: bool, sectio
         info["title"],
         has_db_children=has_db_children,
         section_id=section_id,
+        legacy_titles=legacy_titles,
     )
     return new_content, bool(changes)
 
@@ -786,7 +843,7 @@ def _renumber_disabled() -> bool:
 
 
 async def normalize_section_content_subheadings(
-    db, scheme_id: str, section_id: str, content: str, *, index: dict | None = None
+    db, scheme_id: str, section_id: str, content: str, *, index: dict | None = None, legacy_titles=None
 ) -> tuple[str, bool]:
     """正文落库前规范化 Markdown 子标题编号，返回 (规范化后正文, 是否发生改写)。
 
@@ -822,6 +879,7 @@ async def normalize_section_content_subheadings(
                     info,
                     bool((index.get("has_children") or {}).get(section_id, False)),
                     section_id,
+                    legacy_titles=tuple(legacy_titles or ()),
                 )
 
         cur = await db.execute(
@@ -855,6 +913,7 @@ async def normalize_section_content_subheadings(
             {"number": section_number, "level": section_level, "title": str(rec["title"] or "")},
             has_db_children,
             section_id,
+            legacy_titles=tuple(legacy_titles or ()),
         )
     except Exception as e:  # noqa: BLE001 — 编号规范化绝不能阻断正文落库
         import logging
@@ -1026,6 +1085,26 @@ async def repair_scheme_numbering_consistency(db, scheme_id: str) -> dict:
         snapshot_id = None
     # 复用 validate 已建好的索引，避免修复段再逐章查元数据
     index = await load_scheme_section_index(db, scheme_id)
+    # ✅ R194（FIX-8 · N+1 回归收口）：R192 FIX-R9 在修复循环内**逐章**
+    #    `SELECT word_budget FROM sections WHERE id=?`（重算 word_status 需要
+    #    预算），20 章漂移方案 +20 次查询，击穿 test_numbering_batch_perf 的
+    #    常数级查询护栏（实测 80 > 60）。与同函数 content_by_id 的批量预取
+    #    同口径：循环开跑前**一次** SELECT 取回全部漂移章节预算，循环内查
+    #    字典；预取失败回退逐章查询（fail-soft，行为与 R192 版一致）。
+    wb_by_id: dict = {}
+    try:
+        _wb_ids = [s["section_id"] for s in drifted if s.get("section_id")]
+        if _wb_ids:
+            _wb_qs = ",".join("?" * len(_wb_ids))
+            _wb_cur = await db.execute(
+                f"SELECT id, word_budget FROM sections WHERE scheme_id=? AND id IN ({_wb_qs})",
+                (scheme_id, *_wb_ids),
+            )
+            if _wb_cur is not None:
+                wb_by_id = {r["id"]: r["word_budget"] for r in await _wb_cur.fetchall()}
+    except Exception as e:  # noqa: BLE001 — 预算预取失败不阻断修复（回退逐章查询）
+        logger.warning("编号修复批量预取 word_budget 失败（回退逐章读取）: %s", e)
+        wb_by_id = {}
     fixed = 0
     for sec in report.get("sections", []):
         if sec.get("consistent") or sec.get("skipped"):
@@ -1044,9 +1123,34 @@ async def repair_scheme_numbering_consistency(db, scheme_id: str) -> dict:
                 db, scheme_id, sec_id, content, index=index
             )
             if changed:
+                # ✅ R192（FIX-R9）：与 R190 FIX-12（_renormalize_all_section_contents）
+                #    同族口径——规范化（去重块/剥号）会改变字数，word_count 已重算而
+                #    word_status 停留旧值（over/under 判定失真）。按当前 word_budget
+                #    重算；预算缺失/非法时按 0 预算计算（与 word_status_for 既有口径一致）。
+                #    ✅ R194（FIX-8）：预算改由循环外批量预取的 wb_by_id 供给；
+                #    字典缺失（预取失败回退路径）时逐章查询兜底，行为与 R192 版一致。
+                from app.services.content_utils import word_status_for
+
+                if sec_id in wb_by_id:
+                    _wb_raw = wb_by_id[sec_id]
+                else:
+                    _wb_row = None
+                    try:
+                        _wb_cur = await db.execute(
+                            "SELECT word_budget FROM sections WHERE id=? AND scheme_id=?", (sec_id, scheme_id)
+                        )
+                        _wb_row = await _wb_cur.fetchone()
+                    except Exception:  # noqa: BLE001 — 预算读取失败不阻断修复
+                        _wb_row = None
+                    _wb_raw = _wb_row["word_budget"] if _wb_row else None
+                try:
+                    _wb = int(_wb_raw or 0)
+                except (TypeError, ValueError):
+                    _wb = 0
+                _wc = text_word_count(new_content)
                 await db.execute(
-                    "UPDATE sections SET content=?, word_count=? WHERE id=? AND scheme_id=?",
-                    (new_content, text_word_count(new_content), sec_id, scheme_id),
+                    "UPDATE sections SET content=?, word_count=?, word_status=? WHERE id=? AND scheme_id=?",
+                    (new_content, _wc, word_status_for(_wc, _wb), sec_id, scheme_id),
                 )
                 # ✅ B-09（R175，闭环）：编号修复同样改写了正文 → 原审核结论
                 #    必须失效（此前只有一致性修复链会重置 review_status，编号
@@ -1072,7 +1176,9 @@ async def repair_scheme_numbering_consistency(db, scheme_id: str) -> dict:
 _NUMBERING_SNAPSHOT_TYPES = ("numbering_repair", "numbering_rollback")
 
 
-async def rollback_numbering_version(db, scheme_id: str, snapshot_id: str) -> dict:
+async def rollback_numbering_version(db, scheme_id: str, snapshot_id: str, resync_fn=None) -> dict:
+    # ✅ R188（L10）：resync_fn 由路由层构造后注入（services 不得依赖 routers），
+    #    缺省 None 时与引入前逐字一致，保持所有既有调用方/单测兼容。
     """编号版本一键回滚：把指定 numbering_* 快照涉及章节的正文恢复为快照前内容。
 
     复用 repair_record.rollback_snapshot 引擎（回滚前自动建 undo 快照保证可撤销、
@@ -1091,7 +1197,7 @@ async def rollback_numbering_version(db, scheme_id: str, snapshot_id: str) -> di
         raise ValueError("快照不属于当前方案")
     if snap.get("type") not in _NUMBERING_SNAPSHOT_TYPES:
         raise ValueError(f"快照类型 {snap.get('type')!r} 不属于编号版本管理，请使用对应模块的回滚端点")
-    res = await rollback_snapshot(db, snapshot_id, undo_type="numbering_rollback")
+    res = await rollback_snapshot(db, snapshot_id, undo_type="numbering_rollback", resync_fn=resync_fn)
     return {**res, "scheme_id": scheme_id, "snapshot_type": snap.get("type")}
 
 

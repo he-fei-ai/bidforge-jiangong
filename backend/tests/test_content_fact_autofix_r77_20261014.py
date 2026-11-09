@@ -510,7 +510,12 @@ def test_summary_wiring_in_sse_handlers():
         payloads,
     )
     # 白名单双副本（sse 侧 + schema 侧）必须同步 —— 漏一处则断线重挂丢字段
-    assert re.search(r'"fact_autofix_summary",\s*\),\s*\),', src)
+    # ✅ R197 重锚：sse 侧 _CHECKPOINT_KINDS 已改为从 checkpoint_schema
+    #    （单一事实源）**直接派生**（_CHECKPOINT_KINDS = dict(checkpoint_schema.
+    #    CHECKPOINT_KINDS)），源码里不再有 '"content_generation": (' 字面副本。
+    #    判据改为「派生关系在册」；成员一致性由下方 parity 锁承担（派生后恒等）。
+    assert re.search(r"_CHECKPOINT_KINDS\s*=\s*dict\(checkpoint_schema\.CHECKPOINT_KINDS\)", src)
+    assert "from app.services import checkpoint_schema as checkpoint_schema" in src
     schema = _src("app/services/checkpoint_schema.py")
     assert '"fact_autofix_summary",' in schema
     assert '"fact_autofix_summary": "dict",' in schema

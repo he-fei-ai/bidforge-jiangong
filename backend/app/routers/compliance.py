@@ -20,6 +20,7 @@
 import asyncio
 import json
 import logging
+import sqlite3
 import time
 import uuid
 from datetime import datetime
@@ -62,6 +63,7 @@ from app.services.audit_scoring import (
     ai_results_to_findings,
     expert_result_to_findings,
     merge_findings,
+    normalize_severity_text,
     score_findings,
 )
 from app.services.content_utils import order_sections_dfs
@@ -581,8 +583,18 @@ async def _record_batch_audit(
             await review_db.exec_write(db, _sql, _params, what="规范符合性检查：写入批次审计")
             return
         except Exception as exc:
-            if "column" in str(exc).lower():
-                continue  # 旧库缺列 → 降级写下一级
+            # ✅ R198：降级判据窄化 —— 旧判据 ``str(exc)`` 含 "column" 会把错误
+            #    信息里碰巧带该词的**无关失败**（磁盘 I/O、库锁定等）误判为
+            #    「旧库缺列」并**静默**降级写下一级；且降级本身零日志，审计行
+            #    缺 error_class 的根因无从排查。现只认 sqlite 缺列的两种规范
+            #    形态（INSERT 场景 "has no column named" / 其它 "no such column"）。
+            _msg = str(exc).lower()
+            if (
+                isinstance(exc, sqlite3.OperationalError)
+                and ("no such column" in _msg or "has no column named" in _msg)
+            ):
+                logger.debug("批次审计降级写低级 INSERT（旧库缺列）: %s", exc)
+                continue
             logger.warning("批次审计写入失败（忽略）: %s", exc)
             return
     logger.warning("批次审计写入失败：ai_audit_logs 列均不兼容")
@@ -845,12 +857,26 @@ def _normalize_ai_results(results: list, checklist: list, rule_ids: list) -> lis
     三级回退确定真实规则编号。
     """
     known = [r for r in rule_ids if get_rule(r)]
+    rows = list(results or [])
     out: list = []
-    for idx, r in enumerate(results or []):
-        item = dict(r)
+    for idx, r in enumerate(rows):
+        item = dict(r) if isinstance(r, dict) else {"item": str(r or "")}
+        # ✅ R197（B1）：``hit`` 字符串布尔在此归一为**真布尔**。/check 的元素级
+        #    校验器（_validate_check_results）放行 "true"/"false" 字符串，但下游
+        #    三条口径互斥且全都不一致：评分侧 ``ai_results_to_findings`` 只认
+        #    ``hit is True``（"true" 会被当「未命中」误报并扣分）、
+        #    ``_merge_check_results`` 的 ``bool("false")`` 恒为 True、校验器又
+        #    接受字符串 —— 唯一收口点就是落库前的归一。
+        raw_hit = item.get("hit")
+        if isinstance(raw_hit, str) and raw_hit.strip().lower() in ("true", "false"):
+            item["hit"] = raw_hit.strip().lower() == "true"
         rid = str(item.get("rule_id") or "").strip()
         if not get_rule(rid):
-            if idx < len(known):
+            # ✅ R197（B2）：顺序回退仅在「返回条数 == 清单条数」时启用 ——
+            #    模型漏判某项或乱序返回时，按列表下标强配会把 A 规则的结论
+            #    安到 B 规则头上（severity 锚定、维度扣分全部错位，且比缺项
+            #    更难察觉）。条数不等时只按标题匹配，匹配不到宁可留空。
+            if idx < len(known) and len(rows) == len(known):
                 rid = known[idx]
             else:
                 rid = _match_rule_by_title(item.get("item") or "", checklist)
@@ -860,7 +886,18 @@ def _normalize_ai_results(results: list, checklist: list, rule_ids: list) -> lis
 
 
 #: 严重度排序（用于分批结果合并时「取更高一档」）
-_SEVERITY_RANK = {"高": 3, "中": 2, "低": 1, "high": 3, "medium": 2, "low": 1}
+#: ✅ R197（B3）：补 block/阻断 档（AI 返回 block 时旧词表判 0，合并恒取旧档）；
+#:    档位词先经 normalize_severity_text 归一，此处保留中英文双写仅作冗余防御。
+_SEVERITY_RANK = {
+    "block": 4,
+    "阻断": 4,
+    "高": 3,
+    "中": 2,
+    "低": 1,
+    "high": 3,
+    "medium": 2,
+    "low": 1,
+}
 
 
 def _suggestion_list(row: dict) -> list[str]:
@@ -903,7 +940,9 @@ def _merge_check_results(merged: dict, rows: list) -> None:
             merged[key] = _first
             continue
         prev["hit"] = bool(prev.get("hit")) or bool(_r.get("hit"))
-        if _SEVERITY_RANK.get(str(_r.get("severity")), 0) > _SEVERITY_RANK.get(str(prev.get("severity")), 0):
+        if _SEVERITY_RANK.get(
+            normalize_severity_text(_r.get("severity")), 0
+        ) > _SEVERITY_RANK.get(normalize_severity_text(prev.get("severity")), 0):
             prev["severity"] = _r.get("severity")
         _sugs = _suggestion_list(prev)
         for _s in _suggestion_list(_r):
@@ -1357,7 +1396,13 @@ async def _facts_signature(db, scheme_id: str) -> str:
         #    恒 KeyError → 被本函数的 except 吞掉恒返回 ""，等于**事实签名永久失效**：
         #    事实确认/新增后 TTL 内仍命中旧缓存，SAF-08 永远不出现（2026-10-03 修复复发）。
         return f"{row['n'] or 0}:{row['latest'] or ''}" if row else "0:"
-    except Exception:  # 签名失败仅视为「无事实」，不阻断预检
+    except Exception as exc:
+        # ✅ R198：签名失败仅视为「无事实」，不阻断预检 —— 但必须留痕：
+        #    2026-10-03 的修复复发（恒 KeyError 被 except 吞掉、签名永久失效、
+        #    SAF-08 永不出现）正是「静默降级」形态；无日志则复发无从定位。
+        logger.warning(
+            "预检缓存键：事实签名计算失败（按无事实降级） scheme=%s: %s", scheme_id, exc, exc_info=True
+        )
         return ""
 
 
@@ -2118,6 +2163,52 @@ async def _readiness_overview_compute(
     except Exception as e:
         failed_sources.append("expert_review")
         logger.warning("overview: 读取专家论证预检结果失败（跳过）: %s", e, exc_info=True)
+
+    # --- ✅ R198（R197 遗留②）：评分项覆盖第七源（「该查未查」的该查侧）---
+    #     评分项（招标文件评分标准）覆盖此前只在 /scoring-coverage 独立成页，
+    #     总检完全不知情：方案整体漏掉多个评分项，总检分数照常可放行 ——
+    #     用户看了总检放心交付、评标时才发现缺项。现把同一判定以 CMP-SC-1
+    #     （完整性维度）并入评分；口径单一（复用 scoring.py::scoring_coverage_state
+    #     → scoring_items.build_coverage_report，不复制第二份判据）。
+    #     向后兼容：项目从未启用评分项体系（无提取运行记录）→ 不进 sources、
+    #     不计分、不产 finding，既有方案的总检结果逐字不变。
+    try:
+        from app.routers.scoring import scoring_coverage_state
+
+        sc_state = await scoring_coverage_state(db, scheme_id)
+        if sc_state["applicable"]:
+            if sc_state["status"] == "undetermined":
+                # ✅ B-01 同口径：体系已启用但本次不可判定 → partial_sources
+                #    （不产具体 finding，但 released 必须为 False）
+                partial_sources.append("scoring_coverage")
+            else:
+                sources.append("scoring_coverage")
+                _miss = int(sc_state.get("missing_count") or 0)
+                if _miss > 0:
+                    _rate = sc_state.get("coverage_rate")
+                    _sev = "high" if (_rate is not None and float(_rate) < 0.6) or _miss >= 5 else "medium"
+                    _names = "、".join(filter(None, sc_state.get("missing_names") or []))
+                    ai_findings.append(
+                        {
+                            "rule_id": "CMP-SC-1",
+                            "dimension": "completeness",
+                            "severity": _sev,
+                            "title": f"评分项覆盖缺失：{_miss}/{sc_state.get('total_items', 0)} 项未在方案中体现",
+                            "detail": (_names or "评分项未匹配到任何章节") + (
+                                f"（覆盖率 {round(float(_rate) * 100)}%）" if _rate is not None else ""
+                            ),
+                            "evidence": list(sc_state.get("missing_names") or []),
+                            "section_id": "",
+                            "section_title": "",
+                            "suggestion": "到「评分项」页核对缺失项；为缺失评分项补充对应章节或内容",
+                            "basis": "评分项覆盖校验（与 /scoring-coverage 同一判据）",
+                            "mode": "program",
+                        }
+                    )
+    except Exception as e:
+        if "scoring_coverage" not in failed_sources:
+            failed_sources.append("scoring_coverage")
+        logger.warning("overview: 评分项覆盖状态读取失败（跳过，不阻断总检）: %s", e, exc_info=True)
 
     findings = merge_findings(program_findings, ai_findings, export_findings)
     # ✅ 自动修复能力标注（services/review_autofix.py）：为每条 finding 补

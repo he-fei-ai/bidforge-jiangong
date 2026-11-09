@@ -26,6 +26,9 @@ from app.services.crypto import decrypt_api_key, encrypt_api_key
 
 logger = logging.getLogger("provider_factory")
 
+#: ✅ R19x：429 词边界判定（_status_from_error 专用，裸子串会误吃 42900/42980）。
+_STATUS_429_RE = re.compile(r"\b429\b")
+
 PROVIDER_PRESETS = {
     # ==================== 国内 20 个平台 ====================
     "deepseek": {
@@ -3546,9 +3549,14 @@ def _error_summary(e: Exception) -> str:
 
 
 def _status_from_error(e: Exception) -> int:
-    """从异常文本推断 HTTP 状态码（429 优先，其次 ``HTTP <code>``，兜底 500）。"""
+    """从异常文本推断 HTTP 状态码（429 优先，其次 ``HTTP <code>``，兜底 500）。
+
+    ✅ R19x（2026-11-09）：429 改词边界判定 —— 裸子串 ``"429" in`` 会把
+    「context 42900 tokens」「HTTP 42980」误判为限流，错记自适应并发窗口
+    并触发配额冷却路径。
+    """
     err_str = str(e)
-    if "429" in err_str:
+    if _STATUS_429_RE.search(err_str):
         return 429
     if "HTTP " in err_str:
         try:
@@ -3714,6 +3722,23 @@ async def _call_provider(
         messages = redact_outbound_messages(messages)
     except Exception:  # noqa: BLE001 - 脱敏失败绝不阻断调用
         logger.debug("出站消息脱敏失败（使用原文继续）", exc_info=True)
+    # ✅ R202（2026-11-09 · G1 · 检测与围栏解耦）：注入手法**检测**默认常开。
+    #    旧实现把注入防护整体挂在 ``prompt_injection_defense``（默认 False）
+    #    之下 → 默认部署下既无围栏、也无任何检测，运维完全看不到「用户上传
+    #    的招标文件里带了越狱指令」。本函数是全部 provider 调用的唯一出口，
+    #    检测在这里收口即可覆盖所有链路（含直接拼 f-string 的链路）。
+    #    检测**只读**：不改任何提示词字节、不阻断生成（误报成本高），
+    #    只产出 WARNING + 指标；围栏仍受开关控制（改字节，须显式开启）。
+    #    ⚠️ 覆盖边界（全仓仅此两处直连 provider.chat，均**无用户文本**入模，
+    #    故不在文本检测面内）：``routers/ai_config/connectivity._probe_chat``
+    #    （固定串「回复ok」）与 ``services/ocr.ocr_bytes_vision``
+    #    （图片 base64 + 固定模板提示词）。
+    try:
+        from app.services.prompt_material_guard import scan_outbound_messages
+
+        messages = scan_outbound_messages(messages)
+    except Exception:  # noqa: BLE001 - 检测失败绝不阻断调用
+        logger.debug("出站消息注入检测失败（使用原文继续）", exc_info=True)
     if request_mode != "stream":
         return await provider.chat(
             messages, temperature=temperature, json_mode=json_mode, max_tokens=max_tokens, extra_body=extra_body
@@ -4005,7 +4030,11 @@ async def _attempt_candidate(
                     #    冷却时长由 ``Retry-After`` / 配额冷却负责。旧实现
                     #    ``is_429=True`` 每次把熔断冷却翻倍，放大限流影响。
                     circuit_breaker.record_failure(pname)
-                    logger.error("Provider %s 调用失败: %s", pname, e)
+                    # ✅ R204（2026-11-09 · 日志脱敏口径统一）：本行此前打印**原始
+                    #   异常**（``%s", e``），而同文件其余分支一律走 ``_error_summary``
+                    #   （内部再做 redact_sensitive_text）—— 非 openai_compatible 厂商的
+                    #   异常文本（如 httpx 异常里含带 userinfo 的 base_url）会**明文落盘**。
+                    logger.error("Provider %s 调用失败: %s", pname, _error_summary(e))
                     if _best_partial:
                         # 截断重试后失败：返回已拿到的半截正文，而不是丢弃它再降级到
                         # 下一候选（本候选已产出可用内容：半截 > 拿不到）。

@@ -243,6 +243,21 @@ def _replace_tail_n(m: re.Match, parts: list[int]) -> str:
     return str(parts[-1] if parts else 1)
 
 
+def _alpha_label(n: int) -> str:
+    """Excel 风格字母编号：1→a, 2→b, …, 26→z, 27→aa, 28→ab, …（R203）。
+
+    与 heading_v2._alpha_label / 前端 outlineNumbering.alphaLabel 同口径。
+    """
+    letters = "abcdefghijklmnopqrstuvwxyz"
+    x = max(1, int(n))
+    out = ""
+    while x > 0:
+        x -= 1
+        out = letters[x % 26] + out
+        x //= 26
+    return out
+
+
 def format_outline_number_by_template(id_str: str, template: str) -> str:
     """基于模板格式化编号（支持 {zh}/{num}/{tail}/{tailN}/{alpha}/{circled}/{roman} 等占位符）"""
     parts = outline_number_parts(id_str)
@@ -251,7 +266,9 @@ def format_outline_number_by_template(id_str: str, template: str) -> str:
     last_part = parts[-1]
     full_str = ".".join(str(p) for p in parts)
     cn = CHINESE_NUMBERS[last_part] if 0 < last_part < len(CHINESE_NUMBERS) else str(last_part)
-    alpha = ALPHABET[last_part - 1] if 1 <= last_part <= len(ALPHABET) else "a"
+    # ✅ R203 FIX：旧实现越界回退 "a"（比 clamp 还差），超 26 个同级全部撞 "a"。
+    #    改为 Excel 风格双字母续编（与 heading_v2._alpha_label / 前端 alphaLabel 同口径）。
+    alpha = _alpha_label(last_part) if last_part >= 1 else "a"
     alpha_upper = alpha.upper()
     circled = CIRCLED_NUMBERS.get(last_part, str(last_part))
     roman = ROMAN_NUMBERS[last_part] if 0 < last_part < len(ROMAN_NUMBERS) else str(last_part)

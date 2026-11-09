@@ -42,6 +42,7 @@ CONFIG_ACTIONS: dict[str, str] = {
     "runtime_switch": "调整运行时厂商开关",
     "key_rotation": "主密钥轮转/密文迁移",
     "consistency_repair": "归一矛盾配置",
+    "duplicate": "复制配置",
 }
 
 #: detail 落 ``ai_config_audit_logs.detail``（TEXT，SQLite 容量足够）——
@@ -263,6 +264,12 @@ PROMPT_AUDIT_ACTIONS: dict[str, str] = {
     "update": "修改提示词",
     "reset": "恢复出厂默认",
     "rollback": "回滚版本",
+    # ✅ R204（2026-11-09 · 同步类变更此前无中文标签）：``sync-from-code``
+    #   会写入 ``sync_insert``（新增行）与 ``sync_overwrite``（force 覆盖
+    #   用户编辑）两种 action，此前不在字典里 → 前端审计列表显示英文原样，
+    #   且按动作筛选时**选不到**这两类变更。
+    "sync_insert": "同步插入（代码→DB）",
+    "sync_overwrite": "同步覆盖（代码→DB·强制）",
 }
 
 
@@ -354,6 +361,25 @@ def diff_prompt_snapshot(snapshot: dict | None) -> list[dict]:
     b, a = snapshot.get("before") or "", snapshot.get("after") or ""
     if len(b) != len(a):
         changes.append({"field": "length", "label": "字数", "before": len(b), "after": len(a)})
+    elif b != a:
+        # ✅ R204（2026-11-09 · 等长改字在审计里完全不可见）：旧实现只比
+        #   「长度 + 变量集合」—— 把「必须采用锚桩法」改成「严禁采用锚桩法」
+        #   （同字数、同变量）时 ``changes`` 为空 → 前端审计页显示「无结构化
+        #   变更摘要」，运维无法核验「到底改了什么」，事故复盘只能靠回滚试错。
+        #   快照本身存了全文（信息足够却没用），现补一条「正文内容已改」条目
+        #   （带首处差异位置，便于定位）。
+        try:
+            _first = next((i for i, (x, y) in enumerate(zip(b, a)) if x != y), 0)
+        except Exception:  # pragma: no cover - 理论不可达
+            _first = 0
+        changes.append(
+            {
+                "field": "content_changed",
+                "label": "正文内容",
+                "before": f"{len(b)} 字",
+                "after": f"{len(a)} 字（首处差异在第 {_first + 1} 字）",
+            }
+        )
     try:
         # ✅ 2026-09-25（BUG-E · 变量口径不统一）：diff 与路由 / 编辑器一律用
         #   extract_user_variables（排除 {SHARED_*} 运行时解析的共享片段引用）。

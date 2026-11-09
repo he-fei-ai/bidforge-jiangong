@@ -33,7 +33,9 @@ export type StandardReport = {
  *
  * 后端 `_record_chart_drop` 写入的键名是 `type`（不是 chart_type），reason 是
  * 封闭枚举：per_section_limit / scheme_type_limit / validation_failed /
- * missing_prompt / empty_envelope / invalid_json / insert_failed / insert_none。
+ * missing_prompt / empty_envelope / invalid_json / insert_failed / insert_none，
+ * ✅ R199（2026-11-09）追加降级信号：apply_failed（图表登记整体失败）/
+ * register_cleaned（build 失败已清空本章旧登记）。
  */
 export type ChartDropItem = {
   type?: string;
@@ -94,12 +96,21 @@ export const CHART_DROP_REASON_LABELS: Record<string, string> = {
   invalid_json: "图表 JSON 解析失败",
   insert_failed: "图表登记写入失败",
   insert_none: "图表登记写入返回空",
+  // ✅ R200（2026-11-09）：R196 引入的短章闸（实际成文 <200 字不配图）此前
+  // 缺中文文案，删图明细会裸显 reason —— 补齐（G1 跨端 parity 护栏锁定）
+  min_words: "本节正文过短（不足 200 字），不自动配图",
+  // ✅ R199（2026-11-09）：登记降级信号（后端 sse_handlers 降级出口追加，
+  // type 为 "register"，复用现有 Tag+Tooltip 通道，零新 SSE 事件）
+  apply_failed: "图表登记整体失败（正文已保留，登记待下轮自动重同步）",
+  register_cleaned: "图表登记整体失败，已清空本章旧登记（清单暂与正文不一致）",
 };
 
 /** R49：把删图明细渲染成 Tooltip 文本（空清单返回空串，调用方据此不渲染提示） */
 export function chartDropTexts(items: ChartDropItem[]): string[] {
   return items.map((d) => {
-    const t = d.type || d.chart_type || "图表";
+    const rawType = d.type || d.chart_type || "图表";
+    // ✅ R199：降级信号的 type 是通道名 "register"，展示为可读中文
+    const t = rawType === "register" ? "图表登记" : rawType;
     const reason = d.reason || "";
     const label = CHART_DROP_REASON_LABELS[reason] || reason || "未知理由";
     return `${t}：${label}`;
@@ -415,9 +426,10 @@ export function contentResultSummary(contentResult: unknown): {
   total: number;
   words: number;
   overCount: number;
+  charts: number;
 } {
   if (!contentResult || typeof contentResult !== "object") {
-    return { done: 0, total: 0, words: 0, overCount: 0 };
+    return { done: 0, total: 0, words: 0, overCount: 0, charts: 0 };
   }
   const cr = contentResult as Record<string, unknown>;
   return {
@@ -425,6 +437,9 @@ export function contentResultSummary(contentResult: unknown): {
     total: typeof cr.total === "number" ? cr.total : 0,
     words: typeof cr.words === "number" ? cr.words : 0,
     overCount: typeof cr.over_count === "number" ? cr.over_count : 0,
+    // ✅ R199（2026-11-09）：本次运行配图总数（checkpoint content_result.charts），
+    //    断线重挂/刷新后摘要可见「配图 N 张」。旧后端缺键回退 0（加法式兼容）。
+    charts: typeof cr.charts === "number" && cr.charts > 0 ? Math.floor(cr.charts) : 0,
   };
 }
 

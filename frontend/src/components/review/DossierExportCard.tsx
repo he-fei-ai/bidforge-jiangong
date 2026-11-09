@@ -1,8 +1,8 @@
-import { useState } from "react";
+import { useEffect, useRef, useState } from "react";
 import { Alert, App, Button, Card, Space, Typography } from "antd";
 import { FileWordOutlined } from "@ant-design/icons";
 import { dossierApi } from "../../api";
-import { resolveExportFilename } from "../../utils/exportResponse";
+import { resolveExportFilename, resolveExportError } from "../../utils/exportResponse";
 
 const { Text, Paragraph } = Typography;
 
@@ -17,17 +17,37 @@ export interface DossierExportCardProps {
  *
  * 与既有 Word 导出链路独立：不写导出缓存、不递增轮次；后端开关
  * `dossier_enabled` 默认关闭 → 404，本卡显式提示未启用。
+ *
+ * ✅ R195 收口：①在飞请求接 AbortController —— 切方案/卸载时中止，
+ *   旧方案返回不再触发下载或错误 toast（与页面导出链同口径的跨方案守卫）；
+ *   ②错误文案统一走 `resolveExportError`（409 生成互斥 / 503 转换繁忙有差异化
+ *   文案，不再裸抛 `err?.message`）。
  */
 export function DossierExportCard({ schemeId }: DossierExportCardProps) {
   const { message } = App.useApp();
   const [exporting, setExporting] = useState(false);
   const [disabled, setDisabled] = useState(false);
+  const abortRef = useRef<AbortController | null>(null);
+  const schemeIdRef = useRef(schemeId);
+  schemeIdRef.current = schemeId;
+
+  // 切方案 / 卸载：中止在飞请求（cleanup 先于下一轮 effect body，不会误杀新请求）
+  useEffect(() => {
+    return () => {
+      abortRef.current?.abort();
+      abortRef.current = null;
+    };
+  }, [schemeId]);
 
   const handleExport = async () => {
-    if (!schemeId) return;
+    const sid = schemeIdRef.current;
+    if (!sid) return;
+    const controller = new AbortController();
+    abortRef.current = controller;
     setExporting(true);
     try {
-      const resp = await dossierApi.export(schemeId);
+      const resp = await dossierApi.export(sid, controller.signal);
+      if (schemeIdRef.current !== sid) return; // 跨方案守卫：旧方案返回不触发下载
       const blob = new Blob([resp.data], { type: DOCX_MIME });
       const url = URL.createObjectURL(blob);
       const a = document.createElement("a");
@@ -38,16 +58,19 @@ export function DossierExportCard({ schemeId }: DossierExportCardProps) {
       a.click();
       document.body.removeChild(a);
       URL.revokeObjectURL(url);
-      message.success("可复核底稿已生成");
+      if (schemeIdRef.current === sid) message.success("可复核底稿已生成");
     } catch (e: unknown) {
-      const err = e as { response?: { status?: number }; message?: string };
-      if (err?.response?.status === 404) {
+      const resolution = await resolveExportError(e);
+      if (resolution.canceled || schemeIdRef.current !== sid) return;
+      const status = (e as { response?: { status?: number } })?.response?.status;
+      if (status === 404) {
         setDisabled(true);
       } else {
-        message.error(err?.message || "可复核底稿导出失败");
+        message.error(resolution.message || "可复核底稿导出失败");
       }
     } finally {
-      setExporting(false);
+      if (schemeIdRef.current === sid || !abortRef.current) setExporting(false);
+      if (abortRef.current === controller) abortRef.current = null;
     }
   };
 

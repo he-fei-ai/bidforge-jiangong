@@ -16,6 +16,18 @@ from app.services.ai.heading_templates import HEADING_MANAGED_LEVELS, HEADING_ST
 # ✅ 编号统一（2026-09-25）：编号字符表唯一事实源收敛到 services/numbering.py，
 #    类属性保留同名别名兼容既有引用（tests / 外部脚本按类属性访问）。
 from app.services.numbering import ALPHABET as _NUMBERING_ALPHABET
+
+
+def _alpha_label(n: int) -> str:
+    """Excel 风格字母编号：1→a, 2→b, …, 26→z, 27→aa, 28→ab, …（R203）。"""
+    letters = "abcdefghijklmnopqrstuvwxyz"
+    x = max(1, int(n))
+    out = ""
+    while x > 0:
+        x -= 1
+        out = letters[x % 26] + out
+        x //= 26
+    return out
 from app.services.numbering import CHINESE_NUMBERS as _NUMBERING_CHINESE_NUMBERS
 
 
@@ -77,8 +89,9 @@ class HeadingNumberingGeneratorV2:
             return f"{c[5] or 1}）"
         elif level == 7:
             # 小写字母：a、b、c、（每父级重置）
-            idx = max(0, (c[6] or 1) - 1)
-            return self.ALPHABET[min(idx, len(self.ALPHABET) - 1)]
+            # ✅ R203 FIX：旧实现钳制在 ALPHABET[-1]（z），超 26 个同级尾注静默
+            #    折叠为 z。改为 Excel 风格双字母续编：27→aa, 28→ab, …
+            return _alpha_label(c[6] or 1)
         return ""
 
     def format_heading(self, level: int, title: str, parent_id: str) -> str:

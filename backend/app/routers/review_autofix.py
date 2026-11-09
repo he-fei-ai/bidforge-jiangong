@@ -24,6 +24,7 @@ from fastapi import APIRouter, Depends, HTTPException, Response
 
 from app.db import get_db
 from app.routers.review import reset_review_on_content_change
+from app.services.numbering import normalize_section_content_subheadings
 
 # ✅ R13 判空单一出口（2026-10-06）：静态护栏 tests/test_review_r13_closeout_20261006.py
 #    禁止本文件重新出现裸 db.execute。最关键的一处是 _persist_fixed 的正文 UPDATE ——
@@ -189,6 +190,12 @@ async def _persist_fixed(db, *, scheme_id: str, rule_id: str, pending: list, rep
     from app.services import repair_record
     from app.services.content_utils import DEFAULT_WORD_BUDGET, text_word_count, word_status_for
 
+    # ✅ R197（B7）：落库前**复查**生成守卫。/apply 与 /confirm 只在入口守卫一次，
+    #    而中间隔着 AI 改写（最长 120s）—— 期间用户新启动的生成任务会在
+    #    _persist_fixed 写每章正文时被整章覆盖。守卫必须在写点收口（与 /rollback
+    #    同一口径），而非信任入口时刻的判定。
+    _guard_not_generating(scheme_id, "自动修复落库")
+
     # 修复前快照：回滚的唯一凭据（回滚本身也会再存一份撤销快照）
     snapshot_id = await repair_record.create_snapshot(
         db,
@@ -217,6 +224,17 @@ async def _persist_fixed(db, *, scheme_id: str, rule_id: str, pending: list, rep
                 _persist_content = _fixed
         except Exception as _re:  # noqa: BLE001 - 登记失败不阻断正文落库
             logger.warning("自动修复落库：章节 %s 图表重登记失败（保留原正文）: %s", sid[:8], _re)
+        # ✅ R203（2026-11-09 · 编号归一化补链）：审核自动修复是**整章改写**，
+        #    模型可能重排/重编号子标题；须与 shrink_section / _persist_section 同口径
+        #    在 UPDATE 前补一次 normalize_section_content_subheadings（幂等、受
+        #    content_subheading_renumber 开关控制），否则错号永久留库、后续预检/复核
+        #    判漂移。失败 fail-soft 保留修复结果，不阻断落库。
+        try:
+            _persist_content, _num_changed = await normalize_section_content_subheadings(
+                db, scheme_id, sid, _persist_content
+            )
+        except Exception as _ne:  # noqa: BLE001 - 编号规范化失败不得阻断修复落库
+            logger.warning("自动修复落库：章节 %s 编号规范化失败（保留修复正文）: %s", sid[:8], _ne)
         wc = text_word_count(_persist_content)
         # ✅ R13（2026-10-06）：旧实现丢弃返回值 —— 正文 UPDATE 返回 None 时
         #    循环照常走完、commit 成功、函数返回快照 id，端点据此返回 ok=True。
@@ -334,6 +352,11 @@ async def rollback(scheme_id: str, body: dict | None = None, db=Depends(get_db))
             actor="审核预检自动修复·回滚",
             comment="已回滚自动修复内容，恢复修复前正文，请重新送审",
         )
+    # ✅ R197（B12）：回滚恢复了修复前正文，一致性扫描缓存的 content_hash 须
+    #    失效（与 _persist_fixed:invalidate 同口径；漏调则扫描结果基于回滚前正文）。
+    from app.routers.sections import invalidate_consistency_scan_cache
+
+    await invalidate_consistency_scan_cache(db, scheme_id)
     await db.commit()
     # 修复批次状态同步（与一致性修复的 rollback 同口径）
     rows = await review_db.fetch_all(
@@ -368,6 +391,15 @@ async def list_repairs(scheme_id: str, limit: int = 20, db=Depends(get_db)):
 # ---------------------------------------------------------------------------
 def _severity_rank(sev: str) -> int:
     return {"block": 0, "high": 1, "medium": 2, "low": 3}.get(sev or "", 9)
+
+
+#: ✅ R197（B9）：scope 合法枚举（与 frontend/src/types/audit.ts 三值同步）。
+_AUTOFIX_SCOPES = ("all_blocking", "auto_fixable", "all")
+
+
+async def _validate_scope(scope: str) -> None:
+    if scope not in _AUTOFIX_SCOPES:
+        raise HTTPException(422, f"非法 scope：{scope}（允许 {' / '.join(_AUTOFIX_SCOPES)}）")
 
 
 def _merged_after_if_prefix(items: list[dict], accepted_ids: set) -> str | None:
@@ -424,6 +456,9 @@ async def collect(scheme_id: str, body: dict | None = None, db=Depends(get_db)):
 
     body = body or {}
     scope = str(body.get("scope") or "all_blocking").strip()
+    # ✅ R197（B9）：scope 是文档化三值枚举（types/audit.ts 同步）—— 非法值旧实现
+    #    静默按「全量」处理（collect 泄露 manual 项、stage 绕过「仅阻断项」语义）。
+    await _validate_scope(scope)
     await _load_scheme(db, scheme_id)
     # persist=False（2026-10-03 数据链收口）：修复链路重算只取 findings，
     # 不得落 preflight_runs —— 否则每点一次定位/修复都污染分数趋势。
@@ -465,6 +500,8 @@ async def stage(scheme_id: str, body: dict | None = None, db=Depends(get_db)):
     body = body or {}
     rule_ids = body.get("rule_ids") or []
     scope = str(body.get("scope") or "all_blocking").strip()
+    # ✅ R197（B9）：同 /collect，非法 scope 显式 422（否则静默按全量放行）。
+    await _validate_scope(scope)
     scheme = await _load_scheme(db, scheme_id)
     # persist=False（2026-10-03 数据链收口）：修复链路重算只取 findings，
     # 不得落 preflight_runs —— 否则每点一次定位/修复都污染分数趋势。
@@ -674,7 +711,13 @@ async def confirm(scheme_id: str, body: dict | None = None, db=Depends(get_db)):
         scheme = await _load_scheme(db, scheme_id)
         facts, standards_text = await _build_facts(db, scheme)
         _content, _items = await review_autofix._chain_section_fixes(section, resolved, scheme, facts, standards_text)
-        pending.append((sid, section.get("content") or "", _content))
+        # ✅ R197（B6，B-10 同口径）：链式重算在所有 finding 都 failed 时返回
+        #    **原文**（仅 status=="repaired" 才更新 content）—— 无差异章节不得
+        #    进 pending，否则会 no-op 写库 + 伪造快照 + 触发
+        #    reset_review_on_content_change 把已通过的审核退回 pending，
+        #    凭空留下「正文已变更，原审核结论失效」的假审计痕迹。
+        if _content != (section.get("content") or ""):
+            pending.append((sid, section.get("content") or "", _content))
     snapshot_id = ""
     if pending:
         snapshot_id = await _persist_fixed(

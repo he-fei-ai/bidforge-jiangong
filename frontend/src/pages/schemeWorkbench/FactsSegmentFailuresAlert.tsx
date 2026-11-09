@@ -10,6 +10,8 @@ export function FactsSegmentFailuresAlert({
     ok?: number;
     failed?: number;
     total?: number;
+    /** ✅ R193（F4）：增量跳过段数（chunk_hash 命中已完成集，非失败） */
+    skipped?: number;
     failed_details?: Array<{ index?: number; heading?: string; reason?: string }>;
     /** ✅ R179：模型声明「本段无事实」——不是失败，但同样会少提取内容，必须可见 */
     declared_failed?: number;
@@ -31,17 +33,22 @@ export function FactsSegmentFailuresAlert({
   //    failed>0 条件上，模型声明「无事实」的段既不显示失败明细也不显示原因，
   //    用户只看到 ok 数变少，无法判断是失败还是空段。
   const onlyDeclared = failed <= 0 && declared > 0;
+  // ✅ R193（F4）：增量跳过段数此前生产方一直携带、前端零消费——补展示口径
+  //    （「段数对不上」的常见疑问：total = ok + failed + skipped + declared）。
+  const skipped = Number(s.skipped) || 0;
   const message = allFailed
     ? `本次提取全部 ${total} 段失败，未提取到事实`
     : failed > 0
       ? `本次提取有 ${failed}/${total} 段失败，结果可能不完整`
       : `本次提取有 ${declared}/${total} 段模型未提取到事实（不是失败）`;
+  const messageWithSkipped =
+    skipped > 0 ? `${message}（另有 ${skipped} 段增量跳过：已完成未变动）` : message;
   return (
     <Alert
       type={allFailed ? "error" : failed > 0 ? "warning" : "info"}
       showIcon
       style={{ marginBottom: 12 }}
-      message={message}
+      message={messageWithSkipped}
       description={
         <div style={{ fontSize: 12 }}>
           {details.slice(0, 6).map((d, i) => (

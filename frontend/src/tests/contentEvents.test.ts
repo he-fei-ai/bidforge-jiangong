@@ -256,18 +256,18 @@ describe("contentResultSummary", () => {
       words: 15000,
       over_count: 3,
     });
-    expect(r).toEqual({ done: 12, total: 20, words: 15000, overCount: 3 });
+    expect(r).toEqual({ done: 12, total: 20, words: 15000, overCount: 3, charts: 0 });
   });
 
   it("部分字段缺失时回退 0（不抛异常）", () => {
     const r = contentResultSummary({ done: 5, total: 10 });
-    expect(r).toEqual({ done: 5, total: 10, words: 0, overCount: 0 });
+    expect(r).toEqual({ done: 5, total: 10, words: 0, overCount: 0, charts: 0 });
   });
 
   it("防御式：null / undefined / 非对象均返回全零", () => {
     for (const bad of [null, undefined, 0, "x", [], "text"]) {
       const r = contentResultSummary(bad);
-      expect(r).toEqual({ done: 0, total: 0, words: 0, overCount: 0 });
+      expect(r).toEqual({ done: 0, total: 0, words: 0, overCount: 0, charts: 0 });
     }
   });
 
@@ -278,7 +278,17 @@ describe("contentResultSummary", () => {
       words: null,
       over_count: "3",
     });
-    expect(r).toEqual({ done: 0, total: 0, words: 0, overCount: 0 });
+    expect(r).toEqual({ done: 0, total: 0, words: 0, overCount: 0, charts: 0 });
+  });
+
+  // ✅ R199（2026-11-09）：checkpoint content_result.charts —— 断线重挂摘要透出配图数
+  it("R199：charts 字段透传（缺键回退 0，脏数据不回退为负数/小数）", () => {
+    expect(contentResultSummary({ done: 3, total: 5, charts: 7 }).charts).toBe(7);
+    expect(contentResultSummary({ charts: 0 }).charts).toBe(0);
+    expect(contentResultSummary({ charts: -2 }).charts).toBe(0);
+    expect(contentResultSummary({ charts: 2.7 }).charts).toBe(2);
+    expect(contentResultSummary({ charts: "3" }).charts).toBe(0);
+    expect(contentResultSummary({}).charts).toBe(0);
   });
 });
 
@@ -460,6 +470,8 @@ describe("chartDropTexts", () => {
 
   it("reason 枚举与后端封闭枚举逐项一致（新增枚举值必补中文标签）", () => {
     // 后端 app/routers/_chart_pipeline.py::_record_chart_drop 的 reason 封闭枚举
+    // ✅ R199：追加 sse_handlers 降级出口的 apply_failed / register_cleaned
+    // ✅ R200：追加 R196 短章闸 min_words（此前漏配中文文案，G1 parity 护栏抓获）
     const BACKEND_REASONS = [
       "per_section_limit",
       "scheme_type_limit",
@@ -469,10 +481,23 @@ describe("chartDropTexts", () => {
       "invalid_json",
       "insert_failed",
       "insert_none",
+      "min_words",
+      "apply_failed",
+      "register_cleaned",
     ];
     for (const r of BACKEND_REASONS) {
       expect(CHART_DROP_REASON_LABELS[r], `后端枚举 ${r} 缺中文标签`).toBeTruthy();
     }
     expect(Object.keys(CHART_DROP_REASON_LABELS)).toHaveLength(BACKEND_REASONS.length);
+  });
+
+  // ✅ R199（2026-11-09）：登记降级信号（type=register）展示为可读中文
+  it("R199 降级信号：register 通道名展示为「图表登记」+ 两条新理由中文文案", () => {
+    expect(chartDropTexts([{ type: "register", reason: "apply_failed" }])).toEqual([
+      "图表登记：图表登记整体失败（正文已保留，登记待下轮自动重同步）",
+    ]);
+    expect(chartDropTexts([{ type: "register", reason: "register_cleaned" }])).toEqual([
+      "图表登记：图表登记整体失败，已清空本章旧登记（清单暂与正文不一致）",
+    ]);
   });
 });

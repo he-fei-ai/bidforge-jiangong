@@ -429,8 +429,9 @@ _reg(
 1. 明确本章的「写作聚焦」——本章最该写清楚的核心内容（1-2 句）；
 2. 从给定的【知识库素材候选】中挑选与本章最相关的若干条（仅建议，模型可酌情选用，不得编造候选外条目）；
 3. 从给定的【全局事实候选标题】中挑选与本章最相关的若干条（仅建议）；
-4. 判断本章是否适合用表格来组织内容，并简述理由。
-你**不能**限制后续正文生成阶段可用的素材/事实范围，你的输出只是「建议优先使用」，最终由正文生成模型根据全文语境决定。
+4. 判断本章是否适合用表格来组织内容，并简述理由；
+5. 判断本章是否适合配图：本章内容是否含有可图表化的结构化信息（流程步骤/进度计划/组织架构/劳动力配置/方案对比/平面布置/时间线）。适合则给出建议的图表类型（flowchart 流程图、gantt 甘特图、architecture 架构图、labor 劳动力图、comparison 对比图、layout 布置图、timeline 时间线），并简述理由；量化内容少或纯文字论述则 chart_needed=false。
+你**不能**限制后续正文生成阶段可用的素材/事实范围，你的输出只是「建议优先使用」，最终由正文生成模型根据全文语境决定（含是否实际配图）。
 """,
 )
 
@@ -454,9 +455,9 @@ _reg(
 {fact_titles_text}
 
 请**仅输出严格 JSON**（不要任何解释、不要代码围栏；示例本身就是合法 JSON，直接照此结构输出）：
-{"writing_focus":"本章应重点写清楚什么（1-2句）","knowledge_names":["候选清单中相关的素材名"],"fact_titles":["候选清单中相关的事实标题"],"table_needed":true,"table_purpose":"为何本章适合用表格（无需则填空串）"}
+{"writing_focus":"本章应重点写清楚什么（1-2句）","knowledge_names":["候选清单中相关的素材名"],"fact_titles":["候选清单中相关的事实标题"],"table_needed":true,"table_purpose":"为何本章适合用表格（无需则填空串）","chart_needed":false,"chart_types":[],"chart_note":"建议配图的理由/内容要点（不配则填空串）"}
 
-约束：knowledge_names 与 fact_titles 必须严格来自上方候选清单中的名称/标题；table_needed 为布尔；无表格则 table_needed=false 且 table_purpose=""。
+约束：knowledge_names 与 fact_titles 必须严格来自上方候选清单中的名称/标题；table_needed 为布尔；无表格则 table_needed=false 且 table_purpose=""；chart_needed 为布尔，chart_types 仅能取 flowchart/gantt/architecture/labor/comparison/layout/timeline 中的 0~2 种（chart_needed=false 时必须为空数组且 chart_note=""）。
 """,
 )
 

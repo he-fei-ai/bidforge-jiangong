@@ -5,6 +5,7 @@ import {
   genericAutofixFailedNotice,
   genericAutofixNotice,
   genericResidualNotice,
+  titleSanitizedNotice,
 } from "../../utils/genericResidual";
 import { emptyTopChaptersNotice } from "../../utils/emptyTopChapters";
 import { OutlineGateList } from "./OutlineGateList.tsx";
@@ -110,6 +111,10 @@ export function useOutlineGate(deps: OutlineGateDeps) {
     if (fixFailed) msg.warning(fixFailed);
     const emptyTops = emptyTopChaptersNotice(data);
     if (emptyTops) msg.info(emptyTops);
+    // ✅ R190（FIX-17）：标题清洗（零宽/控制字符）不再静默生效 —— 后端加法式
+    //    回传 `title_sanitized`（整数，仅 >0 才有该键），同一函数出口全调用点生效。
+    const titleSanitized = titleSanitizedNotice(data);
+    if (titleSanitized) msg.info(titleSanitized);
   }
 
   /** 一级目录确认闸门（对齐 OpenBidKit outline-selection）：
@@ -150,6 +155,12 @@ export function useOutlineGate(deps: OutlineGateDeps) {
               // 否则用户取消一次后再点保存就静默清空正文（比原缺陷更隐蔽）。
               hasContentRef.current = true;
               return doSaveGate(filtered);
+            },
+            // ✅ R197：外层闸门在本 onOk 同步 return 后即已关闭 —— 内层取消时
+            //    若无提示，用户会以为目录丢失（须重新触发生成才能再见清单）。
+            //    显式告知出路：目录树预览仍在，可手动编辑后点「保存目录」。
+            onCancel: () => {
+              msg.info("已取消覆盖：目录树预览仍在，可手动调整后点击「保存目录」");
             },
           });
           return;

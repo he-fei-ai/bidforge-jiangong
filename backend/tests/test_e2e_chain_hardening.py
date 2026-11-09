@@ -324,13 +324,18 @@ def test_scanner_prescan_groups_by_object():
 VALID_FLOWCHART = 'flowchart TD\n    A["开始"] --> B["施工"]\n' '    B --> C{"验收合格?"}\n    C --> D["结束"]'
 
 
-async def test_apply_plan_clips_content_when_limit_exceeded(ctx):
+async def test_apply_plan_clips_content_when_limit_exceeded(ctx, monkeypatch):
     db, pid, sid = ctx
+    # ✅ R199 重锚：R196 引入 min_words 闸（本 fixture 正文 <200 字会被先删），
+    #    本用例测的是「事务内限额复核 → 正文同步裁剪」，置 0 恢复原判据。
+    import app.routers._chart_pipeline as _CP
     from app.routers._chart_pipeline import (
         _scan_inline_charts,
         apply_inline_chart_plan,
         build_inline_chart_plan,
     )
+
+    monkeypatch.setattr(_CP, "_CHART_MIN_WORDS", 0)
 
     content = "前文\n```mermaid\n" + VALID_FLOWCHART + "\n```\n后文"
     ct = _scan_inline_charts(content)[0][0]

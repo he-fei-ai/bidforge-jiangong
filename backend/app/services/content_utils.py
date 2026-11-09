@@ -231,7 +231,14 @@ def max_tokens_for_budget(word_budget: int, *, chars: int | None = None) -> int:
             续写场景传"剩余待补字数"，使上限随缺口收敛。
 
     Returns:
-        输出 token 上限（不小于 ``MAX_TOKENS_FLOOR``）。
+        输出 token 上限（不小于 ``MAX_TOKENS_FLOOR``，且不超过
+        ``settings.max_output_tokens``）。
+
+    ✅ R204（2026-11-09 · token 上界）：旧实现**无上界** —— 调用方传入
+    极大 ``word_budget``（如 ``word_budget_override=10**8``）时折算出
+    ``max_tokens≈8×10**7``，直接超出厂商上限 → 整批章节 400，且输出成本失控。
+    现按 ``settings.max_output_tokens``（默认 32768）收口；正常章节预算
+    （≤ 2 万字）折算值远低于该上限 ⇒ **逐字节不变**。
     """
     try:
         budget = int(word_budget or 0)
@@ -246,10 +253,38 @@ def max_tokens_for_budget(word_budget: int, *, chars: int | None = None) -> int:
         target_chars = int(budget * MAX_TOKENS_OVER_FACTOR)
     if target_chars <= 0:
         target_chars = DEFAULT_WORD_BUDGET
-    return max(MAX_TOKENS_FLOOR, int(target_chars * WORD_TOKENS_PER_CHAR))
+    tokens = max(MAX_TOKENS_FLOOR, int(target_chars * WORD_TOKENS_PER_CHAR))
+    cap = _max_output_tokens()
+    if cap > 0:
+        if cap < MAX_TOKENS_FLOOR:
+            # 用户显式把上限设得比「思考吞噬护栏」还小 → 尊重用户配置
+            # （不抬回 FLOOR，否则违背其显式意图）。
+            return cap
+        tokens = min(tokens, cap)
+    return max(MAX_TOKENS_FLOOR, tokens)
 
 
-def normalize_word_budget_override(raw) -> int | None:
+def _max_output_tokens() -> int:
+    """单次 AI 输出 token 硬上限（读配置，失败回落 32768）。"""
+    try:
+        from app.config import settings
+
+        return int(getattr(settings, "max_output_tokens", 32768) or 32768)
+    except Exception:  # pragma: no cover - 配置不可用时用保守默认
+        return 32768
+
+
+def _max_word_budget() -> int:
+    """单章字数预算硬上限（读配置，失败回落 20000）。"""
+    try:
+        from app.config import settings
+
+        return int(getattr(settings, "max_word_budget", 20000) or 20000)
+    except Exception:  # pragma: no cover - 配置不可用时用保守默认
+        return 20000
+
+
+def normalize_word_budget_override(raw, limit: int | None = None) -> int | None:
     """归一化请求体里的 word_budget_override（纯函数，便于单测）。
 
     背景（BUG 修复 2026-09-23 · B4）：前端/脚本可能把该字段以字符串
@@ -262,11 +297,17 @@ def normalize_word_budget_override(raw) -> int | None:
       · bool → None（True/False 不是合法字数，防止 int(True)=1 静默生效）
       · int / float / 数字字符串 → 取整；≤0 视为无效 → None
       · 其它非数值（"abc"、dict、list…）→ None（绝不抛异常）
+
+    ✅ R204（2026-11-09 · 上界）：旧实现**无上界** —— ``10**8`` 这类值会
+    一路成为章预算并折算出天文数字的 ``max_tokens``（厂商 400 + 成本失控）。
+    现按 ``settings.max_word_budget``（默认 20000）**夹紧**（不静默丢弃
+    用户意图：超大值被压到上限，仍是一个合法的大预算；正常值逐字节不变）。
     """
     if raw is None:
         return None
     if isinstance(raw, bool):
         return None
+    v: int | None = None
     if isinstance(raw, (int, float)):
         try:
             if not math.isfinite(float(raw)):
@@ -274,8 +315,7 @@ def normalize_word_budget_override(raw) -> int | None:
             v = int(raw)
         except (TypeError, ValueError, OverflowError):
             return None
-        return v if v > 0 else None
-    if isinstance(raw, str):
+    elif isinstance(raw, str):
         s = raw.strip()
         if not s:
             return None
@@ -286,8 +326,12 @@ def normalize_word_budget_override(raw) -> int | None:
             v = int(parsed)
         except (TypeError, ValueError, OverflowError):
             return None
-        return v if v > 0 else None
-    return None
+    if v is None or v <= 0:
+        return None
+    cap = limit if limit is not None else _max_word_budget()
+    if cap and cap > 0 and v > cap:
+        return cap
+    return v
 
 
 def text_word_count(content: str) -> int:
@@ -649,17 +693,97 @@ def find_unclosed_fences(content: str) -> list[dict]:
 #    content, tolerant_length=True)``。留着「委托薄包装但零调用方」就是新的
 #    悬空副本（与本轮在 _chart_pipeline 清掉的 :197 同族），故不保留别名。
 
+#: ✅ R196（2026-11-09）：图表家族语言标签 —— 缩进自愈只对这三类生效（普通代码
+#: 块的行首缩进可能是刻意排版，不得触碰）。
+_CHART_FENCE_LANGS = ("mermaid", "chart-json", "ai_image")
+
+#: 开围栏行首 4-8 个前导空格（CommonMark：4+ 空格 = 缩进代码块，围栏语义消失；
+#: AI 高发错误形态，提示词 content.py 明示过仍会出现）。超过 8 空格按更深嵌套
+#: 排版处理，不自愈。
+_INDENTED_CHART_FENCE_RE = re.compile(r"^ {4,8}(`{3,}|~{3,})\s*(mermaid|chart-json|ai_image)\s*$")
+
+
+def _dedent_indented_chart_fences(content: str) -> tuple[str, list[dict]]:
+    """反缩进「4-8 空格缩进的图表围栏行」（R196 缩进图表围栏自愈）。
+
+    问题：AI 把 ```` ```mermaid ```` 等图表开围栏写成 4+ 前导空格时，该行按
+    CommonMark 是**缩进代码块**而非围栏 —— 登记/校验/限额/导出/图题全链路
+    不可见：图变源码印进成稿，且不产生任何 charts_dropped 记录（"根本没进
+    管线"盲区，与 R48「删图可观测」同族）。
+
+    自愈规则（保守）：
+      · 仅匹配「4-8 空格 + 围栏标记 + 图表家族 lang」形态的**开围栏行**；
+      · 该行反缩进到行首；
+      · 自该行向后找第一个「strip 后为同种围栏字符且长度 ≥ 开围栏」的行
+        （AI 缩进开围栏时闭围栏通常同样缩进），一并反缩进；块内内容行不动
+        （Mermaid 对行首空白宽容、JSON 缩进合法）；
+      · 幂等：修复后的正文再跑一次零命中；确定性；无损（只动围栏行行首空白）。
+
+    Returns:
+        ``(fixed_content, fixes_log)``；日志项
+        ``{"action": "dedent_chart_fence", "line": 开围栏行号(1-based),
+        "lang": 语言标签, "old_indent": 原缩进空格数, "close_dedented": 是否
+        同时反缩进了闭围栏行}``
+    """
+    if not content:
+        return content, []
+    lines = content.split("\n")
+    changed = False
+    log: list[dict] = []
+    i = 0
+    while i < len(lines):
+        m = _INDENTED_CHART_FENCE_RE.match(lines[i])
+        if not m:
+            i += 1
+            continue
+        indent = len(lines[i]) - len(lines[i].lstrip(" "))
+        fence_char, fence_len = m.group(1)[0], len(m.group(1))
+        lang = m.group(2)
+        lines[i] = lines[i].lstrip(" ")
+        close_dedented = False
+        # 向后找第一个匹配的闭围栏行（同种字符 + 长度 ≥ 开围栏 + strip 后信息串为空）
+        j = i + 1
+        while j < len(lines):
+            _s = lines[j].strip()
+            if (
+                _s
+                and set(_s) == {fence_char}
+                and len(_s) >= fence_len
+            ):
+                if lines[j] != _s:  # 闭围栏行同样带缩进才需要反缩进
+                    lines[j] = _s
+                    close_dedented = True
+                break
+            j += 1
+        changed = True
+        log.append(
+            {
+                "action": "dedent_chart_fence",
+                "line": i + 1,
+                "lang": lang,
+                "old_indent": indent,
+                "close_dedented": close_dedented,
+            }
+        )
+        i += 1
+    if not changed:
+        return content, []
+    return "\n".join(lines), log
+
 
 def auto_fix_unclosed_fences(
     content: str,
     *,
     separator: str = "\n",
 ) -> tuple[str, list[dict]]:
-    """补齐正文中的代码围栏缺陷：**两步**归一 + 追加（落库防线唯一出口）。
+    """补齐正文中的代码围栏缺陷：**三步**归一 + 追加（落库防线唯一出口）。
 
-    ✅ R76（2026-10-13）改造为两步，返回契约 ``(fixed_content, fixes_log)`` 与
-    既有键**逐字不变**（加法式新增 ``action`` 区分两步）：
+    ✅ R196（2026-11-09）改造为三步，返回契约 ``(fixed_content, fixes_log)`` 与
+    既有键**逐字不变**（加法式新增 ``action`` 区分各步）：
 
+      0. ``_dedent_indented_chart_fences`` —— 把「4-8 空格缩进的图表家族开围栏
+         （及同形态闭围栏）」反缩进（``action="dedent_chart_fence"``）。4+ 空格
+         在 CommonMark 下是缩进代码块，图表全链路不可见（图变源码、零观测）。
       1. ``fence_common.normalize_fence_closes`` —— 把「容错判为闭合、但标记长度
          短于开围栏」的闭合行补齐到开围栏长度（``action="normalize_close_length"``）。
          受开关 ``settings.content_fence_normalize_close``（默认 True）控制，
@@ -704,6 +828,11 @@ def auto_fix_unclosed_fences(
         return content, []
     log: list[dict] = []
     current = content
+    # ✅ R196 第 0 步：缩进图表围栏自愈 —— 4-8 空格缩进的开围栏在 CommonMark
+    #    下是缩进代码块，图表全链路不可见；先反缩进使其成为真围栏，
+    #    其后的归一/追加两步才能正确处理它。
+    current, dedent_log = _dedent_indented_chart_fences(current)
+    log.extend(dedent_log)
     if _fence_common.normalize_close_enabled():
         current, normalize_log = normalize_fence_closes(current)
         log.extend(normalize_log)

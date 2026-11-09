@@ -227,7 +227,7 @@ async def _call_parse(db_conn, name, data, **kw):
 
 async def test_parse_outline_oversize_rejected_413(db_conn, monkeypatch):
     """超过单文件上限（monkeypatch 调小）必须 413，不得整读进内存。"""
-    monkeypatch.setattr(uo, "MAX_UPLOAD_BYTES", 4)
+    monkeypatch.setattr(fp, "MAX_UPLOAD_BYTES", 4)  # ✅ R191（H1）patch 点迁移重锚（R192 承接）
     with pytest.raises(HTTPException) as ei:
         await _call_parse(db_conn, "big.txt", b"x" * 32)
     assert ei.value.status_code == 413
@@ -263,7 +263,7 @@ async def test_parse_outline_unknown_project_id_404(db_conn):
 
 async def test_parse_outline_persists_warning_and_record(db_conn, monkeypatch):
     """GBK 文本上传：解析记录落库且 parse_warnings 含编码降级告警。"""
-    monkeypatch.setattr(uo, "MAX_UPLOAD_BYTES", 5 * 1024 * 1024)
+    monkeypatch.setattr(fp, "MAX_UPLOAD_BYTES", 5 * 1024 * 1024)  # ✅ R191（H1）patch 点迁移重锚（R192 承接）
     res = await _call_parse(db_conn, "gbk.txt", "一、工程概况\n二、施工部署\n三、资源配置\n".encode("gbk"))
     assert res["id"]
     cur = await db_conn.execute("SELECT parse_warnings FROM uploaded_outlines WHERE id=?", (res["id"],))
@@ -275,7 +275,7 @@ async def test_parse_outline_persists_warning_and_record(db_conn, monkeypatch):
 
 async def test_parse_outline_success_persists_record(db_conn, monkeypatch):
     """正常文本：识别记录落库、confidence 落在合法区间、outline 有结构。"""
-    monkeypatch.setattr(uo, "MAX_UPLOAD_BYTES", 5 * 1024 * 1024)
+    monkeypatch.setattr(fp, "MAX_UPLOAD_BYTES", 5 * 1024 * 1024)  # ✅ R191（H1）patch 点迁移重锚（R192 承接）
     res = await _call_parse(
         db_conn,
         "outline.txt",

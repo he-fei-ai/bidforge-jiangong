@@ -44,12 +44,23 @@ import type {
 } from "../types/prompt";
 // ✅ 2026-10-06：全局事实模块的前后端契约类型（替代此处的 any）
 import type {
+  FactAdjustResponse,
+  FactCategoriesResponse,
   FactCategoryMap,
   FactChaptersResponse,
+  FactCrossConflict,
   FactDangerResponse,
+  FactDocCategoryOptionsResponse,
+  FactDocCategoryUpdateResponse,
+  FactDocDeleteResponse,
+  FactDocPreviewResponse,
+  FactDocsListResponse,
   FactListResponse,
+  FactParseAllResponse,
+  FactParseDocResponse,
   FactResolveResponse,
   FactRetryFailedResponse,
+  FactUploadDocsResponse,
 } from "../types/facts";
 // ✅ any 清理专项（2026-11-02）：错误体 / SSE 事件 / 写路径载荷契约
 import type {
@@ -338,7 +349,8 @@ export const sectionsApi = {
     api.post(`/schemes/${schemeId}/sections/reorder`, data),
   exportTree: (schemeId: string) => api.get(`/schemes/${schemeId}/sections/export-tree`),
   /** 正文质量审计（交付前自检）：口语化/AI 腔残留 + 引用已废止标准 */
-  quality: (schemeId: string) => api.get(`/schemes/${schemeId}/sections/quality`),
+  quality: (schemeId: string, options?: { signal?: AbortSignal }) =>
+    api.get(`/schemes/${schemeId}/sections/quality`, options ? { signal: options.signal } : undefined),
   /** 字数压缩（对齐 OpenBidKit 的 shrink）：超字数章节 AI 局部 replace/delete 压缩 */
   shrink: (schemeId: string, sectionId: string) =>
     api.post(`/schemes/${schemeId}/sections/${sectionId}/shrink`, null, { timeout: 600000 }),
@@ -487,8 +499,11 @@ export const factsApi = {
     api.get<FactListResponse>("/global-facts", {
       params: {
         scheme_id: schemeId,
-        ...(options?.limit ? { limit: options.limit } : {}),
-        ...(options?.offset ? { offset: options.offset } : {}),
+        // ✅ R189：`offset=0` 是合法的**首页**参数，真值判断会把它吞掉；
+        //    虽然后端默认也是 0，但显式首屏请求与诊断/回放口径必须一致，
+        //    且 `limit=0`（后端语义为不限量）不该被静默改成默认 20。
+        ...(options?.limit !== undefined ? { limit: options.limit } : {}),
+        ...(options?.offset !== undefined ? { offset: options.offset } : {}),
       },
       signal: options?.signal,
     }),
@@ -515,6 +530,14 @@ export const factsApi = {
     api.post<FactResolveResponse>("/global-facts/batch-resolve", {
       scheme_id: schemeId,
       fact_ids: factIds,
+    }),
+  // ✅ R189（2026-11-08 · 调用链断裂补面）：后端 GET /global-facts/cross-conflicts
+  //    （R175 BUG-04）早已把已落库的多来源冲突暴露出来，前端却从未封装 ——
+  //    页面刷新后跨段矛盾横幅只能靠 SSE 内存态，一刷新即消失。
+  crossConflicts: (schemeId: string, options?: { signal?: AbortSignal }) =>
+    api.get<{ conflicts: FactCrossConflict[]; total: number }>("/global-facts/cross-conflicts", {
+      params: { scheme_id: schemeId },
+      signal: options?.signal,
     }),
   // ✅ G3（2026-10-04）：解除「来源已变化」过期标记。
   //    后端 `_mark_project_facts_stale` 是**项目级**批量打标的，一次资料重传
@@ -551,7 +574,7 @@ export const factsApi = {
     ),
   // ✅ 事实分类白名单（后端 CATEGORY_TITLES 单一事实源，消三侧口径债 2026-09-20）
   //    注意与 categoryOptions（文档分类 /documents/category-options）是两套不同分类
-  categories: () => api.get("/global-facts/categories"),
+  categories: () => api.get<FactCategoriesResponse>("/global-facts/categories"),
   // ✅ 2026-10-06：九大章节标题 / 事实属性名 / 来源类型名的**唯一权威来源**
   //    （后端 facts_classification.category_map_payload）。此前该方法从未被
   //    页面调用 —— 三套枚举各自硬编码，其中 source_kind 干脆零展示。
@@ -574,7 +597,7 @@ export const factsApi = {
   uploadDocuments: (files: File[], schemeId: string, options?: { signal?: AbortSignal }) => {
     const form = new FormData();
     files.forEach((f) => form.append("files", f));
-    return api.post("/global-facts/upload-documents", form, {
+    return api.post<FactUploadDocsResponse>("/global-facts/upload-documents", form, {
       params: { scheme_id: schemeId },
       headers: { "Content-Type": "multipart/form-data" },
       timeout: 120000,
@@ -584,7 +607,7 @@ export const factsApi = {
   // ② 解析单份文档（force=true 强制重解析，用于补齐被截断/需重新 OCR 的内容）
   //    options.signal：解析（OCR）耗时可达数分钟，组件卸载/切方案时中断请求
   parseDocument: (docId: string, force = false, options?: { signal?: AbortSignal }) =>
-    api.post(`/global-facts/documents/${docId}/parse`, null, {
+    api.post<FactParseDocResponse>(`/global-facts/documents/${docId}/parse`, null, {
       params: force ? { force: true } : undefined,
       timeout: 300000, // 扫描件 OCR 较慢，放宽超时
       signal: options?.signal,
@@ -597,7 +620,7 @@ export const factsApi = {
     force = false,
     options?: { signal?: AbortSignal },
   ) =>
-    api.post("/global-facts/documents/parse-all", null, {
+    api.post<FactParseAllResponse>("/global-facts/documents/parse-all", null, {
       params: { scheme_id: schemeId, project_id: projectId, ...(force ? { force: true } : {}) },
       timeout: 600000,
       signal: options?.signal,
@@ -606,34 +629,47 @@ export const factsApi = {
   // ✅ 加固：以 schemeId 为主键查询（后端内部反查 project_id），
   //    避免依赖 scheme.project_id 字段而出现「列表静默为空」
   listDocuments: (options: { schemeId: string; projectId?: string; signal?: AbortSignal }) =>
-    api.get("/global-facts/documents", {
+    api.get<FactDocsListResponse>("/global-facts/documents", {
       params: { scheme_id: options.schemeId, project_id: options.projectId },
       signal: options.signal,
     }),
-  deleteDocument: (docId: string) => api.delete(`/global-facts/documents/${docId}`),
+  deleteDocument: (docId: string) =>
+    api.delete<FactDocDeleteResponse>(`/global-facts/documents/${docId}`),
   // ✅ 文件导入/解析增强：文件预览（前 N 字）和分类管理
   // options.signal：预览弹窗关闭/切换文档时中断在途请求；
   // timeout 显式取值（与空态文案共用 PREVIEW_TIMEOUT_MS，避免两处真相源）
   previewDocument: (docId: string, maxChars = 5000, options?: { signal?: AbortSignal }) =>
-    api.get(`/global-facts/documents/${docId}/preview`, {
+    api.get<FactDocPreviewResponse>(`/global-facts/documents/${docId}/preview`, {
       params: { max_chars: maxChars },
       timeout: PREVIEW_TIMEOUT_MS,
       signal: options?.signal,
     }),
   updateDocumentCategory: (docId: string, docCategory: string) =>
-    api.patch(`/global-facts/documents/${docId}/category`, { doc_category: docCategory }),
-  categoryOptions: () => api.get("/global-facts/documents/category-options"),
+    api.patch<FactDocCategoryUpdateResponse>(`/global-facts/documents/${docId}/category`, {
+      doc_category: docCategory,
+    }),
+  categoryOptions: () =>
+    api.get<FactDocCategoryOptionsResponse>("/global-facts/documents/category-options"),
   // ✅ 缺口修复（2026-09-24）：后端 POST /global-facts/adjust（自然语言批量调整
   //    事实，返回最小操作计划，apply=false 默认不落库）早已实现，前端 api 层
   //    **从未封装** —— 「AI 批量调整事实」能力对 UI 完全不可见（调用链断裂）。
   //    现补齐封装；默认 apply=false，与后端「零数据风险」默认一致。
-  adjust: (payload: {
-    instruction: string;
-    scheme_id?: string;
-    project_id?: string;
-    apply?: boolean;
-    operations?: Array<Record<string, unknown>>;
-  }) => api.post("/global-facts/adjust", payload, { timeout: 120000 }),
+  adjust: (
+    payload: {
+      instruction: string;
+      scheme_id?: string;
+      project_id?: string;
+      apply?: boolean;
+      operations?: Array<Record<string, unknown>>;
+    },
+    // ✅ R193：AI 调整 120s 调用补 signal 通道（L-06）——组件切方案/重复
+    //    触发时可中止在飞请求，不再白烧计费。
+    options?: { signal?: AbortSignal },
+  ) =>
+    api.post<FactAdjustResponse>("/global-facts/adjust", payload, {
+      timeout: 120000,
+      signal: options?.signal,
+    }),
 };
 
 // =========================================================================
@@ -1188,6 +1224,8 @@ export const chartsApi = {
     chart_type?: string;
     section_id?: string;
     prediction_id?: string;
+    /** ✅ R200：图表家族围栏 0 基序号（同章多块同码时按序号精确改写） */
+    fence_ordinal?: number;
   }) => api.post("/charts/fix-mermaid", data),
   /** 图表清单（按方案；导出预渲染用） */
   list: (schemeId: string, signal?: AbortSignal) => api.get(`/charts/list/${schemeId}`, { signal }),
@@ -1328,16 +1366,34 @@ export const aiApi = {
 export const promptsApi = {
   list: (category?: string) =>
     api.get<PromptListResponse>("/prompts", { params: category ? { category } : {} }),
+  /** ✅ R204（2026-11-09 · 越权面收口）：提示词**写**接口与审计查询已迁至
+   *  管理面 `/admin/prompts/*`（后端 fail-closed 闸门：本机回环免 token，
+   *  远程需携带 X-Admin-Token）。与 `syncFromCode` 同型：逐请求覆盖 baseURL
+   *  为空串走源站相对路径，由 Vite 代理转发到后端（不经过 /api/v1 前缀）。 */
   update: (key: string, content: string) =>
-    api.patch<PromptMutationResponse>(`/prompts/${key}`, { content }),
-  reset: (key: string) => api.post<PromptMutationResponse>(`/prompts/${key}/reset`),
+    api.patch<PromptMutationResponse>(
+      `/admin/prompts/${key}`,
+      { content },
+      { baseURL: "", headers: adminHeaders() },
+    ),
+  reset: (key: string) =>
+    api.post<PromptMutationResponse>(`/admin/prompts/${key}/reset`, null, {
+      baseURL: "",
+      headers: adminHeaders(),
+    }),
   auditLogs: (key: string, limit = 50, offset = 0) =>
-    api.get<PromptAuditLogsResponse>("/prompts/audit-logs", {
+    api.get<PromptAuditLogsResponse>("/admin/prompts/audit-logs", {
+      baseURL: "",
       params: { key, limit, offset },
+      headers: adminHeaders(),
     }),
   /** ✅ G2 版本回滚：把提示词恢复到某条审计记录「变更前」的版本 */
   rollback: (key: string, auditId: string) =>
-    api.post<PromptRollbackResponse>(`/prompts/${key}/rollback`, { audit_id: auditId }),
+    api.post<PromptRollbackResponse>(
+      `/admin/prompts/${key}/rollback`,
+      { audit_id: auditId },
+      { baseURL: "", headers: adminHeaders() },
+    ),
   /** 硬编码模板→DB 一键同步。⚠️ 端点挂根前缀 /admin/prompts（不在 /api/v1），
    *  逐请求覆盖 baseURL 为空串走源站相对路径，由 Vite 代理转发到后端。 */
   syncFromCode: (force = false) =>

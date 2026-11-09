@@ -940,6 +940,7 @@ async def _migrate(conn: aiosqlite.Connection):
         ("sections", "comparison_json", "TEXT DEFAULT ''"),
         ("sections", "layout_json", "TEXT DEFAULT ''"),
         ("sections", "timeline_json", "TEXT DEFAULT ''"),
+        # ✅ R200 死列标注：零业务读写（仅 sections.py 方案删除清理置空），见 schema_sql.py 同名注释
         ("sections", "inlined_chart_json", "TEXT DEFAULT ''"),
         # ✅ D1（2026-10-11）：离散正文编排阶段产出的结构化编排决策（JSON 文本）
         ("sections", "plan_json", "TEXT DEFAULT ''"),
@@ -1481,7 +1482,10 @@ async def _migrate(conn: aiosqlite.Connection):
 
     # --- 数据迁移：修复旧版图表预测僵尸行（status='generated' 但代码为空） ---
     # 旧版手动预测端点落库时 status 误写为 "generated" 且 mermaid_code 为空：
-    # Phase 3 只处理 pending，这些图永远不会生成代码（UI 显示已生成、导出无图）。
+    # 旧 Phase2/3/4 图表管线已于 2026-09-13 整体删除（正文同步生成管线接管），
+    # ✅ R199（2026-11-09）注释修正：下方 UPDATE 把这些僵尸行重置为 pending 后
+    # **没有补生成消费者**（Phase 3 已不存在）——语义是「在导出预检 / 图表清单
+    # 中显式暴露异常行」（DLV-04 按 pending 判未生成告警），而非等待重生成。
     # 重置为 pending 让 Phase 3 补生成；layout/timeline 的 data_json 是 JSON 数据
     # 本身（顶层无 mermaid_code 字段），必须排除避免误重置。
     # ✅ BUG 修复（2026-09-18）：规范信封对**结构化数据图表**同样写

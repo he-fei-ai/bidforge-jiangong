@@ -41,6 +41,10 @@ export type DocumentParseListProps = {
   parsingDocs: boolean;
   /** 正在解析的单份文档 id（null 表示无单份解析在跑） */
   parsingDocId: string | null;
+  /** ✅ R191（C-F3）：上传保存进行中——行内「解析/重新解析/删除」同样禁用。
+   *  可选（向后兼容）；缺省视为 false。不一致的旧口径：上传中删除与同名
+   *  upsert 竞争会让「删除成功」的文件随上传完成复活。 */
+  uploadingFacts?: boolean;
   /** 分类下拉选项；为空数组时分类降级为只读 Tag */
   categoryOptions: string[];
   /** 解析 / 重新解析（force=true） */
@@ -154,6 +158,7 @@ export default function DocumentParseList({
   docs,
   parsingDocs,
   parsingDocId,
+  uploadingFacts = false,
   categoryOptions,
   onParse,
   onPreview,
@@ -175,8 +180,12 @@ export default function DocumentParseList({
     );
   }
 
-  /** 解析类按钮是否禁用：批量解析中，或已有任意单份解析在跑 */
-  const parseDisabled = parsingDocs || !!parsingDocId;
+  /** 解析类按钮是否禁用：批量解析中 / 已有任意单份解析在跑 / 上传保存进行中
+   *  （✅ R191 C-F3：与 UploadParseTab 的 busy 口径统一——上传中触发解析/
+   *  删除会与同名 upsert 竞争：删除成功提示后文件随上传完成复活）。
+   *  ⚠️ 删除按钮的既有语义不同：只有「正在解析的那一行」禁删（其余行不受
+   *  单份解析影响），uploadingFacts 是本轮唯一新增的禁用维度。 */
+  const parseDisabled = parsingDocs || !!parsingDocId || uploadingFacts;
 
   // ✅ BUG 修复：后端 category-options 是唯一合法分类源；若历史数据/脏数据
   //    带入了未登记分类，Select 的 value 与 options 不匹配会显示空。
@@ -230,7 +239,13 @@ export default function DocumentParseList({
                         icon={<FileSearchOutlined />}
                         disabled={parseDisabled}
                         loading={parsingDocId === doc.id}
-                        onClick={() => onParse(doc.id, doc.file_name)}
+                        // ✅ R203 修复（failed 重试链）：parse_status='failed' 的
+                        //    文档（含「曾成功→重解析失败」正文非空形态）行内只有
+                        //    本按钮可达——直接按 force 请求，绕过后端「正文非空
+                        //    且非 force 短路」分支（旧实现发普通解析 → 短路返回
+                        //    「已解析过」+ 重试指引 note，指引虽已消费但按钮语义
+                        //    仍是空转）。文案仍是「解析」（对用户即「重试」）。
+                        onClick={() => onParse(doc.id, doc.file_name, isFailed)}
                       >
                         解析
                       </Button>,
@@ -265,7 +280,7 @@ export default function DocumentParseList({
                   danger
                   type="link"
                   icon={<CloseCircleOutlined />}
-                  disabled={parsingDocs || parsingDocId === doc.id}
+                  disabled={parsingDocs || uploadingFacts || parsingDocId === doc.id}
                   onClick={() => onDelete(doc.id, doc.file_name)}
                 >
                   删除
@@ -294,6 +309,9 @@ export default function DocumentParseList({
                         size="small"
                         variant="borderless"
                         style={{ width: 116, margin: "0 4px 0 -8px" }}
+                        // ✅ R203（R191 C-F3 补齐）：上传中改判会被同名 upsert 的
+                        //    excluded.doc_category 整列覆盖回自动分类值，无提示。
+                        disabled={uploadingFacts}
                         value={
                           normalizedCategoryOptions.includes(doc.doc_category || "")
                             ? doc.doc_category || "其他"

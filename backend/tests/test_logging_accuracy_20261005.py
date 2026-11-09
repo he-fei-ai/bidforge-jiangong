@@ -121,10 +121,21 @@ class TestCheckpointLogUnification:
     CHECKPOINT_PREFIX = 'logger.warning("检查点写入失败'
 
     def test_unified_prefix_used_everywhere(self):
-        """13 处 checkpoint 写盘失败告警必须全部走统一前缀（可一次 grep 命中）。"""
+        """checkpoint 写盘失败告警必须全部走统一前缀（可一次 grep 命中）。
+
+        ✅ R189（2026-11-08）重锚 13 → 14：`generate_facts` 的 all_skipped
+        正常成功终态此前不写 checkpoint，本轮补上后新增一处写盘失败告警。
+        ✅ R203（2026-11-09）重锚 14 → 15：_sse_outline_review 新增一处
+        （R200-R202 期间并行引入，未同步本计数锁）。分布：sh:13 + sc:1 + sor:1。
+        计数锁的意图是「增删该类告警都要同步本断言」，此处按当前态如实
+        更新；另补一条断言钉死新增分支，防止它被悄悄改掉。
+        """
         assert (
-            len(re.findall(r'logger\.warning\(\s*"检查点写入失败', SSE_FLAT)) == 13
-        ), "checkpoint 告警应恰为 13 处：增删该类告警都要同步本断言"
+            len(re.findall(r'logger\.warning\(\s*"检查点写入失败', SSE_FLAT)) == 15
+        ), "checkpoint 告警应恰为 15 处：增删该类告警都要同步本断言"
+        assert "事实提取 all_skipped 终态" in SSE_FLAT, (
+            "R189 all_skipped 终态的 checkpoint 写盘失败告警缺失"
+        )
 
     def test_no_double_failure_phrase(self):
         """禁止「…失败 checkpoint 失败」双失败歧义句式（原 8 处的真实原文）。"""
@@ -158,7 +169,10 @@ class TestAuditChainSchemeIdentity:
     AUDIT_MSGS = [
         "外科式补齐超时（%ds），回退完整 AI 审核（scheme=%s）",
         "外科式补齐失败，回退完整 AI 审核（scheme=%s）",
-        "目录审核超时（%ds），跳过审核直接完成（scheme=%s）",
+        # ✅ R187（2026-11-08 重锚）：旧文案把「未经审核」写成「跳过审核直接完成」，
+        #    与 completed 事件双双误导；现改为如实表述，锁的判据（完整格式串 +
+        #    scheme_name 在窗口内）强度不降，仅同步文案。
+        "目录审核超时（%ds）：本次目录未经 AI 审核，直接交付（scheme=%s）",
         "目录审核失败（scheme=%s）",
         "审核轮合并修复结果不可用，回退独立修复调用（scheme=%s）",
         "目录自动修复超时（%ds），跳过修复保留原目录（scheme=%s）",

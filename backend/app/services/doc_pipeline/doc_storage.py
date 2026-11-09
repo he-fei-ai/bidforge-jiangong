@@ -42,6 +42,7 @@ import json
 import logging
 import os
 import tempfile
+import threading
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
 from typing import Any
@@ -355,30 +356,55 @@ def write_semantic_index(
 # ---------------------------------------------------------------------------
 
 
+#: ✅ R191 修复（索引并发读改写丢条目）：documents_index.json 的
+#:    读-改-写窗口（read_json → 内存改 → atomic_write_json）无任何互斥——
+#:    同项目并发上传/解析（各在 asyncio.to_thread 线程里跑）交错时，
+#:    后写者以自己的旧快照覆盖前者的条目，索引丢条目（layers_on_disk
+#:    误报 False；DB 是权威源、reparse 可重建，但归档层观测失真）。
+#:    调用方都在工作线程（to_thread），asyncio.Lock 不可用，用进程内
+#:    threading.Lock 串行化同一进程内的全部索引写（写操作为毫秒级 JSON
+#:    落盘，全局粒度无性能顾虑）。
+_INDEX_WRITE_LOCK = threading.Lock()
+
+
 def update_index(project_id: str, entry: dict) -> Path:
     """按 doc_id upsert 一条索引记录（幂等）。"""
     path = index_path(project_id)
-    items = read_json(path)
-    if not isinstance(items, list):
-        items = []
-    doc_id = entry.get("doc_id", "")
-    replaced = False
-    for i, it in enumerate(items):
-        if isinstance(it, dict) and it.get("doc_id") == doc_id:
-            items[i] = {**it, **entry}
-            replaced = True
-            break
-    if not replaced:
-        items.append(entry)
-    return atomic_write_json(path, items)
+    with _INDEX_WRITE_LOCK:
+        items = read_json(path)
+        if not isinstance(items, list):
+            # ✅ R203 修复（损坏静默）:索引文件损坏/半写时旧实现无声重建为单
+            #    条目——其余文档的索引条目全部丢失（需逐文档 reparse 才能补回）
+            #    且零日志。DB 是权威源、reparse 可重建，但至少要留 WARNING 让
+            #    「归档层观测突然塌缩」可被归因。
+            logger.warning(
+                "归档索引损坏或不可读（%s），已按空索引重建；其余条目可经重新解析补回",
+                path,
+            )
+            items = []
+        doc_id = entry.get("doc_id", "")
+        replaced = False
+        for i, it in enumerate(items):
+            if isinstance(it, dict) and it.get("doc_id") == doc_id:
+                items[i] = {**it, **entry}
+                replaced = True
+                break
+        if not replaced:
+            items.append(entry)
+        return atomic_write_json(path, items)
 
 
 def remove_from_index(project_id: str, doc_id: str) -> None:
     path = index_path(project_id)
-    items = read_json(path)
-    if isinstance(items, list):
-        items = [it for it in items if not (isinstance(it, dict) and it.get("doc_id") == doc_id)]
-        atomic_write_json(path, items)
+    with _INDEX_WRITE_LOCK:
+        items = read_json(path)
+        if isinstance(items, list):
+            items = [it for it in items if not (isinstance(it, dict) and it.get("doc_id") == doc_id)]
+            atomic_write_json(path, items)
+        else:
+            # ✅ R203 修复（损坏静默）：与 update_index 对称——损坏时留 WARNING
+            #    （purge 语义保持保守：不基于损坏快照做写回，DB 权威源可重建）。
+            logger.warning("归档索引损坏或不可读（%s），跳过条目移除（可经重新解析重建）", path)
 
 
 # ---------------------------------------------------------------------------
@@ -400,7 +426,15 @@ def delete_doc_tree(project_id: str, doc_id: str) -> bool:
         return False
     import shutil
 
-    shutil.rmtree(target, ignore_errors=True)
+    # ✅ R203 修复（假成功）：旧实现 ignore_errors=True 后无条件返回 True——
+    #    Windows 下文件被占用（杀软扫描 / 预览进程持句柄）时目录树残留，
+    #    调用方（purge_document）与日志均认为清理成功。现失败记 WARNING 并
+    #    返回 False（幂等语义不变：调用方可重试，残留树由项目删除兜底）。
+    try:
+        shutil.rmtree(target)
+    except OSError as e:
+        logger.warning("文档目录树删除失败（可能被占用，可稍后重试或项目删除时兜底清理）: %s: %s", target, e)
+        return False
     return True
 
 

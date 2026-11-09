@@ -570,7 +570,8 @@ class TestTiffPageMarkers:
         import app.services.file_parser as fp
         import app.services.ocr as ocr
 
-        monkeypatch.setattr(fp, "_split_tiff_frames", lambda content: [b"f1", b"f2", b"f3"])
+        # R191 重锚：_split_tiff_frames 新增 diag 形参（帧数上限/丢帧告警），lambda 签名同步
+        monkeypatch.setattr(fp, "_split_tiff_frames", lambda content, diag=None: [b"f1", b"f2", b"f3"])
 
         def _fake_ocr_bytes(frame):
             idx = {b"f1": 1, b"f2": 2, b"f3": 3}[frame]

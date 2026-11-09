@@ -17,6 +17,7 @@
 from __future__ import annotations
 
 import logging
+import re
 import sqlite3
 from pathlib import Path
 
@@ -24,6 +25,20 @@ from app.config import settings
 from app.services.facts_extractor import FACT_SCOPE_PREDICATE, resolve_scheme_project_id
 
 logger = logging.getLogger(__name__)
+
+# ✅ R195 收口（P1）：底稿 doc.save 出口此前零净化 —— 主链所有文本经三层清洗，
+#    底稿直接把 scheme_defects.before_text/after_text/suggestion、global_facts.content
+#    原文写入。DB 文本含 XML 1.0 非法字符（\x00-\x08 等）时 lxml 序列化抛
+#    ValueError → 整份底稿导出 500（主文档已生成也被 unlink 白费）。
+#    与 routers/_export_docx_parts._xml_safe_text 同口径；services 层禁止
+#    import routers（分层护栏），故独立实现。
+_XML_ILLEGAL_RE = re.compile(
+    r"[\x00-\x08\x0b\x0c\x0e-\x1f\ud800-\udfff\ufffe\uffff\u200b\u200c\u200d\u2060\ufeff]"
+)
+
+
+def _safe_text(value) -> str:
+    return _XML_ILLEGAL_RE.sub("", value if isinstance(value, str) else ("" if value is None else str(value)))
 
 #: 低置信度阈值：低于该值的事实进入「事实待确认」清单。
 LOW_CONFIDENCE = 0.8
@@ -198,22 +213,22 @@ async def collect_all(db, scheme_id: str, scheme: dict | None = None) -> dict:
 
 
 def _heading(doc, text: str, level: int) -> None:
-    doc.add_heading(text, level=level)
+    doc.add_heading(_safe_text(text), level=level)
 
 
 def _table(doc, headers: list[str], rows: list[list[str]]) -> None:
     table = doc.add_table(rows=1, cols=len(headers))
     table.style = "Table Grid"
     for i, h in enumerate(headers):
-        table.rows[0].cells[i].text = h
+        table.rows[0].cells[i].text = _safe_text(h)
     for row in rows:
         cells = table.add_row().cells
         for i, value in enumerate(row[: len(headers)]):
-            cells[i].text = str(value or "")
+            cells[i].text = _safe_text(value)
 
 
 def _cell(value) -> str:
-    return "" if value is None else str(value)
+    return _safe_text(value)
 
 
 def _add_defect_appendix(doc, data: dict) -> None:
@@ -221,7 +236,7 @@ def _add_defect_appendix(doc, data: dict) -> None:
     defects = data["defects"]
     items = defects["items"]
     if defects["error"]:
-        doc.add_paragraph(f"缺陷账本查询失败，本附件无法判定（{defects['error']}）。")
+        doc.add_paragraph(f"缺陷账本查询失败，本附件无法判定（{_safe_text(defects['error'])}）。")
         return
     if not items:
         doc.add_paragraph("本方案当前无缺陷记录（0 条）。")
@@ -286,7 +301,7 @@ def _add_review_checklist(doc, data: dict) -> None:
 
     _heading(doc, f"3.1 事实待确认（{len(facts['items'])} 项）", 3)
     if facts["error"]:
-        doc.add_paragraph(f"事实数据查询失败，本节无法判定（{facts['error']}）。")
+        doc.add_paragraph(f"事实数据查询失败，本节无法判定（{_safe_text(facts['error'])}）。")
     elif not facts["items"]:
         doc.add_paragraph("无待确认事实（0 条）。")
     else:
@@ -308,7 +323,7 @@ def _add_review_checklist(doc, data: dict) -> None:
 
     _heading(doc, f"3.2 缺陷待决策（{len(pending)} 项）", 3)
     if data["defects"]["error"]:
-        doc.add_paragraph(f"缺陷账本查询失败，本节无法判定（{data['defects']['error']}）。")
+        doc.add_paragraph(f"缺陷账本查询失败，本节无法判定（{_safe_text(data['defects']['error'])}）。")
     elif not pending:
         doc.add_paragraph("无待决策缺陷（0 条）。")
     else:
@@ -330,7 +345,7 @@ def _add_review_checklist(doc, data: dict) -> None:
     if not standards["available"]:
         doc.add_paragraph(standards["statement"])
     elif standards.get("statement"):
-        doc.add_paragraph(f"标准核实数据查询失败，本节无法判定（{standards['statement']}）。")
+        doc.add_paragraph(f"标准核实数据查询失败，本节无法判定（{_safe_text(standards['statement'])}）。")
     elif not standards["items"]:
         doc.add_paragraph("无待核实标准（0 条）。")
     else:
@@ -357,7 +372,7 @@ def append_to_docx(path: str | Path, data: dict) -> None:
     doc.add_page_break()
     _heading(doc, "可复核底稿（附属产物）", 1)
     if data.get("scheme_name"):
-        doc.add_paragraph(f"方案：{data['scheme_name']}")
+        doc.add_paragraph(f"方案：{_safe_text(data['scheme_name'])}")
     doc.add_paragraph(
         "本部分为机器生成的可复核材料，随主文档一同交付：缺陷与修复记录、" "规范引用溯源附录、人工复核清单。"
     )

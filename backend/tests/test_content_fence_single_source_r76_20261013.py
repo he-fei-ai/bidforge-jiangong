@@ -112,6 +112,9 @@ class TestFencePredicateSingleSource:
             #    本轮 G3 组分别锁住「只剩一处定义 + 行口径必须委托 fence_common」。
             "services/bid_analysis_service.py",
             "services/repair_validator.py",
+            # ✅ R19x（2026-11-09）：numeric_lock._FENCE_RE（```.*?``` 非贪婪）
+            #    不掩 ~~~ 且对未闭合块错配，已改委托 fence_char_ranges。
+            "services/numeric_lock.py",
         ],
     )
     def test_consumers_define_no_local_fence_regex(self, rel):

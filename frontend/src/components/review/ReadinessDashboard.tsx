@@ -85,6 +85,8 @@ const SOURCE_LABEL: Record<string, string> = {
   expert_review: "专家论证预检（AI）",
   // ✅ G1（2026-09-21）：导出预检并入总检后新增的数据来源
   export_check: "导出预检",
+  // ✅ R198（2026-11-09）：评分项覆盖并入总检后新增的第七数据来源
+  scoring_coverage: "评分项覆盖",
 };
 
 export interface ReadinessDashboardProps {

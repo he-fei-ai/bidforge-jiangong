@@ -45,11 +45,24 @@ def _safe_filename(name: str, fallback: str) -> str:
 async def export_dossier(scheme_id: str, db=Depends(get_db)):
     """生成可复核底稿：既有渲染产出主文档 + 三类附属产物。"""
     _require_enabled()
+    # ✅ R195：生成中互斥守卫 —— 与 /export/docx 同口径（复用 export.py 的
+    # 判据与文案），防止生成中导出缺章底稿。
+    export_router._ensure_no_generation_on_export(scheme_id, "dossier")
+    # ✅ R195 收口（P1）：底稿链此前完全旁路 DLV 阻断闸门与编号一致性守卫 ——
+    #    同一方案 DOCX 导出被 DLV-13 high 阻断、底稿却照常产出，两条交付链
+    #    承诺不一致。底稿无 override 入口，检出 high 即阻断。
+    _blockers, _gate = await export_router._export_high_issue_gate(scheme_id, db, {})
+    if _blockers and not _gate["override"]:
+        return export_router._export_blocked_response(_blockers)
+    await export_router._guard_numbering_consistency(db, scheme_id)
 
     prep = await export_router._prepare_export(scheme_id, {"config": {}}, db, defer_audit=True)
     await export_router._prepare_export_render(prep)
 
-    out = EXPORTS_DIR / f"dossier_{scheme_id}_{uuid.uuid4().hex}.docx"
+    # ✅ R195 收口（P1）：产物名必须以 `{scheme_id}_` 开头 —— _gc_orphan_exports
+    #   只扫该前缀；旧名 `dossier_{scheme_id}_*` 不在扫描范围，BackgroundTask
+    #   兜底在断连/进程崩溃时不执行 → 永久孤儿且 GC 永远收不到。
+    out = EXPORTS_DIR / f"{scheme_id}_dossier_{uuid.uuid4().hex}.docx"
     try:
         await asyncio.to_thread(export_router._build_docx_sync, *export_router._build_docx_task(out, prep))
         data = await dossier.collect_all(db, scheme_id, prep.get("scheme"))

@@ -53,6 +53,7 @@ from app.services.content_blocks import (  # noqa: E402
 from app.services.content_blocks import (
     MAX_INLINE_CODE_BLOCK_LINES as _CONTENT_BLOCKS_MAX_INLINE_CODE_BLOCK_LINES,
 )
+from app.services.content_utils import text_word_count
 
 logger = logging.getLogger("chart_pipeline")
 
@@ -115,6 +116,11 @@ _CHART_SCHEME_TYPE_LIMITS = {"ai_image": 6}
 
 #: ✅ R58（2026-10-10）：提示词里「章节字数 ≤ 200 字不配图」的程序侧同口径阈值
 #: （与 prompts/content.py「何时配图」段落一致 —— 同一判据不得两处各写一份）。
+#: ✅ R196（2026-11-09）：该阈值此前只用于配额软提示（build_chart_quota_hint），
+#: 而正文叶子 word_budget ≥ 300（LEAF_MIN_WORD_BUDGET 地板）恒大于 200 →
+#: 软提示分支永不触发、程序侧也从不按**实际成文字数**拦图 —— 150 字的短章
+#: 塞一张图所有闸门照常放行。现 enforce_limits 路径按 text_word_count（剔除
+#: 图表围栏后的实际正文）执行同判据删块（reason=min_words），口径仍同源。
 _CHART_MIN_WORDS = 200
 
 #: 配额提示的展示顺序（flowchart/gantt 优先，ai_image 最后）。
@@ -793,6 +799,11 @@ def build_inline_chart_plan(
     #    _rewrite_code_block(content, code, None) 按代码内容匹配，内容相同的块会被
     #    一起删掉 —— 限额裁剪本应"留第 1 个、删第 2 个"，结果变成两张都删。
     edits: dict[int, str | None] = {}
+    # ✅ R199（2026-11-09）：实际成文字数在循环外计算一次。旧实现在图表块循环
+    #    体内对同一份 content 重复全文 text_word_count（循环内不改写 content，
+    #    改写统一累积在 edits、循环后一次性应用）—— O(块数 × 全文字数) 的重复
+    #    CPU，长章多块时在锁外白白放大耗时（P1-3 特意把计算移出锁，此处又自伤）。
+    _actual_words = text_word_count(content)
     # ✅ 清单口径：同一类型只登记一条（保持 /charts/list 与导出预检的既有语义）。
     #    注意这与"每一块都要过校验/修复/限额"并不矛盾 —— 校验是全量的，
     #    去重只作用于"写入 chart_predictions"这一步。
@@ -808,6 +819,22 @@ def build_inline_chart_plan(
         #    收紧方向若落地，判据应与下方「同类型全方案限额」同源（都读 chart_predictions）。
         #    超限块直接从正文移除（与"校验失败删块"同一宁缺勿滥语义）。
         if enforce_limits:
+            # ✅ R196：实际成文字数闸 —— 提示词与配额提示的「≤200 字不配图」判据
+            #    此前在程序侧无执行点（word_budget 地板 300 恒过软提示阈值）。
+            #    现按剔除图表围栏后的实际正文字数执行：短章配图一律移除。
+            #    放在 per_section_limit 之前（先判「本章根本不该有图」再谈配额）。
+            #    ✅ R199：_actual_words 已外提到循环外（content 在循环内不被改写）。
+            if _actual_words < _CHART_MIN_WORDS:
+                edits[ordinal] = None
+                _record_chart_drop(dropped_out, ct, "min_words")
+                logger.info(
+                    "章节 %s 实际正文仅 %d 字（<%d），图表 [%s] 已移除（短章不配图）",
+                    section_id[:8],
+                    _actual_words,
+                    _CHART_MIN_WORDS,
+                    ct,
+                )
+                continue
             if section_chart_count >= _CHART_PER_SECTION_LIMIT:
                 edits[ordinal] = None
                 _record_chart_drop(dropped_out, ct, "per_section_limit")
@@ -912,7 +939,14 @@ def build_inline_chart_plan(
 
 
 async def apply_inline_chart_plan(
-    db, section_id: str, rows: list[tuple], content: str | None = None, dropped_out: list | None = None
+    db,
+    section_id: str,
+    rows: list[tuple],
+    content: str | None = None,
+    dropped_out: list | None = None,
+    *,
+    enforce_limits: bool = True,
+    inserted_out: list[int] | None = None,
 ) -> str | None:
     """在调用方事务内写入图表登记（**不 commit**）。
 
@@ -941,6 +975,17 @@ async def apply_inline_chart_plan(
         dropped_out: 可选，观测清单 —— 锁内复核跳过登记的图表类型逐条记入
             （reason 为 scheme_type_limit / insert_failed / insert_none）。
             不传则行为与旧版完全一致，属加法式改动。
+        enforce_limits: ✅ R199（2026-11-09）：全方案同类型限额的**事务内复核**
+            是否执行。默认 True 保持生成链路行为不变；手动保存/审核修复/回滚
+            等调用方以 enforce_limits=False 调 build（契约见 sections.py「手动
+            保存是用户显式意图，不做程序级限额裁剪」）时必须同样传 False ——
+            旧实现 B2 复核未加门控，泄漏到手动路径：用户显式保存、且全方案该
+            类型已满额时，图表块会在保存事务里被**从正文静默删掉**且零留痕。
+            insert_failed / insert_none 的降级裁剪与限额无关，不受本开关影响。
+        inserted_out: 可选，实写数出参（约定调用方传空 list，本函数 append 一个
+            int）。✅ R199：resync_inline_charts 旧实现按 len(rows) 报「登记数」，
+            但 rows 里被限额复核/INSERT 失败跳过的行并未落库 —— 日志与返回值
+            虚高，排障误导。传此出参时按真实 INSERT 成功数返回。
 
     Returns:
         传入 content 时返回裁剪后的正文；否则返回 None。
@@ -956,25 +1001,29 @@ async def apply_inline_chart_plan(
     if not rows:
         return content
     scheme_id = rows[0][2] if len(rows[0]) > 2 else ""
-    try:
-        cur = await db.execute(
-            "SELECT chart_type, COUNT(*) AS n FROM chart_predictions "
-            "WHERE scheme_id=? AND section_id<>? GROUP BY chart_type",
-            (scheme_id, section_id),
-        )
-        # ✅ R13 修复（2026-09-22）：全局单连接上，先前的 DELETE 之后 SELECT
-        #    可能返回 None（aiosqlite 在连接状态异常 / 事务冲突时）。若 cur 为 None
-        #    直接 .fetchall() 会抛 "'NoneType' object has no attribute 'fetchall'"，
-        #    在日志里连续出现 24 次（见日志 R13），导致该路径上配图上限复核被静默跳过。
-        #    此处显式判空，与下方 except 分支保持同一 fallback（live = {}）。
-        if cur is None:
-            logger.warning("配图上限事务内复核：db.execute 返回 None（连接/事务异常），" "跳过上限复核，按原计划写入")
+    live: dict[str, int] = {}
+    if enforce_limits:
+        # ✅ R199：限额复核（含 SELECT 本身）整体门控在 enforce_limits=True 下。
+        #    手动保存等 enforce_limits=False 路径跳过 SELECT，省一次查询且与
+        #    build 侧「不做程序级限额裁剪」的契约一致。
+        try:
+            cur = await db.execute(
+                "SELECT chart_type, COUNT(*) AS n FROM chart_predictions "
+                "WHERE scheme_id=? AND section_id<>? GROUP BY chart_type",
+                (scheme_id, section_id),
+            )
+            # ✅ R13 修复（2026-09-22）：全局单连接上，先前的 DELETE 之后 SELECT
+            #    可能返回 None（aiosqlite 在连接状态异常 / 事务冲突时）。若 cur 为 None
+            #    直接 .fetchall() 会抛 "'NoneType' object has no attribute 'fetchall'"，
+            #    在日志里连续出现 24 次（见日志 R13），导致该路径上配图上限复核被静默跳过。
+            #    此处显式判空，与下方 except 分支保持同一 fallback（live = {}）。
+            if cur is None:
+                logger.warning("配图上限事务内复核：db.execute 返回 None（连接/事务异常），" "跳过上限复核，按原计划写入")
+            else:
+                live = {r["chart_type"]: r["n"] for r in await cur.fetchall()}
+        except Exception as e:
+            logger.warning("配图上限事务内复核失败（按原计划写入）: %s", e)
             live = {}
-        else:
-            live = {r["chart_type"]: r["n"] for r in await cur.fetchall()}
-    except Exception as e:
-        logger.warning("配图上限事务内复核失败（按原计划写入）: %s", e)
-        live = {}
     running: dict[str, int] = {}
     skipped_types: set[str] = set()
     _drop_seen: set[tuple[str, str]] = set()
@@ -994,12 +1043,16 @@ async def apply_inline_chart_plan(
 
     for row in rows:
         ct = row[3] if len(row) > 3 else ""
-        _limit = _CHART_SCHEME_TYPE_LIMITS.get(ct, _CHART_SCHEME_TYPE_DEFAULT_LIMIT)
-        if live.get(ct, 0) + running.get(ct, 0) >= _limit:
-            logger.info("章节 %s 图表 [%s] 全方案已达 %d 个上限（事务内复核），跳过登记", section_id[:8], ct, _limit)
-            skipped_types.add(ct)
-            _note_drop(ct, "scheme_type_limit")
-            continue
+        # ✅ R199：同类型全方案限额复核仅在 enforce_limits=True 下执行（B2 修复
+        #    的并发超发防护只对生成链路有意义；手动保存/修复/回滚路径是用户
+        #    显式意图，与 build 侧 enforce_limits=False 的「不裁剪」契约一致）。
+        if enforce_limits:
+            _limit = _CHART_SCHEME_TYPE_LIMITS.get(ct, _CHART_SCHEME_TYPE_DEFAULT_LIMIT)
+            if live.get(ct, 0) + running.get(ct, 0) >= _limit:
+                logger.info("章节 %s 图表 [%s] 全方案已达 %d 个上限（事务内复核），跳过登记", section_id[:8], ct, _limit)
+                skipped_types.add(ct)
+                _note_drop(ct, "scheme_type_limit")
+                continue
         # ✅ BUG 修复（2026-10-05 · F-3，R13 同构）：aiosqlite 在事务冲突 / 连接
         #    异常时 `await db.execute(...)` 可能返回 None（SELECT 早已在同一函数内
         #    做过 None 兜底），INSERT 却**静默吞掉**——chart_predictions 里缺一条，
@@ -1031,6 +1084,9 @@ async def apply_inline_chart_plan(
             _note_drop(ct, "insert_none")
             continue
         running[ct] = running.get(ct, 0) + 1
+    # ✅ R199：实写数出参（被限额/INSERT 失败跳过的行不计入）
+    if inserted_out is not None:
+        inserted_out.append(sum(running.values()))
     if content is not None and skipped_types:
         # ✅ BUG 修复（2026-09-24）：改为按围栏序号精确删除（_apply_chart_fence_edits）。
         #    旧实现按代码内容匹配，内容相同的块会被一起删掉，可能误删**其它类型**
@@ -1075,13 +1131,19 @@ async def resync_inline_charts(
     #    合法空串返回值也当 None 回退——「正文仅由图表块构成且块被限额全部
     #    裁掉」时 apply 返回 ""，回退成裁剪前正文 ⇒ 图块留在正文、chart_predictions
     #    无行 ⇒ 恰是本模块注释反复要杜绝的幽灵图（导出照渲、清单查不到、绕过限额）。
-    _applied = await apply_inline_chart_plan(db, section_id, rows, new_content)
+    _inserted: list[int] = []
+    _applied = await apply_inline_chart_plan(
+        db, section_id, rows, new_content, enforce_limits=enforce_limits, inserted_out=_inserted
+    )
     if _applied is None:
         _applied = new_content
     new_content = _applied
-    if rows:
-        logger.info("章节 %s 同步登记 %d 个内联图表", section_id[:8], len(rows))
-    return len(rows), new_content
+    # ✅ R199：返回实写数（rows 中被事务内限额复核 / INSERT 失败跳过的行不计）。
+    #    旧实现按 len(rows) 报「登记数」——日志与返回值虚高，排障误导。
+    _n = _inserted[0] if _inserted else len(rows)
+    if _n:
+        logger.info("章节 %s 同步登记 %d 个内联图表", section_id[:8], _n)
+    return _n, new_content
 
 
 def resync_inline_chart_rows(

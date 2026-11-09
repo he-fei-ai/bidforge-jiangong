@@ -43,6 +43,8 @@ export interface ComplianceRepairDrawerProps {
   history: CrRepairHistoryItem[];
   consistencySeverity: string;
   forceFullRepair: boolean;
+  /** ✅ R197（F4）：确认请求在飞态（四个确认按钮共用，双击双发防护） */
+  confirming: boolean;
   onForceFullRepairChange: (checked: boolean) => void;
   onScan: () => void;
   onCancelScan: () => void;
@@ -68,6 +70,7 @@ export function ComplianceRepairDrawer({
   history,
   consistencySeverity,
   forceFullRepair,
+  confirming,
   onForceFullRepairChange,
   onScan,
   onCancelScan,
@@ -168,6 +171,7 @@ export function ComplianceRepairDrawer({
                 强制全量重修
               </Checkbox>
               <Button
+                loading={confirming}
                 disabled={!(repair?.items || []).some((i) => i.status === "repaired")}
                 onClick={() => onConfirm(repairItemIds("repaired"), [])}
               >
@@ -175,6 +179,7 @@ export function ComplianceRepairDrawer({
               </Button>
               <Button
                 danger
+                loading={confirming}
                 disabled={!(repair?.items || []).some((i) => i.status === "repaired")}
                 onClick={() => onConfirm([], repairItemIds("repaired"))}
               >
@@ -185,9 +190,11 @@ export function ComplianceRepairDrawer({
               </Button>
             </Space>
             <div style={{ marginTop: 8, fontSize: 12, color: "#999" }}>
-              💡 一次修复是按「章节」成稿的：逐条<Text strong>拒绝</Text>某条冲突会将该章节
-              <Text strong>整体恢复</Text>为修复前原文（同章节其他已修复项一并回退）。
-              需要保留部分修改时，请先「全部拒绝」后用更低的修复等级重新「一键修复」。
+              {/* ✅ R197（F5）：文案对齐 R181 冲突级片段回滚语义（旧文案宣称
+                  「整体恢复为修复前原文」与后端现行三态行为矛盾） */}
+              💡 一次修复是按「章节」成稿的：逐条<Text strong>拒绝</Text>某条冲突会回滚该
+              冲突对应的变更片段；无法定位到变更片段时<Text strong>正文不会回滚</Text>
+              （仅回写冲突状态，会显式提示）。需要保留部分修改时，请先「全部拒绝」后用更低的修复等级重新「一键修复」。
             </div>
             <div style={{ marginTop: 4, fontSize: 12, color: "#999" }}>
               💡 默认会跳过「已修复且修复成果仍在正文里」的冲突以节省 AI 调用；
@@ -382,6 +389,7 @@ export function ComplianceRepairDrawer({
                         <Button
                           size="small"
                           type="primary"
+                          disabled={confirming}
                           onClick={() => onConfirm([it.conflict_id!], [])}
                         >
                           接受
@@ -389,9 +397,10 @@ export function ComplianceRepairDrawer({
                         <Button
                           size="small"
                           danger
+                          disabled={confirming}
                           onClick={() => onConfirm([], [it.conflict_id!])}
                         >
-                          拒绝（恢复原文）
+                          拒绝（回滚变更片段）
                         </Button>
                       </Space>
                     )}

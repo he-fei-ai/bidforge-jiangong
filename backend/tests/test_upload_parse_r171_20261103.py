@@ -152,34 +152,45 @@ class TestOutlinePatternsOrder:
     """_OUTLINE_PATTERNS 顺序锁 + OCR 容错注释存在性。"""
 
     def test_patterns_order_fixed(self):
-        """pattern 列表顺序固定：中文数字章 → 阿拉伯数字章 → 点分 → 单数字 → 中文顿号 → 中文括号 → 阿拉伯括号 → 右括号。"""
+        """pattern 列表顺序固定：中文数字章 → 阿拉伯数字章 → 点分（无分隔符·R191）→ 点分 → 单数字 → 中文顿号 → 中文括号 → 阿拉伯括号 → 右括号。
+
+        R191 重锚（意图不放宽）：新增「点分无分隔符直接跟汉字」条目（8→9 条），
+        修复 "1.1工程概况" 被（有分隔符）点分条回溯命中错撕为 "1工程概况"。
+        ⚠️ 新条必须排在「点分（要求分隔符）」之前：后者对 "1.1.1施工准备"
+        会回溯命中（raw_id="1.1"+吃掉分隔点），更具体的无分隔符形态永远轮不到。
+        """
         patterns = fp._OUTLINE_PATTERNS
-        # 共 8 条
-        assert len(patterns) == 8
+        # 共 9 条
+        assert len(patterns) == 9
         # 第 0 条：中文数字章（level=1，含 章/节/篇）
         assert patterns[0][0] == 1
         assert "部分|章|节|篇" in patterns[0][1].pattern
         # 第 1 条：阿拉伯数字章
         assert patterns[1][0] == 1
         assert r"\d+" in patterns[1][1].pattern and "部分|章|节|篇" in patterns[1][1].pattern
-        # 第 2 条：点分编号（level=None，按上下文推断）
+        # 第 2 条（R191 新增）：点分编号无分隔符直接跟汉字（level=None）
         assert patterns[2][0] is None
         assert "." in patterns[2][1].pattern
-        # 第 3 条：单数字编号
-        assert patterns[3][0] == 1
-        assert r"\d+" in patterns[3][1].pattern
-        # 第 4 条：中文数字顿号
-        assert patterns[4][0] == 2
-        assert "、" in patterns[4][1].pattern
-        # 第 5 条：中文数字括号
-        assert patterns[5][0] is None
-        assert "（" in patterns[5][1].pattern or "(" in patterns[5][1].pattern
-        # 第 6 条：阿拉伯数字括号
-        assert patterns[6][0] == 3
-        assert r"\d+" in patterns[6][1].pattern
-        # 第 7 条：右括号编号（兜底）
+        # 汉字前瞻判据（用 "4e00" 子串断言，避开转义层级歧义）
+        assert "4e00" in patterns[2][1].pattern, patterns[2][1].pattern
+        # 第 3 条：点分编号（level=None，要求分隔符）
+        assert patterns[3][0] is None
+        assert "." in patterns[3][1].pattern
+        # 第 4 条：单数字编号
+        assert patterns[4][0] == 1
+        assert r"\d+" in patterns[4][1].pattern
+        # 第 5 条：中文数字顿号
+        assert patterns[5][0] == 2
+        assert "、" in patterns[5][1].pattern
+        # 第 6 条：中文数字括号
+        assert patterns[6][0] is None
+        assert "（" in patterns[6][1].pattern or "(" in patterns[6][1].pattern
+        # 第 7 条：阿拉伯数字括号
         assert patterns[7][0] == 3
-        assert ")" in patterns[7][1].pattern or "）" in patterns[7][1].pattern
+        assert r"\d+" in patterns[7][1].pattern
+        # 第 8 条：右括号编号（兜底）
+        assert patterns[8][0] == 3
+        assert ")" in patterns[8][1].pattern or "）" in patterns[8][1].pattern
 
     def test_ocr_robustness_comment_present(self):
         """OCR 容错注释必须存在（说明「编号与分隔符之间允许 \\s*」的设计意图）。"""

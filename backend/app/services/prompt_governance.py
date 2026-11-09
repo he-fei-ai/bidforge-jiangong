@@ -124,13 +124,28 @@ _SEG_HEAD_RE = re.compile(r"^\s*【([^】]{1,60})】\s*[:：]\s?(.*)$")
 
 
 def segment_priority_of(label: str) -> int:
-    """按标签取优先级；支持子串匹配（标签名常带补充说明，如「章节（本章须落实）」）。"""
+    """按标签取优先级；支持子串匹配（标签名常带补充说明，如「章节（本章须落实）」）。
+
+    ✅ R204（2026-11-09 · 匹配顺序依赖导致优先级误判）：旧实现对
+    ``CONTEXT_PRIORITY`` 按**插入顺序**做子串匹配，先命中者胜 ——
+    ``"目录"``（1）登记在 ``"目录库参考"``（3）之前，于是
+    ``segment_priority_of("目录库参考")`` 返回 **1**（而非登记的 3），
+    外部目录库参考被当成"目录级核心内容"优先保留，而本该先被削减的
+    资料摘要/知识库反而被砍 —— 与设计文档（全局事实 > 目录树 > 资料摘要 >
+    知识库）相反。
+
+    现改为「先精确 → 再**最长匹配**（匹配串最长者胜）→ 最后兜底」。
+    """
     if label in CONTEXT_PRIORITY:
         return CONTEXT_PRIORITY[label]
+    best_len = 0
+    best_val = _DEFAULT_PRIORITY
     for k, v in CONTEXT_PRIORITY.items():
         if k in label or label in k:
-            return v
-    return _DEFAULT_PRIORITY
+            if len(k) > best_len:
+                best_len = len(k)
+                best_val = v
+    return best_val
 
 
 def split_labeled_segments(text: str) -> tuple[str, list[dict], str]:
@@ -336,6 +351,15 @@ def allocate_context_budget(text: str, budget: int, min_ratio: float = _SEGMENT_
 
     prefix, segs, trailing = split_labeled_segments(text)
     if not segs:
+        # ⚠️ R204（2026-11-09 · **回退**：保持既有 fail-soft 契约）。
+        #   探查曾指出「无【标签】段时预算整体失效（只告警不裁）」是护栏漏洞，
+        #   本轮一度改为「按预算硬裁整段」，但既有护栏
+        #   （test_prompt_governance::test_no_segments_returns_text、
+        #   test_prompt_g6_governance::test_budget_keeps_program_requirements_before_material）
+        #   明确锁定「无标签段 → **原样返回**、不硬裁」—— 因为无标签文本里
+        #   往往就是最关键的任务描述（指令前缀），硬砍会直接破坏任务本体。
+        #   该缺口需要「标签白名单 + 外部段落围栏」这类更细的机制才能安全收口，
+        #   属**产品级取舍**，本轮登记为遗留项，不在此处擅自改变契约。
         _record_budget_not_applied("no_labeled_segments")
         logger.warning("上下文预算未生效（无【标签】段，无法按优先级分配）：预算 %d 字", budget)
         return text, {"applied": False, "budget": budget, "segments": 0}

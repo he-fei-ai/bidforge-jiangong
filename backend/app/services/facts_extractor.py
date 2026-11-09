@@ -1100,8 +1100,13 @@ def _split_table_rows(
     if header_idx >= 0:
         header = [lines[header_idx]]
         # 若下一行为 Markdown 对齐分隔行（|---|---|），一并保留
+        # ✅ R193：空行剥掉 |:- 后字符集合恰为空集 → 恒等成立，表格与正文间的
+        #    空行被误判为分隔行收进 header（每个切分子段注入「表头+空行」）。
+        #    补「行非空」前置判定（真分隔行必含 - 字符，剥字符后仍非空的说法
+        #    不成立——分隔行如 |---|---| 剥后剩空白，但行本身 strip() 非空）。
         if (
             header_idx + 1 < len(lines)
+            and lines[header_idx + 1].strip()
             and set(lines[header_idx + 1].strip().replace("|", "").replace(":", "").replace("-", "").strip()) == set()
         ):
             header.append(lines[header_idx + 1])
@@ -1384,7 +1389,11 @@ def split_into_chunks(text: str, chunk_size: int = CHUNK_SIZE, overlap: int = CH
                     _finalize()
                     if len(part) > effective_size:
                         # 超长 part 强制按字数切（相同子段文本走 _classify 缓存，仅首次扫描）
-                        for i in range(0, len(part), effective_size - overlap):
+                        # ✅ R193：effective_size 可被高权重区打 7 折，调用方一旦传入
+                        #    chunk_size ≤ overlap，步长 ≤ 0 → range 为空 → 该 part
+                        #    整体静默丢失（与 :1132-1152 已修的「超长单行丢行」同族）。
+                        #    步长下限 1 保证任何参数组合都不丢内容。
+                        for i in range(0, len(part), max(1, effective_size - overlap)):
                             _seg_text = part[i : i + effective_size]
                             _seg_zone = _classify(_seg_text)
                             chunks.append(
@@ -1599,24 +1608,42 @@ async def extract_from_single_chunk(
         return []
 
     items: list[FactItem] = []
+    _malformed = 0
     # ✅ 2026-10-06：把模型主动声明的「本段未能提取」回传给编排层。
-    #    _validate 早已接受 segment_failed=true（视为合法输出），但该标志从未
-    #    传出本函数 → 编排层无法区分「合法空段」与「模型没读懂这段」，
-    #    后者会被永久记为已完成（见 ExtractionResult.declared_failed_chunks）。
-    #    只在「一个事实都没解析出来」时登记，避免与真实产出重复计数。
+    # _validate 早已接受 segment_failed=true（视为合法输出），但该标志从未
+    # 传出本函数 → 编排层无法区分「合法空段」与「模型没读懂这段」，
+    # 后者会被永久记为已完成（见 ExtractionResult.declared_failed_chunks）。
+    # 只在「一个事实都没解析出来」时登记，避免与真实产出重复计数。
     _segment_declared_failed = obj.get("segment_failed") is True
     # ✅ 新格式：{"facts": [...]}
     for f in obj.get("facts", []) or []:
+        # ✅ R193：弱模型可能输出 {"facts": ["塔吊 QTZ80", ...]}（字符串数组）
+        #    或 {"facts": {"名称": "值"}}（dict 迭代产出键）。此前 AttributeError
+        #    发生在 collect_json_response 成功【之后】的解析区（不在重试 try 内）
+        #    → 整段记失败、每轮重试 3 次后依旧失败，该段事实持续丢失且
+        #    failed_details 原因不可读（'str' object has no attribute 'get'）。
+        #    现跳过非 dict 条目并计数留痕。
+        if not isinstance(f, dict):
+            _malformed += 1
+            continue
         parsed = _parse_fact_dict(f, default_source=f"第{chunk_index + 1}段:{heading[:30]}")
         if parsed:
             items.append(parsed)
     # ✅ 旧格式兼容：{"groups": [{"items":[...]}]}（渐进迁移期间保留）
     if not items:
         for g in obj.get("groups", []) or []:
+            if not isinstance(g, dict):
+                _malformed += 1
+                continue
             for it in g.get("items", []) or []:
+                if not isinstance(it, dict):
+                    _malformed += 1
+                    continue
                 parsed = _parse_legacy_fact_dict(it, chunk_index=chunk_index)
                 if parsed:
                     items.append(parsed)
+    if _malformed:
+        logger.warning("第 %d 段模型输出含 %d 个非对象事实条目，已跳过", chunk_index + 1, _malformed)
 
     # 安全关键事实过滤：禁止保留模拟值（is_simulated 恒 false 但仍保留此防线）
     items = _filter_safety_sensitive(items)
@@ -3021,6 +3048,12 @@ def format_for_frontend(result: ExtractionResult) -> dict[str, Any]:
                 it.source_ref or "",
             )
             _chapter = it.chapter or _dims["chapter"]
+            # ✅ R193（口径同源）：库值 chapter（人工归类 / 历史标注）可能与现算
+            #    _dims["chapter"] 不同，而 shared_chapters 集合只由现算维度构成 →
+            #    主归属章缺席共享集合（前端复用徽标与 chapter 不一致）。并入主归属。
+            _shared_chapters = list(_dims["shared_chapters"])
+            if _chapter and _chapter not in _shared_chapters:
+                _shared_chapters.append(_chapter)
             _items_payload.append(
                 {
                     "fact_id": it.persisted_id,
@@ -3049,7 +3082,7 @@ def format_for_frontend(result: ExtractionResult) -> dict[str, Any]:
                     "fact_attr": it.fact_attr or "",
                     "source_kind": it.source_kind or "",
                     "is_shared": bool(it.is_shared),
-                    "shared_chapters": list(_dims["shared_chapters"]),
+                    "shared_chapters": _shared_chapters,
                     "value_kind": it.value_kind or "",
                     "is_simulated": it.is_simulated,
                     "is_safety_critical": it.is_safety_critical,
@@ -3089,9 +3122,15 @@ def format_for_frontend(result: ExtractionResult) -> dict[str, Any]:
             }
         )
 
+    # ✅ R189（2026-11-08 · 契约兑现）：group_count 早在 R89 就被登记进
+    #    `checkpoint_schema.FACTS_CHECKPOINT_FIELDS` 并由生成器写进
+    #    `types/checkpointSchema.ts`，但服务端从未产出 → `facts_result` 断线重挂
+    #    载荷里该键恒缺失（声明了却永远为 undefined 的假契约）。此处按实际分组
+    #    数补齐，与 SSE 在线 completed 事件同源（纯加法，前端零消费不受影响）。
     return {
         "ok": True,
         "groups": flat_groups,
+        "group_count": len(flat_groups),
         "total_items": result.total_items,
         "simulated_count": result.simulated_count,
         "conflict_count": result.conflict_count,
@@ -3545,6 +3584,11 @@ async def load_completed_chunks(db, project_id: str, scheme_id: str = "") -> set
             "SELECT chunk_hash FROM facts_extracted_chunks " "WHERE project_id=? AND scheme_id=?",
             (project_id, scheme_id or ""),
         )
+        # ✅ R13 显式化（R193）：None 游标此前靠 AttributeError 落进宽 except，
+        #    日志只见通用异常、按全量提取静默降级（白烧整轮 AI 计费不可判读）。
+        if cur is None:
+            logger.warning("读取提取进度失败（db.execute 返回 None，R13，按全量提取处理）")
+            return set()
         done = {r[0] for r in await cur.fetchall() if r[0]}
     except Exception as e:
         logger.warning("读取提取进度失败（按全量提取处理）: %s", e)
@@ -3562,7 +3606,11 @@ async def load_completed_chunks(db, project_id: str, scheme_id: str = "") -> set
             "AND next_retry_at > datetime('now','localtime')",
             (project_id, scheme_id or ""),
         )
-        deferred = {r[0] for r in await cur.fetchall() if r[0]}
+        if cur is None:
+            # ✅ R13 显式化（R193）：同上，退避态读取失败按立即重试处理并留痕。
+            logger.warning("读取失败段退避状态失败（db.execute 返回 None，R13，按立即重试处理）")
+        else:
+            deferred = {r[0] for r in await cur.fetchall() if r[0]}
     except Exception as e:
         logger.warning("读取失败段退避状态失败（按立即重试处理）: %s", e)
     return CompletedChunkSet(done | deferred, deferred=deferred)
@@ -3598,6 +3646,11 @@ async def save_extracted_chunks(db, project_id: str, scheme_id: str, ok_hashes, 
             "SELECT chunk_hash FROM facts_extracted_chunks " "WHERE project_id=? AND scheme_id=?",
             (project_id, scheme_id or ""),
         )
+        if cur is None:
+            # ✅ R13 显式化（R193）：None 游标此前靠 AttributeError 进重试闭包，
+            #    日志只见通用异常。显式 RuntimeError 重试语义不变（retry_db_op），
+            #    日志可判读为「进度读取未生效」。
+            raise RuntimeError("读取已提取进度失败（db.execute 返回 None，R13）")
         existing = {r[0] for r in await cur.fetchall()}
         stale = existing - all_h
         if stale:
@@ -3697,6 +3750,10 @@ async def record_chunk_failures(db, project_id: str, scheme_id: str = "", *, fai
                 "SELECT fail_count FROM facts_chunk_failures " "WHERE project_id=? AND scheme_id=? AND chunk_hash=?",
                 (project_id, scheme_id or "", h),
             )
+            if cur is None:
+                # ✅ R13 显式化（R193）：同 save_extracted_chunks——显式异常进
+                #    retry_db_op 重试，日志可判读。
+                raise RuntimeError("读取失败段计数失败（db.execute 返回 None，R13）")
             row = await cur.fetchone()
             count = int(row[0] or 0) + 1 if row else 1
             delay = retry_delay_seconds(count)
@@ -3766,6 +3823,17 @@ async def release_chunk_failures(db, project_id: str, scheme_id: str = "", *, ch
 
     now = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
     hashes = [str(r.get("chunk_hash") or "") for r in rows if r.get("chunk_hash")]
+    if not hashes:
+        # ✅ R193（空集守卫）：rows 非空但全部 chunk_hash 为空（脏数据 / 历史迁移
+        #    行）时 `IN ()` 是 sqlite 语法错误 → 接口 500。同文件同族写点均有
+        #    空集守卫（if non_protected_ids / if ok / if all_h / if names），
+        #    唯此处漏。
+        return {
+            "released": 0,
+            "segments": [],
+            "skipped_source": "manual_retry_no_valid_hashes",
+            "diagnostics": {"scoped_failed_segments": len(rows), "bypassed_backoff": 0, "already_immediate": 0},
+        }
     placeholders = ",".join("?" * len(hashes))
     await db.execute(
         f"UPDATE facts_chunk_failures SET next_retry_at='', last_manual_retry_at=? "
@@ -3953,7 +4021,18 @@ async def invalidate_export_cache(db, scheme_id: str, facts_touched: bool = Fals
     from pathlib import Path
 
     cur = await db.execute("SELECT id, result_path FROM export_cache WHERE scheme_id=?", (scheme_id,))
-    rows = [dict(r) for r in await cur.fetchall()]
+    # ✅ R189（2026-11-08 · R13 服务层漏网面）：本查询是事实链收尾的**缓存失效**
+    #    步骤，事实此时已由 persist_extraction 落库。若 db.execute 返回 None，
+    #    裸 .fetchall() 抛 AttributeError 会冒泡到 SSE 外层 → finish_task(failed)，
+    #    把「提取成功」谎报成失败（R166 注释已明确禁止）。与 persist_extraction
+    #    :3157 的「判空降级空集危险→raise」不同：此处空集只影响「跳过清缓存」，
+    #    不会扩大任何 DELETE 范围，故安全降级为不清理并留 ERROR 日志，
+    #    同时继续推进下方 facts_touched 时间戳（章节失效标记仍可用）。
+    if cur is None:
+        logger.error("R13：db.execute 返回 None（导出缓存失效·查询，scheme=%s），跳过缓存清理", scheme_id)
+        rows: list[dict] = []
+    else:
+        rows = [dict(r) for r in await cur.fetchall()]
     cache_count = len(rows)
     if cache_count > 0:
         # ✅ R166（2026-11-03 · 锁族补面）：DELETE+commit 接 retry_db_op ——

@@ -383,7 +383,7 @@ _reg(
 2. **改值/删项必须引用真实 fact_id**：update/delete 的 fact_id 必须来自【现有全局事实】，不得编造。
 3. **改值优先于新增**：同一事实已存在则用 update 改值，不要重复 add。
 4. **严禁模拟与商务信息**：新增事实不得为凭空的估计值/行业默认值；报价/单价/资质等商务信息一律不新增（在 summary 中说明已忽略）。
-5. category 取值必须是以下枚举之一（拿不准填 other）：basic/basis/personnel/labor/schedule/machinery/material/construction_practice/deployment/process_flow/tech_param/design_param/safety/risk/monitoring/emergency/acceptance/temporary/environment/quality/other。
+5. category 取值必须是以下枚举之一（拿不准填 other）：basic/basis/personnel/labor/schedule/equipment/machinery/material_mgmt/tech_param/scale/risk/safety_critical/deployment/temporary/process/execution/monitoring/quality/acceptance/commitment/environment/emergency/other。
 6. 若调整要求无法基于现有事实落地（如引用了不存在的信息、与约束矛盾），则返回空操作列表并在 summary 说明原因。
 7. 返回标准 JSON：{"operations": [{"op": "update", "fact_id": "...", "value": "新值", "name": "可选改名", "category": "可选"}, {"op": "add", "name": "事实名", "value": "值", "category": "other"}, {"op": "delete", "fact_id": "...", "reason": "为何删"}], "summary": "一句话向用户说明本次改了什么"}
 8. update/add 可带可选字段 value_kind（枚举 fact/requirement）：fact=本方案已采用的确定性口径（默认）；requirement=招标文件/规范的要求原文口径（无法安全转写为本方案承诺时）。与调整要求无关时不要动该字段；拿不准填 fact。

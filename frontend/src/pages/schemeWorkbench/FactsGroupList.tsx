@@ -14,8 +14,11 @@ import {
   applyFactsFilter,
   factAttrTitle,
   factChapterTitle,
+  factConfidenceColor,
+  factConfidencePercent,
   factSourceKindTitle,
   factValueKindLabel,
+  safeFactText,
 } from "./factsShared";
 
 const { Text } = Typography;
@@ -148,7 +151,10 @@ export const FactsGroupList = memo(function FactsGroupList({
                             }}
                           >
                             <Text strong style={{ color: it.has_conflict ? "#ff4d4f" : undefined }}>
-                              {it.name || `事实 ${idx + 1}`}
+                              {/* ✅ R193（D-06）：R189 安全渲染纪律贯穿主值位——name/value
+                                  是事实 Tab 渲染量最大的字段，脏数据（对象/数组）裸渲染
+                                  会「Objects are not valid as a React child」整列表崩。 */}
+                              {safeFactText(it.name) || `事实 ${idx + 1}`}
                             </Text>
                             <span style={{ color: "#666" }}>:</span>
                             <Text
@@ -161,7 +167,7 @@ export const FactsGroupList = memo(function FactsGroupList({
                                 fontWeight: 500,
                               }}
                             >
-                              {it.value}
+                              {safeFactText(it.value)}
                             </Text>
                           </div>
 
@@ -271,8 +277,10 @@ export const FactsGroupList = memo(function FactsGroupList({
                                       // ✅ R174 F6：key 由 index 改为「值+来源」内容组合键，
                                       //    候选值增删/裁决后重排不再发生邻行 DOM 复用错位
                                       <div key={`${String(cv.value)}::${String(cv.source)}::${ci}`}>
-                                        {cv.value as string} ({cv.source}, 置信度{" "}
-                                        {(cv.confidence! * 100).toFixed(0)}%)
+                                        {safeFactText(cv.value)} ({safeFactText(cv.source)}, 置信度{" "}
+                                        {factConfidencePercent(cv.confidence) === null
+                                          ? "未知"
+                                          : `${factConfidencePercent(cv.confidence)}%`})
                                       </div>
                                     ))}
                                   </div>
@@ -288,31 +296,31 @@ export const FactsGroupList = memo(function FactsGroupList({
                                 📝 待审核
                               </Tag>
                             )}
-                            {/* 置信度小条 */}
-                            <Tooltip title={`置信度 ${(it.confidence! * 100).toFixed(0)}%`}>
+                            {/* 置信度小条（R189：缺失/非数不渲染 NaN%，色阶走单一纯函数） */}
+                            <Tooltip
+                              title={
+                                factConfidencePercent(it.confidence) === null
+                                  ? "置信度未知"
+                                  : `置信度 ${factConfidencePercent(it.confidence)}%`
+                              }
+                            >
                               <div
                                 style={{
                                   width: 50,
                                   height: 6,
                                   borderRadius: 3,
-                                  background:
-                                    it.confidence! >= 0.9
-                                      ? "#52c41a"
-                                      : it.confidence! >= 0.7
-                                        ? "#1677ff"
-                                        : it.confidence! >= 0.4
-                                          ? "#fa8c16"
-                                          : "#ff4d4f",
+                                  background: factConfidenceColor(it.confidence),
                                   opacity: 0.8,
                                 }}
                               />
                             </Tooltip>
-                            {/* 来源 */}
-                            {it.source && (
+                            {/* 来源（R189：source_ref 可能是 JSON 数组/对象，裸 .slice 会崩） */}
+                            {safeFactText(it.source) && (
                               <span style={{ fontSize: 11, color: "#999" }}>
-                                📎 {it.source}
-                                {(it as { source_ref?: string }).source_ref &&
-                                  ` · ${(it as { source_ref?: string }).source_ref!.slice(0, 30)}`}
+                                📎 {safeFactText(it.source)}
+                                {(it as { source_ref?: unknown }).source_ref
+                                  ? ` · ${safeFactText((it as { source_ref?: unknown }).source_ref).slice(0, 30)}`
+                                  : ""}
                               </span>
                             )}
                           </div>
@@ -343,13 +351,13 @@ export const FactsGroupList = memo(function FactsGroupList({
                                     走同一裁决接口。 */}
                                 <div style={{ display: "flex", alignItems: "center", gap: 8 }}>
                                   <Tag color="green" style={{ margin: 0 }}>
-                                    {it.value}（当前）
+                                    {safeFactText(it.value)}（当前）
                                   </Tag>
                                   <Button
                                     size="small"
                                     type="link"
                                     style={{ padding: 0, height: "auto" }}
-                                    onClick={() => onResolveConflict(it, it.value!)}
+                                    onClick={() => onResolveConflict(it, safeFactText(it.value))}
                                   >
                                     保留当前值
                                   </Button>
@@ -361,16 +369,16 @@ export const FactsGroupList = memo(function FactsGroupList({
                                     style={{ display: "flex", alignItems: "center", gap: 8 }}
                                   >
                                     <Tag color="orange" style={{ margin: 0 }}>
-                                      {cv.value as string}
+                                      {safeFactText(cv.value)}
                                     </Tag>
                                     <span style={{ fontSize: 11, color: "#999" }}>
-                                      来自 {cv.source}
+                                      来自 {safeFactText(cv.source)}
                                     </span>
                                     <Button
                                       size="small"
                                       type="link"
                                       style={{ padding: 0, height: "auto" }}
-                                      onClick={() => onResolveConflict(it, cv.value as string)}
+                                      onClick={() => onResolveConflict(it, safeFactText(cv.value))}
                                     >
                                       选此值
                                     </Button>

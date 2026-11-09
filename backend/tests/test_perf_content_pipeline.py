@@ -369,8 +369,12 @@ class _RecordingDb:
 
 
 class TestInlineChartPlanSplit:
-    def test_plan_is_pure_and_returns_rows(self):
+    def test_plan_is_pure_and_returns_rows(self, monkeypatch):
         """build_inline_chart_plan 不接收 db —— 结构上保证计算不触碰数据库。"""
+        # ✅ R199 重锚：R196 引入 min_words 闸（本 fixture 正文 <200 字会被先删）
+        import app.routers._chart_pipeline as _CP
+
+        monkeypatch.setattr(_CP, "_CHART_MIN_WORDS", 0)
         content = "前文\n```mermaid\n" + VALID_FLOWCHART + "\n```\n后文"
         new_content, rows = build_inline_chart_plan(
             "scheme-1", "sec-1", content, enforce_limits=True, scheme_type_counts={}

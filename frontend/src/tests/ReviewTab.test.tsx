@@ -91,6 +91,7 @@ function baseProps(over: Partial<ReviewTabProps> = {}): ReviewTabProps {
     setRerunPlan: noop,
     checkingExport: false,
     exportCheckIncomplete: false,
+    setExportCheckIncomplete: noop,
     handleExportCheck: asyncNoop,
     handlePlaceholderJump: noop,
     rerunning: false,

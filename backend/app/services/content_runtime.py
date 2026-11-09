@@ -407,12 +407,16 @@ def should_continue_round(
     return (wc < under_line or continue_count < min_passes) and continue_count < max_rounds
 
 
-def continue_max_tokens(*, word_budget: int, wc: int) -> int:
+def continue_max_tokens(*, word_budget: int, wc: int, cap_factor: float = 1.1) -> int:
     """续写轮输出 token 上限：按「剩余待补字数」折算（P1-2，不含首稿）。
 
     与旧实现 ``max_tokens_for_budget(word_budget,
     chars=max(1, int(word_budget*1.1)-wc))`` 逐字一致；下限保护由
     ``max_tokens_for_budget`` 内建（MAX_TOKENS_FLOOR）。
+
+    ✅ R19x（2026-11-09）：新增 ``cap_factor``（默认 1.1 逐字兼容）。调用方
+    （sse_handlers 续写循环）的总字数上限系数是 ``1 + word_budget_tolerance``，
+    旧实现此处硬编码 1.1 —— 用户改容差后 token 上限与字数上限失配。
     """
     try:
         budget = int(word_budget or 0)
@@ -422,4 +426,10 @@ def continue_max_tokens(*, word_budget: int, wc: int) -> int:
         cur = int(wc or 0)
     except (TypeError, ValueError):
         cur = 0
-    return max_tokens_for_budget(budget, chars=max(1, int(budget * 1.1) - cur))
+    try:
+        cf = float(cap_factor)
+    except (TypeError, ValueError):
+        cf = 1.1
+    if not (cf > 0):
+        cf = 1.1
+    return max_tokens_for_budget(budget, chars=max(1, int(budget * cf) - cur))

@@ -261,7 +261,13 @@ def test_cache_get_or_render_caches_result():
     def mock_render(code, chart_type, **kwargs):
         nonlocal call_count
         call_count += 1
-        return BytesIO(b"\x89PNG\r\n\x1a\n" + b"\x00" * 200)
+        # ✅ R199：get_or_render 磁盘命中补全文件校验（PIL verify）——
+        #    fixture 必须提供真实可解码 PNG（旧"PNG 头+全零体"会被正确拒收）
+        buf = BytesIO()
+        from PIL import Image
+
+        Image.new("RGB", (64, 48), (10, 120, 30)).save(buf, format="PNG")
+        return BytesIO(buf.getvalue())
 
     with patch("app.services.ai.mermaid_renderer.render_mermaid_to_bytes", side_effect=mock_render):
         r1 = cache.get_or_render("test_code", "flowchart")

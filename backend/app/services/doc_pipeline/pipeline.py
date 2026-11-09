@@ -371,7 +371,20 @@ async def ingest_parse_result(
         logger.warning(
             "回写 project_documents 解析元数据未生效（db.execute 返回 None，R13），" "分块与解析层照常提交：%s", doc_id
         )
-    await db.commit()
+    # ✅ R203 修复（commit 裸奔）：commit 自身抛异常（磁盘 I/O / 锁超时）时既不
+    #    rollback 也不留痕——已 DELETE 的旧分块 / INSERT 的新分块 /
+    #    parse_status='success' 元数据全部悬空，交由连接池下一个请求的 commit
+    #    一并固化（幽灵提交，正是 upload 路径 R191 commit 守卫注释描述的危害）。
+    #    现显式 rollback（悬空写全部作废）后上抛，由上层「解析落库失败」语义
+    #    （置 failed + 告警留痕）接管。
+    try:
+        await db.commit()
+    except Exception:
+        try:
+            await db.rollback()
+        except Exception as rb_err:
+            logger.debug("分块落库 commit 失败路径 rollback 失败（连接损坏时忽略）: %s", rb_err)
+        raise
     return {
         "parse_version": parse_version,
         "chunk_count": len(chunks),
@@ -570,7 +583,17 @@ async def build_completeness_report(db, *, doc_id: str, project_id: str, total_p
     _qs_cur = await db.execute("UPDATE project_documents SET quality_score=? WHERE id=?", (quality, doc_id))
     if _qs_cur is None:
         logger.warning("完整性报告回写 quality_score 失败（db.execute 返回 None）：%s", doc_id)
-    await db.commit()
+    # ✅ R203 修复（commit 裸奔）：commit 失败 → rollback 清悬空写 + WARNING，
+    #    报告本身已在内存算好照常返回（与本函数「落库失败不影响返回结果」的
+    #    既有降级哲学一致）。
+    try:
+        await db.commit()
+    except Exception as c_err:
+        try:
+            await db.rollback()
+        except Exception as rb_err:
+            logger.debug("完整性报告 commit 失败路径 rollback 失败（连接损坏时忽略）: %s", rb_err)
+        logger.warning("完整性报告落库 commit 失败（报告照常返回，落库待重试）: %s: %s", doc_id, c_err)
 
     # ✅ BUG 修复（事件循环卫生，2026-09-20）：下方 meta 读写此前是【同步】磁盘 IO
     #    直接内联在 async 函数里 —— 违反本模块"所有文件 IO 走 asyncio.to_thread"
@@ -1161,36 +1184,57 @@ async def run_cross_check(db, *, project_id: str, doc_id: str = "") -> dict:
     # 先置 1 再清 0，reset 恒为最终裁决。
     # ✅ R13 补全（2026-10-06）：写路径判空 —— UPDATE 失败时告警但仍 commit
     #    （报告 INSERT 在后面，不应被前面的 UPDATE 失败拖累）。
-    if final_keep:
-        ph = ",".join("?" * len(final_keep))
-        _kcur = await db.execute(f"UPDATE global_facts SET has_conflict=1 " f"WHERE id IN ({ph})", list(final_keep))
-        if _kcur is None:
-            logger.warning("交叉校验置位 has_conflict=1 失败（db.execute 返回 None，R13）：%s", project_id)
+    # ✅ R193（第四条写源补锁）：本函数此前直写 global_facts.has_conflict 且
+    #    自带 commit，是 T-04/R189 写锁矩阵之外的第 4 条事实写源（REST 依赖、
+    #    SSE 租约、docs inproc guard 三者皆不经过）—— 与 AI 提取落库
+    #    （persist_extraction 置 1）或 REST 冲突裁决（resolve 置 0）并发时丢失
+    #    更新（误报冲突消失/残留）。现按 R189 `project_facts_inproc_guard` 同一
+    #    把进程内项目锁包住「置位+消解+提交」写窗（不申请 DB 租约——单进程部署
+    #    口径见 R176 V1 / R189 L-02；guard 等待超时 fail-soft 放行并留 ERROR，
+    #    与 R189 设计一致）。
+    from app.services.facts_write_guard import project_facts_inproc_guard
 
-    if reset_ids:
-        ph = ",".join("?" * len(reset_ids))
-        _rcur = await db.execute(f"UPDATE global_facts SET has_conflict=0 " f"WHERE id IN ({ph})", list(reset_ids))
-        if _rcur is None:
-            logger.warning("交叉校验消解 has_conflict=0 失败（db.execute 返回 None，R13）：%s", project_id)
+    async with project_facts_inproc_guard(project_id, holder="doc_pipeline.cross_check"):
+        if final_keep:
+            ph = ",".join("?" * len(final_keep))
+            _kcur = await db.execute(f"UPDATE global_facts SET has_conflict=1 " f"WHERE id IN ({ph})", list(final_keep))
+            if _kcur is None:
+                logger.warning("交叉校验置位 has_conflict=1 失败（db.execute 返回 None，R13）：%s", project_id)
 
-    report = {
-        "project_id": project_id,
-        "doc_id": doc_id,
-        "fact_count": len(rows),
-        "stored_conflicts": len(final_keep),
-        "cross_conflicts": conflicts,
-        "cross_source_conflicts": cross_src_conflicts,
-        "flagged_fact_ids": sorted(i for i in final_keep if i),
-        "checked_at": _now(),
-    }
-    _rcur2 = await db.execute(
-        "INSERT INTO doc_validation_reports (id, doc_id, project_id, kind,"
-        " report_json, created_at) VALUES (?,?,?,?,?,?)",
-        (str(uuid.uuid4()), doc_id, project_id, "cross_check", _jdump(report), _now()),
-    )
-    if _rcur2 is None:
-        logger.warning("交叉校验报告落库 doc_validation_reports 失败（db.execute 返回 None，R13）：%s", project_id)
-    await db.commit()
+        if reset_ids:
+            ph = ",".join("?" * len(reset_ids))
+            _rcur = await db.execute(f"UPDATE global_facts SET has_conflict=0 " f"WHERE id IN ({ph})", list(reset_ids))
+            if _rcur is None:
+                logger.warning("交叉校验消解 has_conflict=0 失败（db.execute 返回 None，R13）：%s", project_id)
+
+        report = {
+            "project_id": project_id,
+            "doc_id": doc_id,
+            "fact_count": len(rows),
+            "stored_conflicts": len(final_keep),
+            "cross_conflicts": conflicts,
+            "cross_source_conflicts": cross_src_conflicts,
+            "flagged_fact_ids": sorted(i for i in final_keep if i),
+            "checked_at": _now(),
+        }
+        _rcur2 = await db.execute(
+            "INSERT INTO doc_validation_reports (id, doc_id, project_id, kind,"
+            " report_json, created_at) VALUES (?,?,?,?,?,?)",
+            (str(uuid.uuid4()), doc_id, project_id, "cross_check", _jdump(report), _now()),
+        )
+        if _rcur2 is None:
+            logger.warning("交叉校验报告落库 doc_validation_reports 失败（db.execute 返回 None，R13）：%s", project_id)
+        # ✅ R203 修复（commit 裸奔）：commit 失败 → rollback 清悬空写 +
+        #    WARNING，报告已在内存照常返回（与本函数「消解失败告警不阻断」的
+        #    既有降级哲学一致）。
+        try:
+            await db.commit()
+        except Exception as c_err:
+            try:
+                await db.rollback()
+            except Exception as rb_err:
+                logger.debug("交叉校验 commit 失败路径 rollback 失败（连接损坏时忽略）: %s", rb_err)
+            logger.warning("交叉校验报告落库 commit 失败（报告照常返回）: %s: %s", project_id, c_err)
     return report
 
 

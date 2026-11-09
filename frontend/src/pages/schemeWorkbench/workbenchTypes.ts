@@ -43,6 +43,20 @@ export interface SseBaseEvent {
   failed_sections?: unknown[];
 }
 
+/** ✅ R190（FIX-4）：上下文降级可见信号（后端 D-39/R176 下发，此前前端零消费）。
+ *  后端 payload 无 message 键 —— 前端须按 field/stage/reason/字符数自行拼提示。
+ *  reason 稳定枚举见后端 sse_handlers.CONTEXT_DEGRADED_REASONS：
+ *  budget_truncated（预算硬切）| segment_failed（装配段失败，整段缺席）。 */
+export interface ContextDegradedEvent extends SseBaseEvent {
+  event: "context_degraded";
+  field?: string;
+  stage?: string;
+  reason?: string;
+  original_chars?: number;
+  kept_chars?: number;
+  segment_id?: string;
+}
+
 /** stats / ping / progress 事件内嵌运行统计的公共键（GenStats 字段子集） */
 export interface SseStatsFields {
   done?: number;
@@ -71,6 +85,9 @@ export interface OutlineGenEvent extends SseBaseEvent, SseStatsFields {
    *  `{ready, blockers}` 由后端 `outline_auto_confirm.evaluate()` 产出；
    *  前端只在开关开启且 ready 时启动倒计时，否则逐字回落到人工闸门。 */
   auto_confirm?: unknown;
+  /** ✅ R188（L9）：检查点写失败（R187 FIX-2 短方案 / R188 L8 停止态）。
+   *  后端 payload 自带 outline，成果不丢，但刷新/断线后无法从检查点恢复。 */
+  checkpoint_failed?: boolean;
   elapsed_ms?: number;
   eta_ms?: number | null;
 }
@@ -118,6 +135,13 @@ export interface FactsGenEvent extends SseBaseEvent {
   warnings?: unknown[];
   elapsed_ms?: number;
   segment_stats?: { failed?: number } & Record<string, unknown>;
+  /** ✅ R189：completed 事件实带的诊断键，此前靠 `Record` 索引签名蒙混，
+   *  类型层看不出后端已下发（applyFactsCompletedEvent 一直在读这两个）。 */
+  cross_conflicts?: unknown[];
+  skipped?: number;
+  deferred?: number;
+  skipped_source?: string;
+  group_count?: number;
 }
 
 /** 方案记录（schemesApi.get / list 响应）—— 页面消费字段 —— 后端契约 */
@@ -157,6 +181,9 @@ export interface FactsSegmentStats {
   ok?: number;
   failed: number;
   total?: number;
+  /** ✅ R193（F4 契约对齐）：增量跳过段数（chunk_hash 命中已完成集，非失败）。
+   *  后端 segment_stats 一直携带该键，前端类型此前缺声明。 */
+  skipped?: number;
   failed_details?: Array<{ index?: number; heading?: string; reason?: string }>;
   /** ✅ R179：模型声明「本段无事实」的段数（不是失败，下次增量提取会重试） */
   declared_failed?: number;

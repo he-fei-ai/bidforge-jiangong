@@ -754,12 +754,15 @@ export function ExportTab({
         />
       )}
       <Space>
+        {/* ✅ R195：生成中（事实/目录/正文）导出与生成链互斥（后端 409）——
+              前端主动禁用把「事后报错」变「事前预防」，与后端语义对齐。 */}
         <Button
           type="primary"
           icon={<ExportOutlined />}
           onClick={() => handleExport("docx")}
           loading={exporting}
-          title="导出 DOCX（不受审核与预检状态限制）"
+          disabled={generating}
+          title={generating ? "方案正在生成中，导出与生成互斥，请等待完成或先停止生成" : "导出 DOCX（不受审核与预检状态限制）"}
         >
           {exporting ? "导出中..." : "导出 DOCX"}
         </Button>
@@ -767,7 +770,12 @@ export function ExportTab({
           icon={<FilePdfOutlined />}
           onClick={() => handleExport("pdf")}
           loading={exporting}
-          title="先生成 DOCX 再转换为 PDF（需安装 Microsoft Word 或 LibreOffice）"
+          disabled={generating}
+          title={
+            generating
+              ? "方案正在生成中，导出与生成互斥，请等待完成或先停止生成"
+              : "先生成 DOCX 再转换为 PDF（需安装 Microsoft Word 或 LibreOffice）"
+          }
         >
           导出 PDF
         </Button>

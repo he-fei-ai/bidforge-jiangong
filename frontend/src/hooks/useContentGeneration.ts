@@ -423,7 +423,9 @@ export function useContentGeneration(
               }
               const sm = contentResultSummary(fin?.content_result);
               if (sm.total > 0) {
-                msg.info(`后台正文生成：已完成 ${sm.done}/${sm.total} 章，共 ${sm.words} 字`);
+                // ✅ R199：终态摘要透出配图数
+                const chartMsg = sm.charts > 0 ? `，配图 ${sm.charts} 张` : "";
+                msg.info(`后台正文生成：已完成 ${sm.done}/${sm.total} 章，共 ${sm.words} 字${chartMsg}`);
               }
               if (fin?.status === "completed") {
                 msg.success("正文生成已在后台完成");

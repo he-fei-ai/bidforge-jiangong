@@ -1537,7 +1537,16 @@ class TestFrontendConsumesByChapterAndPagination:
         root = os.path.dirname(APP)
         src = io.open(os.path.join(root, "frontend", "src", "api", "index.ts"), encoding="utf-8").read()
         assert "options?.limit" in src and "options?.offset" in src, "factsApi.list 未下发分页参数"
-        assert "limit: options?.limit" in src or "options?.limit ?" in src
+        # ✅ R189（2026-11-08）重锚：旧断言锁死字面量 `limit: options?.limit`
+        #    或 `options?.limit ?`，而本轮把真值判断改成 `!== undefined`
+        #    （offset=0 是合法首页参数，真值判断会静默吞掉）→ 护栏假红。
+        #    断言强度不降：仍要求两个参数都显式下发，且**禁止**退回真值判断。
+        assert "{ limit: options.limit }" in src and "{ offset: options.offset }" in src, (
+            "factsApi.list 未显式下发 limit/offset 分页参数"
+        )
+        assert "options?.limit !== undefined" in src and "options?.offset !== undefined" in src, (
+            "分页参数不得用真值判断（offset=0 会被吞掉，首页请求与回放口径不一致）"
+        )
 
     def test_page_consumes_pagination(self):
         src = self._src()

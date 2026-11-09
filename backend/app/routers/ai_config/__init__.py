@@ -47,6 +47,7 @@ from .audit import (
 from .config import (
     clear_config_key,
     delete_config,
+    duplicate_config,
     export_config,
     get_active_env,
     get_config,
@@ -87,6 +88,7 @@ __all__ = [
     "get_config",
     "save_config",
     "delete_config",
+    "duplicate_config",
     "toggle_config",
     "clear_config_key",
     "update_fallback_chain",

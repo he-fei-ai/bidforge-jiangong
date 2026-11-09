@@ -77,7 +77,7 @@ _HEADING_NUM_PREFIX_RES = (
     re.compile(r"^#{1,6}\s*"),
     re.compile(r"^第[一二三四五六七八九十百千零\d]+[章节][、\s]*"),
     re.compile(r"^[（(][一二三四五六七八九十百]+[)）][、\s]*"),
-    re.compile(r"^\d+(?:\.\d+)*[、.\s]+"),
+    re.compile(r"^\d+(?:[.．]\d+)*[、.．\s]+"),
     re.compile(r"^\d+[）)][、\s]*"),
     re.compile(r"^[a-zA-Z]{1,2}[、.\s]+"),
 )
@@ -722,8 +722,16 @@ def _clean_chart_title(raw, limit: int = 40) -> str:
     中英混排图题会被粘成一串（``"Site Layout Plan 施工平面布置"`` →
     ``"SiteLayoutPlan施工平面布置"``），导出后图题不可读、也不可检索。
     现保留单个分隔空格（全角空格同样归一为半角单空格）。
+
+    ✅ R202（2026-11-09 · G2 · 模型可见静默截断）：超限时追加省略号 ——
+    图题会随图表 JSON 一起送进模型（图表生成指令），静默截断会让模型把
+    半截标题当成完整标题（例如「深基坑支护与」被当成完整图题）。
+    改动仅在超长时发生，未超长逐字节不变。
     """
-    return _RE_WS_RUN.sub(" ", _strip_leading_figure_number(raw)).strip()[:limit]
+    cleaned = _RE_WS_RUN.sub(" ", _strip_leading_figure_number(raw)).strip()
+    if len(cleaned) > limit:
+        return cleaned[:limit] + "…"
+    return cleaned
 
 
 def _title_candidate(raw: str) -> str:
@@ -842,10 +850,22 @@ def _drop_leadin_without_visual(blocks: list[dict]) -> list[dict]:
     上游丢弃）时，引导语照样原样印进成稿 —— 读者看到"流程图如下"翻遍
     全文无图。现解析收尾统一兜底：
       · 段落是**纯引导语**（短、以引导语收尾）且其后一块不是
-        chart / image / ai_image → 整段删除（与删图删引导语同口径）；
+        chart / image / ai_image / table → 整段删除（与删图删引导语同口径）；
       · 长段落（正文里恰好以"如下："收尾）绝不触碰 —— 不做句内裁剪，
         避免误删实质内容；
       · 绝不静默：每次删除记 INFO。
+
+    ✅ R194（FIX-9 · 白名单补 table）：判据源 ``_RE_LEADIN_BROAD`` 明确含
+    「如(?:下|后)(?:图|表)」与「见(?:下|上)(?:图|表)」—— 即「如下表 /
+    见下表」也命中引导语判据，但本函数的后继白名单只有 chart / image /
+    ai_image，**表格不在其中**。「预算安排如下表：」+ 紧邻 GFM/HTML 表格块
+    （工程文档极高频形态）被整段删除 —— 删除的是正当行文而非悬空引用：
+    引导语的视觉对象（表格）明明存在。且与同文件
+    ``_pop_orphan_lead_in_block`` 的 docstring 契约（"表格前的引导语绝不
+    触碰"）及导出侧 ``_export_docx_parts._pop_orphan_lead_in`` 守卫直接矛盾，
+    只删导出渲染面（本函数仅供导出/预检消费）→ 前端预览有这句、导出成稿
+    没有。白名单补 "table" 后与本函数自身 docstring「没有任何图表/图片」
+    的"图表"语义对齐。
     """
     out: list[dict] = []
     for idx, blk in enumerate(blocks):
@@ -853,7 +873,7 @@ def _drop_leadin_without_visual(blocks: list[dict]) -> list[dict]:
             out.append(blk)
             continue
         nxt = blocks[idx + 1] if idx + 1 < len(blocks) else None
-        if nxt is not None and nxt.get("type") in ("chart", "image", "ai_image"):
+        if nxt is not None and nxt.get("type") in ("chart", "image", "ai_image", "table"):
             out.append(blk)
             continue
         text = _RE_BOLD_WRAP.sub(r"\1", str(blk.get("text") or "").strip()).strip()
@@ -1166,7 +1186,11 @@ def _parse_content_blocks(content: str, diagnostics: dict | None = None) -> list
                 blocks.append(
                     {
                         "type": "ai_image",
-                        "title": ai_title,
+                        # ✅ R196（2026-11-09）：图题兜底链与 chart-json 分支同口径 ——
+                        #    源文题注 > 载荷 title > 引导语。旧实现只取载荷 title
+                        #    （空则空串），导出端只剩类型通用名「配图」可兜底，
+                        #    图题信息层级缺失。
+                        "title": _extract_figure_caption(blocks) or ai_title or _lead_in_title(blocks),
                         "code": "\n".join(code_lines).strip(),
                         "inline": True,
                     }

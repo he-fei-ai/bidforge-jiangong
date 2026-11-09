@@ -1,5 +1,6 @@
 import { type GenStats, type SectionLogItem } from "../../utils/contentEvents";
 import { MAX_OUTLINE_DEPTH } from "../../utils/outlineConstants";
+import { hasRenderableStoredId } from "../../utils/outlineNumbering";
 import { statsEqual } from "./statsFormat.ts";
 import type { OutlineNodeInput } from "./workbenchTypes.ts";
 import { Alert, Tag, Tree } from "antd";
@@ -46,10 +47,16 @@ export function buildTree(nodes: OutlineNodeInput[]): TreeNode[] {
   return nodes.map((n) => {
     // ✅ 从 outline_json 里提取后端权威编号（点分路径，如 "1"/"1.1"/"1.1.1"）
     // 这是目录树编号正确显示的关键 —— UUID 无点号无法解析
+    // ✅ R192（FIX-R15）：合法性判据收敛到 `storedIdParts` 单一实现
+    //    （hasRenderableStoredId）。旧 ASCII 正则拒绝全角数字——后端 `\d`
+    //    匹配 Unicode Nd（`stored_id_parts` 接受全角，R87 刻意为之），存量/
+    //    直改库数据 `outline_json.id="１２"` 时 outlineId=undefined → 树不渲染
+    //    编号，而同一数据在后端 `stored_id_to_display` 产出「第十二章」进导出
+    //    成稿——正是 R87 要消灭的「树 ≠ 成稿」分叉（方向反转）。
     let outlineId: string | undefined;
     try {
       const oj = typeof n.outline_json === "string" ? JSON.parse(n.outline_json) : n.outline_json;
-      if (oj?.id && /^\d+(\.\d+)*$/.test(String(oj.id))) {
+      if (oj?.id && hasRenderableStoredId(oj.id)) {
         outlineId = String(oj.id);
       }
     } catch {
@@ -123,7 +130,9 @@ export function treeFingerprint(nodes: TreeNode[]): string {
       // ✅ 2026-09-29：facts_stale 参与指纹 —— 它是用户可感知的状态（目录树上
       // 的「事实已变更」徽标）。若不含它，3s 轻量轮询会因指纹相同而保留旧树，
       // 事实刚变更后的徽标要等到下一次完整 load() 才出现（表现为「标了却没显示」）。
-      out += `${n.key}:${n.word_count}:${n.status}:${n.facts_stale ? 1 : 0};`;
+      // ✅ R203：title 纳入指纹 —— 改名后若字数恰好未变，旧指纹相同会跳过刷新，
+      // 新标题要等下一次字数变化才显示。纳入 title 后改名即刻反映。
+      out += `${n.key}:${n.title}:${n.word_count}:${n.status}:${n.facts_stale ? 1 : 0};`;
       if (n.children?.length) walk(n.children);
     }
   }

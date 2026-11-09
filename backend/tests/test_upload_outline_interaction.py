@@ -133,15 +133,19 @@ class TestParseOutlineRejections:
         assert e.value.status_code == 400
 
     async def test_oversize_413(self, db_conn, monkeypatch):
-        """超过上传上限被 413 拒绝（上限读 file_parser.MAX_UPLOAD_BYTES，可配置）。"""
-        monkeypatch.setattr(uo, "MAX_UPLOAD_BYTES", 50)
+        """超过上传上限被 413 拒绝（上限运行时读 file_parser.MAX_UPLOAD_BYTES，可配置）。
+
+        R191 重锚（H1）：上限自静态 from-import 快照改运行时模块属性读取——
+        patch 点随之迁移到 file_parser 模块属性（与 global_facts_docs 同口径），
+        「运行期变更可生效」正是本测试验证的行为。"""
+        monkeypatch.setattr(fp, "MAX_UPLOAD_BYTES", 50)
         with pytest.raises(HTTPException) as e:
             await uo.parse_outline(file=_upload("big.txt", b"x" * 100), db=db_conn, scheme_name="", reorganize=False)
         assert e.value.status_code == 413
 
     async def test_oversize_message_reflects_configured_limit(self, db_conn, monkeypatch):
         """413 文案随配置上限动态变化（不写死 30MB）。"""
-        monkeypatch.setattr(uo, "MAX_UPLOAD_BYTES", 2 * 1024 * 1024)  # 2MB
+        monkeypatch.setattr(fp, "MAX_UPLOAD_BYTES", 2 * 1024 * 1024)  # 2MB
         with pytest.raises(HTTPException) as e:
             await uo.parse_outline(
                 file=_upload("big.txt", b"x" * (3 * 1024 * 1024)), db=db_conn, scheme_name="", reorganize=False

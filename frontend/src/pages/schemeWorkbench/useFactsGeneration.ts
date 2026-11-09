@@ -44,6 +44,10 @@ export interface FactsGenerationDeps {
   missingValueMode: "fabricate" | "omit" | "placeholder";
   docList: DocRecord[];
   factsSummary: FactsSummary | null;
+  /** ✅ R193（D-08）：页面级方案 id 引用——点击发生在旧渲染闭包里，弹窗确认/
+   *  重试请求返回时方案可能已切换，以旧 id 发起 SSE 会把旧方案的进度/矛盾
+   *  写入新方案共享 state。可选注入（测试替身可不传，守卫自动跳过）。 */
+  currentSchemeIdRef?: MutableRefObject<string>;
 }
 
 export function useFactsGeneration(deps: FactsGenerationDeps) {
@@ -72,10 +76,21 @@ export function useFactsGeneration(deps: FactsGenerationDeps) {
     missingValueMode,
     docList,
     factsSummary,
+    currentSchemeIdRef,
   } = deps;
 
   const runGenerateFactsSse = async () => {
     if (!id) return;
+    // ✅ R193 修复（D-08 · 跨方案污染）：点击发生在旧方案渲染闭包里，弹窗
+    //    确认/重试请求返回时方案可能已切换 —— 以旧 id 发起 SSE 会把旧方案
+    //    提取的 progress/logs/segmentStats/crossConflicts 全部写入当前页面
+    //    共享 state（新方案视图显示旧方案的提取过程）。与 handleAckStaleOne
+    //    的 sid 守卫同域（useDocumentWorkflow 已有先例）。
+    const _currentScheme = currentSchemeIdRef?.current;
+    if (_currentScheme && _currentScheme !== id) {
+      msg.info("方案已切换，已取消本次提取");
+      return;
+    }
     // ✅ 世代校验：标记本代生成，收尾时仅当仍是最新一代才复位全局状态
     const mySeq = ++genSeqRef.current;
     // ✅ R106 FIX-8：立刻清空上一代 task_id。本代任务的 task_id 由 SSE
@@ -125,7 +140,16 @@ export function useFactsGeneration(deps: FactsGenerationDeps) {
         if (evt.event === "error") {
           pushLog(lastProgress, `❌ ${evt.message || "提取失败"}`);
         } else if (evt.event === "warning") {
-          const wm = evt.message || (Array.isArray(evt.warnings) ? evt.warnings.join("；") : "");
+          // ✅ R193（D-13）：warnings 元素按契约是 string，但类型是宽松数组——
+          //    非 string 元素旧实现 join 出 "[object Object]" 噪声文案，逐项
+          //    安全文本化（对象 JSON 化）。
+          const wm =
+            evt.message ||
+            (Array.isArray(evt.warnings)
+              ? evt.warnings
+                  .map((w) => (typeof w === "string" ? w : JSON.stringify(w) ?? String(w)))
+                  .join("；")
+              : "");
           if (wm) pushLog(lastProgress, `⚠️ ${wm}`);
         }
         if (onSseEvent(evt)) break;
@@ -354,6 +378,13 @@ export function useFactsGeneration(deps: FactsGenerationDeps) {
     }
     try {
       const res = await factsApi.retryFailed(id);
+      // ✅ R193（D-08）：重试请求返回时方案可能已切换——旧实现以旧 id 重跑
+      //    SSE（跨方案污染）。切走即取消，与 runGenerateFactsSse 入口守卫同域。
+      const _currentScheme = currentSchemeIdRef?.current;
+      if (_currentScheme && _currentScheme !== id) {
+        msg.info("方案已切换，已取消本次重试");
+        return;
+      }
       const released = res.data?.released ?? 0;
       if (released <= 0) {
         msg.info(

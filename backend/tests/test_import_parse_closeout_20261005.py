@@ -96,11 +96,31 @@ def test_b5_both_refs_are_declared():
 
 
 def test_b5_scheme_switch_effect_still_aborts_them():
-    """[id] effect 的 abort 清单不得因本轮改动而回退（新旧两条路径都要有）。"""
+    """[id] effect 的 abort 清单不得因本轮改动而回退（新旧两条路径都要有）。
+
+    R191 重锚（意图不放宽，形态升级）：factsDocsList 的中止从「切方案 effect
+    内直接 abort」迁到「文档列表加载 effect 的 cleanup」（React 保证 cleanup
+    先于下一轮所有 effect body——旧位置在 effect body 声明序上晚于列表加载
+    effect，会误杀新方案刚发出的请求且无重发 → 新方案页面残留上一方案
+    文档列表）。其余 abort 清单仍在切方案 effect 内。
+    R193 重锚（同款形态升级第二例）：factsListAbortRef 的中止同样迁入
+    「事实列表加载」effect 的 cleanup——机理与 factsDocsList 完全同构
+    （mount effect 先发新方案请求、切换 effect 后 abort 恰杀新请求且无重发），
+    R191 注释自证该机理时遗漏了 facts 这一侧。"""
     src = _page_src()
     block = _slice_after(src, "const previousSchemeId = mountedSchemeIdRef.current", 2600)
-    assert "factsListAbortRef.current?.abort();" in block
-    assert "factsDocsListAbortRef.current?.abort();" in block
+    # factsList / factsDocsList 的中止均已迁出切方案 effect（误杀新请求），不得回流
+    assert "factsListAbortRef.current?.abort();" not in block
+    assert "factsDocsListAbortRef.current?.abort();" not in block
+    # 中止语义必须仍在：两条列表加载 effect 的 cleanup 各负责上一轮请求
+    list_effect = src[src.index("进入工作台即拉取资料文档列表") :]
+    list_effect = list_effect[: list_effect.index("一次性元数据加载")]
+    assert "return () => {" in list_effect
+    assert "factsDocsListAbortRef.current?.abort();" in list_effect
+    facts_effect = src[src.index("loadComplianceHistory();") :]
+    facts_effect = facts_effect[: facts_effect.index("上传配额动态下发")]
+    assert "return () => {" in facts_effect
+    assert "factsListAbortRef.current?.abort();" in facts_effect
 
 
 # --------------------------------------------------------------------------- #
@@ -292,10 +312,25 @@ def test_page_abort_refs_all_covered_by_unmount_cleanup():
     assert end > 0
     cleanup = block[:end]
     missing = sorted(r for r in written if f"{r}.current?.abort();" not in cleanup)
-    # 外部库/别处管理的 ref 允许豁免（登记即白名单，按符号名登记、不按行号）
-    allowlist: set[str] = set()
+    # 外部库/别处管理的 ref 允许豁免（登记即白名单，按符号名登记、不按行号）。
+    # ✅ R193：adjustAbortRef 定义在 FactsAdjustPanel 组件内（_page_src 递归拼接
+    #    schemeWorkbench 目录后被本扫描捕获），其归宿是该组件自身的 schemeId
+    #    effect cleanup（切方案/卸载时 abort 在飞 AI 请求）——白名单登记 +
+    #    反向归宿锁（下方断言），棘轮强度不降。
+    allowlist: set[str] = {"adjustAbortRef"}
     missing = [r for r in missing if r not in allowlist]
     assert not missing, f"以下 AbortController 在请求中被赋值，但卸载 cleanup 未 abort：{missing}"
+    # 反向归宿锁：白名单 ref 必须在其宿主组件内拥有自己的 effect cleanup abort
+    panel_src = (
+        _REPO / "frontend" / "src" / "pages" / "schemeWorkbench" / "FactsAdjustPanel.tsx"
+    ).read_text(encoding="utf-8").replace("\r\n", "\n")
+    assert "adjustAbortRef.current?.abort();" in panel_src, (
+        "adjustAbortRef 的中止归宿（组件 cleanup）不得移除"
+    )
+    cleanup_seg = panel_src[panel_src.index("return () => {") :]
+    assert "adjustAbortRef.current?.abort();" in cleanup_seg[:400], (
+        "adjustAbortRef 的 abort 必须在 effect cleanup 内（组件卸载/切方案时执行）"
+    )
 
 
 # --------------------------------------------------------------------------- #

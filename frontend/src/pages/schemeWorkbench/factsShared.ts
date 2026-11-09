@@ -1,4 +1,3 @@
-import { factsApi } from "../../api";
 import {
   type FactChapterStat,
   type FactChapterStatBlock,
@@ -9,9 +8,43 @@ import {
   type FactStats,
   type FactsSummary,
 } from "../../types/facts";
-import { FactsChapterCoveragePanel } from "./FactsChapterCoveragePanel.tsx";
-import { FactsDiagnosticsPanel } from "./FactsDiagnosticsPanel.tsx";
-import { Collapse, Pagination, Tag } from "antd";
+
+
+/** ✅ R189（2026-11-08）：把任意后端值安全转成可渲染文本。
+ *
+ *  事实值/矛盾候选值/来源引用的契约虽声明为 string，但 AI 输出、旧库脏数据、
+ *  跨语言序列化都可能给出 number / null / 数组 / 对象。此前组件用
+ *  `x as string` 直接作 React child：对象值触发
+ *  "Objects are not valid as a React child" 整块崩溃，且 `.slice()` 在
+ *  非字符串上抛 TypeError。所有展示位统一走本函数（不改写业务值）。
+ */
+export function safeFactText(value: unknown): string {
+  if (value === null || value === undefined) return "";
+  if (typeof value === "string") return value;
+  if (typeof value === "number" || typeof value === "boolean") return String(value);
+  try {
+    return JSON.stringify(value) ?? "";
+  } catch {
+    return String(value);
+  }
+}
+
+/** ✅ R189：置信度百分比。缺失 / 非数 / 越界一律返回 null（不渲染 NaN%）。
+ *  优先级：0~1 小数直接乘 100；0~100 的百分制值按原值；其余钳制到 0~100。
+ */
+export function factConfidencePercent(value: unknown): number | null {
+  if (typeof value !== "number" || !Number.isFinite(value)) return null;
+  const pct = value >= 0 && value <= 1 ? value * 100 : value;
+  return Math.max(0, Math.min(100, Math.round(pct)));
+}
+
+/** ✅ R189：置信度色阶（与既有四档阈值逐值一致，仅把 null 收敛为灰色）。 */
+export function factConfidenceColor(value: unknown): string {
+  const pct = factConfidencePercent(value);
+  if (pct === null) return "#bfbfbf";
+  const ratio = pct / 100;
+  return ratio >= 0.9 ? "#52c41a" : ratio >= 0.7 ? "#1677ff" : ratio >= 0.4 ? "#fa8c16" : "#ff4d4f";
+}
 
 export function hasFactsFilterMatch(
   groups: FactGroupLike[] | null | undefined,
@@ -721,6 +754,38 @@ export function buildFactsCategoryEntries(
       if (it.has_conflict) e.conflicts += 1;
       if (!it.is_resolved) e.unresolved += 1;
     }
+  }
+  return out;
+}
+
+/**
+ * ✅ R193（L-07 · R189 遗留落地）：左侧分类面板数据源——后端 `stats.by_category`
+ * 全量统计（list_facts 注释明确「分页仅影响 groups，统计基于全量」）。
+ *
+ * 旧数据源 `buildFactsCategoryEntries(facts, …)` 只聚合当前页 20 组：
+ * >20 组方案的分类面板缺行、计数徽标失真、翻页后选中分类悬空跳变。
+ * 后端 by_category 与分组列表共用同一 `_cat_order` 排序，面板首项必落在
+ * 当前页分组头部 → 默认选中不悬空。后端字段缺行/脏数据安全返回 []。
+ */
+export function buildFactsCategoryEntriesFromStats(
+  stats: unknown,
+  labelOf?: (cat: string) => string,
+): FactsCategoryEntry[] {
+  const arr = (stats as { by_category?: unknown } | null | undefined)?.by_category;
+  if (!Array.isArray(arr)) return [];
+  const out: FactsCategoryEntry[] = [];
+  for (const raw of arr) {
+    const r = (raw || {}) as Record<string, unknown>;
+    const cat = String(r.category ?? "").trim() || "other";
+    out.push({
+      category: cat,
+      title: (labelOf?.(cat) || "").trim() || String(r.title ?? "") || cat,
+      groupCount: Number(r.groups) || 0,
+      itemCount: Number(r.items) || 0,
+      simulated: Number(r.simulated) || 0,
+      conflicts: Number(r.conflicts) || 0,
+      unresolved: Number(r.unresolved) || 0,
+    });
   }
   return out;
 }

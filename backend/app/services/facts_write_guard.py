@@ -153,3 +153,43 @@ async def project_facts_write_guard(db, project_id: str, *, holder: str = "") ->
         yield token
     finally:
         await release_project_facts_write(db, project_id, token)
+
+
+@asynccontextmanager
+async def project_facts_inproc_guard(project_id: str, *, holder: str = "") -> AsyncIterator[bool]:
+    """仅抢**进程内**同一把项目锁（不碰 DB 租约、不 commit）。
+
+    ✅ R189（2026-11-08 · T-04 第三条写入源补面）：``global_facts_docs.py`` 的
+    ``_mark_project_facts_stale`` 在删除/重解析文档时直接 ``UPDATE global_facts``，
+    是事实表的第三条写来源，此前既没走 REST 的 ``_facts_write_guard_dependency``
+    也没走 SSE 的 ``acquire_project_facts_write`` —— 与 AI 提取落库并发时构成
+    典型 lost update（新落库事实未标 stale，正文继续用过时数据）。
+
+    这里刻意**只复用 ``_lock_for`` 而不申请 DB 租约**：``_acquire_lease`` 内部会
+    ``db.commit()``，而 docs 的调用点带着未提交事务进来（R166 注释已明示该
+    前提），提前提交会破坏调用方的事务边界。共享同一把进程内锁即可与
+    ``acquire_project_facts_write`` 互斥（后者也是先取这把锁）。
+
+    等待超时不阻断业务：yield ``False`` 并留 ERROR 日志，由调用方决定是否降级。
+    跨 worker 场景仍依赖 DB 租约（见报告遗留项），当前部署为单 worker。
+    """
+    pid = str(project_id or "")
+    if not pid:
+        yield True
+        return
+    lock = _lock_for(pid)
+    acquired = False
+    try:
+        await asyncio.wait_for(lock.acquire(), timeout=LOCK_WAIT_SECONDS)
+        acquired = True
+    except asyncio.TimeoutError:
+        logger.error(
+            "项目事实进程内锁等待超时（holder=%s · project=%s），本次写入可能与 AI 提取并发",
+            holder,
+            pid,
+        )
+    try:
+        yield acquired
+    finally:
+        if acquired and lock.locked():
+            lock.release()

@@ -196,6 +196,13 @@ export function useOutlineGeneration(deps: OutlineGenerationDeps) {
           setProgress(1);
           setProgressMsg("目录生成完成");
           pushOutlineLog(1, "✅ 目录生成完成");
+          // ✅ R188（L9）：R187 FIX-2 短方案检查点写失败会终态降级并回传
+          //    checkpoint_failed，此前前端零消费 —— 界面显示「完成」但刷新后
+          //    成果不可恢复。现明确告警并引导立即手动保存。
+          if (evt.checkpoint_failed) {
+            msg.warning("成果未能写入检查点：刷新或断线后可能无法恢复，请立即手动保存目录");
+            pushOutlineLog(1, "⚠️ 检查点写入失败，请立即手动保存");
+          }
           // 长方案分步生成：记录失败章节，前端高亮提示
           if (
             evt.failed_chapters &&
@@ -248,6 +255,22 @@ export function useOutlineGeneration(deps: OutlineGenerationDeps) {
           batcher.flushNow();
           setProgressMsg("已停止");
           pushOutlineLog(lastP, "⏹ 已停止");
+          // ✅ R188（L8/L9）：停止态检查点写失败时后端回传 checkpoint_failed
+          //    （payload 仍自带 outline），现如实提示「检查点不可恢复」。
+          if (evt.checkpoint_failed) {
+            msg.warning("检查点写入失败：刷新或断线后无法恢复，请立即保存已生成目录");
+            pushOutlineLog(lastP, "⚠️ 检查点写入失败，请立即手动保存");
+          }
+          // ✅ R192（FIX-R13）：后端停止态明确携带失败章清单（_finish_stopped_with_partial
+          //    的 failed_chapters/failed_count），旧实现在线/重挂两条 stopped 路径都只读
+          //    outline/checkpoint_failed——已失败章节不在目录树高亮，用户只看到「已停止」，
+          //    与 completed 分支（setFailedOutlineChapters + warning）的提示强度不一致。
+          if (Array.isArray(evt.failed_chapters) && evt.failed_chapters.length) {
+            setFailedOutlineChapters(evt.failed_chapters);
+            const failedCount = evt.failed_count || evt.failed_chapters.length;
+            msg.warning(`已停止：${failedCount} 章子目录生成失败，保存部分成果后请手动补充`);
+            pushOutlineLog(lastP, `⚠️ ${failedCount} 章子目录失败`);
+          }
           // ✅ BUG 修复：长方案分步生成被停止时，已生成的部分目录此前只更新到
           // 前端内存 tree，刷新页面即丢失。现询问用户是否保存这部分成果
           //（后端 save-outline 智能保留已有正文，按需重建结构）。
@@ -440,6 +463,11 @@ export function useOutlineGeneration(deps: OutlineGenerationDeps) {
               // checkpoint 回传的 outline 即目录树节点（后端 SSE 契约），收窄一次供闭包复用
               const stoppedOutline = ckpt.outline as OutlineNodeInput[];
               setTree(buildTree(stoppedOutline));
+              // ✅ R192（FIX-R13）：重挂 stopped 同样消费失败章清单（与在线分支同口径）
+              if (Array.isArray(ckpt.failed_chapters) && ckpt.failed_chapters.length) {
+                setFailedOutlineChapters(ckpt.failed_chapters);
+                msg.warning(`已停止：${ckpt.failed_count || ckpt.failed_chapters.length} 章子目录生成失败，可保存部分成果后手动补充`);
+              }
               const partialCount = countOutline(stoppedOutline);
               const hint = buildPartialOutlineHint({
                 event: ckpt.event,
@@ -471,12 +499,31 @@ export function useOutlineGeneration(deps: OutlineGenerationDeps) {
               // ✅ BUG 修复（2026-09-25）：ckpt 可能为 undefined（stopped 且无 checkpoint
               //    成果），旧实现直接 ckpt.event 抛 TypeError 使收尾逻辑中断，用户既看不到
               //    「已停止」提示也没有弹窗。同函数其它分支均用可选链，唯独此处漏了。
+              // ✅ R192（FIX-R14）：R190 FIX-5 后「停止+检查点写失败」终态保持 stopped
+              //    但无 checkpoint——旧文案丢弃 fin.message（「用户已停止（检查点写入
+              //    失败，刷新后可能无法恢复半份成果…）」），用户不知道半份成果已丢失。
+              //    对齐刷新接管路径（SchemeWorkbenchPage `后台任务已停止${st.message…}`）。
               msg.info(
-                ckpt?.event === "error"
+                (ckpt?.event === "error"
                   ? "后台任务因异常中断，且无可恢复的部分成果"
-                  : "后台任务已停止",
+                  : "后台任务已停止") + (fin.message ? `：${fin.message}` : ""),
               );
             }
+          } else if (fin?.status === "degraded") {
+            // ✅ R192（FIX-R12）：R187/R188 引入终态 degraded（completed 但检查点写
+            //    失败，sse_handlers finish_task("degraded")）。在线 completed 分支对
+            //    同场景有 checkpoint_failed 告警，刷新接管路径（TERMINAL_TASK_STATUSES
+            //    含 degraded）有分支——唯独 SSE 断线重挂路径的终态分发只有
+            //    completed/failed/stopped 三支：degraded 落入三支全不命中，无任何
+            //    提示、无 load()，进度条永久停在「正在重新挂接后台任务」，成果
+            //    确已丢失（检查点没写成，重挂也取不到 outline_result）而用户毫不知情。
+            //    现补分支：如实告知 + 收尾刷新（与在线告警同文案口径）。
+            msg.warning(
+              fin.message ||
+                "目录已生成，但成果未能写入检查点：刷新或断线后无法恢复，请重新生成或立即手动保存",
+            );
+            pushOutlineLog(1, "⚠️ 检查点写入失败，后台成果不可恢复");
+            load();
           }
         }
       }

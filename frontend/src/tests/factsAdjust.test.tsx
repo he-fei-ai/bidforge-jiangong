@@ -116,7 +116,8 @@ describe("FactsAdjustPanel · 应用", () => {
     await opts.onOk();
 
     expect(apply).toHaveBeenCalledTimes(1);
-    expect(apply).toHaveBeenCalledWith(ops, "共 2 项");
+    // ✅ R193：apply 新增第 3 参 AbortSignal（AI 请求可中止，L-06）。
+    expect(apply).toHaveBeenCalledWith(ops, "共 2 项", expect.any(AbortSignal));
     // 计划清空后「应用调整计划」按钮消失
     expect(screen.queryByRole("button", { name: /应用调整计划/ })).toBeNull();
   });
@@ -182,7 +183,8 @@ describe("FactsAdjustPanel · 应用", () => {
     fireEvent.click(screen.getByRole("button", { name: /应用调整计划/ }));
     const opts = (confirmDialog as any).mock.calls[0][0] as ConfirmOptions;
     await opts.onOk();
-    expect(apply).toHaveBeenCalledWith(expect.any(Array), "按已确认计划调整（2 项）");
+    // ✅ R193：apply 新增第 3 参 AbortSignal（AI 请求可中止，L-06）。
+    expect(apply).toHaveBeenCalledWith(expect.any(Array), "按已确认计划调整（2 项）", expect.any(AbortSignal));
   });
 });
 
@@ -277,7 +279,8 @@ describe("FactsAdjustPanel · 预览", () => {
     clickOk();
 
     await waitFor(() => expect(preview).toHaveBeenCalledTimes(1));
-    expect(preview).toHaveBeenCalledWith("把开挖深度统一改为 8.5m");
+    // ✅ R193：preview 新增第 2 参 AbortSignal（AI 请求可中止，L-06）。
+    expect(preview).toHaveBeenCalledWith("把开挖深度统一改为 8.5m", expect.any(AbortSignal));
     expect(screen.getByRole("button", { name: /应用调整计划/ })).toBeTruthy();
   });
 

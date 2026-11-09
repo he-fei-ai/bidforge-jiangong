@@ -107,6 +107,13 @@ async def _add_fact(
 async def _build(db, monkeypatch, tmp_path, sid: str) -> Path:
     monkeypatch.setattr(export_dossier.settings, "dossier_enabled", True)
     monkeypatch.setattr(export_dossier, "EXPORTS_DIR", Path(tmp_path))
+    # ✅ R195 重锚：底稿链接入了 DLV 阻断闸门（与 /export/docx 同口径），
+    #    最小种子数据无审核记录 → DLV-09 high 阻断。本文件聚焦附属产物，
+    #    闸门放行由桩替代；闸门阻断行为由 tests/test_export_r195_20261109.py 实证。
+    async def _gate_pass(_sid, _db, _body):
+        return [], {"checked": True, "override": False}
+
+    monkeypatch.setattr(export_router, "_export_high_issue_gate", _gate_pass)
     resp = await export_dossier.export_dossier(sid, db=db)
     assert isinstance(resp, FileResponse)
     assert resp.path and Path(resp.path).exists()

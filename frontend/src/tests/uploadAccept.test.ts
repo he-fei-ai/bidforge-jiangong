@@ -39,6 +39,7 @@ const BACKEND_SUPPORTED_EXTENSIONS = [
   "bmp",
   "tiff",
   "tif",
+  "webp",
   "doc",
   "wps",
 ];

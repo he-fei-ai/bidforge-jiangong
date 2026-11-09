@@ -489,6 +489,18 @@ async def run_repair(
                                 _wc = text_word_count(_persist_content)
                         except Exception as _re:  # noqa: BLE001
                             logger.warning("[一致性修复] 第 %s 章图表重登记失败（保留原正文）: %s", sid, _re)
+                    # ✅ R203（2026-11-09 · 编号归一化补链）：修复整章改写正文，
+                    #    UPDATE 前须补 normalize_section_content_subheadings 归一化
+                    #    子标题编号。fail-soft 不阻断修复落库。
+                    try:
+                        from app.services.numbering import normalize_section_content_subheadings
+
+                        _persist_content, _ = await normalize_section_content_subheadings(
+                            db, scheme_id, sid, _persist_content
+                        )
+                        _wc = text_word_count(_persist_content)
+                    except Exception as _ne:  # noqa: BLE001
+                        logger.warning("[一致性修复] 第 %s 章编号规范化失败（保留修复正文）: %s", sid, _ne)
                     await db.execute(
                         "UPDATE sections SET content=?, word_count=?, word_status=?, " "updated_at=? WHERE id=?",
                         (_persist_content, _wc, word_status_for(_wc, _wb), datetime.now().isoformat(), sid),

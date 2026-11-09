@@ -102,124 +102,38 @@ def _fn(tree: ast.Module, name: str) -> ast.FunctionDef:
 
 # ====================================================================
 # A 组 · L3：export_audit 判据副本 → 委派单一事实源
+# ✅ R198（2026-11-09 · R197 遗留①收口）：历史副本 export_audit.py 已**物理删除**
+#    —— 其独有 7 项检测器已于 R181 迁入生产模块 `_export_issue_scan.py`
+#    （单一事实源），委派副本失去存在意义。原「委派结构锁」族改写为
+#    「文件已删除 + 单一事实源」锁，守护意图（防副本回流）全部保留。
 # ====================================================================
 
 
 class TestL3AuditDelegatesToExport:
-    """物理副本 = 本仓最高频反模式「同一判据两份副本」：任一侧改动即漂移，
-    且漂移无任何测试能发现。"""
+    """历史形态：物理副本 = 同一判据两份副本，任一侧改动即漂移。
+    现锁「副本已删 + 生产判据单源」，任何一侧复活旧副本/复制判据即红。"""
 
-    @pytest.mark.parametrize("name", DELEGATED)
-    def test_body_is_single_delegating_return(self, name):
-        """结构锁：函数体必须**恰为 1 条 Return**，且其值是
-        `return _ex.<同名>(...)` —— 副本物理体一旦回流即红。"""
-        fn = _fn(_mod_ast("routers/export_audit.py"), name)
-        stmts = [
-            s
-            for s in fn.body
-            if not (isinstance(s, ast.Expr) and isinstance(s.value, ast.Constant) and isinstance(s.value.value, str))
-        ]
-        assert len(stmts) == 1 and isinstance(stmts[0], ast.Return), f"{name} 不再是单行委派（副本回流或被改写）"
-        call = stmts[0].value
-        assert isinstance(call, ast.Call), f"{name} 未调用 _ex.{name}"
-        target = call.func
-        assert (
-            isinstance(target, ast.Attribute)
-            and target.attr == name
-            and isinstance(target.value, ast.Name)
-            and target.value.id == "_ex"
-        ), f"{name} 的委派目标不是 _ex.{name}"
+    def test_audit_module_deleted(self):
+        """历史副本必须保持删除状态（复活即红 —— 这是收敛的终态不变式）。"""
+        assert not (APP_DIR / "routers" / "export_audit.py").exists(), (
+            "routers/export_audit.py 已于 R198 删除（判据单一事实源在 _export_issue_scan.py）；"
+            "如需恢复必须先更新本护栏"
+        )
 
     def test_delegation_target_exists(self):
-        """委派目标必须真实存在于 export（防改名字后静默 AttributeError）。"""
+        """14 个判据必须真实存在于 export 生产模块（防改名后静默 AttributeError）。"""
         exp = _mod_ast("routers/export.py")
         for name in DELEGATED:
             _fn(exp, name)
 
-    def test_audit_content_is_not_delegated(self):
-        """反向锁：`audit_content` 是本文件的**能力超集**（另加全文级体检），
-        收敛会丢功能 ⇒ 必须仍是本文件实现，绝不可一并委派掉。"""
-        fn = _fn(_mod_ast("routers/export_audit.py"), "audit_content")
-        stmts = [
-            s
-            for s in fn.body
-            if not (isinstance(s, ast.Expr) and isinstance(s.value, ast.Constant) and isinstance(s.value.value, str))
-        ]
-        assert not (
-            len(stmts) == 1
-            and isinstance(stmts[0], ast.Return)
-            and isinstance(stmts[0].value, ast.Call)
-            and isinstance(stmts[0].value.func, ast.Attribute)
-        ), "audit_content 被收敛成委派 —— 会丢掉本文件独有的全文级体检能力"
-
     @pytest.mark.parametrize("name", AUDIT_ONLY)
     def test_audit_only_capability_retained(self, name):
-        """audit 独有的 7 项能力必须仍在（收敛时最容易顺手删掉的东西）。"""
-        _fn(_mod_ast("routers/export_audit.py"), name)
-
-    def test_module_imports_export(self):
-        src = (APP_DIR / "routers" / "export_audit.py").read_bytes().decode("utf-8")
-        assert "from app.routers import export as _ex" in src, "export_audit 未导入 export（委派会 NameError）"
-
-    def test_delegated_functions_behave_identically(self):
-        """行为锁：委派是**薄包装**（非对象 rebinding），故断言**逐项输出相等**
-        —— —— 「同一对象」断言会因包装层本身而恒假（首版即踩）。"""
-        from app.routers import export, export_audit
-
-        secs = [
-            {
-                "id": "s1",
-                "title": "工程概况",
-                "level": 1,
-                "sort_order": 0,
-                "outline_json": '{"id":"1","level":1}',
-                "content": "# 工程概况\n## 1.1 周边\n无异常。",
-            },
-            {
-                "id": "s2",
-                "title": "工程概况",
-                "level": 1,
-                "sort_order": 0,
-                "outline_json": '{"id":"2","level":1}',
-                "content": "# 工程概况",
-            },
-        ]
-        probes = {
-            "_section_sort_key": [secs[0]],
-            "_stored_outline_number": secs,
-            "_detect_section_number_mismatch": secs,
-            "_detect_duplicate_sections": secs,
-            "_detect_body_subheading_namespace_conflict": secs,
-            "_detect_stale_cross_references": secs,
-            "_section_number_prefix": ["第二章 支护", ""],
-            "_cn_numeral_to_int": ["二十一", "3", "十"],
-            "_count_unclosed_chart_fences": ["```mermaid\nA-->B\n```", "```mermaid\nA-->B"],
-            "_count_child_namespace_subheadings": [([{"lvl": 2, "text": "2.1 x"}], "2")],
-            "_format_audit_log": [{"total": 1, "items": [], "counts": {"warn": 1}}],
-            "_build_chart_type_index": [({("s1", "c1"): "flowchart"}, {"flowchart": 1})],
-            "_find_fallback_code": [({"flowchart": [("s1", "c1")]}, "gantt", "s2", {"flowchart": 1})],
-            "_resolve_chart_code": [
-                ({"type": "mermaid"}, "s1", "flowchart", {}, {"flowchart": [("s1", "c1")]}, {"flowchart": 1})
-            ],
-        }
-
-        def _call(fn, args):
-            try:
-                return ("ok", repr(fn(args)))
-            except Exception as e:  # noqa: BLE001 - 错误行为也是行为
-                return ("exc", type(e).__name__)
-
-        checked = 0
-        for name, args_list in probes.items():
-            for args in args_list:
-                a = _call(getattr(export_audit, name), args)
-                b = _call(getattr(export, name), args)
-                assert a == b, f"{name}({args!r}): audit={a} export={b}"
-                checked += 1
-        assert checked >= len(probes), "探针未覆盖到全部函数"
+        """audit 独有的 7 项能力已迁入生产模块 `_export_issue_scan.py`，必须仍在
+        （收敛时最容易顺手删掉的东西）。"""
+        _fn(_mod_ast("routers/_export_issue_scan.py"), name)
 
     def test_audit_content_still_runs(self):
-        from app.routers.export_audit import audit_content
+        from app.routers._export_issue_scan import audit_content
 
         assert audit_content([])["total"] == 0
 
@@ -537,7 +451,9 @@ class TestL4ResidualIsReportedNotRejected:
 
 class TestStaticHygiene:
     TOUCHED = [
-        "routers/export_audit.py",
+        # ✅ R198：routers/export_audit.py 已物理删除，退出体检名单
+        #    （收敛终态锁见 TestL3AuditDelegatesToExport.test_audit_module_deleted）
+        "routers/_export_issue_scan.py",
         "routers/sections.py",
         "routers/upload_outline.py",
         "services/outline_quality.py",
@@ -560,35 +476,43 @@ class TestStaticHygiene:
         tops = [n.name for n in tree.body if isinstance(n, (ast.FunctionDef, ast.AsyncFunctionDef, ast.ClassDef))]
         assert len(tops) == len(set(tops)), f"{rel} 顶层重名：{[n for n in tops if tops.count(n) > 1]}"
 
-    def test_export_audit_has_no_dead_imports(self):
-        """L3 收敛后不得留下死导入（副本函数体是它们此前的唯一使用者）。
+    def test_export_issue_scan_imports_no_export_at_module_level(self):
+        """✅ R198 断环锁（替代原 export_audit 死导入锁 —— 该文件已物理删除）。
 
-        ⚠️ 判定走 **AST 导入节点**，不是源码子串 —— 文件里有一句注释
-        明确点名了这些被删的名字（说明「为什么删」），纯文本匹配会自咬
-        （首版即踩：AGENTS §5.14「源码含字符串是假判据」同族）。
+        `_export_issue_scan.py` 被 `export.py` 中部转发 import
+        （``from ._export_issue_scan import _AUDIT_RULES``）：若本模块**顶部**
+        import export，会形成初始化环 —— 首触本模块（不经 export 的入口，
+        如 readiness/独立脚本）立即 ImportError（R198 实测）。
+        锁定两点：
+        1. 模块级不得出现任何 `app.routers.export` 依赖（真依赖一律直引
+           services 叶子）；
+        2. `_sh()` 延迟解析 facade 必须在（仅剩的 2 个 export 侧名字的
+           合法通道；防有人恢复顶部 import）。
         """
-        tree = _mod_ast("routers/export_audit.py")
-        imported: set[str] = set()
-        for n in ast.walk(tree):
-            if isinstance(n, ast.Import):
-                imported |= {a.asname or a.name.split(".")[0] for a in n.names}
-            elif isinstance(n, ast.ImportFrom):
-                imported |= {a.asname or a.name for a in n.names}
-        for dead in (
-            "json",
-            "parse_fence_line",
-            "_cn_pure_to_int",
-            "_compute_subheading",
-            "_parse_content_blocks",
-            "_strip_duplicate_leading_title",
-            "_strip_title_number",
-        ):
-            assert dead not in imported, f"死导入未清理：{dead}"
+        tree = _mod_ast("routers/_export_issue_scan.py")
+        for n in tree.body:
+            if isinstance(n, (ast.Import, ast.ImportFrom)):
+                mods = (
+                    [a.name for a in n.names]
+                    if isinstance(n, ast.Import)
+                    else [n.module or ""]
+                )
+                for m in mods:
+                    assert m != "app.routers.export" and not str(m).startswith("app.routers.export"), (
+                        f"模块级 import {m} 会与 export.py 的转发 import 成环（R198 实测首触即 ImportError）"
+                    )
+        assert any(
+            isinstance(n, ast.FunctionDef) and n.name == "_sh" for n in tree.body
+        ), "_sh() 延迟解析 facade 被删除 —— 2 个 export 侧名字将无法安全引用"
 
-        import app.routers.export_audit as ea
+    def test_export_issue_scan_importable_first_touch(self):
+        """行为锁：不经 export 首触本模块必须成功（环的存在形态即本次缺陷）。"""
+        import importlib
+        import sys
 
-        assert ea.audit_content is not None
-        assert ea.logger is not None
+        sys.modules.pop("app.routers._export_issue_scan", None)
+        mod = importlib.import_module("app.routers._export_issue_scan")
+        assert callable(mod.audit_content)
 
     @pytest.mark.asyncio
     async def test_duplicate_scheme_still_renumbers(self, db_conn):

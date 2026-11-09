@@ -209,11 +209,27 @@ def select_page_blocks(pages: list[dict], *, max_chars: int = _MAX_DOC_CHARS) ->
 
 
 async def select_scoring_sources(db, project_id: str) -> list[dict]:
-    """扫描项目全部文档，确定性筛出候选页块（v1 不接受 doc_ids 限定范围）。"""
+    """扫描项目全部文档，确定性筛出候选页块（v1 不接受 doc_ids 限定范围）。
+
+    ✅ R191 修复（chunk_type='page' 死契约）：doc_chunker 从不产 'page' 块
+    （只产 section/semantic/table 三类，schema 注释的四类声明从未兑现），
+    旧查询恒取 0 行 → 本函数恒走「无页块」兜底分支——评分项提取的页级
+    定位与 M1 页码溯源从未真正生效（静默降级）。现改读实际存在的
+    section/semantic 块并按 page_num 聚合成页块（同页多块正文合并，
+    source_ref 取该页首块），页级选择能力自此可达；页码口径不变
+    （doc_chunks.page_num / source_ref，取不到留空，不编造）。
+
+    ✅ R191（R13 判空）：两处 db.execute 游标 None 时降级留痕（主游标 →
+    返回空列表，调用方走既有 failed run 语义；块游标 → 跳过该文档），
+    不再裸 fetchall 抛 AttributeError。
+    """
     cur = await db.execute(
         "SELECT id, file_name, parsed_markdown FROM project_documents WHERE project_id=?",
         (project_id,),
     )
+    if cur is None:
+        logger.warning("评分项提取：查询项目文档失败（db.execute 返回 None，R13），project=%s", project_id)
+        return []
     docs = await cur.fetchall()
 
     sources: list[dict] = []
@@ -222,18 +238,30 @@ async def select_scoring_sources(db, project_id: str) -> list[dict]:
         name = str(_row(doc, "file_name", 1) or "")
         parsed = str(_row(doc, "parsed_markdown", 2) or "")
         cur2 = await db.execute(
-            "SELECT page_num, text, source_ref FROM doc_chunks WHERE doc_id=? AND chunk_type='page' ORDER BY page_num",
+            "SELECT page_num, text, source_ref FROM doc_chunks "
+            "WHERE doc_id=? AND chunk_type IN ('section','semantic') "
+            "ORDER BY page_num, rowid",
             (doc_id,),
         )
+        if cur2 is None:
+            logger.warning("评分项提取：查询文档分块失败（db.execute 返回 None，R13），doc=%s", doc_id)
+            continue
         rows = await cur2.fetchall()
-        pages = [
-            {
-                "page_num": _row(r, "page_num", 0),
-                "text": _row(r, "text", 1),
-                "source_ref": _row(r, "source_ref", 2),
-            }
-            for r in rows
-        ]
+        # 按 page_num 聚合成页块：同页多个 section/semantic 块正文拼接
+        _by_page: dict = {}
+        for r in rows:
+            pn = _row(r, "page_num", 0)
+            key = pn if isinstance(pn, int) and pn > 0 else 1
+            entry = _by_page.get(key)
+            if entry is None:
+                _by_page[key] = {
+                    "page_num": key,
+                    "text": str(_row(r, "text", 1) or ""),
+                    "source_ref": str(_row(r, "source_ref", 2) or ""),
+                }
+            else:
+                entry["text"] = (entry["text"] + "\n" + str(_row(r, "text", 1) or "")).strip("\n")
+        pages = [_by_page[k] for k in sorted(_by_page)]
         if pages:
             text, used_pages, hits = select_page_blocks(pages, max_chars=_MAX_DOC_CHARS)
             if not text:

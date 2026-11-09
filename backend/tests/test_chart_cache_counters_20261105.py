@@ -6,15 +6,26 @@
 轻量计数出口 ``get_counters()`` 语义，以及它与命中路径的一致性。
 """
 
+import io
+
 from app.services.ai.mermaid_renderer import _chart_cache
 
 
 def _put_cached_chart(code: str, chart_type: str = "flowchart") -> None:
-    """按缓存 key 规则预置一份磁盘缓存（不依赖 mermaid 二进制）。"""
+    """按缓存 key 规则预置一份磁盘缓存。
+
+    ✅ R199（2026-11-09）：get_or_render 磁盘命中补全文件完整性校验（长度 +
+    PIL verify）—— 预置内容必须是真实可解码 PNG（旧 b"fake-png-bytes" 会被
+    新判据正确拒收并删除重渲，hits 恒不增）。
+    """
+    from PIL import Image
+
     key = _chart_cache._cache_key(chart_type, code, True, False)
     path = _chart_cache.cache_dir / f"{key}.png"
     path.parent.mkdir(parents=True, exist_ok=True)
-    path.write_bytes(b"fake-png-bytes")
+    buf = io.BytesIO()
+    Image.new("RGB", (64, 48), (10, 120, 30)).save(buf, format="PNG")
+    path.write_bytes(buf.getvalue())
 
 
 class TestChartCacheCounters:

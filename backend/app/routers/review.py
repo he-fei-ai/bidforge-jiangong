@@ -200,12 +200,20 @@ async def reset_review_on_content_change(
     current = (row["review_status"] or "").strip()
     if current not in REVIEW_STATUS_NEED_RESET:
         return False
-    await review_db.exec_write(
+    # ✅ R197（B8）：退回 UPDATE 改为 compare-and-set（R95 同口径）—— 旧实现
+    #    先 SELECT 后无条件 UPDATE，读→写 await 窗口内并发流转（评审人同时点
+    #    「通过」）会被静默覆盖为 pending，且留痕的 from_status 可能记录已被
+    #    替换的状态。0 行 = 状态已被并发方改写，如实返回 False（不写留痕）。
+    _n = await review_db.exec_write(
         db,
-        "UPDATE sections SET review_status='pending', updated_at=? WHERE id=?",
-        (datetime.now().isoformat(), section_id),
+        "UPDATE sections SET review_status='pending', updated_at=? "
+        "WHERE id=? AND scheme_id=? AND review_status=?",
+        (datetime.now().isoformat(), section_id, scheme_id, current),
         what=f"章节审核状态回退（section={section_id[:8]}）",
+        require_rows=False,
     )
+    if _n <= 0:
+        return False
     await _write_record(
         db,
         scheme_id,

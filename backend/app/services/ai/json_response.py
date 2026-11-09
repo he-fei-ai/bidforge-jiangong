@@ -63,18 +63,30 @@ def _build_repair_user_prompt(issues: list, raw: str, repair_key: str = GENERIC_
             invalid_content=raw or "",
         )
     except Exception:
-        try:
-            from app.services.ai.prompts._registry import get_prompt as _get_generic
+        # ✅ R204（2026-11-09 · 兜底必须尊重调用方请求的 repair_key）：
+        #   旧实现在渲染失败时**硬编码**回落 ``GENERIC_REPAIR_KEY``，完全忽略
+        #   调用方传入的 key —— 目录族（OUTLINE_REPAIR_KEY）/事实族
+        #   （FACTS_REPAIR_KEY）在注册表缺失或渲染异常时，改用**通用**
+        #   schema-fix 提示词，而通用提示词会把 ``{"facts": [...]}`` 诱导成
+        #   非事实形状（方向性错误）。现按「先用请求的 key，再用通用 key」
+        #   的顺序回落，并留下 WARNING 记录实际使用的 key。
+        for _key in (repair_key, GENERIC_REPAIR_KEY):
+            try:
+                from app.services.ai.prompts._registry import get_prompt as _get_generic
 
-            _tpl = _get_generic(GENERIC_REPAIR_KEY)
-            return (
-                _tpl.replace("{target_description}", "JSON 结果")
-                .replace("{issues}", _format_json_issues(issues or ["JSON 语法错误，无法解析"]))
-                .replace("{invalid_content}", raw or "")
-            )
-        except Exception:  # noqa: BLE001
-            logger.error("JSON 修复提示词不可用（注册表缺失）", exc_info=True)
-            raise ValueError("JSON 修复提示词不可用：注册表缺少 %s" % GENERIC_REPAIR_KEY) from None
+                _tpl = _get_generic(_key)
+                if not _tpl:
+                    continue
+                logger.warning("JSON 修复提示词渲染失败，回落为注册表原文（key=%s）", _key)
+                return (
+                    _tpl.replace("{target_description}", "JSON 结果")
+                    .replace("{issues}", _format_json_issues(issues or ["JSON 语法错误，无法解析"]))
+                    .replace("{invalid_content}", raw or "")
+                )
+            except Exception:  # noqa: BLE001 - 逐个 key 尝试，失败即试下一个
+                continue
+        logger.error("JSON 修复提示词不可用（注册表缺失）", exc_info=True)
+        raise ValueError("JSON 修复提示词不可用：注册表缺少 %s" % repair_key) from None
 
 
 def _format_json_issues(issues: list) -> str:
@@ -151,12 +163,29 @@ _FENCE_PATTERN = re.compile(r"```(?:json)?\s*(.*?)```", re.S)
 
 
 def _json_from_fenced_blocks(text: str) -> str | None:
-    """优先从代码围栏内提取 JSON（多个围栏逐个尝试）。"""
+    """优先从代码围栏内提取 JSON（多个围栏逐个尝试）。
+
+    ✅ R204（2026-11-09 · 围栏候选必须**可解析**）：旧实现对每个围栏只做
+    「括号配对扫描」，取到第一个平衡片段就返回 —— **不验证能否 json.loads**。
+    模型若先输出一个「示例/说明」围栏再输出真正答案围栏，会取到示例那个
+    （解析失败）→ 白白触发一整轮修复（每轮 1 次额外计费），甚至把可用结果
+    判成失败。现对每个候选做 ``json.loads`` 验证，失败则继续下一个围栏，
+    全部失败才回退原文扫描（与 ``_json_from_raw_text`` 口径一致）。
+    """
+    fallback: str | None = None
     for block in _FENCE_PATTERN.findall(text):
         candidate = _extract_balanced(block.strip())
-        if candidate:
+        if not candidate:
+            continue
+        try:
+            json.loads(candidate)
             return candidate
-    return None
+        except json.JSONDecodeError:
+            # 记下第一个「像 JSON 但解析失败」的候选，作为最后的兜底（保持旧语义：
+            # 至少给修复轮一个可指认的对象）。
+            if fallback is None:
+                fallback = candidate
+    return fallback
 
 
 def _json_from_raw_text(text: str) -> str | None:
@@ -180,7 +209,8 @@ def _json_from_raw_text(text: str) -> str | None:
 def extract_json(text: str) -> str | None:
     """从模型输出中提取 JSON 字符串（兼容代码块包裹）。
 
-    优先从代码围栏提取；若多个围栏都拿不到结构，再在原文中用括号配对扫描。
+    优先从代码围栏提取（**逐个验证可解析**，R204）；若围栏全不可用，再在
+    原文中用括号配对扫描。
     """
     text = text.strip()
     return _json_from_fenced_blocks(text) or _json_from_raw_text(text)
@@ -412,7 +442,12 @@ async def _run_json_generation(
         # 修复的半成品（否则第 2 轮是在「修已经改坏的结果」）。
         repair_messages = [
             *messages,
-            {"role": "assistant", "content": raw or ""},
+            # ✅ R204（2026-11-09 · 上下文与待修对象必须一致）：旧实现 assistant
+            #   消息放**最近一次** ``raw``，而修复提示词里的 ``invalid_content``
+            #   放**最初**的 ``first_raw`` —— 模型被要求修 A、看到的却是 B
+            #   （第 2 轮尤其明显：此时 assistant 里已是上一轮的半成品）。
+            #   现统一用 ``first_raw``（与 ``invalid_content`` 同源）。
+            {"role": "assistant", "content": first_raw or ""},
             {"role": "user", "content": _build_repair_user_prompt(issues, first_raw or "", repair_key)},
         ]
         try:
@@ -610,6 +645,6 @@ def renumber_outline(nodes: list, prefix: str = "", _depth: int = 0) -> list:
     """程序统一重排编号（薄包装；唯一实现在 services/numbering.renumber_outline_nodes）
 
     兼容说明：保持与旧实现完全相同的签名与语义（就地修改并返回；
-    非列表原样返回；递归深度防护 20）。
+    非列表原样返回；递归深度防护与 numbering._MAX_TREE_DEPTH=200 同源）。
     """
     return renumber_outline_nodes(nodes, strip_titles=True, prefix=prefix, _depth=_depth)

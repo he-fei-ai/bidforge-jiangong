@@ -434,3 +434,43 @@ describe("useDocumentWorkflow · 超时文案中文化", () => {
     expect(msg.error).toHaveBeenCalledWith("解析请求超时（300 秒），请稍后重试");
   });
 });
+
+describe("useDocumentWorkflow · 批量解析结果回传 note 展示（2026-11-08 前后端接口一致性）", () => {
+  it("后端回传 note（重提事实提醒）必须随结果提示，不得被前端丢弃", async () => {
+    vi.spyOn(factsApi, "parseAllDocuments").mockResolvedValue({
+      data: {
+        ok: true,
+        parsed: 2,
+        failed_count: 0,
+        truncated_count: 0,
+        reconciled_count: 0,
+        stale_facts: 3,
+        note: "本轮新解析的文档已纳入项目资料全集；如已提取过全局事实，请重新执行「③ AI 提取事实」",
+      },
+    } as never);
+    // docList 缺 parse_status → 视为「待解析」，放行批量解析请求
+    const { result, msg } = setup(undefined, [doc("d1", "a.pdf"), doc("d2", "b.pdf")]);
+    await act(async () => {
+      await result.current.handleParseDocuments();
+    });
+    const allText = [
+      ...msg.success.mock.calls.map((c) => String(c[0])),
+      ...msg.warning.mock.calls.map((c) => String(c[0])),
+      ...msg.info.mock.calls.map((c) => String(c[0])),
+    ].join(" | ");
+    expect(allText).toContain("AI 提取事实");
+    // 同时确认 stale_facts 计数语义被 note 文案带出（已含「重新执行」动作提示）
+    expect(allText).toContain("请重新执行");
+  });
+
+  it("无 note 时仍按原口径给出精简成功提示（向后兼容）", async () => {
+    vi.spyOn(factsApi, "parseAllDocuments").mockResolvedValue({
+      data: { ok: true, parsed: 2, failed_count: 0, truncated_count: 0, reconciled_count: 0 },
+    } as never);
+    const { result, msg } = setup(undefined, [doc("d1", "a.pdf"), doc("d2", "b.pdf")]);
+    await act(async () => {
+      await result.current.handleParseDocuments();
+    });
+    expect(msg.success).toHaveBeenCalledWith("解析完成：成功 2 个文档");
+  });
+});

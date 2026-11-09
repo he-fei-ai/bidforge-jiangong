@@ -43,6 +43,8 @@ export interface ImportTabProps {
   parsingDocs: boolean;
   parsingDocId: string | null;
   handleUploadDocuments: (files: File[]) => void | Promise<void>;
+  /** ✅ R203（R191 遗留承接）：解析中「停止解析」入口（页面 parseAbortRef.abort），可选透传 */
+  onStopParse?: () => void;
   handleParseDocuments: (force?: boolean) => void | Promise<void>;
   loadDocuments: () => void | Promise<void>;
   handleParseDocument: (docId: string, fileName: string, force?: boolean) => void | Promise<void>;
@@ -210,6 +212,7 @@ export function ImportTab(props: ImportTabProps) {
     uploadedFiles,
     parsingDocs,
     parsingDocId,
+    onStopParse,
     handleUploadDocuments,
     handleParseDocuments,
     loadDocuments,
@@ -278,6 +281,7 @@ export function ImportTab(props: ImportTabProps) {
               uploadedFiles={uploadedFiles}
               parsingDocs={parsingDocs}
               parsingDocId={parsingDocId}
+              onStopParse={onStopParse}
               onUploadFiles={handleUploadDocuments}
               onParseAll={() => handleParseDocuments()}
               onReparseAll={() => handleParseDocuments(true)}

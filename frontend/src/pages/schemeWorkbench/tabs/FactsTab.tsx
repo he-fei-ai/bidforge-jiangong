@@ -45,7 +45,7 @@ import type {
   FactPagination,
   FactsSummary,
 } from "../../../types/facts";
-import { FACTS_PAGE_SIZE, buildFactsPagination } from "../factsShared";
+import { FACTS_PAGE_SIZE, buildFactsPagination, safeFactText } from "../factsShared";
 import type { FactsCategoryEntry } from "../factsShared";
 import type { FactsLogItem } from "../logTypes";
 import type { FactsSegmentStats } from "../workbenchTypes";
@@ -92,6 +92,8 @@ export interface FactsTabProps {
   factsLogs: FactsLogItem[];
   uploadingFacts: boolean;
   parsingDocs: boolean;
+  /** 单份解析进行中的 docId（可选；R203 起纳入上传/批量解析按钮禁用口径） */
+  parsingDocId?: string | null;
   taskPaused: boolean;
   taskStopping: boolean;
   // 诊断
@@ -155,6 +157,9 @@ export function FactsTab({
   factsLogs,
   uploadingFacts,
   parsingDocs,
+  /** ✅ R203：单份解析进行中的 docId——与 UploadParseTab 的 busy 口径对齐
+   *  （可选向后兼容：未传时按旧口径，既有调用方/测试零影响）。 */
+  parsingDocId,
   taskPaused,
   taskStopping,
   factsChapterReport,
@@ -313,15 +318,16 @@ export function FactsTab({
                     return (
                       <span key={cf.rule_id || idx} style={{ fontSize: 12 }}>
                         <Tag color={sevColor}>{cf.severity || "low"}</Tag>
-                        <Text strong>{cf.side_a?.name}</Text>：
-                        {/* 后端 value 契约为 string（facts_extractor 下发），编译期收窄 */}
+                        {/* R189：`value` 运行时可能是对象/数字（旧数据或 AI 输出），
+                            `as string` 只是编译期收窄，作 React child 会整块崩。 */}
+                        <Text strong>{safeFactText(cf.side_a?.name)}</Text>：
                         <Text delete type="danger">
-                          {cf.side_a?.value as string | undefined}
+                          {safeFactText(cf.side_a?.value)}
                         </Text>
                         {" ↔ "}
-                        <Text type="warning">{cf.side_b?.value as string | undefined}</Text>
+                        <Text type="warning">{safeFactText(cf.side_b?.value)}</Text>
                         {cf.resolution_hint ? (
-                          <Text type="secondary"> · {cf.resolution_hint}</Text>
+                          <Text type="secondary"> · {safeFactText(cf.resolution_hint)}</Text>
                         ) : null}
                       </span>
                     );
@@ -344,7 +350,7 @@ export function FactsTab({
           multiple
           accept={UPLOAD_FILE_ACCEPT}
           showUploadList={false}
-          disabled={generating || uploadingFacts || parsingDocs}
+          disabled={generating || uploadingFacts || parsingDocs || !!parsingDocId}
           beforeUpload={(file, fileList) => {
             if (fileList[0] === file) {
               // antd Upload 元素的 originFileObj 为可选键（受控链路才有），结构断言读取
@@ -356,9 +362,14 @@ export function FactsTab({
             return false;
           }}
         >
+          {/* ✅ R203：Upload/Button disabled 补 !!parsingDocId 维度（与
+              UploadParseTab busy 口径对齐）——单份解析（OCR 分钟级）进行中
+              上传同名文件 → upsert 整行换新（parsed_markdown=''、
+              parse_status='pending'），在飞解析持旧 doc_id 完成后写不回，
+              解析结果静默丢失。 */}
           <Button
             icon={<UploadOutlined />}
-            disabled={generating || uploadingFacts || parsingDocs}
+            disabled={generating || uploadingFacts || parsingDocs || !!parsingDocId}
             loading={uploadingFacts}
           >
             ① 上传文件保存
@@ -367,11 +378,18 @@ export function FactsTab({
         <Button
           icon={<FileTextOutlined />}
           onClick={() => handleParseDocuments()}
-          disabled={generating || uploadingFacts || parsingDocs || docStats.actionableCount === 0}
+          disabled={
+            generating ||
+            uploadingFacts ||
+            parsingDocs ||
+            !!parsingDocId ||
+            docStats.actionableCount === 0
+          }
           loading={parsingDocs}
         >
           {/* ✅ 2026-09-24 B4：与 import Tab 按钮同口径（待解析 + 失败均可批量处理）
-                  ✅ 2026-09-25：改用 useMemo 化的 docStats，消除每次渲染的重复计算与 IIFE */}
+                  ✅ 2026-09-25：改用 useMemo 化的 docStats，消除每次渲染的重复计算与 IIFE
+                  ✅ R203：disabled 补 !!parsingDocId 维度（与 UploadParseTab busy 口径对齐）*/}
           ② 解析文档
           {docStats.pendingCount > 0
             ? `（${docStats.actionableCount} 待解析）`
@@ -409,22 +427,28 @@ export function FactsTab({
           busy={generating || uploadingFacts || parsingDocs}
           disabled={(factsSummary?.total || 0) === 0}
           confirmDialog={(opts) => modal.confirm(opts)}
-          preview={async (instruction) => {
-            const { data } = await factsApi.adjust({
-              instruction,
-              scheme_id: id!,
-              apply: false,
-            });
+          preview={async (instruction, signal) => {
+            const { data } = await factsApi.adjust(
+              {
+                instruction,
+                scheme_id: id!,
+                apply: false,
+              },
+              { signal },
+            );
             return data;
           }}
-          apply={async (operations, instruction) => {
+          apply={async (operations, instruction, signal) => {
             // 应用用户刚确认的预览计划，禁止后端再次调用 AI 生成另一份计划
-            const { data } = await factsApi.adjust({
-              instruction,
-              scheme_id: id!,
-              apply: true,
-              operations,
-            });
+            const { data } = await factsApi.adjust(
+              {
+                instruction,
+                scheme_id: id!,
+                apply: true,
+                operations,
+              },
+              { signal },
+            );
             await loadFacts();
             // ✅ 2026-10-08（F3 前端接线）：被丢弃的操作要在成功提示里也说清楚，
             //    否则「改了 3 条只落 2 条」在 toast 上仍是一个「已应用」。
@@ -485,7 +509,7 @@ export function FactsTab({
         loading={factsDiagnosticsLoading}
         chapterReport={factsChapterReport}
         dangerReport={factsDangerReport}
-        onRefresh={loadFactsDiagnostics}
+        onRefresh={() => void loadFactsDiagnostics()}
       />
 
       {/* ✅ 2026-10-06：消费此前被整体丢弃的 stats.by_chapter。
@@ -790,26 +814,6 @@ export function FactsTab({
             factAttrTitles={factAttrTitles}
             sourceKindTitles={factSourceKindTitles}
           />
-          {/* ✅ 2026-10-06：消费后端 pagination（此前从不下发 limit/offset，
-                  分组一多就整屏渲染）。总数不足一页时不渲染控件。 */}
-          {(() => {
-            const pg = buildFactsPagination(factsPagination, FACTS_PAGE_SIZE);
-            if (!pg.show) return null;
-            return (
-              <div style={{ marginTop: 12, textAlign: "center" }}>
-                <Pagination
-                  current={pg.page}
-                  pageSize={pg.pageSize}
-                  total={pg.total}
-                  size="small"
-                  showSizeChanger={false}
-                  onChange={(p: number) => {
-                    void loadFacts(p);
-                  }}
-                />
-              </div>
-            );
-          })()}
         </>
       ) : (
         // ✅ 优化：工具栏（AI 提取/上传/手动新增）始终渲染于列表上方，
@@ -819,6 +823,32 @@ export function FactsTab({
           image={Empty.PRESENTED_IMAGE_SIMPLE}
         />
       )}
+      {/* ✅ R189（2026-11-08 · P1 功能不可达修复）：分页控件此前只写在
+          第二个分支（无分类视图）里，而 `activeFactCategory` 由
+          `resolveSelectedFactCategory` 保证「只要有分组就必非 null」→
+          首个分类分支恒命中，分页控件**永远不渲染**。用户只能看到当前页
+          20 组，第 2 页及以后既翻不到、左侧分类面板也只基于当前页构造。
+          现把控件提到两分支之外：两种视图共用同一份后端 pagination，
+          总数不足一页时仍按 buildFactsPagination 返回不渲染（零行为变更）。 */}
+      {facts.length > 0 &&
+        (() => {
+          const pg = buildFactsPagination(factsPagination, FACTS_PAGE_SIZE);
+          if (!pg.show) return null;
+          return (
+            <div style={{ marginTop: 12, textAlign: "center" }}>
+              <Pagination
+                current={pg.page}
+                pageSize={pg.pageSize}
+                total={pg.total}
+                size="small"
+                showSizeChanger={false}
+                onChange={(p: number) => {
+                  void loadFacts(p);
+                }}
+              />
+            </div>
+          );
+        })()}
     </div>
   );
 }

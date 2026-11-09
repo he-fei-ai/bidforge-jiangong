@@ -21,6 +21,8 @@ export interface UnknownTaskRecoveryDeps {
   modal: { confirm: (cfg: ModalFuncProps) => void };
   generating: boolean;
   genSeqRef: MutableRefObject<number>;
+  // ✅ R194（FIX-13）：手动接管期间回填，恢复停止/暂停按钮的控制可达性
+  activeTaskIdRef: MutableRefObject<string>;
   setGenerating: (v: boolean) => void;
   setGenType: (v: string) => void;
   setTaskPaused: (v: boolean) => void;
@@ -28,6 +30,9 @@ export interface UnknownTaskRecoveryDeps {
   setProgressMsg: (v: string) => void;
   load: () => Promise<void>;
   pollTaskUntilTerminal: (taskId: string) => Promise<TaskTerminalInfo | null>;
+  // ✅ R194（FIX-16）：content 任务终态消费 content_result（失败明细合并进日志区
+  //    属页面作用域，经回调注入；缺省不消费，行为与引入前一致）
+  onContentResult?: (fin: TaskTerminalInfo) => void;
   unknownTaskTypeLabel: Record<string, string>;
 }
 
@@ -38,6 +43,7 @@ export function useUnknownTaskRecovery(deps: UnknownTaskRecoveryDeps) {
     modal,
     generating,
     genSeqRef,
+    activeTaskIdRef,
     setGenerating,
     setGenType,
     setTaskPaused,
@@ -45,6 +51,7 @@ export function useUnknownTaskRecovery(deps: UnknownTaskRecoveryDeps) {
     setProgressMsg,
     load,
     pollTaskUntilTerminal,
+    onContentResult,
     unknownTaskTypeLabel,
   } = deps;
 
@@ -78,6 +85,8 @@ export function useUnknownTaskRecovery(deps: UnknownTaskRecoveryDeps) {
   /** 手动恢复入口：重新接管未知态任务的轮询（用户触发，非自动无限轮询） */
   const handleReattachUnknownTask = async () => {
     const ut = unknownTaskRef.current;
+    // ✅ R194（FIX-13）：本协程是否回填过 activeTaskIdRef（退出时只清自己写的值）
+    let didBackfill = false;
     if (!ut || !id) return;
     if (generating) {
       msg.info("当前已有任务在前台监听，请等待其结束");
@@ -108,6 +117,14 @@ export function useUnknownTaskRecovery(deps: UnknownTaskRecoveryDeps) {
     setTaskPaused(false);
     setProgress(0);
     setProgressMsg("正在重新接管后台任务...");
+    // ✅ R194（FIX-13 · C-4）：手动接管同样回填 activeTaskIdRef —— 接管轮询
+    //    窗口内停止/暂停按钮可见但 handleControl 读空 id 永远提示「尚未取得任务
+    //    标识」。接管拿到的是**同一任务**的 id，回填语义与刷新接管（:1828）对齐；
+    //    退出时只清本路径写入的值。
+    if (!activeTaskIdRef.current) {
+      activeTaskIdRef.current = reattachTaskId;
+      didBackfill = true;
+    }
     try {
       const fin = await pollTaskUntilTerminal(reattachTaskId);
       if (genSeqRef.current !== mySeq) return;
@@ -117,6 +134,10 @@ export function useUnknownTaskRecovery(deps: UnknownTaskRecoveryDeps) {
         return;
       }
       clearUnknownTask();
+      // ✅ R194（FIX-16 · C-9）：content 任务终态消费 content_result（失败明细 /
+      //    进度摘要），与断线重挂路径同口径；mergeFailedSections 属页面作用域，
+      //    经 onContentResult 回调注入（hook 不持有日志区状态）。
+      if (ut.genType === "content") onContentResult?.(fin);
       if (fin.status === "completed" || fin.status === "degraded") {
         msg.success("后台任务已完成，正在刷新");
         load();
@@ -131,6 +152,9 @@ export function useUnknownTaskRecovery(deps: UnknownTaskRecoveryDeps) {
         setGenerating(false);
         setGenType("");
         setTaskPaused(false);
+        if (didBackfill && activeTaskIdRef.current === reattachTaskId) {
+          activeTaskIdRef.current = "";
+        }
       }
     }
   };

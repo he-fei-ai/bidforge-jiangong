@@ -375,6 +375,12 @@ async def fix_mermaid(body: dict, db=Depends(get_db)):
     prediction_id = (body.get("prediction_id") or "").strip()
     section_id = (body.get("section_id") or "").strip()
     chart_type = (body.get("chart_type") or "").strip()
+    # ✅ R200（2026-11-09）：前端透传的图表围栏序号（iter_inline_chart_fences
+    #    0 基序号，含全部图表家族围栏）。同章存在**内容相同的多个坏块**时，
+    #    按内容匹配只能命中首个 —— 前端点的是第 2 块的修复按钮，写回却改了
+    #    第 1 块（预览修好成稿仍坏）。序号仅在与代码双重吻合时采纳，防伪造/漂移。
+    _fence_ordinal = body.get("fence_ordinal")
+    fence_ordinal: int | None = _fence_ordinal if isinstance(_fence_ordinal, int) and _fence_ordinal >= 0 else None
 
     # ✅ BUG 修复：预览修复入口可能传错/不传 chart_type（旧前端硬编码 "flowchart"），
     #    而 chart_predictions 回写按 (section_id, chart_type) 定位 —— 类型不符时
@@ -634,7 +640,46 @@ async def fix_mermaid(body: dict, db=Depends(get_db)):
                 srow = await cur.fetchone()
                 old_content = (srow["content"] or "") if srow else ""
                 if old_content:
-                    patched = _rewrite_code_block(old_content, code, fixed) or ""
+                    # ✅ R196（2026-11-09）：按围栏序号精确改写（只动目标块）——
+                    #    旧实现 _rewrite_code_block 按代码内容匹配，`code == old_code`
+                    #    命中**所有**同内容块：同章两块相同代码（手动保存路径
+                    #    enforce_limits=False 不裁剪）会同时被替换，违背 R48 确立的
+                    #    「按围栏序号精确改写、只动指定块」纪律。登记目标定位不到时
+                    #    （正文与清单漂移）回退旧行为兜底。
+                    from app.routers._chart_pipeline import _apply_chart_fence_edits, _scan_chart_fences_full
+
+                    _target_ords = [_o for _ct, _cd, _o in _scan_chart_fences_full(old_content) if _cd == code]
+                    if _target_ords:
+                        # ✅ R199（2026-11-09）：同章多块同码时只改第一块是既有口径
+                        #    （R196 按围栏序号精确改写、登记行只存一条/类型），但
+                        #    多匹配意味着正文与清单已漂移（手动保存路径允许同码
+                        #    多块）——修第 1 块后其余块仍是坏代码、导出照渲。
+                        #    至少 WARNING 留痕，让「预览修好、成稿仍坏」可定位。
+                        # ✅ R200：前端点的是**哪一块**由 fence_ordinal 精确指定
+                        #    （0 基图表家族围栏序号）；仅当该序号处的代码与本次待修
+                        #    code 双重吻合时采纳，否则告警回退首块（防序号漂移/伪造
+                        #    把修复写进另一块）。未传（旧前端）行为不变。
+                        _chosen_ord = _target_ords[0]
+                        if fence_ordinal is not None and len(_target_ords) > 1:
+                            if fence_ordinal in _target_ords:
+                                _chosen_ord = fence_ordinal
+                            else:
+                                logger.warning(
+                                    "fix-mermaid：前端围栏序号 %s 与正文同码块 %s 不吻合，回退首块",
+                                    fence_ordinal,
+                                    _target_ords,
+                                )
+                        if len(_target_ords) > 1 and _chosen_ord != fence_ordinal:
+                            logger.warning(
+                                "fix-mermaid：正文命中 %d 个同码图表块（围栏序号 %s），"
+                                "改写序号 %s，其余块仍为坏代码（正文与清单漂移）",
+                                len(_target_ords),
+                                _target_ords,
+                                _chosen_ord,
+                            )
+                        patched = _apply_chart_fence_edits(old_content, {_chosen_ord: fixed}) or ""
+                    else:
+                        patched = _rewrite_code_block(old_content, code, fixed) or ""
 
             if row:
                 try:

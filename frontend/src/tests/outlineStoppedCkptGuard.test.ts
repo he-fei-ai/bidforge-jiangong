@@ -22,7 +22,9 @@ const src: string = genSource;
 
 describe("SchemeWorkbenchPage stopped 收尾分支可选链护栏", () => {
   it("无成果提示必须使用可选链 ckpt?.event", () => {
-    expect(src).toMatch(/msg\.info\(\s*ckpt\?\.event === "error"/);
+    // ✅ R203：R192 FIX-R14 加 fin.message 拼接后表达式包了 (…) 分组括号，
+    //    正则同步放宽——核心不变量是「必须用 ckpt?.event（可选链）」。
+    expect(src).toMatch(/msg\.info\(\s*\(?ckpt\?\.event === "error"/);
   });
 
   it("禁止裸 ckpt.event 访问回潮（ckpt 可能为 undefined）", () => {

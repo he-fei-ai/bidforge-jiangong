@@ -24,6 +24,18 @@ from app.services.content_blocks import _clean_chart_title, _title_candidate
 _GANTT_CODE = 'flowchart TD\n    A["施工准备"] --> B["基础施工"]'
 
 
+def _r199_png() -> bytes:
+    """✅ R199：get_or_render 磁盘命中补全文件完整性校验（长度 + PIL verify）——
+    fixture 必须提供真实可解码 PNG（旧假字节 b"PNG-PIL" 会被新判据正确拒收）。"""
+    from PIL import Image
+
+    buf = BytesIO()
+    Image.new("RGB", (64, 48), (90, 140, 200)).save(buf, format="PNG")
+    data = buf.getvalue()
+    assert len(data) > 100
+    return data
+
+
 def _make_cache(tmp_path):
     return mr.ChartCache(cache_dir=str(tmp_path / "charts"))
 
@@ -38,13 +50,13 @@ def test_cache_skip_http_write_then_read_hits(tmp_path, monkeypatch):
 
     def fake_render(code, chart_type="flowchart", *, skip_http=False, allow_pil=True):
         calls.append(skip_http)
-        return BytesIO(b"PNG-PIL")
+        return BytesIO(_r199_png())
 
     monkeypatch.setattr(mr, "render_mermaid_to_bytes", fake_render)
 
     for _ in range(3):
         out = cache.get_or_render(_GANTT_CODE, "flowchart", skip_http=True)
-        assert out is not None and out.getvalue() == b"PNG-PIL"
+        assert out is not None and out.getvalue() == _r199_png()
 
     # 只渲染一次 → 第 2/3 次均命中自身写入的缓存
     assert calls == [True]
@@ -83,7 +95,7 @@ def test_cache_follower_shares_leader_result(tmp_path, monkeypatch):
         render_calls.append(skip_http)
         leader_started.set()
         time.sleep(0.15)
-        return BytesIO(b"LEADER-RESULT")
+        return BytesIO(_r199_png())
 
     monkeypatch.setattr(mr, "render_mermaid_to_bytes", slow_render)
 
@@ -102,7 +114,7 @@ def test_cache_follower_shares_leader_result(tmp_path, monkeypatch):
 
     assert len(results) == 2
     assert all(r is not None for r in results), "follower 假失败（旧 BUG-175-01 症状）"
-    assert all(r.getvalue() == b"LEADER-RESULT" for r in results)
+    assert all(r.getvalue() == _r199_png() for r in results)
     assert render_calls == [True], "同一 key 只允许 leader 渲染一次"
 
 
