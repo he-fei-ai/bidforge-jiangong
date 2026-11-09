@@ -1406,6 +1406,64 @@ async def _facts_signature(db, scheme_id: str) -> str:
         return ""
 
 
+#: ✅ R207（日志驱动）：就绪度总检聚合时实际会读、但**不改变正文**的来源表。
+#: /check、/expert-review、/consistency-audit、/consistency/scan|repair|confirm、
+#: 评分项提取、全局事实确认等写入都不会改变 content_fingerprint / review_state_hash，
+#: 也不一定改变「可注入事实」签名（_facts_signature 只统计可注入事实）。
+#: 结果是 TTL(120s) 内 /overview 会返回**旧放行结论**（生产日志实证：跑完合规
+#: 检查后总检仍显示上一次的 released=True）。签名只需感知「写入水位」，不做判据复制。
+_SOURCE_SIGNATURE_QUERIES: tuple[tuple[str, str, tuple], ...] = (
+    (
+        "compliance_check",
+        "SELECT COUNT(*) AS n, COALESCE(MAX(rowid),0) AS mx FROM compliance_check WHERE scheme_id=?",
+        ("scheme",),
+    ),
+    (
+        "consistency_audit",
+        "SELECT COUNT(*) AS n, COALESCE(MAX(rowid),0) AS mx FROM consistency_audit WHERE scheme_id=?",
+        ("scheme",),
+    ),
+    (
+        "consistency_conflicts",
+        "SELECT COUNT(*) AS n, COALESCE(MAX(rowid),0) AS mx,"
+        " COALESCE(SUM(CASE WHEN status IN ('pending','failed') THEN 1 ELSE 0 END),0) AS unresolved"
+        " FROM consistency_conflicts WHERE scheme_id=?",
+        ("scheme",),
+    ),
+    (
+        "consistency_repairs",
+        "SELECT COUNT(*) AS n, COALESCE(MAX(rowid),0) AS mx FROM consistency_repairs WHERE scheme_id=?",
+        ("scheme",),
+    ),
+    # 下面三张表的写入键是 project_id 或全库共享；按全表取水位属**保守失效**
+    # （别的项目写入也会让本方案缓存重算一次），代价仅是一次 COUNT+MAX(rowid)。
+    ("scheme_scoring_items", "SELECT COUNT(*) AS n, COALESCE(MAX(rowid),0) AS mx FROM scheme_scoring_items", ()),
+    ("bid_analysis_items", "SELECT COUNT(*) AS n, COALESCE(MAX(rowid),0) AS mx FROM bid_analysis_items", ()),
+    ("global_facts", "SELECT COUNT(*) AS n, COALESCE(MAX(rowid),0) AS mx FROM global_facts", ()),
+)
+
+
+async def _sources_signature(db, scheme_id: str) -> str:
+    """六源写入水位签名（并入总检缓存键，防止「刚跑完检查却拿到旧结论」）。
+
+    每一路独立 try：旧库缺表 / 测试内存库无该表 / 瞬时读失败时该路返回空串
+    （fail-soft，不改变其它路的判定，绝不阻断总检）。刻意**不把
+    ``preflight_runs`` 计入**：总检自身会写该表，否则缓存将永不命中。
+    """
+    parts: list[str] = []
+    for name, sql, arg_kinds in _SOURCE_SIGNATURE_QUERIES:
+        try:
+            params = (scheme_id,) if arg_kinds else ()
+            row = await review_db.fetch_one(db, sql, params, what=f"总检缓存键：{name} 写入水位")
+            parts.append(f"{name}={row['n'] if row else 0}:{row['mx'] if row else 0}")
+            if "unresolved" in sql and row:
+                parts.append(f"{name}.unresolved={row['unresolved'] or 0}")
+        except Exception as exc:  # noqa: BLE001 - 单一来源不可判定不得阻断总检
+            logger.debug("总检缓存键：%s 写入水位不可用（跳过该路）: %s", name, exc)
+            parts.append(f"{name}=?")
+    return "|".join(parts)
+
+
 async def _build_preflight_context(scheme_id: str, db) -> PreflightContext:
     """从 DB 装配预检上下文（章节 + 图表 + 方案元信息 + 已确认全局事实）。
 
@@ -1642,7 +1700,11 @@ async def run_preflight_check(scheme_id: str, db=Depends(get_db), force: bool = 
         review_hash = await _review_state_hash(db, scheme_id)
         # ✅ 2026-10-03：进程内缓存键并入「已确认事实签名」，事实确认后
         #    TTL 内不再返回旧结论（SAF-08 能及时出现）；落库指纹语义不变。
-        cache_key = (fingerprint, await _facts_signature(db, scheme_id), review_hash)
+        # ✅ R207：把「六源写入水位」并入原有事实签名槽位 —— cache_key 仍是
+        #    3 元组（既有护栏/消费方形态不变）。AI 检查 / 一致性审计 / 冲突状态 /
+        #    评分项 / 全局事实任一写入后，TTL 内也必须重算而非返回旧放行结论。
+        _facts_sig = (await _facts_signature(db, scheme_id)) + "|" + (await _sources_signature(db, scheme_id))
+        cache_key = (fingerprint, _facts_sig, review_hash)
         hit = _PREFLIGHT_RECENT.get(scheme_id)
         if not force and hit and hit[0] == cache_key and time.monotonic() - hit[1] < OVERVIEW_CACHE_TTL:
             cached = dict(hit[2])
@@ -1655,7 +1717,11 @@ async def run_preflight_check(scheme_id: str, db=Depends(get_db), force: bool = 
         stats = await asyncio.to_thread(preflight_stats, ctx)
         stats["standard_db_version"] = STANDARD_DB_VERSION
         stats["standard_db_checked_at"] = STANDARD_DB_CHECKED_AT
-        result = score_findings(findings)
+        # ✅ R207：与 /overview 同口径 —— 单个 checker 抛错代表「该维度没检查」，
+        #    不得折叠成通过（released 必须为 False）。/overview 已在
+        #    _readiness_overview_compute 计入 partial_sources，此前本端点漏接。
+        _preflight_partial = ["program"] if any(bool(f.get("engine_error")) for f in findings) else []
+        result = score_findings(findings, partial_sources=_preflight_partial)
         payload = result.as_dict()
         payload.update(
             {
@@ -1704,7 +1770,11 @@ async def readiness_overview(scheme_id: str, db=Depends(get_db), force: bool = F
         review_hash = await _review_state_hash(db, scheme_id)
         # ✅ 2026-10-03：进程内缓存键并入「已确认事实签名」（同 /preflight）；
         #    落库 content_fingerprint（G3 时效语义）保持不变。
-        cache_key = (fingerprint, await _facts_signature(db, scheme_id), review_hash)
+        # ✅ R207：把「六源写入水位」并入原有事实签名槽位 —— cache_key 仍是
+        #    3 元组（既有护栏/消费方形态不变）。AI 检查 / 一致性审计 / 冲突状态 /
+        #    评分项 / 全局事实任一写入后，TTL 内也必须重算而非返回旧放行结论。
+        _facts_sig = (await _facts_signature(db, scheme_id)) + "|" + (await _sources_signature(db, scheme_id))
+        cache_key = (fingerprint, _facts_sig, review_hash)
         hit = _OVERVIEW_RECENT.get(scheme_id)
         if not force and hit and hit[0] == cache_key:
             if time.monotonic() - hit[1] < OVERVIEW_CACHE_TTL:
@@ -1899,7 +1969,14 @@ async def _readiness_overview_compute(
         #    同样不得折叠成通过。检测器崩溃时 issues 里没有该类问题（零发现），
         #    若只看 findings 就是「没冲突」；此处按执行态计入 partial_sources，
         #    使 incomplete=True、released=False。
-        if (_exp.get("subheading_check") or {}).get("undetermined"):
+        # ✅ R207：R183/R185 的三态此前只覆盖 subheading_check；导出预检同时
+        #    会产出 crossref_check.undetermined（方案无图表但正文引用「图 9-9」等
+        #    → 无法判定），/export/check 已显式提示「不代表通过」，总检却把它
+        #    折叠成「无问题」甚至 released=True。两路同口径计入 partial_sources。
+        _exp_undetermined = bool((_exp.get("subheading_check") or {}).get("undetermined")) or bool(
+            (_exp.get("crossref_check") or {}).get("undetermined")
+        )
+        if _exp_undetermined and "export_check" not in partial_sources:
             partial_sources.append("export_check")
     except Exception as e:
         # ✅ P1-6：读取失败必须让用户可见（否则该来源静默不参与评分、分数虚高）
@@ -2002,12 +2079,29 @@ async def _readiness_overview_compute(
             stale_ai_sources.append("consistency")
             logger.warning("overview: 一致性审计结论正文指纹不一致（已跳过）scheme=%s", scheme_id)
         if row and not _audit_stale:
+            _audit_corrupt = False
             try:
                 issues = json.loads(row["issues"] or "[]")
-            except json.JSONDecodeError:
+            except json.JSONDecodeError as _exc:
+                # ✅ R207：结论 JSON 损坏 = 该来源没读到，旧实现静默当「零发现」
+                #    （不进 sources / failed_sources，分数无声偏高）；与同文件
+                #    AI 合规段的损坏留痕口径对齐，并显式计入 failed_sources。
                 issues = []
+                _audit_corrupt = True
+                logger.warning(
+                    "overview: 一致性审计结论 JSON 损坏（按读取失败处理）scheme=%s err=%s", scheme_id, _exc
+                )
+                if "consistency" not in failed_sources:
+                    failed_sources.append("consistency")
             for idx, it in enumerate(issues):
-                sev = str(it.get("severity") or "medium").lower()
+                # ✅ R207：与 /check 合并段、audit_scoring 共用同一归一出口
+                #    （中文「高/中/低/阻断/严重」+ block），旧实现把中文档位
+                #    一律降为 medium、把 block(40 分) 降为 medium(8 分)。
+                sev = normalize_severity_text(it.get("severity") or "medium")
+                # ✅ 既有契约（test_readiness_overview_six_sources）：consistency
+                #    源不得产出 block 级 finding（AI/扫描不得自行判交付阻断），
+                #    故归一后的 block 仍按历史口径降为 medium；本轮修复的是
+                #    中文「高/中/低」此前被 .lower() 一律误降为 medium。
                 if sev not in ("high", "medium", "low"):
                     sev = "medium"
                 # ✅ 修复（2026-09-17）：每条一致性审计 issue 使用唯一 rule_id，
@@ -2030,7 +2124,7 @@ async def _readiness_overview_compute(
                         "mode": "ai",
                     }
                 )
-            if issues or row["score"] is not None:
+            if not _audit_corrupt and (issues or row["score"] is not None):
                 sources.append("consistency")
     except Exception as e:
         failed_sources.append("consistency")
@@ -2086,7 +2180,12 @@ async def _readiness_overview_compute(
             )
             unresolved = [c for c in scan_conflicts if c.get("status") in ("pending", "failed")]
             for idx, c in enumerate(unresolved):
-                sev = str(c.get("severity") or "medium").lower()
+                # ✅ R207：同上，统一走 audit_scoring.normalize_severity_text。
+                sev = normalize_severity_text(c.get("severity") or "medium")
+                # ✅ 既有契约（test_readiness_overview_six_sources）：consistency
+                #    源不得产出 block 级 finding（AI/扫描不得自行判交付阻断），
+                #    故归一后的 block 仍按历史口径降为 medium；本轮修复的是
+                #    中文「高/中/低」此前被 .lower() 一律误降为 medium。
                 if sev not in ("high", "medium", "low"):
                     sev = "medium"
                 try:
@@ -2155,8 +2254,15 @@ async def _readiness_overview_compute(
         if row and not _expert_stale:
             try:
                 expert = json.loads(row["result"] or "{}")
-            except json.JSONDecodeError:
+            except json.JSONDecodeError as _exc:
+                # ✅ R207：专家论证结论损坏时旧实现静默当「没有这一路来源」
+                #    （既不在 sources 也不在 failed_sources，总检照样放行）。
                 expert = {}
+                logger.warning(
+                    "overview: 专家论证预检结论 JSON 损坏（按读取失败处理）scheme=%s err=%s", scheme_id, _exc
+                )
+                if "expert_review" not in failed_sources:
+                    failed_sources.append("expert_review")
             if expert:
                 ai_findings.extend(expert_result_to_findings(expert))
                 sources.append("expert_review")
@@ -2223,7 +2329,9 @@ async def _readiness_overview_compute(
     stats["standard_db_version"] = STANDARD_DB_VERSION
     stats["standard_db_checked_at"] = STANDARD_DB_CHECKED_AT
     # ✅ G1：单列导出预检命中数，前端可说明"这分里有几项来自导出预检"
-    stats["export_issue_count"] = sum(int(f.get("count") or 0) for f in export_findings)
+    # ✅ R207：按 issue 自带 count 求和（缺失回退聚合条数），20 章待审核的
+    #    聚合 issue 不再显示成「1 项」；hit_count 由 export_issues_to_findings 产出。
+    stats["export_issue_count"] = sum(int(f.get("hit_count") or f.get("count") or 0) for f in export_findings)
     payload = result.as_dict()
     payload.update(
         {

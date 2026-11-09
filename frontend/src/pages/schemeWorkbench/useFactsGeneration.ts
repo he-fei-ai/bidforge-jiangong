@@ -139,6 +139,9 @@ export function useFactsGeneration(deps: FactsGenerationDeps) {
         if (!taskId && evt.task_id) taskId = evt.task_id;
         if (evt.event === "error") {
           pushLog(lastProgress, `❌ ${evt.message || "提取失败"}`);
+          // ✅ R205（全局事实→界面数据同步）：分段提取逐段落库，异常前可能
+          //    已写入部分事实；旧实现不刷新列表，界面停在启动前的旧事实集。
+          loadFacts();
         } else if (evt.event === "warning") {
           // ✅ R193（D-13）：warnings 元素按契约是 string，但类型是宽松数组——
           //    非 string 元素旧实现 join 出 "[object Object]" 噪声文案，逐项
@@ -181,9 +184,14 @@ export function useFactsGeneration(deps: FactsGenerationDeps) {
           break;
         } else if (evt.event === "stopped") {
           pushLog(lastProgress, "⏹ 已停止");
-          msg.info("已停止");
+          msg.info(evt.message || "已停止");
+          // ✅ R205：与 error 终态同口径，停止前已落库的分段事实必须刷新，
+          //    否则列表与 DB 状态脱节（用户以为「什么都没提取到」）。
+          loadFacts();
           break;
-        } else if (evt.event === "progress" || evt.event === "connecting") {
+        // ✅ R208：事实链后端从不推 connecting（仅目录/正文两链推），
+        //    该分支是 R203 登记的死分支，删除以免误以为本链有建连阶段。
+        } else if (evt.event === "progress") {
           lastProgress = evt.progress || 0;
           setProgress(lastProgress);
           setProgressMsg(evt.message || "");

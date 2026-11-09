@@ -1683,7 +1683,15 @@ async def generate_outline(scheme_id: str, request: Request, db=Depends(get_db))
                             has_content=await _has_content_short(db, scheme_id),
                         )
                     except Exception as _e:
-                        logger.warning("N1 自动确认判定失败（短方案，忽略，不阻塞 completed 事件）: %s", _e)
+                        logger.warning("N1 自动确认判定失败（短方案，回落人工确认）: %s", _e)
+                        # ✅ R208：旧实现只 warning 且不写 auto_confirm → 前端
+                        #    parseAutoConfirm(undefined) 得 ready=false + 空 blockers，
+                        #    静默回落人工闸门且零原因提示。显式回传 blocker，
+                        #    由 describeAutoConfirmBlockers 产出可见文案。
+                        _short_payload["auto_confirm"] = {
+                            "ready": False,
+                            "blockers": [{"code": "evaluate_failed", "message": "自动确认前置判定异常"}],
+                        }
                     # ✅ 收尾顺序统一（2026-09-16）：先落 checkpoint → 再置终态 → 最后
                     #    yield 事件。旧实现是 yield 完才 finish_task —— 前端收到
                     #    completed 后立即 break/断开连接时，生成器被 aclose，
@@ -2218,8 +2226,9 @@ async def generate_outline(scheme_id: str, request: Request, db=Depends(get_db))
                                 "task_id": task_id,
                                 "progress": p,
                                 "message": msg,
-                                "done": done,
-                                "total": _total,
+                                # ✅ R208：done/total 由快照单一出口产出 ——
+                                #    ** 展开后置会覆盖此处字面量，旧重复键既无效
+                                #    又与快照分母不同源，容易误读为两口径都生效。
                                 "outline": _preview,
                                 **_snapshot_outline_stats(_prog),
                             },
@@ -2392,7 +2401,13 @@ async def generate_outline(scheme_id: str, request: Request, db=Depends(get_db))
                         has_content=await _has_content(db, scheme_id),
                     )
                 except Exception as _e:
-                    logger.warning("N1 自动确认判定失败（忽略，不阻塞 completed 事件）: %s", _e)
+                    logger.warning("N1 自动确认判定失败（回落人工确认）: %s", _e)
+                    # ✅ R208：与短方案出口同口径，显式回传 blocker 让前端
+                    #    describeAutoConfirmBlockers 给出可见原因，而非静默降级。
+                    payload["auto_confirm"] = {
+                        "ready": False,
+                        "blockers": [{"code": "evaluate_failed", "message": "自动确认前置判定异常"}],
+                    }
 
                 # ✅ 成果可恢复 + 收尾顺序（2026-09-16 修复）：
                 #    先落 checkpoint → 再置终态 → 最后 yield 事件。
@@ -6058,6 +6073,12 @@ async def generate_content(scheme_id: str, request: Request, db=Depends(get_db))
                             except Exception:
                                 logger.debug("一致性修复进度更新失败（不影响修复 · task=%s）", task_id, exc_info=True)
 
+                        # ✅ R207（SSE 收尾补链）：本链直调 services，绕过
+                        #    /consistency/repair 的 routers 编排层；与同步端点
+                        #    注入同一份图表重登记回调（单一事实源）。
+                        from app.routers.consistency_repair import _make_chart_resync
+
+                        _chart_resync = _make_chart_resync(scheme_id)
                         scan_result = await _scanner.run_scan(
                             db,
                             scheme_id=scheme_id,
@@ -6109,6 +6130,7 @@ async def generate_content(scheme_id: str, request: Request, db=Depends(get_db))
                                 facts=scan_result.get("contexts", {}).get("global_facts", ""),
                                 severity_threshold=consistency_severity,
                                 progress_cb=_repair_cb,
+                                resync_fn=_chart_resync,
                             )
                         else:
                             repair_result = await _repair_agent.run_repair(
@@ -6131,7 +6153,34 @@ async def generate_content(scheme_id: str, request: Request, db=Depends(get_db))
                                 #    两条路径口径在此分叉。现补齐透传。
                                 force_full_repair=force_full_repair,
                                 progress_cb=_repair_cb,
+                                resync_fn=_chart_resync,
                             )
+                        # ✅ R207：正文已被自动修复改写 —— 审核结论必须退回
+                        #    并写留痕（SSE 统一置 pending 只覆盖本次生成章节），
+                        #    一致性扫描缓存的 content_hash 也必须失效。
+                        #    异常 fail-soft，但留 WARNING，不得影响生成终态。
+                        try:
+                            from app.routers.review import reset_review_on_content_change
+                            from app.routers.sections import invalidate_consistency_scan_cache
+
+                            _touched = {
+                                str(it.get('section_id') or '')
+                                for it in (repair_result.get('items') or [])
+                                if isinstance(it, dict)
+                                and it.get('status') == 'repaired'
+                                and it.get('section_id')
+                            }
+                            for _sid in _touched:
+                                await reset_review_on_content_change(
+                                    db,
+                                    scheme_id,
+                                    _sid,
+                                    actor='正文生成收尾·一致性修复',
+                                    comment='收尾自动一致性修复改写了正文，原审核结论失效，请重新送审',
+                                )
+                            await invalidate_consistency_scan_cache(db, scheme_id)
+                        except Exception as _ce:  # noqa: BLE001 - 补链失败不阻断生成
+                            logger.warning('全文一致性修复收尾补链失败（不影响生成）: %s', _ce)
                         _put(
                             "consistency_repair_done",
                             scan_id=scan_result["scan_id"],

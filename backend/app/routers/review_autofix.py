@@ -176,8 +176,15 @@ async def plan(scheme_id: str, body: dict | None = None, db=Depends(get_db)):
     }
 
 
-async def _persist_fixed(db, *, scheme_id: str, rule_id: str, pending: list, repair_id: str = "") -> str:
+async def _persist_fixed(
+    db, *, scheme_id: str, rule_id: str, pending: list, repair_id: str = "", skipped_out: list | None = None
+) -> str:
     """把校验通过的修复结果落库，返回快照 id（回滚凭据）。
+
+    ✅ R207：``skipped_out`` 为加法式出参，收集「落库前正文已被改动」而跳过的
+    章节明细。守卫放在**写点**（本函数）而非端点：/apply 与 /confirm 共用本函数，
+    R168 只给 stage→confirm 前缀路径盖了 content_sha_before，/apply 整条链
+    （AI 改写最长 120s）此前无条件整章覆盖用户在此期间的手工编辑。
     口径与人工编辑 / 一致性修复完全一致（复用同一批唯一实现）：
     ``word_count`` / ``word_status`` 用 ``content_utils`` 唯一口径重算；
     审核状态经 ``reset_review_on_content_change`` 退回待审核
@@ -203,7 +210,39 @@ async def _persist_fixed(db, *, scheme_id: str, rule_id: str, pending: list, rep
         [{"section_id": sid, "content_before": before} for sid, before, _ in pending],
         snapshot_type="review_autofix",
     )
+    _skipped: list[dict] = skipped_out if skipped_out is not None else []
     for sid, _before, after in pending:
+        # ✅ R207（P0 写点守卫）：落库前复查本章当前正文与修复依据 (before)。
+        #    /apply 从 _load_sections 到本函数之间隔着最长 120s 的 AI 改写；
+        #    /confirm 非前缀路径也有一次 AI 链式重算。期间用户手工编辑或其它
+        #    修复批次落库，旧实现无条件整章 UPDATE 会静默覆盖。与 R168 的
+        #    stage→confirm sha 守卫同源，但收口在**唯一写点**而非按端点接线。
+        #    读不到 / 列形态异常时按「无法判定」放行（旧行为逐字不变，兼容
+        #    历史批次与内存库桩），只有明确读到 str 且不一致才跳过。
+        try:
+            _cur = await review_db.fetch_one(
+                db,
+                "SELECT content FROM sections WHERE id=?",
+                (sid,),
+                what="自动修复落库：复查章节正文（内容漂移守卫）",
+            )
+            _current_content = _cur["content"] if _cur else None
+            if _current_content is not None and not isinstance(_current_content, str):
+                _current_content = None
+        except Exception as _ce:  # noqa: BLE001 - 无法判定不得阻断修复落库
+            _current_content = None
+            logger.warning("自动修复落库：章节 %s 正文复查失败（按未漂移处理）: %s", str(sid)[:8], _ce)
+        if _current_content is not None and _current_content != _before:
+            _skipped.append(
+                {
+                    "rule_id": rule_id,
+                    "section_id": sid,
+                    "status": "content_changed",
+                    "detail": "自动修复期间本章正文已被修改，已跳过以防覆盖用户编辑",
+                }
+            )
+            logger.warning("自动修复落库：跳过内容已漂移章节 section=%s", str(sid)[:8])
+            continue
         row = await review_db.fetch_one(
             db,
             "SELECT word_budget FROM sections WHERE id=?",
@@ -271,7 +310,13 @@ async def _persist_fixed(db, *, scheme_id: str, rule_id: str, pending: list, rep
             require_rows=False,
         )
     await db.commit()
-    logger.info("审核预检自动修复 rule=%s：已落库 %d 章（快照 %s）", rule_id, len(pending), snapshot_id)
+    logger.info(
+        "审核预检自动修复 rule=%s：已落库 %d 章（跳过内容漂移 %d 章，快照 %s）",
+        rule_id,
+        len(pending) - len(_skipped),
+        len(_skipped),
+        snapshot_id,
+    )
     return snapshot_id
 
 
@@ -306,10 +351,20 @@ async def apply(scheme_id: str, body: dict | None = None, db=Depends(get_db)):
         standards_text=standards_text,
     )
     pending = res.pop("pending", []) or []
+    # ✅ R207：把写点漂移守卫的跳过明细透出（正常路径不新增任何键）。
+    _drift_skipped: list[dict] = []
     if pending:
         res["snapshot_id"] = await _persist_fixed(
-            db, scheme_id=scheme_id, rule_id=rule_id, pending=pending, repair_id=res.get("repair_id", "")
+            db,
+            scheme_id=scheme_id,
+            rule_id=rule_id,
+            pending=pending,
+            repair_id=res.get("repair_id", ""),
+            skipped_out=_drift_skipped,
         )
+    if _drift_skipped:
+        res["skipped"] = _drift_skipped
+        res["message"] = f"{len(_drift_skipped)} 章在修复期间正文已被改动，已跳过以防覆盖用户编辑"
     return res
 
 
@@ -719,13 +774,34 @@ async def confirm(scheme_id: str, body: dict | None = None, db=Depends(get_db)):
         if _content != (section.get("content") or ""):
             pending.append((sid, section.get("content") or "", _content))
     snapshot_id = ""
+    # ✅ R207：写点漂移守卫的跳过明细单独收集，再并入 R39 的 skipped 出口；
+    #    若接受的全部章节都因内容漂移被跳过，B-10 语义要求按 no_change 处理
+    #    （不得伪造 confirmed + 快照，也不得谎报 repaired_sections）。
+    _drift_skipped: list[dict] = []
+    _written = 0
     if pending:
         snapshot_id = await _persist_fixed(
-            db, scheme_id=scheme_id, rule_id="batch", pending=pending, repair_id=batch_id
+            db,
+            scheme_id=scheme_id,
+            rule_id="batch",
+            pending=pending,
+            repair_id=batch_id,
+            skipped_out=_drift_skipped,
         )
-        # ✅ B-10（R175，闭环）：只有**真的写入了正文**才标记 confirmed。
-        await repair_record.mark_repair_status(db, batch_id, "confirmed")
-        status = "confirmed"
+        skipped.extend(_drift_skipped)
+        _written = len(pending) - len(_drift_skipped)
+        if _written <= 0:
+            await repair_record.mark_repair_status(db, batch_id, "failed")
+            status = "no_change"
+            logger.warning(
+                "review_autofix confirm: 批次 %s 全部 %d 章因落库前正文漂移被跳过",
+                batch_id[:8],
+                len(_drift_skipped),
+            )
+        else:
+            # ✅ B-10（R175，闭环）：只有**真的写入了正文**才标记 confirmed。
+            await repair_record.mark_repair_status(db, batch_id, "confirmed")
+            status = "confirmed"
     else:
         # ✅ B-10（R175）：被接受项全部因内容漂移/失效被跳过（pending 为空），
         #    旧实现仍 mark "confirmed" 并返回成功 —— 用户以为修完了，正文没动。
@@ -735,9 +811,9 @@ async def confirm(scheme_id: str, body: dict | None = None, db=Depends(get_db)):
     return {
         "status": status,
         "accepted": len(accepted_items),
-        "repaired_sections": len(pending),
+        "repaired_sections": _written,
         "snapshot_id": snapshot_id,
         "batch_id": batch_id,
         "skipped": skipped,
-        "message": "" if pending else "本次接受的问题均未产生实际正文改动（内容未变或已跳过），未标记为已确认",
+        "message": "" if _written > 0 else "本次接受的问题均未产生实际正文改动（内容未变、已失效或因正文漂移跳过），未标记为已确认",
     }

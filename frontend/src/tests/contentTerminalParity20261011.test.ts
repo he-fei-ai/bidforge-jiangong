@@ -165,6 +165,9 @@ describe("B 组 · degraded 处理点必须可见可控", () => {
     "hooks/useContentGeneration.ts": "正文 SSE 终态 + 断线重挂轮询",
     "hooks/useSchemeLiveTask.ts": "后台任务终态跳变检测（触发刷新）",
     "components/TaskStatusBar.tsx": "纯展示：状态色与图标（不走终态逻辑）",
+    // ✅ R205：比较的是 X-Cache-Status 响应**头值**（导出缓存降级标记），
+    //   与后台任务终态无关；按 B 组「新增 degraded 处理点须带理由登记」纪律显式登记。
+    "utils/exportResponse.ts": "R205：X-Cache-Status 头值 degraded（缓存降级），非任务终态",
   };
 
   it("B1: 出现「degraded 当状态处理」的文件，必须走共享出口或已登记", () => {

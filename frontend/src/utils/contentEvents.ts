@@ -183,6 +183,11 @@ export type SectionLogItem = {
   word_count?: number;
   word_budget?: number;
   word_status?: string; // under / normal / over（字数达标情况）
+  /** ✅ R208（后端 section_done 自 R66 起下发，此前前端零声明零消费）：
+   *  目标/实际偏差、达成率、是否落在容差带内 —— 生成日志据此可追溯。 */
+  word_deviation?: number;
+  word_ratio?: number;
+  word_within_band?: boolean;
   /** ✅ 续写失败信号（后端 section_done 下发）：续写调用失败/产出被丢弃且最终字数不达标 */
   continue_failed?: boolean;
   /** ✅ 质量告警（后端 section_done 下发 quality_issues）：本章正文的程序化质检问题 */
@@ -435,7 +440,14 @@ export function contentResultSummary(contentResult: unknown): {
   return {
     done: typeof cr.done === "number" ? cr.done : 0,
     total: typeof cr.total === "number" ? cr.total : 0,
-    words: typeof cr.words === "number" ? cr.words : 0,
+    // ✅ R208：在线终态载荷用 word_count、进度/checkpoint 用 words；旧
+    //    checkpoint 或降级路径只带 word_count 时摘要恒显示「共 0 字」。
+    words:
+      typeof cr.words === "number"
+        ? cr.words
+        : typeof cr.word_count === "number"
+          ? cr.word_count
+          : 0,
     overCount: typeof cr.over_count === "number" ? cr.over_count : 0,
     // ✅ R199（2026-11-09）：本次运行配图总数（checkpoint content_result.charts），
     //    断线重挂/刷新后摘要可见「配图 N 张」。旧后端缺键回退 0（加法式兼容）。

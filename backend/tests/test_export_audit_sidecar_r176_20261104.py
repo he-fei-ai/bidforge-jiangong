@@ -302,10 +302,19 @@ async def test_rule_change_invalidates_sidecar_and_recomputes(tmp_path, monkeypa
     await E._write_audit_sidecar(artifact, {**prep, "content_audit": _audit_of(prep)}, "hr")
     assert await E._read_audit_sidecar(artifact, prep, "hr") is not None
 
-    before = E.audit_rules_fingerprint()
-    real_rules = E._AUDIT_RULES
-    new_rule = ("r177_probe", "R177 临时规则", "error", E.re.compile(r"R177PROBE"))
-    monkeypatch.setattr(E, "_AUDIT_RULES", real_rules + (new_rule,))
+    # ✅ R205 重锚：R198 断环后 _AUDIT_RULES / audit_content / 指纹函数的单一
+    #    事实源是 _export_issue_scan，export 只是 re-export 别名。旧用例把
+    #    monkeypatch 打在 E（export 模块副本）上 → audit_content 读不到新规则，
+    #    断言恒假（假红）。改为 patch 真实模块，并同步 facade 侧别名以兼容
+    #    任何仍从 export 取表的调用点。
+    from app.routers import _export_issue_scan as _scan
+
+    before = _scan.audit_rules_fingerprint()
+    real_rules = _scan._AUDIT_RULES
+    new_rule = ("r177_probe", "R177 临时规则", "error", _scan.re.compile(r"R177PROBE"))
+    _patched_rules = real_rules + (new_rule,)
+    monkeypatch.setattr(_scan, "_AUDIT_RULES", _patched_rules)
+    monkeypatch.setattr(E, "_AUDIT_RULES", _patched_rules)
 
     # 1) 规则确实改了：audit_content 能命中新规则
     probe_prep = {

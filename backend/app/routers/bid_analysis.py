@@ -1093,9 +1093,11 @@ async def start_bid_analysis(
         # ✅ BUG 修复：内层抛出的 400（缺参/无文档）被宽异常捕获后伪装成
         #    500，前端把「参数不对」当服务端崩溃重试/报警。语义错误原样上抛。
         raise
-    except Exception as e:
+    except Exception:
         logger.exception("结构化解析 /start 崩溃")
-        raise HTTPException(500, detail=str(e))
+        # ✅ R208：内部异常原文可能含凭据/路径，不得回显；装配失败属服务暂时
+        #    不可用（503 + 稳定 code），而非 500 语义错误。前端 detail 仍为字符串。
+        raise HTTPException(503, detail="结构化解析服务暂时不可用（BID_ANALYSIS_START_FAILED），请稍后重试")
 
 
 @router.get("/start-sse")
@@ -1121,9 +1123,10 @@ async def start_bid_analysis_sse(
     except HTTPException:
         # ✅ BUG 修复：同上——_start_sse_inner 的 400 参数校验错误不得降级成 500
         raise
-    except Exception as e:
+    except Exception:
         logger.exception("结构化解析 SSE 入口崩溃")
-        raise HTTPException(500, detail=str(e))
+        # ✅ R208：与 /start 同口径（内部异常不外泄、503 稳定 code）。
+        raise HTTPException(503, detail="结构化解析服务暂时不可用（BID_ANALYSIS_SSE_START_FAILED），请稍后重试")
 
 
 async def _start_sse_inner(

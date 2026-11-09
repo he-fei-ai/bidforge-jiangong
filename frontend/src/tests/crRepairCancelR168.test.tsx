@@ -231,7 +231,10 @@ describe("页面接线源码锁", () => {
     }) as Record<string, string>;
     const checkSrc = Object.values(checkSources)[0] || "";
     expect(checkSrc, "useExportCheck.ts 应在 glob 覆盖内").toBeTruthy();
-    expect(checkSrc).toMatch(/if \(!id \|\| checkingQuality\) return;/);
+    // ✅ R207 重锚（意图保留 + 加强）：R207 把异步 state 判定升级为
+    //    「checkingQuality + 同步 ref」双判据，旧字面量锁住的是实现形态。
+    expect(checkSrc).toMatch(/if \(!id \|\| checkingQuality \|\| qualityInFlightRef\.current\) return;/);
+    expect(checkSrc).toContain("const qualityInFlightRef = useRef(false)");
   });
 });
 

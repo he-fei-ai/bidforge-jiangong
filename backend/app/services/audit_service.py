@@ -399,6 +399,39 @@ def diff_prompt_snapshot(snapshot: dict | None) -> list[dict]:
     return changes
 
 
+async def _next_prompt_audit_version(db) -> int:
+    """取下一个**全局**提示词变更序号（事务内自增；不可用时降级为 0）。
+
+    ✅ R206（2026-11-09 · L-14 · 提示词审计无版本号）：
+    ``prompt_audit_logs.created_at`` 仅**秒级**精度 —— 同秒内的多次变更先后
+    **不可判定**（既有排序 ``created_at DESC, rowid DESC`` 靠 rowid 兜底，
+    而 rowid 在 VACUUM / 重建表后会变，跨进程也不保证与写入顺序一致）。
+
+    序号在**同一事务**内自增（``UPDATE ... SET seq = seq + 1``）：事务回滚则
+    序号一并回滚（不留空洞）；并发写由 SQLite 写锁串行化 ⇒ 序号唯一且与
+    写入顺序一致。
+
+    刻意**不用** ``MAX(version)+1``：两个并发事务会读到同一个 MAX 并各自写入
+    相同序号 —— 而序号重复正是本项要消灭的问题。
+
+    序列表缺失/不可用 → 返回 0（降级：排序退回 created_at+rowid）。审计行
+    照常写入，**绝不因序号失败而丢审计**。
+    """
+    try:
+        await db.execute("UPDATE prompt_audit_sequence SET seq = seq + 1 WHERE id = 1")
+        cur = await db.execute("SELECT seq FROM prompt_audit_sequence WHERE id = 1")
+        row = await cur.fetchone()
+        if row is None or row[0] is None:
+            # 序列表存在但缺单行（老库 / 手工干预）→ 补一行并从 1 起算
+            await db.execute("INSERT OR IGNORE INTO prompt_audit_sequence (id, seq) VALUES (1, 1)")
+            cur = await db.execute("SELECT seq FROM prompt_audit_sequence WHERE id = 1")
+            row = await cur.fetchone()
+        return int(row[0]) if row and row[0] is not None else 0
+    except Exception as e:
+        logger.debug("提示词审计序号自增失败（降级 version=0）: %s", e)
+        return 0
+
+
 async def record_prompt_audit(
     db,
     key: str,
@@ -409,12 +442,16 @@ async def record_prompt_audit(
     after_vars: list[str],
     request: Request | None = None,
 ) -> None:
-    """写入一条提示词变更审计（指纹 + 变量集合 + 正文快照）。
+    """写入一条提示词变更审计（指纹 + 变量集合 + 正文快照 + 版本序号）。
 
     由调用方事务提交；本函数不 commit，保证「内容更新 + 审计」原子性。
     快照写入失败时**降级写入无快照行**（宁可丢回滚能力，也不丢审计行）。
+
+    ✅ R206（L-14）：同时写入 ``version``（全局变更序号，见
+    :func:`_next_prompt_audit_version`）。旧库缺 ``version`` / ``snapshot_json``
+    列时**逐级降级**（先摘 version，再摘 snapshot_json），审计行绝不丢。
     """
-    vals = (
+    base_vals = [
         uuid.uuid4().hex,
         key,
         action,
@@ -423,30 +460,52 @@ async def record_prompt_audit(
         json.dumps(sorted(set(before_vars)), ensure_ascii=False),
         json.dumps(sorted(set(after_vars)), ensure_ascii=False),
         client_ip_of(request),
-    )
+    ]
     snap = ""
     if getattr(settings, "prompt_audit_snapshot_enabled", True):
         snap = prompt_snapshot_json(before, after)
-    if snap:
+    # ✅ R206（L-14）：全局单调序号（与本行写入同事务 ⇒ 回滚不留空洞）。
+    version = await _next_prompt_audit_version(db)
+
+    # 旧库可能缺列（version / snapshot_json）→ 逐级降级重试，审计行绝不丢。
+    with_version = True
+    with_snapshot = bool(snap)
+    while True:
+        cols = [
+            "id",
+            "prompt_key",
+            "action",
+            "before_hash",
+            "after_hash",
+            "variables_before",
+            "variables_after",
+            "client_ip",
+        ]
+        vals = list(base_vals)
+        if with_version:
+            cols.append("version")
+            vals.append(version)
+        if with_snapshot:
+            cols.append("snapshot_json")
+            vals.append(snap)
         try:
             await db.execute(
-                "INSERT INTO prompt_audit_logs"
-                " (id,prompt_key,action,before_hash,after_hash,"
-                "variables_before,variables_after,client_ip,snapshot_json)"
-                " VALUES (?,?,?,?,?,?,?,?,?)",
-                vals + (snap,),
+                f"INSERT INTO prompt_audit_logs ({','.join(cols)})" f" VALUES ({','.join(['?'] * len(cols))})",
+                vals,
             )
             return
         except Exception:
-            # 旧库尚未 _migrate 出 snapshot_json 列 → 降级写入
-            logger.debug("prompt_audit_logs 缺 snapshot_json 列，已降级写入（无回滚能力）")
-    await db.execute(
-        "INSERT INTO prompt_audit_logs"
-        " (id,prompt_key,action,before_hash,after_hash,"
-        "variables_before,variables_after,client_ip)"
-        " VALUES (?,?,?,?,?,?,?,?)",
-        vals,
-    )
+            if with_version:
+                # 旧库未迁移出 version 列 → 摘掉该列重试（序号退化为 0）。
+                with_version = False
+                logger.debug("prompt_audit_logs 缺 version 列，已降级写入（序号不可用）")
+                continue
+            if with_snapshot:
+                # 旧库未迁移出 snapshot_json 列 → 摘掉该列重试（丢回滚能力）。
+                with_snapshot = False
+                logger.debug("prompt_audit_logs 缺 snapshot_json 列，已降级写入（无回滚能力）")
+                continue
+            raise
 
 
 async def list_prompt_audit_logs(db, key: str, limit: int = 50, offset: int = 0) -> dict:
@@ -466,15 +525,34 @@ async def list_prompt_audit_logs(db, key: str, limit: int = 50, offset: int = 0)
         offset = 0
     cur = await db.execute("SELECT COUNT(*) FROM prompt_audit_logs WHERE prompt_key=?", (key,))
     total = int((await cur.fetchone())[0] or 0)
-    cur = await db.execute(
-        "SELECT id,prompt_key,action,before_hash,after_hash,variables_before,variables_after,"
-        "client_ip,created_at,snapshot_json FROM prompt_audit_logs WHERE prompt_key=?"
-        " ORDER BY created_at DESC, rowid DESC LIMIT ? OFFSET ?",
-        (key, limit, offset),
-    )
+    # ✅ R206（L-14）：审计列表按 **version 全局序号** 排序（精确到「同秒内的
+    #    多次变更」），旧行 version=0 → 其相对顺序仍由 created_at/rowid 决定，
+    #    与升级前逐字一致。旧库缺 version 列 → 退回旧排序（不 500）。
+    try:
+        cur = await db.execute(
+            "SELECT id,prompt_key,action,before_hash,after_hash,variables_before,variables_after,"
+            "client_ip,created_at,snapshot_json,version FROM prompt_audit_logs WHERE prompt_key=?"
+            " ORDER BY version DESC, created_at DESC, rowid DESC LIMIT ? OFFSET ?",
+            (key, limit, offset),
+        )
+        rows = await cur.fetchall()
+    except Exception as e:
+        logger.debug("prompt_audit_logs 缺 version 列，审计列表退回旧排序: %s", e)
+        cur = await db.execute(
+            "SELECT id,prompt_key,action,before_hash,after_hash,variables_before,variables_after,"
+            "client_ip,created_at,snapshot_json FROM prompt_audit_logs WHERE prompt_key=?"
+            " ORDER BY created_at DESC, rowid DESC LIMIT ? OFFSET ?",
+            (key, limit, offset),
+        )
+        rows = await cur.fetchall()
     items = []
-    for row in await cur.fetchall():
+    for row in rows:
         item = dict(row)
+        # 旧行/旧库缺该列 → 归一为 0（前端契约恒有该键）。
+        try:
+            item["version"] = int(item.get("version") or 0)
+        except (TypeError, ValueError):
+            item["version"] = 0
         for field in ("variables_before", "variables_after"):
             try:
                 item[field] = json.loads(item.get(field) or "[]")

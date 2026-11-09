@@ -1611,6 +1611,8 @@ export default function SchemeWorkbenchPage() {
       expertAbortRef.current?.abort();
       checkAbortRef.current?.abort();
       auditAbortRef.current?.abort();
+      // ✅ R207：页面自持的一致性审计历史 GET 也须中止（旧结果落到新方案页）
+      consistencyLatestAbortRef.current?.abort();
       sseBatcherRef.current?.stop();
       exportBatcherRef.current?.stop();
       exportingRef.current = false;
@@ -1724,6 +1726,7 @@ export default function SchemeWorkbenchPage() {
       expertAbortRef.current?.abort();
       checkAbortRef.current?.abort();
       auditAbortRef.current?.abort();
+      consistencyLatestAbortRef.current?.abort();
       presetListAbortRef.current = null;
       exportCheckAbortRef.current = null;
       cacheAbortRef.current = null;
@@ -2070,7 +2073,15 @@ export default function SchemeWorkbenchPage() {
     //    消费，目录/正文两链却没有）。与 error 分支对称：warning 不中断流、只 toast 告知，
     //    故 return false。单点接线覆盖两链，与事实链既有「日志行 + toast」双通道形态一致。
     if (evt.event === "warning") {
-      msg.warning(evt.message || "存在需人工核对的提示");
+      // ✅ R205（前后端载荷对齐）：事实链 warning 只带 warnings 数组不带 message
+      //    （sse_handlers generate_facts），旧实现恒弹兜底文案「存在需人工核对的
+      //    提示」+ 事实链本地日志另出一条 ⇒ 双提示且真实告警内容不可见。
+      const _warnParts = Array.isArray(evt.warnings)
+        ? (evt.warnings as unknown[])
+            .map((w) => (typeof w === "string" ? w : (JSON.stringify(w) ?? String(w))))
+            .filter((w): w is string => Boolean(w))
+        : [];
+      msg.warning(evt.message || (_warnParts.length ? _warnParts.join("；") : "存在需人工核对的提示"));
       return false;
     }
     // ✅ R190（FIX-4）：上下文降级可见信号（D-39）。此前该事件无 message 键，
@@ -2102,6 +2113,13 @@ export default function SchemeWorkbenchPage() {
       if (Array.isArray(evt.failed_sections) && evt.failed_sections.length > 0) {
         mergeFailedSectionsIntoRef(evt.failed_sections);
       }
+      // ✅ R205（同名不同 payload）：正文 build_error_payload 与 stopped/completed
+      //    同带标准校验与事实冲突修复汇总，旧 error 分支只读 message → 异常终态
+      //    下「已执行但未成功」的两类留痕完全不可见。纯函数，零闭包依赖。
+      const _errStdHint = standardSummaryHint(evt.standard_summary);
+      if (_errStdHint) msg.warning(_errStdHint);
+      const _errFaHint = factAutofixHint(evt.fact_autofix_summary);
+      if (_errFaHint) msg.info(_errFaHint);
       // ✅ 修复：error 后中断 SSE 连接（旧实现仅 break 未 abort，后端任务继续运行，
       // 用户此时再次点生成会造成新旧两个任务并发写同一方案）
       abortControllerRef.current?.abort();
@@ -2394,6 +2412,33 @@ export default function SchemeWorkbenchPage() {
           break;
         }
 
+        // ✅ R205（后端推·前端零消费）：字数调整阶段四事件此前无任何分支，
+        //    长任务期间进度文案冻结在上一阶段，用户不知道正在扩写/压缩。
+        if (
+          evt.event === "word_adjust_start" ||
+          evt.event === "word_adjust_batch_start" ||
+          evt.event === "word_adjust_batch_done" ||
+          evt.event === "word_adjust_done"
+        ) {
+          const wa = evt as Record<string, unknown>;
+          let waMsg = "";
+          if (evt.event === "word_adjust_start") {
+            waMsg = `字数调整中：不足 ${Number(wa.under) || 0} 章 / 超出 ${Number(wa.over) || 0} 章，共 ${Number(wa.batch_count) || 0} 批`;
+          } else if (evt.event === "word_adjust_batch_start") {
+            waMsg = `字数调整 ${Number(wa.batch) || 0}/${Number(wa.batch_total) || 0} 批进行中`;
+          } else if (evt.event === "word_adjust_batch_done") {
+            waMsg = `字数调整 ${Number(wa.done) || 0}/${Number(wa.total) || 0} 章完成`;
+          } else {
+            waMsg = `字数调整完成（计划 ${Number(wa.planned) || 0} 章，已调整 ${Number(wa.adjusted) || 0} 章）`;
+          }
+          setProgressMsg(waMsg);
+          // 批次事件只更新文案，避免逐批刷屏日志（首/末事件写日志留痕）
+          if (evt.event === "word_adjust_start" || evt.event === "word_adjust_done") {
+            pushOutlineLog(typeof evt.progress === "number" ? evt.progress : 0, waMsg);
+          }
+          continue;
+        }
+
         // ---- 章节级细粒度事件 ----
         if (evt.event === "section_start") {
           const item: SectionLogItem = {
@@ -2420,6 +2465,11 @@ export default function SchemeWorkbenchPage() {
             word_count: evt.word_count,
             word_budget: evt.word_budget,
             word_status: evt.word_status,
+            // ✅ R208：R66 起后端随 section_done 下发偏差/达成率/容差判定，
+            //    此前前端零声明零消费，日志区无法追溯字数是否落在容差带。
+            word_deviation: evt.word_deviation,
+            word_ratio: evt.word_ratio,
+            word_within_band: evt.word_within_band,
             // ✅ 续写失败信号（后端 section_done 下发）：区别于「要点不足写不满」
             continue_failed: !!evt.continue_failed,
             // ✅ 缺口修复（2026-09-24 / 2026-10-04 修正）：后端 section_done 一并下发
@@ -3195,6 +3245,9 @@ export default function SchemeWorkbenchPage() {
   const checkAbortRef = useRef<AbortController | null>(null);
   const auditAbortRef = useRef<AbortController | null>(null);
   const expertAbortRef = useRef<AbortController | null>(null);
+  // ✅ R207：页面自持的「载入上次一致性审计结果」GET（useReviewAudit 五 ref
+  //    收口范围之外），切方案/卸载必须一并中止。
+  const consistencyLatestAbortRef = useRef<AbortController | null>(null);
   const [expertRunning, setExpertRunning] = useState(false);
 
   // R-P1 拆分：专家论证 / 合规检查 / 一致性审计（含 auditRunning、consistencyResult
@@ -3259,8 +3312,16 @@ export default function SchemeWorkbenchPage() {
 
   const loadConsistencyLatest = async () => {
     if (!id) return;
+    const sid = id;
+    const controller = new AbortController();
+    consistencyLatestAbortRef.current?.abort();
+    consistencyLatestAbortRef.current = controller;
     try {
-      const { data } = await complianceApi.consistencyLatest(id);
+      const { data } = await complianceApi.consistencyLatest(id, controller.signal);
+      // ✅ R207：审核域唯一完全无落地守卫的读请求 —— 切方案后旧方案的
+      //    「载入上次结果」会把 score/issues 写进新方案页（R197 五 ref 收口
+      //    只覆盖 hook 内 AI 长请求，页面自持的这个 GET 被遗漏）。
+      if (controller.signal.aborted || currentSchemeIdRef.current !== sid) return;
       if (data?.exists) {
         setConsistencyResult({
           score: data.score,

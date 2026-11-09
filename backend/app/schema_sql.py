@@ -708,8 +708,29 @@ CREATE TABLE IF NOT EXISTS prompt_audit_logs (
     variables_before TEXT DEFAULT '[]',
     variables_after TEXT DEFAULT '[]',
     client_ip TEXT DEFAULT '',
+    -- ✅ R206（2026-11-09 · L-14 · 提示词审计无版本号）：created_at 仅**秒级**
+    --    精度，同秒多次变更的先后不可判定（既有 ORDER BY created_at DESC, rowid
+    --    DESC 只能靠 rowid 兜底，而 rowid 在 VACUUM / 重建表后会变）。version 是
+    --    **全局单调递增的变更序号**（事务内自增，见 prompt_audit_sequence），
+    --    使「变更先后」可精确判定、列表排序稳定。历史行 version=0（默认），
+    --    读侧按 (version DESC, created_at DESC, rowid DESC) 排序 ⇒ 旧行相对
+    --    顺序逐字不变。
+    version INTEGER NOT NULL DEFAULT 0,
     created_at TEXT DEFAULT (datetime('now','localtime'))
 );
+
+-- ✅ R206（L-14）：提示词审计的**全局序号发生器**（单行表）。
+--    序号在审计写入的**同一事务**内自增（UPDATE ... SET seq = seq + 1），
+--    与审计行写入原子：事务回滚则序号一并回滚（不留空洞）；并发写由
+--    SQLite 写锁串行化 ⇒ 同一秒内的多次变更也有确定先后。
+--    独立于 prompt_audit_logs：审计行可能被人工清理/删除，而序号必须连续，
+--    且「取下一个序号」与「写审计行」要在同一事务里完成（故不能用
+--    MAX(version)+1 —— 两个并发事务会读到同一个 MAX，写出重复序号）。
+CREATE TABLE IF NOT EXISTS prompt_audit_sequence (
+    id INTEGER PRIMARY KEY CHECK (id = 1),
+    seq INTEGER NOT NULL DEFAULT 0
+);
+INSERT OR IGNORE INTO prompt_audit_sequence (id, seq) VALUES (1, 0);
 
 
 -- 性能索引

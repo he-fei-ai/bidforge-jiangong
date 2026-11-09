@@ -106,6 +106,21 @@ export const SectionLogList = memo(function SectionLogList({ items }: { items: S
                       : ""}
                 </Tag>
               )}
+              {/* ✅ R208：R66 起后端随 section_done 下发达成率/容差判定，
+                  此前三键零声明零消费，日志区无法回答「这章字数是否在容差带内」。 */}
+              {item.status === "success" && typeof item.word_ratio === "number" && (
+                <Tooltip
+                  title={`目标 ${item.word_budget ?? 0} 字 / 实际 ${item.word_count ?? 0} 字，偏差 ${item.word_deviation ?? 0} 字`}
+                >
+                  <Tag
+                    color={item.word_within_band === false ? "orange" : "success"}
+                    style={{ margin: 0, fontSize: 11, flexShrink: 0 }}
+                  >
+                    {Math.round(item.word_ratio * 100)}% ·{" "}
+                    {item.word_within_band === false ? "容差外" : "容差内"}
+                  </Tag>
+                </Tooltip>
+              )}
               {/* ✅ 续写失败信号：发生过续写调用失败/产出被丢弃且最终仍不达标，
                   单独提示用户「可重试或手工续写」，与「写不满」区分 */}
               {item.status === "success" && item.continue_failed && (

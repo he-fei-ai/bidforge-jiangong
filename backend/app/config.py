@@ -129,6 +129,8 @@ class Settings(BaseSettings):
     image_api_key: str = ""  # 留空时回退到文本模型 key（Agnes 可免 key）
     image_enabled: bool = True
     image_default_size: str = "2K"  # 1K/2K/3K/4K
+    # ⚠️ R208 核实为**死配置**：全仓 backend/app 零读点（同 image_max_per_project）。
+    #    图像质量由厂商端点 / image_default_size 决定；保留键名兼容旧 .env，勿据此接线新功能。
     image_quality: str = "standard"
     image_max_concurrency: int = 2
     # ---------- 配置连通性预检并发上限（R179 N-09 · 2026-11-05） ----------

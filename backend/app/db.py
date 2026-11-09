@@ -1098,6 +1098,13 @@ async def _migrate(conn: aiosqlite.Connection):
         #     只存非敏感字段（不含明文/密文 Key）；历史行为空串 = 无快照，
         #     读取端容忍，仅回滚能力对历史记录不可用。
         ("ai_config_audit_logs", "snapshot_json", "TEXT DEFAULT ''"),
+        # --- ✅ R206（2026-11-09 · L-14）：提示词审计的**全局变更序号**。
+        #     created_at 仅秒级精度 ⇒ 同秒多次变更先后不可判定（既有排序靠
+        #     rowid 兜底，而 rowid 在 VACUUM/重建表后会变）。version 列存
+        #     「事务内自增的全局单调序号」（发生器见 prompt_audit_sequence 表），
+        #     历史行默认 0 ⇒ 旧行相对顺序逐字不变（读侧排序 (version DESC,
+        #     created_at DESC, rowid DESC)）。
+        ("prompt_audit_logs", "version", "INTEGER NOT NULL DEFAULT 0"),
         # --- ✅ 2026-09-29：章节「事实变更失效标记」的数据源。
         #     全局事实（global_facts）发生任何写操作后，由唯一出口
         #     invalidate_export_cache(..., facts_touched=True) 把本方案的时间戳
@@ -1179,14 +1186,34 @@ async def _migrate(conn: aiosqlite.Connection):
             " before_hash TEXT DEFAULT '', after_hash TEXT DEFAULT '',"
             " variables_before TEXT DEFAULT '[]', variables_after TEXT DEFAULT '[]',"
             " client_ip TEXT DEFAULT '',"
+            " version INTEGER NOT NULL DEFAULT 0,"  # ✅ R206（L-14）：全局变更序号
             " created_at TEXT DEFAULT (datetime('now','localtime')))"
         )
         await conn.execute(
             "CREATE INDEX IF NOT EXISTS idx_prompt_audit_key_created" " ON prompt_audit_logs(prompt_key, created_at)"
         )
+        # ✅ R206（L-14）：按 (prompt_key, version) 排序的覆盖索引 —— 审计列表
+        #    改按 version DESC 排序后，原 (key, created_at) 索引不再覆盖排序，
+        #    审计表行数增长后会成为排序热点。旧库补建（IF NOT EXISTS 幂等）。
+        await conn.execute(
+            "CREATE INDEX IF NOT EXISTS idx_prompt_audit_key_version" " ON prompt_audit_logs(prompt_key, version)"
+        )
     except Exception as e:
         # ✅ B1-4（R176）：审计表缺失 → 提示词审计能力长期缺席（降级可见）
         _record_migration_degraded("prompt_audit_logs 建表", e)
+
+    # --- ✅ R206（L-14）：提示词审计的全局序号发生器（单行表）。
+    #     新库已由 SCHEMA_SQL 创建；此处兜底覆盖老库/测试路径。
+    #     缺失只影响「序号」这一个增强能力（降级为 version=0，排序退回
+    #     created_at+rowid），不阻断审计写入 ⇒ 不进 _MIGRATION_DEGRADED。
+    try:
+        await conn.execute(
+            "CREATE TABLE IF NOT EXISTS prompt_audit_sequence ("
+            "id INTEGER PRIMARY KEY CHECK (id = 1), seq INTEGER NOT NULL DEFAULT 0)"
+        )
+        await conn.execute("INSERT OR IGNORE INTO prompt_audit_sequence (id, seq) VALUES (1, 0)")
+    except Exception as e:
+        logger.debug("提示词审计序号表兜底建表失败（version 降级为 0）: %s", e)
 
     # --- ✅ 性能优化（2026-09-24 · 基线优化 P0-2）：ai_audit_logs 覆盖索引 ---
     # 背景（基线实测，13334 行）：`GET /ai/config/audit-logs` 每次附带两条

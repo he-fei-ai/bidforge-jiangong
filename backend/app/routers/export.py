@@ -816,16 +816,9 @@ async def collect_export_issues(
         #    status 计数 → 导出预检显示「必选项 17/17 成功」却放行缺资料的成稿。
         #    判据与 /bid-analysis/results、目录注入、提取层物化同源于
         #    bid_analysis_service.is_missing_result，避免四处口径分叉。
-        from app.services.bid_analysis_service import is_missing_result as _is_missing_ba
-
-        def _ba_has_valid_result(r: dict) -> bool:
-            if r.get("status") != "success":
-                return False
-            return not _is_missing_ba(str(r.get("content") or ""), str(r.get("output_type") or "markdown"))
-
-        ba_success = sum(1 for r in ba_required if _ba_has_valid_result(r))
+        ba_success = sum(1 for r in ba_required if _ba_result_has_content(r))
         ba_failed = [
-            r for r in ba_required if r["status"] not in ("success", "idle") or not _ba_has_valid_result(r)
+            r for r in ba_required if r["status"] not in ("success", "idle") or not _ba_result_has_content(r)
         ]
         if ba_total > 0 and ba_success < ba_total:
             _ba_summary = {
@@ -1092,6 +1085,16 @@ _EXPORT_ISSUE_RULE_MAP: dict[str, tuple[str, str]] = {
     #    high 级阻断导出（要求先修复再交付）。
     "body_subheading_namespace_conflict": ("DLV-13", "high"),
 }
+#: ✅ R207（日志驱动实证）：同一 rule_id 由多个 issue 类型映射时，409 明细里
+#: 会出现数条**标题完全相同**的阻断项（生产日志 21:15:35：DLV-09 连续两条
+#: 「正文均已通过审核」6 处 / 4 处，用户无法区分「待审」与「驳回」）。
+#: 与前端 pages/schemeWorkbench/exportShared.ts::EXPORT_ISSUE_LABEL 同键同义
+#: （双向 parity 由 R207 护栏锁定），只列需要区分的同族类型。
+_EXPORT_ISSUE_SUBTYPE_LABEL: dict[str, str] = {
+    "review_pending": "章节待审核",
+    "review_rejected": "章节审核未通过",
+    "review_missing": "缺少章节审核记录",
+}
 #: 单个 finding 最多回带的章节 ID（避免响应体膨胀）
 _EXPORT_FINDING_SECTION_CAP = 20
 
@@ -1136,7 +1139,18 @@ def _export_high_issue_blockers(issues: list) -> list[dict]:
         if not entry["title"]:
             rule = get_rule(meta[0])
             entry["title"] = str(getattr(rule, "title", "") or "") if rule is not None else ""
-    return list(blocked.values())
+    result = list(blocked.values())
+    # ✅ R207：同一 rule_id 有多条子类时，追加可区分的展示标题（加法式新键，
+    #    ``title`` 原值保持契约不变）。409 detail 与前端提示据此可区分
+    #    「待审 / 驳回 / 无记录」，不再是两条一模一样的「正文均已通过审核」。
+    _per_rule: dict[str, int] = {}
+    for entry in result:
+        _per_rule[entry["rule_id"]] = _per_rule.get(entry["rule_id"], 0) + 1
+    for entry in result:
+        sub = _EXPORT_ISSUE_SUBTYPE_LABEL.get(entry["type"])
+        if sub and _per_rule.get(entry["rule_id"], 0) > 1:
+            entry["display_title"] = f"{entry['title']}·{sub}"
+    return result
 
 
 async def _export_high_issue_gate(scheme_id: str, db, body: dict) -> tuple[list[dict], dict]:
@@ -1170,7 +1184,9 @@ async def _export_high_issue_gate(scheme_id: str, db, body: dict) -> tuple[list[
 def _export_blocked_response(blockers: list[dict]) -> JSONResponse:
     """409 + 可执行 detail：明确告诉用户拦了什么、怎么继续。"""
     total = sum(int(b["count"]) for b in blockers)
-    names = "、".join(f"{b['title'] or b['type']}（{b['rule_id']}）{b['count']} 处" for b in blockers)
+    names = "、".join(
+        f"{b.get('display_title') or b['title'] or b['type']}（{b['rule_id']}）{b['count']} 处" for b in blockers
+    )
     detail = (
         f"导出已被阻断：存在 {len(blockers)} 类高风险问题（共 {total} 处）——{names}。"
         "请先修复后重试；如确认已知悉，可勾选「已知悉并继续」再次导出（本次覆写会写入导出留痕）。"
@@ -1252,11 +1268,27 @@ def export_issues_to_findings(issues: list) -> list:
         sevs = [_EXPORT_ISSUE_RULE_MAP[str(i.get("type"))][1] for i in items]
         severity = max(sevs, key=lambda s: SEVERITY_ORDER.get(s, 0))
 
-        sections_hit = [str(i.get("section_id") or "") for i in items if i.get("section_id")]
+        # ✅ R207：R198 给聚合类 issue（review_*/chart_*）补的是 **section_ids**
+        #    数组，而此处只读单数 section_id → 映射后的 finding.section_ids 恒空，
+        #    前端「问题定位跳转」链路整体不可达（类型声明形同虚设）。两形态都收，
+        #    去重后按统一 cap 截断；逐条 issue 的 section_id 行为逐字不变。
+        sections_hit: list[str] = []
+        for i in items:
+            _one = str(i.get("section_id") or "").strip()
+            _ids = [str(x or "").strip() for x in (i.get("section_ids") or []) if isinstance(x, (str, int))]
+            for _sid in [_one, *_ids]:
+                if _sid and _sid not in sections_hit:
+                    sections_hit.append(_sid)
         sample_titles = [str(i.get("title") or "") for i in items if i.get("title")][:3]
         counts: dict[str, int] = {}
+        # ✅ R207：聚合类 issue 自带 count（20 章待审核 = 1 条 issue + count=20），
+        #    而 ``count=len(items)`` 是「聚合条数」。旧实现让 stats 显示「1 项」，
+        #    与逐条 issue（20 条空章节显示「20 项」）差 20 倍。新增 hit_count
+        #    （加法式，count 语义保持不变）供总检统计使用。
+        hit_total = 0
         for i in items:
             cnt = i.get("count")
+            hit_total += cnt if isinstance(cnt, int) and cnt > 0 else 1
             if isinstance(cnt, int):
                 counts[str(i.get("type"))] = counts.get(str(i.get("type")), 0) + cnt
 
@@ -1282,6 +1314,7 @@ def export_issues_to_findings(issues: list) -> list:
                 "mode": "program",
                 "source": "export_check",
                 "count": len(items),
+                "hit_count": hit_total,
             }
         )
     return findings
@@ -1299,7 +1332,7 @@ async def _readiness_preflight_summary(scheme_id: str, db) -> dict:
     try:
         cur = await db.execute(
             "SELECT total, grade, verdict, released, blocked, rule_version,"
-            " content_fingerprint, created_at"
+            " content_fingerprint, review_state_hash, created_at"
             " FROM preflight_runs WHERE scheme_id=?"
             " ORDER BY created_at DESC, rowid DESC LIMIT 1",
             (scheme_id,),
@@ -5125,6 +5158,77 @@ def _export_cache_fast_path_enabled() -> bool:
         return True
 
 
+def _ba_result_has_content(row: dict) -> bool:
+    """解析项是否为「成功且有有效内容」（导出预检计数的单一判据）。
+
+    ✅ R205：bid_analysis 在「全部分段无有效结果」时写
+    ``status='success' + content='{}'`` 的失败哨兵；只按 status 计数会把
+    空壳当成成功。判据与解析模块 is_missing_result 同源（局部导入避免模块
+    顶层依赖），独立成函数供行为级护栏直接验证。
+    """
+    if row.get("status") != "success":
+        return False
+    from app.services.bid_analysis_service import is_missing_result
+
+    return not is_missing_result(str(row.get("content") or ""), str(row.get("output_type") or "markdown"))
+
+
+#: 附录单条提取成果的最大字符数（超出显式标注截断，防 JSON 原文撑爆表格）。
+_APPENDIX_EXTRACT_MAX_CHARS = 2000
+
+
+def _format_extract_data_for_appendix(raw: object, *, limit: int = _APPENDIX_EXTRACT_MAX_CHARS) -> str:
+    """把 ``doc_extractions.extract_data`` 格式化为可读附录正文（纯函数）。
+
+    ✅ R205（解析→导出格式不兼容）：四层存储写入的是 ``_jdump(payload)`` 的
+    **完整 JSON 对象字符串**（doc_id / extract_schema_version / 类别内容 /
+    source_items），旧导出实现直接 ``str(raw)[:500]`` —— 附录里出现的是被
+    硬截断的半截 JSON（键名、引号、右花括号全缺），既不可读也不可复用，
+    且真正有价值的类别内容往往排在 500 字之后而完全不可见。
+
+    修法：先按 JSON 解析并逐键铺成「键：值」行；列表取前 20 条并标注总数，
+    元数据键不渲染。解析失败（旧库里直接存纯文本的行）保持原文语义，
+    仅按上限截断；整体仍受 ``limit`` 约束，绝不撑爆附录表格。
+    """
+    text = raw if isinstance(raw, str) else ("" if raw is None else str(raw))
+    if not text.strip():
+        return ""
+    try:
+        parsed = json.loads(text)
+    except (TypeError, ValueError):
+        parsed = None
+    if not isinstance(parsed, dict):
+        return text[:limit]
+    lines: list[str] = []
+    for key, value in parsed.items():
+        if key in ("doc_id", "extract_schema_version", "extract_time"):
+            continue
+        if isinstance(value, list):
+            parts: list[str] = []
+            for entry in value[:20]:
+                if isinstance(entry, dict):
+                    title = str(entry.get("title") or entry.get("name") or "").strip()
+                    body = str(entry.get("content") or entry.get("value") or "").strip()
+                    parts.append(f"{title}：{body}" if title and body else (title or body))
+                else:
+                    parts.append(str(entry))
+            value_text = "；".join(p for p in parts if p)
+            if len(value) > 20:
+                value_text += f" …（共 {len(value)} 条）"
+        elif isinstance(value, dict):
+            value_text = "；".join(
+                f"{k}：{v}" for k, v in value.items() if v not in (None, "", "没有提及")
+            )
+        else:
+            value_text = "" if value is None else str(value)
+        if value_text.strip():
+            lines.append(f"{key}：{value_text}")
+    out = "\n".join(lines) or text
+    if len(out) > limit:
+        out = out[:limit] + f" …（已截断，原始 {len(text)} 字符）"
+    return out
+
+
 async def _load_appendix_sources(db, scheme_id: str, project_id: str) -> list[dict]:
     """D-3：加载导出补充附录的数据源（知识库条目 / 解析提取成果）。
 
@@ -5182,7 +5286,13 @@ async def _load_appendix_sources(db, scheme_id: str, project_id: str) -> list[di
         items = []
         for r in await _db_fetch_all(cur, what="_load_appendix_sources:doc_extractions"):
             d = dict(r)
-            items.append({"name": str(d.get("extract_type") or ""), "value": str(d.get("extract_data") or "")[:500]})
+            # ✅ R205：不再把完整 JSON 字符串硬截 500 字当正文（见纯函数注释）
+            items.append(
+                {
+                    "name": str(d.get("extract_type") or ""),
+                    "value": _format_extract_data_for_appendix(d.get("extract_data") or ""),
+                }
+            )
         if items:
             groups.append({"title": "解析提取成果", "items": items})
     except sqlite3.Error as e:

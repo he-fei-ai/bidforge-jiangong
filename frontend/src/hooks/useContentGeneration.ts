@@ -328,6 +328,16 @@ export function useContentGeneration(
             setProgressMsg(evt.reason || "方案尚无正文");
           } else if (evt.event === "consistency_failed") {
             setProgressMsg(`全文一致性处理失败：${evt.reason || ""}`);
+          } else if (
+            evt.event === "word_adjust_start" ||
+            evt.event === "word_adjust_batch_start" ||
+            evt.event === "word_adjust_batch_done" ||
+            evt.event === "word_adjust_done"
+          ) {
+            // ✅ R205：与页面正文状态机保持 SSE 事件覆盖一致（F2 parity）。
+            //    字数调整是长任务阶段，此前两套实现都零消费、进度文案冻结。
+            if (typeof evt.progress === "number") setProgress(evt.progress);
+            setProgressMsg(evt.message || "正在调整章节字数...");
           }
           // ✅ 2026-10-10：`degraded` 与 `completed` 同为终态（后端一致性修复有失败项
           //   时的加法式终态）。旧实现只认 completed ⇒ 降级完成时不提示、不 load()。

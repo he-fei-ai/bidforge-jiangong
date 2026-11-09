@@ -321,6 +321,36 @@ def _needs_reload_by_watermark(db_path: str) -> bool:
     return True
 
 
+def _needs_reload_wal_aware(db_path: str) -> bool:
+    """L-12（WAL 感知的缓存失效判据）：**表级水印为权威，mtime 降级为粗判兜底**。
+
+    ✅ R206（2026-11-09 · L-12 · WAL 下跨进程提示词变更长期不可见）：
+    旧实现的判据是 ``_db_newer_than_cache(current) and _needs_reload_by_watermark(current)``
+    —— **mtime 是前置门禁**，表级水印只是「第二道闸」。而 SQLite **WAL 模式**下
+    跨进程写入落在 ``-wal`` 文件里，**主库文件内容与 mtime 都不变**（只在
+    checkpoint 时改写）⇒ 前置门禁恒为 False ⇒ 水印那第二道闸**永远走不到**
+    ⇒ 外部进程 / 脚本 / 迁移工具写入的提示词在本服务进程内**长期不可见**
+    （表现：前端已保存却不生效，且无任何告警）。
+
+    现改为：
+    - **有水印基线** → 以水印为权威判据（探针含 1s 节流）：水印变了 / 探测失败
+      ⇒ 重载；水印未变 / 节流窗口内 ⇒ 不重载。
+      「他表写入 bump 了库 mtime」仍**不触发**全量重载（R108 的原意保留 ——
+      探针判定水印未变时会把 mtime 推到当前值，消化掉这次 bump）。
+    - **无水印基线**（极旧库缺 ``updated_at`` 列、库文件尚不存在）→ 退回 mtime
+      粗判，逐字维持 R179「库文件后创建即重载」与旧行为。
+
+    调用方须持 _cache_lock。
+    """
+    if _loaded_db_watermark is None:
+        # 无水印基线 → 退回「mtime 变新即重载」（R179 / 旧行为逐字不变）。
+        return _db_newer_than_cache(db_path)
+    # 有水印基线 → 水印权威（WAL 下 mtime 不变，只有水印看得见跨进程写入）。
+    #   注意：本函数在「水印未变」时会把 _loaded_db_mtime 推到当前值，
+    #   因此不会因「他表写入 bump 了库 mtime」而全量重载（R108 语义不变）。
+    return _needs_reload_by_watermark(db_path)
+
+
 def _load_prompt_cache_sync():
     """同步方式从数据库加载所有提示词到缓存。"""
     global _prompt_cache, _loaded_db_path, _loaded_db_mtime, _loaded_db_watermark, _loaded_db_missing
@@ -437,7 +467,10 @@ def _get_prompt_cache() -> dict[str, str]:
             # 路径未变但库已变新 → 外部写入（多进程 / 脚本 / 迁移），自动重载。
             # ✅ R108（P1-1）：mtime 只是**粗判**（库级信号，他表写入也算）；
             #    变新后须再过 prompt_templates 表级水印第二道闸才真正重载。
-            if _db_newer_than_cache(current) and _needs_reload_by_watermark(current):
+            # ✅ R206（L-12）：WAL 模式下主库 mtime 不变（写入落在 -wal），
+            #    故 mtime 只能是粗判；表级水印才是权威判据。旧实现把 mtime 当
+            #    **前置**门禁 ⇒ WAL 下跨进程写入永远看不见（水印闸走不到）。
+            if _needs_reload_wal_aware(current):
                 _prompt_cache = {}
                 try:
                     _load_prompt_cache_sync()

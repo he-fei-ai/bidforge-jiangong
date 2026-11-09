@@ -179,13 +179,29 @@ export function useExportCheck(deps: ExportCheckDeps) {
   //    toast 归属错乱；卸载后 setState。与 handleExportCheck 的
   //    exportCheckAbortRef 同型（独立 ref，不与预检互相取消）。
   const qualityAbortRef = useRef<AbortController | null>(null);
-  useEffect(() => () => qualityAbortRef.current?.abort(), []);
+  const qualityInFlightRef = useRef(false);
+  // ✅ R207：切方案时中止本域在飞的质量自检（ref 是 hook 私有，页面清单拿不到，
+  //    与 useReviewAudit 的 [id] effect 同型）；卸载兜底缺一即复活。
+  useEffect(
+    () => () => {
+      qualityAbortRef.current?.abort();
+    },
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+    [],
+  );
+  useEffect(() => {
+    qualityAbortRef.current?.abort();
+    qualityInFlightRef.current = false;
+    setCheckingQuality(false);
+    setQualityResult(null);
+  }, [id]); // eslint-disable-line react-hooks/exhaustive-deps
 
   const handleQualityCheck = async () => {
-    // ✅ R168（FIX-10）：重入锁 —— 同帧双击此前可并发两个请求（checkingQuality 是
-    //    异步置位，挡不住连点），结果相互覆盖；与同页其它预检入口的 running 态口径一致。
-    if (!id || checkingQuality) return;
+    // ✅ R168（FIX-10）+ R207：同步 ref 重入锁 —— checkingQuality 是异步 state，
+    //    同帧双击挡不住；并补上跨方案切换后的锁复位。
+    if (!id || checkingQuality || qualityInFlightRef.current) return;
     const sid = id;
+    qualityInFlightRef.current = true;
     const controller = new AbortController();
     qualityAbortRef.current?.abort();
     qualityAbortRef.current = controller;
@@ -220,7 +236,14 @@ export function useExportCheck(deps: ExportCheckDeps) {
       if (controller.signal.aborted || currentSchemeIdRef.current !== sid) return;
       msg.error(err.message || "质量自检失败");
     } finally {
-      setCheckingQuality(false);
+      // ✅ R207：旧请求完成不得关掉新方案/新请求的 spinner（与 R197 F3
+      //    「finally 复位收敛进 ref 门禁」同口径）。
+      if (qualityAbortRef.current === controller && currentSchemeIdRef.current === sid) {
+        qualityAbortRef.current = null;
+        setCheckingQuality(false);
+      }
+      if (qualityAbortRef.current === controller) qualityInFlightRef.current = false;
+      else if (currentSchemeIdRef.current === sid) qualityInFlightRef.current = false;
     }
   };
 

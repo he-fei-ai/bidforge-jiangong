@@ -58,6 +58,10 @@ type BaSseEvent =
       used_doc_count?: number;
       input_doc_count?: number;
       dropped_doc_count?: number;
+      // ✅ R208：与后端 text_stats 逐字对齐（多标段上下文可见性）
+      section_title?: string;
+      section_hint_applied?: boolean;
+      multi_section_unselected?: boolean;
     }
   | { type: "completed"; result?: BaSseCompletedResult }
   | { type: "error"; error?: string }
@@ -196,7 +200,17 @@ export function useBidAnalysis(deps: BidAnalysisDeps) {
               used_doc_count: evt.used_doc_count ?? 0,
               input_doc_count: evt.input_doc_count ?? 0,
               dropped_doc_count: evt.dropped_doc_count ?? 0,
+              section_title: evt.section_title ?? "",
+              section_hint_applied: !!evt.section_hint_applied,
+              multi_section_unselected: !!evt.multi_section_unselected,
             });
+            // ✅ R208：多标段未选标段时后端不注入标段上下文，18 项结果可能
+            //    混入其他标段内容 —— 必须在提取阶段即时告知而非事后翻日志。
+            if (evt.multi_section_unselected) {
+              msg.warning(
+                "检测到多标段项目但未选择标段：本次提取未注入标段上下文，请先在「选择标段」中指定后重新提取",
+              );
+            }
           } else if (t === "completed") {
             // 兜底前先断言到含可选字段的 result 契约，{} 兜底与取属性逻辑保持原样
             const r: BaSseCompletedResult = evt.result || {};

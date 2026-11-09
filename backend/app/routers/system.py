@@ -499,7 +499,13 @@ async def outline_auto_confirm_put(body: OutlineAutoConfirmSettings):
     kv[_OUTLINE_AUTO_CONFIRM_KEY] = "true" if enabled else "false"
     await _governance_kv_save(kv)
     logger.info("目录自动确认开关已更新并持久化: outline_auto_confirm=%s", enabled)
-    return {"enabled": enabled}
+    # ✅ R208：GET 带 delay_ms、前端 PUT 也按完整 OutlineAutoConfirmSettings 标注，
+    #    旧 PUT 只回 enabled → 调用方读 data.delay_ms 得 undefined（倒计时回落 8000
+    #    而非运维配置值）。与 GET 同源于 settings，加法式补回。
+    return {
+        "enabled": enabled,
+        "delay_ms": int(getattr(settings, "outline_auto_confirm_delay_ms", 8000) or 8000),
+    }
 
 
 # ✅ 2026-11-05（R175 收口）：治理开关持久化 —— 旧实现只写进程内存态

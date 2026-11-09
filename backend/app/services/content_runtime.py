@@ -221,10 +221,14 @@ def build_chapter_layered_messages(
     消息                          内容
     ============================  ============================================
     ``system``                    仅整案常量（逐章变量已由调用方注入为空串）
-    ``user`` ①整案稳定上下文      方案名称/类型/项目概述/施工内容/全局事实/知识库/生成标准块
+    ``user`` ①整案稳定上下文      方案名称/类型/项目概述/施工内容/全局事实/生成标准块
     ``user`` ②章节树上下文        上级章节链/上级要点/同级章节
-    ``user`` ③本章任务差异        当前章节编号/标题/目标字数/前序结尾 + ``chapter_extras``
+    ``user`` ③本章任务差异        知识库素材/当前章节编号/标题/目标字数/前序结尾 + ``chapter_extras``
     ============================  ============================================
+
+    ✅ R206（L-1）：「项目知识库素材」原在 ① 段，但它是**逐章量**（调用方按本章
+    过滤）⇒ ① 段不再逐章相同，**显式 cache 断点整块失效**（整案上下文每章全价
+    重算）。现移至 ③ 段**段首**（段首以保住 R57 的「知识库先于当前章节」顺序契约）。
 
     ✅ 为什么必须分层（依据《标书智能体（四）》）：各厂商 Prompt Cache 命中的是
     **请求前缀**，而不是「某段内容看起来一样」。旧实现把「上级章节链→当前章节→
@@ -247,6 +251,8 @@ def build_chapter_layered_messages(
             → 输出与本参数引入前**逐字一致**。
         chapter_extraction_text: ✅ G4 本章专项提取成果（逐章变化量）。追加到
             任务差异段（本章专属事实之后、图表配额之前），缺省空串时整段不存在。
+        knowledge_text: ✅ R206（L-1）本章知识库素材文本 —— **逐章量**（调用方按
+            本章过滤），故置于 ③ 段段首而非 ① 段（详见函数文档）。
         其余参数与 :func:`build_chapter_user_content` 同义同名，便于一一对照。
 
     Returns:
@@ -271,13 +277,21 @@ def build_chapter_layered_messages(
         )
     if facts_text:
         stable += "\n【全局事实变量（唯一可信数据源）】：\n" + build_facts_header(eff_standard) + f"{facts_text}\n"
-    if knowledge_text:
-        stable += (
-            "\n【项目知识库素材】：\n"
-            "（企业管理制度/工艺要点/既有素材，"
-            "与本项目相关的表述应遵循其口径，数据仍以上方全局事实为准）\n"
-            f"{knowledge_text}\n"
-        )
+    # ✅ R206（2026-11-09 · L-1 · 知识库素材逐章不同却被放进「整案稳定段」）：
+    #    ``knowledge_text`` 由调用方**按本章过滤**（``_filter_knowledge_rows(
+    #    knowledge_rows, leaf)``）⇒ 逐章不同。它原先被放进稳定段，而稳定段的
+    #    **定义**就是「同一方案各章节逐字相同」——
+    #      · 显式 cache 断点（``cache_control``）落在稳定段末尾时，段内任一
+    #        字节不同 ⇒ **整块**判不命中 ⇒ 整案上下文（项目概述/施工内容/
+    #        全局事实/生成标准块）每章全价重算；
+    #      · 自动前缀缓存也只能命中到分叉点，稳定段后半截同样失效。
+    #    现移出稳定段（它本就是逐章量），改置于**任务差异段段首** ——
+    #    置于段首是为保住 R57 的顺序契约「知识库素材必须排在【当前章节编号】
+    #    之前」（见 test_prompt_prefix_stability_r57）。
+    #    治理侧无副作用：围栏与切片预算按**每条 user 消息**独立施加
+    #    （sse_handlers：``_guard_external_material`` + ``_apply_prompt_context_budget``），
+    #    「项目知识库素材」仍是 MATERIAL_LABELS 成员（照常围栏/扫描）、
+    #    优先级仍是 3（预算不足时先于任务本体被削减，语义不变）。
     stable += "\n\n" + build_user_block(eff_standard)
 
     # ② 章节树上下文：同一父章节下**各兄弟章节逐字相同**
@@ -291,7 +305,19 @@ def build_chapter_layered_messages(
     )
 
     # ③ 本章任务差异：每次请求唯一不同的部分，必须放在**最后**
-    task = f"【当前章节编号】：{section_number}\n"
+    task = ""
+    # ✅ R206（L-1）：知识库素材是**逐章量**（按本章过滤），故置于任务差异段
+    #    **段首** —— 段首而非段尾，是为保住 R57 的顺序契约「知识库素材必须排在
+    #    【当前章节编号】之前」（test_prompt_prefix_stability_r57 定向锁）。
+    if knowledge_text:
+        task += (
+            "【项目知识库素材】：\n"
+            "（企业管理制度/工艺要点/既有素材，"
+            "与本项目相关的表述应遵循其口径，数据仍以上方全局事实为准）\n"
+            f"{knowledge_text}\n"
+            "\n"
+        )
+    task += f"【当前章节编号】：{section_number}\n"
     task += f"【当前章节】：{leaf['title']} — {leaf.get('description', '')}\n"
     task += f"【目标字数】：{word_budget_hint or f'{word_budget}字'}\n"
     if prev_sibling_summary:

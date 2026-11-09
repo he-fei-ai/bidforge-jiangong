@@ -27,6 +27,9 @@ export interface content_result {
   fact_autofix_summary?: Record<string, unknown>;
   order_check?: Record<string, unknown>;
   fact_injection_summary?: Record<string, unknown>;
+  processed?: number;
+  charts?: number;
+  fact_mapping?: unknown[];
 }
 
 export interface facts_result {

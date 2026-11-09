@@ -505,7 +505,11 @@ async def run_repair(
                         "UPDATE sections SET content=?, word_count=?, word_status=?, " "updated_at=? WHERE id=?",
                         (_persist_content, _wc, word_status_for(_wc, _wb), datetime.now().isoformat(), sid),
                     )
-                    await db.commit()
+                    # ✅ R207（P0 半生效收口）：逐章修复不再各自 commit。
+                    #    旧实现每修完一章就提交，中途锁竞争/连接故障会留下
+                    #    「正文已落库、冲突状态未回写、批次留痕缺失、无快照可回滚」
+                    #    的半生效态；R168 只收口了 fullbook 路径。现与 fullbook
+                    #    同口径：全部 UPDATE 缓冲到事务末，提交权唯一归 save_repair。
                 if _persist_content == before:
                     # ✅ B-07（R175，闭环）：模型返回内容与原文逐字相同 →
                     #    本次修复**没有改动任何正文**。旧实现照样计入 repaired，
@@ -563,7 +567,9 @@ async def run_repair(
         await db.execute("UPDATE consistency_conflicts SET status='repaired' WHERE id=?", (cid,))
     for cid in failed_conflicts:
         await db.execute("UPDATE consistency_conflicts SET status='failed' WHERE id=?", (cid,))
-    await db.commit()
+    # ✅ R207：冲突状态回写与上面的正文 UPDATE 同属一个事务，提交权唯一归
+    #    下方 repair_record.save_repair；中途异常时 get_db 的 rollback 会把
+    #    正文与状态一起回滚（旧实现此处先提交，批次留痕若失败即半生效）。
 
     # ✅ 统计口径统一（2026-09-16 · 依据运行库记录）：旧实现 total_conflicts 按
     #    **冲突**计数（len(targets)+len(skipped)），而 repaired/failed/skipped 由

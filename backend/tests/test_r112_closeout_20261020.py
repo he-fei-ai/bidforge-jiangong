@@ -66,7 +66,10 @@ class TestCompressionBombThresholdsConfigurable:
         assert mod.MAX_ARCHIVE_ENTRIES == 2000
         assert mod.MAX_ARCHIVE_UNCOMPRESSED_BYTES == 400 * 1024 * 1024
         assert mod.MAX_COMPRESSION_RATIO == 200
-        assert mod.MAX_ARCHIVE_ENTRY_BYTES == 64 * 1024 * 1024
+        # ✅ R205 重锚：R203 为兼容 30MB 工程量清单 xlsx（解压后单条目
+        #    250~300MB sheet XML）把默认值由 64MB 放宽到 400MB，与总量闸
+        #    同口径；环境变量名 BIDFORGE_MAX_ARCHIVE_ENTRY_BYTES 不变。
+        assert mod.MAX_ARCHIVE_ENTRY_BYTES == 400 * 1024 * 1024
 
     def test_env_override(self):
         """环境变量覆盖生效：设置后模块常量取环境变量值。"""

@@ -81,8 +81,8 @@ _AUDIT_RULES: tuple[tuple[str, str, str, re.Pattern], ...] = (
     ),
 )
 # 图表家族围栏（未闭合即视为生成被截断，残片渲染必失败）——
-# 统一定义在 _chart_pipeline.INLINE_CHART_FENCE_LANGS，避免两端分叉。
-_CHART_FENCE_LANGS = _CHART_FENCE_LANGS
+# 统一定义在 content_blocks.INLINE_CHART_FENCE_LANGS（文件头别名赋值），
+# 避免在此重复定义（R65 护栏锁模块级符号不得重名）。
 
 
 def _count_unclosed_chart_fences(content: str) -> int:

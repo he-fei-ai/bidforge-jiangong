@@ -93,6 +93,13 @@ export type BaTextStats = {
   input_doc_count?: number;
   /** 未纳入的文档数（预算耗尽被整份跳过，或正文为空） */
   dropped_doc_count?: number;
+  // ✅ R208（后端 bid_analysis.py text_stats 在产，此前前端零声明零消费）
+  /** 本次提取命中的标段标题（多标段项目） */
+  section_title?: string;
+  /** 是否已按所选标段注入 section_hint */
+  section_hint_applied?: boolean;
+  /** 多标段但未选择标段 → 本次提取未注入标段上下文，必须提示 */
+  multi_section_unselected?: boolean;
 };
 
 /** 解析项「无有效内容」标记（与后端 MARKDOWN_MISSING_RESULT 一致） */

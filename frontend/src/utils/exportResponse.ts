@@ -280,6 +280,31 @@ export function parseExportDegraded(headers: unknown): ExportDegradedInfo | null
   return { signals, message: parts.join("；") };
 }
 
+/**
+ * ✅ R205（导出→前端零消费字段）：后端 DOCX/PDF 在缺图降级时挂
+ * `X-Cache-Status: degraded`（export.py:5885/6516），此前前端生产代码
+ * 只解析 `X-Export-Degraded`，缓存降级信号完全不可见。
+ */
+export interface CacheStatusInfo {
+  status: string;
+  degraded: boolean;
+  message: string;
+}
+
+/** 解析 `X-Cache-Status`；头缺失返回 null，仅 degraded 产出中文提示。 */
+export function parseCacheStatus(headers: unknown): CacheStatusInfo | null {
+  const raw = headerValue(headers, "x-cache-status");
+  if (!raw) return null;
+  const status = raw.trim().toLowerCase();
+  if (!status) return null;
+  const degraded = status === "degraded";
+  return {
+    status,
+    degraded,
+    message: degraded ? "本次导出缓存降级：成稿可能缺少图表，建议检查后重新导出" : "",
+  };
+}
+
 /** 全局事实读取状态（`X-Global-Facts-Status` 回传的百分号编码 JSON）。 */
 export interface GlobalFactsStatus {
   ok: boolean;

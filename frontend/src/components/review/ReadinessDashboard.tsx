@@ -87,6 +87,9 @@ const SOURCE_LABEL: Record<string, string> = {
   export_check: "导出预检",
   // ✅ R198（2026-11-09）：评分项覆盖并入总检后新增的第七数据来源
   scoring_coverage: "评分项覆盖",
+  // ✅ R207（2026-11-09）：R175 B-17 起后端会产出 numbering（success 与 failed
+  //    两侧），此前前端零映射 → 三类来源告警里出现裸英文 "numbering"。
+  numbering: "编号一致性",
 };
 
 export interface ReadinessDashboardProps {

@@ -68,11 +68,27 @@ async def _seed_scheme(db, name: str = "条款库底稿") -> tuple[str, str]:
     return pid, sid
 
 
+def _disable_export_gate(monkeypatch) -> None:
+    """✅ R205：本组验收「条款库附录不列举未登记条款」，与导出 DLV 阻断无关。
+
+    R195 起底稿链也接入 ``_export_high_issue_gate``，最小 fixture（正文仅
+    「正文段落一」）被判 high → 返回 409 JSONResponse，三条用例拿不到
+    FileResponse。显式隔离闸门，保持原测试意图逐字不变。
+    """
+    from app.routers import export as export_router
+
+    async def _no_blockers(*_args, **_kwargs):
+        return [], {"override": False}
+
+    monkeypatch.setattr(export_router, "_export_high_issue_gate", _no_blockers)
+
+
 async def _build_dossier(db, monkeypatch, tmp_path, sid: str, *, clause_enabled: bool | None = None) -> Path:
     monkeypatch.setattr(export_dossier.settings, "dossier_enabled", True)
     if clause_enabled is not None:
         monkeypatch.setattr(export_dossier.settings, "clause_library_enabled", clause_enabled)
     monkeypatch.setattr(export_dossier, "EXPORTS_DIR", Path(tmp_path))
+    _disable_export_gate(monkeypatch)
     resp = await export_dossier.export_dossier(sid, db=db)
     assert isinstance(resp, FileResponse) and resp.path and Path(resp.path).exists()
     return Path(resp.path)
@@ -427,6 +443,7 @@ async def test_switch_matrix_appendix_and_clause_queries(db_conn, monkeypatch, t
         assert calls == []
         return
 
+    _disable_export_gate(monkeypatch)
     resp = await export_dossier.export_dossier(sid, db=db_conn)
     path = Path(resp.path)
     text = _docx_text(path)

@@ -104,6 +104,10 @@ export interface ContentGenEvent extends SseBaseEvent, SseStatsFields {
   word_count?: number;
   word_budget?: number;
   word_status?: string;
+  /** ✅ R208：R66 起后端 section_done 下发的目标/实际偏差（前端此前零声明） */
+  word_deviation?: number;
+  word_ratio?: number;
+  word_within_band?: boolean;
   continue_failed?: boolean;
   quality_issues?: unknown;
   chart_count?: number;

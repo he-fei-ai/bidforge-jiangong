@@ -59,6 +59,10 @@ export function ScoringCoveragePanel({
   const [creatingKey, setCreatingKey] = useState<string>("");
   const seqRef = useRef(0);
   const abortRef = useRef<AbortController | null>(null);
+  // ✅ R208：抽取是 300s 长任务，与 load() 的 seq/abort 必须隔离，
+  //    否则切方案/卸载时旧请求回写或把新方案 spinner 关掉。
+  const extractSeqRef = useRef(0);
+  const extractAbortRef = useRef<AbortController | null>(null);
 
   const load = useCallback(async () => {
     if (!schemeId) return;
@@ -88,6 +92,9 @@ export function ScoringCoveragePanel({
     return () => {
       seqRef.current += 1;
       abortRef.current?.abort();
+      // ✅ R208：切方案/卸载同时中止 300s 抽取长任务并作废旧世代
+      extractSeqRef.current += 1;
+      extractAbortRef.current?.abort();
     };
   }, [load]);
 
@@ -96,9 +103,16 @@ export function ScoringCoveragePanel({
       msg.warning("当前方案未关联项目，无法解析评分项");
       return;
     }
+    // ✅ R208：300s 长任务独立世代 + AbortController —— 切方案/卸载后旧响应
+    //    不得落地、旧 finally 不得关掉新方案 spinner（与 load() 的 seq 隔离）。
+    const seq = ++extractSeqRef.current;
+    const ac = new AbortController();
+    extractAbortRef.current?.abort();
+    extractAbortRef.current = ac;
     setExtracting(true);
     try {
-      const { data: res } = await scoringApi.extract(projectId);
+      const { data: res } = await scoringApi.extract(projectId, undefined, ac.signal);
+      if (seq !== extractSeqRef.current || ac.signal.aborted) return;
       if (res.status === "failed") {
         msg.warning(res.error || "评分项解析失败（未定位到评标办法/评分标准）");
       } else if (res.status === "empty") {
@@ -111,10 +125,12 @@ export function ScoringCoveragePanel({
       }
       await load();
     } catch (e: unknown) {
+      if (ac.signal.aborted || seq !== extractSeqRef.current) return;
       const err = e as { response?: { data?: { detail?: string } }; message?: string };
       msg.error(err?.response?.data?.detail || err?.message || "评分项解析失败");
     } finally {
-      setExtracting(false);
+      if (seq === extractSeqRef.current) setExtracting(false);
+      if (extractAbortRef.current === ac) extractAbortRef.current = null;
     }
   }, [projectId, load, msg]);
 

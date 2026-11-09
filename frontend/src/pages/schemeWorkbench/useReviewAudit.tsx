@@ -53,6 +53,12 @@ export interface ConsistencyAuditResult {
   //    避免用户误以为「分数比单批时低」是正文变差。
   score_rule?: string;
   score_note?: string;
+  // ✅ R207（R181/B-19 加法键消费）：后端分批/预算闸门触顶时显式声明
+  //    「只查了部分正文」，此前前端零消费 → 用户看到绿色「审计完成」。
+  partial?: boolean;
+  counts?: Record<string, number>;
+  checked_chars?: number;
+  total_chars?: number;
 }
 
 /** 专家论证预检结果（POST /compliance/expert-review 响应；页面读 ready/missing/score/suggestions） */
@@ -310,6 +316,10 @@ export function useReviewAudit(deps: ReviewAuditDeps) {
   /** ✅ R106 FIX-5：取消专家论证预检 */
   const handleCancelExpertReview = () => {
     expertAbortRef.current?.abort();
+    // ✅ R207：R205 只给 CR 扫描/修复两个取消按钮补了即时反馈，R106 FIX-5
+    //    引入的这三个取消入口仍是零反馈（catch 对 aborted 一律静默是为切方案/
+    //    卸载不弹噪声，不能改），故在取消动作处即时提示；静默语义不变。
+    msg.info("已取消当前检查");
   };
 
   // ================== ✅ 规范符合性检查（complianceApi.check）==================
@@ -390,6 +400,10 @@ export function useReviewAudit(deps: ReviewAuditDeps) {
   /** ✅ R106 FIX-5：取消合规检查（abort → 服务端断连即在下一 await 边界取消 AI 调用） */
   const handleCancelComplianceCheck = () => {
     checkAbortRef.current?.abort();
+    // ✅ R207：R205 只给 CR 扫描/修复两个取消按钮补了即时反馈，R106 FIX-5
+    //    引入的这三个取消入口仍是零反馈（catch 对 aborted 一律静默是为切方案/
+    //    卸载不弹噪声，不能改），故在取消动作处即时提示；静默语义不变。
+    msg.info("已取消当前检查");
   };
 
   const handleConsistencyAudit = async () => {
@@ -409,13 +423,26 @@ export function useReviewAudit(deps: ReviewAuditDeps) {
         issues: data.issues || [],
         score_rule: data.score_rule,
         score_note: data.score_note,
+        partial: data.partial === true,
+        counts: data.counts,
+        checked_chars: data.checked_chars,
+        total_chars: data.total_chars,
       });
       const high = (data.issues || []).filter(
         (i: ConsistencyIssueItem) => i.severity === "high",
       ).length;
-      msg.success(
-        `一致性审计完成：评分 ${data.score}，不一致项 ${data.issues?.length || 0}（高危 ${high}）`,
-      );
+      // ✅ R207：覆盖不完整时不得再弹绿色「完成」（与合规检查 D-41 同型，
+      //    两条互相否定的 toast 会让用户误判结论可信度）。
+      if (data.partial === true) {
+        msg.warning(
+          `一致性审计覆盖不完整：仅检查 ${Number(data.checked_chars || 0)}/${Number(data.total_chars || 0)} 字，` +
+            `不一致项 ${data.issues?.length || 0}（高危 ${high}）。结果不代表全书一致，请重跑或拆分方案`,
+        );
+      } else {
+        msg.success(
+          `一致性审计完成：评分 ${data.score}，不一致项 ${data.issues?.length || 0}（高危 ${high}）`,
+        );
+      }
     } catch (e: unknown) {
       const err = e as { name?: string; code?: string; message?: string };
       if (controller.signal.aborted || schemeIdRef.current !== sid) return;
@@ -433,6 +460,10 @@ export function useReviewAudit(deps: ReviewAuditDeps) {
   /** ✅ R106 FIX-5：取消一致性审计 */
   const handleCancelConsistencyAudit = () => {
     auditAbortRef.current?.abort();
+    // ✅ R207：R205 只给 CR 扫描/修复两个取消按钮补了即时反馈，R106 FIX-5
+    //    引入的这三个取消入口仍是零反馈（catch 对 aborted 一律静默是为切方案/
+    //    卸载不弹噪声，不能改），故在取消动作处即时提示；静默语义不变。
+    msg.info("已取消当前检查");
   };
 
   // ===== ✅ 全文一致性 Agent 修复工作台（F-AGENT-CONSISTENCY-REPAIR）=====
@@ -519,7 +550,11 @@ export function useReviewAudit(deps: ReviewAuditDeps) {
 
   /** ✅ R168（FIX-10）：取消一致性扫描 */
   const handleCancelCrScan = () => {
+    // ✅ R205：R197 的 catch 守卫对 aborted 一律静默（为切方案/卸载不弹噪声
+    //    toast），把用户主动取消也一起吞了 —— 点「取消」后界面零反馈。
+    //    改为在取消动作处即时提示；切方案/卸载不走本 handler，静默语义不变。
     crScanAbortRef.current?.abort();
+    msg.info("已取消一致性扫描");
   };
 
   const handleCrRepair = async (opts?: { conflictIds?: string[]; severity?: string }) => {
@@ -590,7 +625,9 @@ export function useReviewAudit(deps: ReviewAuditDeps) {
 
   /** ✅ R168（FIX-10）：取消一致性修复（abort → 服务端断连即在下一 await 边界取消） */
   const handleCancelCrRepair = () => {
+    // ✅ R205：与 handleCancelCrScan 同口径，用户主动取消即时可见。
     crRepairAbortRef.current?.abort();
+    msg.info("已取消一致性修复");
   };
 
   const crRepairItemIds = (status: string) =>
@@ -631,6 +668,24 @@ export function useReviewAudit(deps: ReviewAuditDeps) {
       // ✅ R197（F4）：消费后端 R181 加法键 rejected_not_restored —— 列出「无法
       //    归因到变更片段、正文未回滚」的拒绝项，后端契约明言调用方必须显式
       //    提示人工核对，不得当作已恢复。旧实现零消费 → 用户误以为已恢复原文。
+      // ✅ R207：R181 逐条回滚明细此前只声明类型、零消费（R197 护栏
+      //    只锁「字符串存在」，命中类型声明即假绿）。restored===false
+      //    的条目必须并入人工核对提示，不能只靠聚合数量。
+      const restoreDetails = (result.conflict_restore_results ?? []) as {
+        conflict_id?: string;
+        restored?: boolean;
+        reason?: string;
+      }[];
+      const detailNotRestored = restoreDetails.filter((d) => d.restored === false);
+      if (detailNotRestored.length > 0) {
+        const sample = detailNotRestored
+          .slice(0, 3)
+          .map((d) => d.conflict_id || d.reason || '未知冲突')
+          .join('、');
+        msg.warning(
+          `${detailNotRestored.length} 条拒绝项明细显示未回滚（${sample}），请人工核对后再导出`,
+        );
+      }
       const rejectedNotRestored = result.rejected_not_restored ?? [];
       if (rejectedNotRestored.length > 0) {
         msg.warning(
@@ -656,16 +711,23 @@ export function useReviewAudit(deps: ReviewAuditDeps) {
     }
   };
 
+  const crRollbackInFlightRef = useRef(false);
   const handleCrRollback = (repair: CrRepairHistoryItem) => {
-    if (!id) return;
+    // ✅ R207：命令式 modal.confirm 的 onOk 不在 [id] effect 可达范围，
+    //    切方案后残留弹窗会用旧闭包回滚旧方案并把结果刷到新方案页。
+    if (!id || crRollbackInFlightRef.current) return;
+    const sid = id;
     modal.confirm({
       title: "回滚本次修复？",
       content: `将把本次修复涉及的章节恢复为修复前正文（快照 ${repair.snapshot_id || "—"}）。该操作会生成一个可再次撤销的快照。`,
       okText: "确认回滚",
       cancelText: "取消",
       onOk: async () => {
+        if (schemeIdRef.current !== sid || crRollbackInFlightRef.current) return;
+        crRollbackInFlightRef.current = true;
         try {
           await consistencyRepairApi.rollback(id, { repair_id: repair.id });
+          if (schemeIdRef.current !== sid) return;
           msg.success("已回滚到修复前版本");
           // ✅ G11：回滚改写了正文 → 审核结论失效，需要重新送审 + 重跑总检
           setReviewTick((t) => t + 1);
@@ -675,7 +737,10 @@ export function useReviewAudit(deps: ReviewAuditDeps) {
           load();
         } catch (e: unknown) {
           const err = e as { message?: string };
+          if (schemeIdRef.current !== sid) return;
           msg.error(err.message || "回滚失败");
+        } finally {
+          crRollbackInFlightRef.current = false;
         }
       },
     });

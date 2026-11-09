@@ -236,14 +236,23 @@ class TestSseSourceLocks:
         )
 
     def test_fix7_checkpoint_whitelist_additive_keys(self):
-        """FIX-7：content_generation checkpoint 白名单补 R105 留痕键（断线通道）。"""
-        src = _sse_src()
-        i_kind = src.index('"content_generation": (')
-        j = src.index("facts_generation", i_kind)
-        seg = src[i_kind:j]
-        assert '"order_check"' in seg and '"fact_injection_summary"' in seg, (
+        """FIX-7：content_generation checkpoint 白名单补 R105 留痕键（断线通道）。
+
+        ✅ R205 重锚：R197 起白名单从 checkpoint_schema 单一事实源派生，
+        sse_handlers.py 里已无 ``"content_generation": (`` 字面量，原源码锁
+        锚点永久失效（ValueError: substring not found）——护栏形同虚设。
+        改为直接断言单一事实源 + 路由侧派生关系，并补齐 R205 三键，
+        意图不变且可拦「白名单漏键」的真实回归。
+        """
+        from app.routers import sse_handlers as sh
+        from app.services import checkpoint_schema as cs
+
+        fields = cs.CHECKPOINT_KINDS["content_generation"][1]
+        assert "order_check" in fields and "fact_injection_summary" in fields, (
             "checkpoint 白名单缺 order_check / fact_injection_summary（断线重挂拿不到 R105 留痕）"
         )
+        assert {"processed", "charts", "fact_mapping"} <= set(fields), "R205 断线重挂三键缺失"
+        assert sh._CHECKPOINT_KINDS["content_generation"] == cs.CHECKPOINT_KINDS["content_generation"]
 
 
 # ---------------------------------------------------------------------------

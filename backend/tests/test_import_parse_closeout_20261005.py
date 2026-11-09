@@ -317,7 +317,10 @@ def test_page_abort_refs_all_covered_by_unmount_cleanup():
     #    schemeWorkbench 目录后被本扫描捕获），其归宿是该组件自身的 schemeId
     #    effect cleanup（切方案/卸载时 abort 在飞 AI 请求）——白名单登记 +
     #    反向归宿锁（下方断言），棘轮强度不降。
-    allowlist: set[str] = {"adjustAbortRef"}
+    # ✅ R208：extractAbortRef 定义在 ScoringCoveragePanel（300s 评分项抽取长
+    #    任务），归宿是该组件自身的 [load] effect cleanup（切方案/卸载 abort），
+    #    与 adjustAbortRef 同口径 —— 白名单登记 + 反向归宿锁，棘轮强度不降。
+    allowlist: set[str] = {"adjustAbortRef", "extractAbortRef"}
     missing = [r for r in missing if r not in allowlist]
     assert not missing, f"以下 AbortController 在请求中被赋值，但卸载 cleanup 未 abort：{missing}"
     # 反向归宿锁：白名单 ref 必须在其宿主组件内拥有自己的 effect cleanup abort
@@ -326,6 +329,12 @@ def test_page_abort_refs_all_covered_by_unmount_cleanup():
     ).read_text(encoding="utf-8").replace("\r\n", "\n")
     assert "adjustAbortRef.current?.abort();" in panel_src, (
         "adjustAbortRef 的中止归宿（组件 cleanup）不得移除"
+    )
+    scoring_panel_src = (
+        _REPO / "frontend" / "src" / "pages" / "schemeWorkbench" / "tabs" / "ScoringCoveragePanel.tsx"
+    ).read_text(encoding="utf-8").replace("\r\n", "\n")
+    assert "extractAbortRef.current?.abort();" in scoring_panel_src, (
+        "extractAbortRef 的中止归宿（ScoringCoveragePanel 组件 cleanup）不得移除"
     )
     cleanup_seg = panel_src[panel_src.index("return () => {") :]
     assert "adjustAbortRef.current?.abort();" in cleanup_seg[:400], (

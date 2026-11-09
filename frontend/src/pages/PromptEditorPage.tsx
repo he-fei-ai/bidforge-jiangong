@@ -142,9 +142,9 @@ export default function PromptEditorPage() {
         if (cancelled) return;
         setPrompts(data.items || []);
       })
-      .catch(() => {
+      .catch((e: unknown) => {
         if (cancelled) return;
-        msg.error("加载提示词失败");
+        msg.error(promptErrorText(e, "加载提示词失败"));
       })
       .finally(() => {
         if (!cancelled) setLoading(false);
@@ -310,7 +310,9 @@ export default function PromptEditorPage() {
               .then(({ data: ld }) => {
                 if (isMountedRef.current) setPrompts(ld.items || []);
               })
-              .catch(() => {});
+              .catch((e: unknown) => {
+                if (isMountedRef.current) msg.error(promptErrorText(e, "同步后刷新列表失败"));
+              });
           } catch (e) {
             msg.error(promptErrorText(e, "从代码同步失败"));
           } finally {

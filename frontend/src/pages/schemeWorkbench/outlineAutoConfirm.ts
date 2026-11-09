@@ -27,6 +27,8 @@ export const AUTO_CONFIRM_BLOCKER_LABELS: Record<string, string> = {
   empty_chapters: "空章",
   failed_sections: "失败章节",
   existing_content: "已存在正文",
+  /** ✅ R208：后端自动确认前置判定异常时回传的兜底 blocker（不再静默降级） */
+  evaluate_failed: "自动确认判定异常",
 };
 
 /** 宽松解析 SSE completed / checkpoint 回传的 `auto_confirm`。

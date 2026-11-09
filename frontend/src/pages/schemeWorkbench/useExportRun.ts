@@ -15,6 +15,7 @@ import {
   ganttTruncatedWarning,
   globalFactsStatusWarning,
   noHttpFallbackWarning,
+  parseCacheStatus,
   noPilFallbackWarning,
   parseChartRenderStats,
   parseExportBlock,
@@ -228,6 +229,9 @@ export function useExportRun(deps: ExportRunDeps) {
       }
       const degraded = parseExportDegraded(resp.headers);
       if (degraded) msg.warning(degraded.message, 8);
+      // ✅ R205：X-Cache-Status: degraded（成稿缺图且缓存降级）此前零消费。
+      const cacheStatus = parseCacheStatus(resp.headers);
+      if (cacheStatus?.degraded) msg.warning(cacheStatus.message, 8);
       // ✅ B-15：覆写放行必须让用户看得见（本次是显式动作且已写入导出留痕）。
       const overrideSignal = parseExportOverride(resp.headers);
       if (overrideSignal) {

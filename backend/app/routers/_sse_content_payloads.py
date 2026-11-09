@@ -77,7 +77,11 @@ def build_content_checkpoint(
         try:
             ckpt["word_audit"] = word_audit_summary(run_stats.get("audit_rows") or [], tolerance=word_tol)
         except Exception:
+            # ✅ R208：空 dict 与「本轮无数据」不可混淆 —— 统计计算失败必须留痕，
+            #    否则断线重挂 / 审核预检把失败当「0 项」，运维也无从区分。
             ckpt["word_audit"] = {}
+            ckpt["word_audit_error"] = True
+            logger.warning("正文终态 word_audit 汇总计算失败（task=%s）", task_id, exc_info=True)
     # ✅ R77b（2026-10-15）：事实冲突定点修复汇总随所有终态载荷回填
     #    （与 word_audit 同一"唯一拼装点"纪律，五条收尾路径全覆盖；
     #    断线重挂/审核预检经白名单同读本键）。纯累加器、零异常面。
@@ -102,7 +106,10 @@ def build_content_checkpoint(
                     (_oc.get("unexpected") or [])[:5],
                 )
         except Exception:
+            # ✅ R208：同 word_audit —— 顺序校验统计失败不得伪装成「无问题」。
             ckpt["order_check"] = {}
+            ckpt["order_check_error"] = True
+            logger.warning("正文终态 order_check 计算失败（task=%s）", task_id, exc_info=True)
     # ✅ R105（G3 · 逐章注入留痕汇总）：多少章有留痕、多少条事实
     #    因预算没进提示词、落在哪几章（纯读累加器，零异常面）。
     try:
@@ -128,7 +135,10 @@ def build_content_checkpoint(
             "truncated_sections": _ft_secs,
         }
     except Exception:
+        # ✅ R208：同族第三处 —— 事实注入留痕统计失败不得伪装成「零丢弃」。
         ckpt["fact_injection_summary"] = {}
+        ckpt["fact_injection_summary_error"] = True
+        logger.warning("正文终态 fact_injection_summary 计算失败（task=%s）", task_id, exc_info=True)
     return {
         "event": event,
         "message": message,

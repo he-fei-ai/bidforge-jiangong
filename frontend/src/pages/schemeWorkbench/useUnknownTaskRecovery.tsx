@@ -216,7 +216,14 @@ export function useUnknownTaskRecovery(deps: UnknownTaskRecoveryDeps) {
             proceed();
             return;
           }
-          msg.error("查询任务状态失败，请检查网络后重试（本次未发起新生成）");
+          // ✅ R208：响应拦截器已把后端 detail 写进 error.message，旧实现
+          //    硬编码文案把 503/超时等真实病因吞掉，用户无从判断可否重试。
+          const err = e as { message?: string; response?: { data?: { detail?: string } } };
+          msg.error(
+            err?.response?.data?.detail ||
+              err?.message ||
+              "查询任务状态失败，请检查网络后重试（本次未发起新生成）",
+          );
         }
       },
     });

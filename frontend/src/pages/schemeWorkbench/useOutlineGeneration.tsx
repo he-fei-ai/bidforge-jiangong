@@ -190,12 +190,20 @@ export function useOutlineGeneration(deps: OutlineGenerationDeps) {
           break;
         }
         if (onSseEvent(evt)) break;
-        if (evt.event === "completed") {
+        // ✅ R205（P0 · 跨模块 SSE 断点）：后端 R204 起在有失败章 / 检查点写失败
+        //    时把终态 event 从 completed 降为 degraded（sse_handlers.py:2372），
+        //    载荷与 completed 完全同构（outline / review / failed_chapters /
+        //    auto_confirm / checkpoint_failed）。旧实现在线循环只认 completed /
+        //    stopped ⇒ degraded 落到通用 else：setTree 不执行、一级目录闸门不弹、
+        //    进度不收口、循环不 break（degraded 只在断线重挂分支有处理）。
+        //    现与 completed 共用同一收尾路径，仅文案区分降级语义。
+        const _isDegradedOutline = evt.event === "degraded";
+        if (evt.event === "completed" || _isDegradedOutline) {
           // ✅ 性能优化：终态事件立即 flush，确保 UI 与后续操作一致
           batcher.flushNow();
           setProgress(1);
-          setProgressMsg("目录生成完成");
-          pushOutlineLog(1, "✅ 目录生成完成");
+          setProgressMsg(_isDegradedOutline ? "目录生成降级完成（请查看失败章节与检查点提示）" : "目录生成完成");
+          pushOutlineLog(1, _isDegradedOutline ? "⚠️ 目录生成降级完成" : "✅ 目录生成完成");
           // ✅ R188（L9）：R187 FIX-2 短方案检查点写失败会终态降级并回传
           //    checkpoint_failed，此前前端零消费 —— 界面显示「完成」但刷新后
           //    成果不可恢复。现明确告警并引导立即手动保存。
@@ -253,8 +261,10 @@ export function useOutlineGeneration(deps: OutlineGenerationDeps) {
         } else if (evt.event === "stopped") {
           // ✅ 性能优化：终态事件立即 flush
           batcher.flushNow();
-          setProgressMsg("已停止");
-          pushOutlineLog(lastP, "⏹ 已停止");
+          // ✅ R205：后端 stopped 载荷补了 message（检查点失败时含具体原因），
+          //    旧实现硬编码「已停止」把原因吞掉。
+          setProgressMsg(evt.message || "已停止");
+          pushOutlineLog(lastP, `⏹ ${evt.message || "已停止"}`);
           // ✅ R188（L8/L9）：停止态检查点写失败时后端回传 checkpoint_failed
           //    （payload 仍自带 outline），现如实提示「检查点不可恢复」。
           if (evt.checkpoint_failed) {

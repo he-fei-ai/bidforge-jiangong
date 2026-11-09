@@ -389,11 +389,16 @@ export const sectionsApi = {
 //    覆盖率报告不缓存，每次调用实时计算；抽取结果由后端落库快照。
 export const scoringApi = {
   /** 触发评分项抽取（v1 全自动扫候选页块；doc_ids 仅做类型校验） */
-  extract: (projectId: string, data?: { doc_ids?: string[]; force?: boolean }) =>
+  /** ✅ R208：300s 长任务补可选 signal（旧调用只传一参，行为逐字不变）。 */
+  extract: (
+    projectId: string,
+    data?: { doc_ids?: string[]; force?: boolean },
+    signal?: AbortSignal,
+  ) =>
     api.post<import("../types/scoring").ScoringExtractResponse>(
       `/projects/${projectId}/scoring-items/extract`,
       data || {},
-      { timeout: 300000 },
+      { timeout: 300000, signal },
     ),
   /** 列出评分项 + 最近一次抽取运行状态 */
   listItems: (projectId: string) =>
@@ -915,8 +920,8 @@ export const complianceApi = {
   /** 全文一致性审计（事实 vs 正文比对，AI 耗时较长） */
   consistencyAudit: (schemeId: string, signal?: AbortSignal) =>
     api.post(`/compliance/consistency-audit/${schemeId}`, null, { timeout: 300000, signal }),
-  consistencyLatest: (schemeId: string) =>
-    api.get(`/compliance/consistency-audit/${schemeId}/latest`),
+  consistencyLatest: (schemeId: string, signal?: AbortSignal) =>
+    api.get(`/compliance/consistency-audit/${schemeId}/latest`, { signal }),
   // 一致性审计历史趋势端点（/history）的前端消费已下线（2026-10-03 孤儿 API
   // 清理：全仓零调用方；后端端点保留，脚本/手工诊断可直接请求）。
   // ===== 商业级增强：规则目录 / 程序化预检 / 就绪度总览 / 整改报告 =====
@@ -1807,10 +1812,13 @@ export async function* sseGetStream(
         inner.signal.addEventListener(
           "abort",
           () => {
-            // 仅当不是外层主动取消时才报超时（外层取消走下方 catch 的 return 分支）
-            if (!options?.signal?.aborted) {
-              reject(new Error(timeoutMsg));
-            }
+            // ✅ R208：与 sseFetch 同口径 —— 内层 abort（含外层主动取消 /
+            //    建连超时）一律让 Promise.race 决出，旧实现外层取消时不 reject
+            //    ⇒ abortPromise 永不 settle，建连阶段取消后连接悬挂。取消语义
+            //    由下方 catch 的 AbortError / signal.aborted 分支统一处理。
+            const err = new Error(timeoutMsg);
+            err.name = options?.signal?.aborted ? "AbortError" : "TimeoutError";
+            reject(err);
           },
           { once: true },
         );

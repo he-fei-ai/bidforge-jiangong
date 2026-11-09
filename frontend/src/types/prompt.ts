@@ -66,6 +66,12 @@ export interface PromptAuditLog {
   rollbackable?: boolean;
   /** 不可回滚的原因（后端统一文案，供 tooltip 直接展示） */
   rollback_blocked_reason?: string;
+  /**
+   * ✅ R206（L-14 · 2026-11-09）：**全局变更序号**（后端事务内自增）。
+   * `created_at` 仅秒级精度 → 同秒多次变更的先后不可判定；序号使「变更先后」
+   * 可精确判定（列表按 version 倒序）。历史行 / 旧库缺该列 → 0。
+   */
+  version?: number;
 }
 
 export interface PromptAuditLogsResponse {

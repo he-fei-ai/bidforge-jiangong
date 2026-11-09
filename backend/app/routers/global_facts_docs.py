@@ -1425,7 +1425,15 @@ async def parse_document(doc_id: str, force: bool = False, db=Depends(get_db)):
             "（已截断至上限）" if char_truncated else "",
             "（解析器截断）" if diag.get("truncated") else "",
         )
-        result: dict = {"ok": True, "text_len": len(stored), "truncated": truncated}
+        # ✅ R208（前后端契约闭合）：FactParseDocResponse.parse_status 在 TS 里声明必填，
+        #    而成功主分支此前不回该键（仅 failed 短路分支回），前端
+        #    `data.parse_status === "failed"` 恒 false 且类型契约倒挂。加法式补回。
+        result: dict = {
+            "ok": True,
+            "parse_status": "success",
+            "text_len": len(stored),
+            "truncated": truncated,
+        }
         if layer_info:
             result["layers"] = layer_info
         if parser_warnings:
