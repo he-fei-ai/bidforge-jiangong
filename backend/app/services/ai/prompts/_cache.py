@@ -26,7 +26,12 @@ from pathlib import Path
 #    绝不影响 prompt 渲染主流程。
 from app.services.prompt_governance import sanitize_error_text as _sanitize_error
 
-from ._metrics import record_render, record_render_error, record_render_missing_vars
+from ._metrics import (
+    record_prompt_cache_degraded,
+    record_render,
+    record_render_error,
+    record_render_missing_vars,
+)
 from ._registry import (
     _ALL_PROMPTS,
     clean_prompt_text,
@@ -40,6 +45,10 @@ from ._registry import (
 logger = logging.getLogger(__name__)
 
 _prompt_cache: dict[str, str] | None = None
+# ✅ R205（2026-11-09 · L-13 · 加载失败静默回退出厂默认）：最后一次**成功**加载的
+#   缓存。旧实现加载异常即 ``_prompt_cache = None`` → 回退出厂默认且无指标。
+#   现保留上次成功缓存（不丢已生效的定制），并打点 ``prompt_cache_degraded``。
+_last_good_cache: dict[str, str] = {}
 # ✅ BUG 修复（2026-09-23 · 缓存路径漂移）：记录缓存加载时的 DB 路径。
 #    旧实现固定读 DATA_DIR/"scheme_assistant.db"，而真实连接路径以 app.db.DB_PATH
 #    为准（测试/多实例会切换该值）—— 路径切换后缓存仍指向旧库，前端编辑
@@ -354,6 +363,8 @@ def _load_prompt_cache_sync():
                     cleaned = clean_prompt_text(row["content"])
                     local_cache[row["key"]] = cleaned
                 _prompt_cache = local_cache
+                # ✅ R205（2026-11-09 · L-13）：记最后一次成功缓存，供加载失败时回退。
+                _last_good_cache = local_cache
                 _loaded_db_path = db_path
                 # ✅ R108（P1-1）：与本次加载**同一连接**记表级水印，计算式与
                 #    _query_prompt_watermark **逐字同口径**（COUNT(*)+MAX，绝不
@@ -372,8 +383,16 @@ def _load_prompt_cache_sync():
             finally:
                 conn.close()
         except Exception as e:
-            logger.warning("Failed to load prompt cache from DB: %s", _sanitize_error(e))
-            _prompt_cache = None
+            # ✅ R205（2026-11-09 · L-13）：旧实现 ``_prompt_cache = None`` →
+            #   ``get_prompt`` 静默回退出厂默认（已生效的 DB 定制全丢）且无指标。
+            #   现保留**上次成功**缓存（不丢已生效定制），并打点 degraded 指标，
+            #   使「配置库挂了但服务仍跑、用的是旧缓存」这一事实可观测。
+            logger.warning("Failed to load prompt cache from DB (保留上次成功缓存): %s", _sanitize_error(e))
+            _prompt_cache = _last_good_cache
+            try:
+                record_prompt_cache_degraded(type(e).__name__)
+            except Exception:  # noqa: BLE001
+                pass
 
 
 def _get_prompt_cache() -> dict[str, str]:
@@ -408,7 +427,12 @@ def _get_prompt_cache() -> dict[str, str]:
                 _load_prompt_cache_sync()
             except Exception as e:
                 logger.warning("Failed to load prompt cache from DB: %s", _sanitize_error(e))
-                _prompt_cache = None
+                # ✅ R205（2026-11-09 · L-13）：保留上次成功缓存，不静默回退默认。
+                _prompt_cache = _last_good_cache
+                try:
+                    record_prompt_cache_degraded(type(e).__name__)
+                except Exception:  # noqa: BLE001
+                    pass
         elif current is not None and _loaded_db_path == current:
             # 路径未变但库已变新 → 外部写入（多进程 / 脚本 / 迁移），自动重载。
             # ✅ R108（P1-1）：mtime 只是**粗判**（库级信号，他表写入也算）；
@@ -420,14 +444,25 @@ def _get_prompt_cache() -> dict[str, str]:
                     logger.info("Prompt cache reloaded: prompt_templates 表已更新")
                 except Exception as e:
                     logger.warning("Failed to reload prompt cache from DB: %s", _sanitize_error(e))
-                    _prompt_cache = None
+                    # ✅ R205（2026-11-09 · L-13）：保留上次成功缓存，不静默回退默认。
+                    _prompt_cache = _last_good_cache
+                    try:
+                        record_prompt_cache_degraded(type(e).__name__)
+                    except Exception:  # noqa: BLE001
+                        pass
         return _prompt_cache or {}
 
 
-def get_prompt(key: str, **kwargs) -> str:
+def get_prompt(key: str, strict: bool = False, **kwargs) -> str:
     """获取提示词，优先读取数据库，回退到硬编码。
 
     当提供 kwargs 时，自动使用 render_prompt 替换变量。
+
+    Args:
+        key: 提示词 key。
+        strict: ✅ R205（2026-11-09 · 未知 key 静默空串）：默认 False（兼容旧
+            行为，未知 key 返回空串 + 记 error 指标）；设为 True 时未知 key
+            **抛 ``KeyError``**，由路由层转 404/500，避免模型收到空 system 提示词。
 
     BUG-FIX（空值污染）：
       原实现 `if _prompt_cache and key in _prompt_cache` 只判断 key 是否存在。
@@ -454,6 +489,10 @@ def get_prompt(key: str, **kwargs) -> str:
             # ✅ R181（2026-11-06 · N-02 遗留）：未知 key 计入 render_errors
             #    （可观测），保持返回空串的兼容行为不变。
             record_render_error(key)
+            # ✅ R205（2026-11-09 · strict 模式）：路由/强约束调用方可要求未知
+            #    key 显式失败（转 404），避免模型收到空 system 提示词。
+            if strict:
+                raise KeyError(f"未知提示词 key: {key}")
             return ""
         if _status == "db_empty":
             logger.warning("Prompt '%s' 在数据库中内容为空，已回退到出厂默认（避免下发空提示词）", key)

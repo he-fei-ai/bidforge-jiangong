@@ -25,6 +25,7 @@
 from __future__ import annotations
 
 import logging
+import re
 
 from app.config import settings
 
@@ -56,6 +57,47 @@ def redaction_enabled() -> bool:
 def injection_defense_enabled() -> bool:
     """注入防护开关（``prompt_injection_defense``，默认 False）。"""
     return bool(getattr(settings, "prompt_injection_defense", False))
+
+
+def pii_redaction_enabled() -> bool:
+    """个人敏感信息（PII）脱敏开关（``prompt_pii_redact_enabled``，默认 False）。
+
+    ✅ R205（2026-11-09 · 无 PII 脱敏）：既有 ``redact_text`` 只覆盖高置信度
+    **凭据**形态（sk-/gsk_/api_key=…），身份证/手机号/邮箱等个人信息
+    **原样外发**。PII 与凭据是两类风险，故独立开关、默认关闭（零行为变化）。
+    """
+    return bool(getattr(settings, "prompt_pii_redact_enabled", False))
+
+
+#: ✅ R205（2026-11-09）：PII 脱敏正则（高召回、低误杀）。
+#:   身份证 18 位 / 手机号 1[3-9] + 9 位 / 邮箱。匹配后整体替换为 ``[已脱敏-PII]``，
+#:   不保留任何字符（避免「部分掩码」被反推）。
+_PII_PATTERNS = (
+    re.compile(r"(?<!\d)([1-9]\d{5}(?:19|20)\d{2}(?:0[1-9]|1[0-2])(?:0[1-9]|[12]\d|3[01])\d{3}[\dXx])(?!\d)"),
+    re.compile(r"(?<!\d)1[3-9]\d{9}(?!\d)"),
+    re.compile(r"[A-Za-z0-9._%+\-]+@[A-Za-z0-9.\-]+\.[A-Za-z]{2,}"),
+)
+
+
+def redact_pii(text: str) -> tuple[str, int]:
+    """对文本做 PII 脱敏，返回 (脱敏后文本, 命中数)。
+
+    开关关闭时**原样返回**（命中数 0），保证既有行为逐字节不变。
+    只替换高置信度 PII 形态（身份证/手机号/邮箱）；其它个人信息
+    （姓名/住址）不在此列（误杀成本高于漏杀）。任何异常 fail-soft。
+    """
+    if not text or not pii_redaction_enabled():
+        return text, 0
+    try:
+        total = 0
+        out = text
+        for pat in _PII_PATTERNS:
+            out, n = pat.subn(lambda _m: "[已脱敏-PII]", out)
+            total += n
+        return out, total
+    except Exception:  # noqa: BLE001 - 脱敏失败绝不阻断生成
+        logger.warning("PII 脱敏失败（使用原文继续）", exc_info=True)
+        return text, 0
 
 
 def context_budget() -> int:
@@ -129,7 +171,11 @@ def redact_only(text: str) -> str:
     out, n = redact_text(text)
     if n:
         logger.warning("出站消息中检出 %d 处疑似凭据，已脱敏", n)
-    return out
+    # ✅ R205（2026-11-09 · PII 脱敏缺口）：凭据脱敏之后串联 PII 脱敏。
+    pii_out, n2 = redact_pii(out)
+    if n2:
+        logger.warning("出站消息中检出 %d 处疑似个人敏感信息（身份证/手机号/邮箱），已脱敏", n2)
+    return pii_out
 
 
 def redact_outbound_messages(messages: list) -> list:
@@ -165,15 +211,18 @@ def redact_outbound_messages(messages: list) -> list:
         if not isinstance(content, str) or not content:
             out.append(msg)
             continue
+        # ✅ R204：所有角色统一脱敏（system 消息里的外部资料此前绕过）。
         redacted, n = redact_text(content)
-        total += n
-        if n:
+        # ✅ R205（2026-11-09 · PII 脱敏缺口）：凭据之后串联 PII 脱敏。
+        redacted, n2 = redact_pii(redacted)
+        total += n + n2
+        if n + n2:
             changed = True
             out.append({**msg, "content": redacted})
         else:
             out.append(msg)
     if total:
-        logger.warning("出站消息共脱敏 %d 处疑似凭据", total)
+        logger.warning("出站消息共脱敏 %d 处疑似凭据/个人敏感信息", total)
     return out if changed else messages
 
 

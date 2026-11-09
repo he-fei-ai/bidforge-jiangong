@@ -3932,6 +3932,10 @@ async def _attempt_candidate(
                                 )
                                 mt = _nxt
                                 continue
+                        # ✅ R205（2026-11-09 · L-2）：截断且未重试（或重试不可用）→
+                        #   本次结果即最终返回结果，标记截断，供上层落库带「被截断」标识，
+                        #   避免半截正文被当作成功正文入库（审核/导出照常用）。
+                        c["_truncated"] = True
                     # ✅ R176 B2（2026-11-04）：把本次 provider 的「流式解析跳过」
                     #    计数带出到候选 dict，供 chat_with_fallback_meta 上报
                     #    （非流式/本地分片路径恒为 0，与引入前行为一致）。
@@ -4043,6 +4047,9 @@ async def _attempt_candidate(
                         c["_stream_parse_skipped_reason"] = str(
                             getattr(provider, "last_stream_parse_skipped_reason", "") or ""
                         )
+                        # ✅ R205（2026-11-09 · L-2）：兜底返回的是被截断的半截正文，
+                        #   标记截断，使上层落库时携带「被截断」标识。
+                        c["_truncated"] = True
                         return _best_partial, None
                     return "", e
     return "", last_err
@@ -4556,6 +4563,7 @@ async def _chat_with_fallback_inner(
                     "text": winner,
                     "provider_used": _wc.get("provider_name", ""),
                     "fallback_reason": _classify_fallback_reason(errors[-1] if errors else None),
+                    "truncated": bool(_wc.get("_truncated", False)),
                     "stream_parse_skipped": int(_wc.get("_stream_parse_skipped", 0) or 0),
                     "stream_parse_skipped_reason": str(_wc.get("_stream_parse_skipped_reason", "") or ""),
                 }
@@ -4667,10 +4675,14 @@ async def chat_with_fallback_meta(
     scene: str = "",
     reasoning_effort: str = "",
 ) -> dict:
-    """元信息入口：返回 text/provider_used/fallback_reason/stream_parse_skipped*。
+    """元信息入口：返回 text/provider_used/fallback_reason/truncated/stream_parse_skipped*。
 
     ✅ R176 B2（2026-11-04）：需要观测降级链与流式解析跳过时使用；
     不需要时继续用 chat_with_fallback（同一编排实现，零分叉）。
+    ✅ R205（2026-11-09 · L-2）：新增 ``truncated`` 字段 —— 正文因
+    ``finish_reason=length/max_tokens`` 被 max_tokens 截断时为 ``True``
+    （截断重试仍失败或重试不可用），供上层落库时携带「被截断」标识，
+    避免半截正文被当作成功正文入库。
     """
     return await _chat_with_fallback_result(
         messages,

@@ -1,0 +1,42 @@
+============================= test session starts =============================
+platform win32 -- Python 3.14.4, pytest-9.1.0, pluggy-1.6.0
+rootdir: J:\编程\专项方案工具箱\backend
+configfile: pytest.ini
+plugins: anyio-4.13.0, asyncio-1.4.0, cov-7.1.0
+asyncio: mode=Mode.AUTO, debug=False, asyncio_default_fixture_loop_scope=function, asyncio_default_test_loop_scope=function
+collected 567 items
+
+tests\test_file_parser.py .............................................. [  8%]
+..................                                                       [ 11%]
+tests\test_file_parser_hardening.py ..............................       [ 16%]
+tests\test_file_parser_tables.py ...................                     [ 19%]
+tests\test_upload_parse_module.py ...................                    [ 23%]
+tests\test_upload_parse_r171_20261103.py .................               [ 26%]
+tests\test_upload_outline_interaction.py ..............................  [ 31%]
+tests\test_upload_outline_reorganize.py ......                           [ 32%]
+tests\test_upload_outline_r13_guards_20261008.py ....................... [ 36%]
+.......                                                                  [ 37%]
+tests\test_upload_format_contract.py .......                             [ 39%]
+tests\test_import_parse_r13_closeout_20261005.py ....................... [ 43%]
+.....                                                                    [ 44%]
+tests\test_import_parse_r175_20261103.py ...................             [ 47%]
+tests\test_import_parse_r180_20261107.py .........................       [ 51%]
+tests\test_import_parse_legacy_closeout_r176_20261103.py .........       [ 53%]
+tests\test_doc_pipeline.py ................................              [ 59%]
+tests\test_parse_extract_r179_20261105.py ..................             [ 62%]
+tests\test_r181_legacy_closeout_20261108.py ........                     [ 63%]
+tests\test_parse_truncation_chain.py ...........................         [ 68%]
+tests\test_file_import_pipeline.py ....................                  [ 71%]
+tests\test_import_module_boundaries_20261008.py ...................      [ 75%]
+tests\test_import_module_crosscut_20261008.py .......................... [ 79%]
+                                                                         [ 79%]
+tests\test_import_module_fixes_20260925.py ............................. [ 85%]
+......................                                                   [ 88%]
+tests\test_import_module_hardening_20260923.py .............             [ 91%]
+tests\test_import_module_linkage_fixes_20261003.py ............s..       [ 93%]
+tests\test_parse_instrumentation.py ........                             [ 95%]
+tests\test_parse_truncated_persist.py ..                                 [ 95%]
+tests\test_parse_truncation_fix_20260930.py .........................    [100%]
+
+================= 566 passed, 1 skipped in 302.03s (0:05:02) ==================
+EXIT=0

@@ -82,6 +82,13 @@ CHECKPOINT_KINDS: dict[str, tuple[str, tuple[str, ...]]] = {
             #    副本同步，parity 锁拦分叉）。
             "order_check",
             "fact_injection_summary",
+            # ✅ R205（跨模块数据链）：唯一拼装点 build_*_payload 实际下发的
+            #    processed / charts / fact_mapping 三键此前未登记，task_status
+            #    断线重挂按本白名单过滤 → 配图统计恒 0、已处理章数与章节事实
+            #    映射表整条丢失（R199 只补了在线载荷与前端读法，白名单漏网）。
+            "processed",
+            "charts",
+            "fact_mapping",
         ),
     ),
     # ✅ R89（2026-10-17）：facts 归入单一事实源（此前只存在于 routers 侧手写副本，
@@ -121,6 +128,10 @@ CHECKPOINT_FIELD_TYPES: dict[str, dict[str, str]] = {
         # ✅ R194（FIX-7）：R105 留痕键补类型（dict）。
         "order_check": "dict",
         "fact_injection_summary": "dict",
+        # ✅ R205：与白名单同步补类型，供生成的 TS 契约与消费方读法一致。
+        "processed": "int",
+        "charts": "int",
+        "fact_mapping": "list[dict]",
     },
     # ✅ R89：与页面内联副本逐项对齐（前端 applyFactsCompletedEvent 只按数组消费
     #    cross_conflicts，具体形态由 facts_extractor 决定，故用 list[dict] → unknown[]）。

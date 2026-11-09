@@ -7494,11 +7494,24 @@ async def generate_facts(scheme_id: str, request: Request, db=Depends(get_db)):
             yield _sse({"event": _terminal_event, "task_id": task_id, "message": done_msg, **frontend_data})
         except asyncio.CancelledError:
             await finish_task(task_id, "stopped", "用户已停止")
-            yield _sse({"event": "stopped", "task_id": task_id})
+            # ✅ R205：与目录/正文链 stopped 同构，补 message（前端统一层与
+            #    事实链本地分支都读 message，缺键时只能显示兜底文案）。
+            yield _sse({"event": "stopped", "task_id": task_id, "message": "用户已停止"})
         except Exception as e:
             logger.exception("全局事实提取失败（scheme_id=%s · task=%s）", scheme_id, task_id)
             await finish_task(task_id, "failed", str(e))
-            yield _sse({"event": "error", "task_id": task_id, "message": str(e)})
+            # ✅ R205：错误终态补最小统计键（与正文 build_error_payload 同构，
+            #    值取 0 表示「未产生可统计成果」，旧客户端忽略加法键）。
+            yield _sse(
+                {
+                    "event": "error",
+                    "task_id": task_id,
+                    "message": str(e),
+                    "progress": 0,
+                    "total": 0,
+                    "failed_count": 0,
+                }
+            )
         finally:
             # 客户端断开/生成器关闭时，避免后台提取任务泄漏
             if pipe_task is not None and not pipe_task.done():

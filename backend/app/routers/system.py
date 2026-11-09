@@ -594,6 +594,7 @@ async def load_governance_settings() -> dict[str, int | bool]:
     return applied
 
 
+@router.get("/governance")
 async def governance_get():
     """读取提示词治理开关当前生效值（持久化优先，重启不丢）。
 

@@ -1,0 +1,642 @@
+
+[1m[46m RUN [49m[22m [36mv3.2.4 [39m[90mj:/编程/专项方案工具箱/frontend[39m
+
+ [32m✓[39m src/tests/reviewApiContract.test.ts [2m([22m[2m7 tests[22m[2m)[22m[32m 13[2mms[22m[39m
+ [32m✓[39m src/tests/useReviewAuditR198.test.tsx [2m([22m[2m5 tests[22m[2m)[22m[32m 48[2mms[22m[39m
+ [32m✓[39m src/tests/reviewAuditR197.test.ts [2m([22m[2m16 tests[22m[2m)[22m[32m 9[2mms[22m[39m
+ [32m✓[39m src/tests/ReviewTab.test.tsx [2m([22m[2m6 tests[22m[2m)[22m[33m 1632[2mms[22m[39m
+   [33m[2m✓[22m[39m ReviewTab · 正文质量自检三态[2m > [22mchecked=0 且零问题 → 显示「无法判定」，不得声称正文可直接交付 [33m 895[2mms[22m[39m
+ [32m✓[39m src/tests/ReadinessDashboard.test.tsx [2m([22m[2m39 tests[22m[2m)[22m[33m 11847[2mms[22m[39m
+   [33m[2m✓[22m[39m ReadinessDashboard · 交付就绪度总检[2m > [22m空态：runs 无历史 → 显示「尚未总检」且导出按钮禁用 [33m 640[2mms[22m[39m
+   [33m[2m✓[22m[39m ReadinessDashboard · 交付就绪度总检[2m > [22m一键总检 → 渲染综合评分 / 等级 / 放行结论 / 来源标签 [33m 558[2mms[22m[39m
+   [33m[2m✓[22m[39m ReadinessDashboard · 交付就绪度总检[2m > [22m严重度筛选：默认显示「阻断」置顶（sorter 语义正确）；切「提示」/「阻断+严重」过滤 [33m 379[2mms[22m[39m
+   [33m[2m✓[22m[39m ReadinessDashboard · 交付就绪度总检[2m > [22m问题行展开 → 显示证据 / 整改建议 / 行业依据 [33m 353[2mms[22m[39m
+   [33m[2m✓[22m[39m ReadinessDashboard · 交付就绪度总检[2m > [22m导出整改清单 → 调用 report + 触发下载 [33m 400[2mms[22m[39m
+   [33m[2m✓[22m[39m ReadinessDashboard · 自动修复入口接线[2m > [22m可修项行内「自动修复」→ 打开 AutoFixModal，定位按钮按该行 rule_id 调 plan [33m 419[2mms[22m[39m
+   [33m[2m✓[22m[39m ReadinessDashboard · 自动修复入口接线[2m > [22m存在 block+fixable 项 → 批量按钮带计数，点击后 BatchFixModal 发起 collect [33m 340[2mms[22m[39m
+   [33m[2m✓[22m[39m ReadinessDashboard · 自动修复入口接线[2m > [22mBatchFixModal onFixed → 父组件强制 runOverview(true) 重算 [33m 611[2mms[22m[39m
+   [33m[2m✓[22m[39m ReadinessDashboard · 过期恢复与告警链路[2m > [22m过期告警里的「重新总检」以 force=true 重算（不得复用旧缓存） [33m 460[2mms[22m[39m
+   [33m[2m✓[22m[39m ReadinessDashboard · 过期恢复与告警链路[2m > [22m单条自动修复 onFixed → 同样 force=true 重算（与批量同口径） [33m 671[2mms[22m[39m
+   [33m[2m✓[22m[39m ReadinessDashboard · 过期恢复与告警链路[2m > [22m严重度筛选：全部 / 一般 两档均可用（此前只锁了提示与阻断+严重） [33m 438[2mms[22m[39m
+   [33m[2m✓[22m[39m ReadinessDashboard · 过期恢复与告警链路[2m > [22m总检失败 → 报错，且保留上一轮结论（不得清空面板） [33m 461[2mms[22m[39m
+   [33m[2m✓[22m[39m ReadinessDashboard · R55 陈旧 AI 结论告警[2m > [22mstale_ai_sources 非空 → 告警列出未采用的 AI 来源（中文名映射） [33m 306[2mms[22m[39m
+   [33m[2m✓[22m[39m ReadinessDashboard · R55 陈旧 AI 结论告警[2m > [22m无 stale_ai_sources（正常/旧后端）→ 不渲染该告警 [33m 308[2mms[22m[39m
+
+[2m Test Files [22m [1m[32m5 passed[39m[22m[90m (5)[39m
+[2m      Tests [22m [1m[32m73 passed[39m[22m[90m (73)[39m
+[2m   Start at [22m 12:34:37
+[2m   Duration [22m 20.95s[2m (transform 3.15s, setup 1.16s, collect 17.67s, tests 13.55s, environment 7.28s, prepare 840ms)[22m
+
+
+--- STDERR ---
+[90mstderr[2m | src/tests/ReadinessDashboard.test.tsx[2m > [22m[2mReadinessDashboard · 交付就绪度总检[2m > [22m[2m空态：runs 无历史 → 显示「尚未总检」且导出按钮禁用
+[22m[39mWarning: [antd: Modal] `destroyOnClose` is deprecated. Please use `destroyOnHidden` instead.
+Warning: [antd: Modal] `destroyOnClose` is deprecated. Please use `destroyOnHidden` instead.
+
+[90mstderr[2m | src/tests/ReadinessDashboard.test.tsx[2m > [22m[2mReadinessDashboard · 交付就绪度总检[2m > [22m[2m空态：runs 无历史 → 显示「尚未总检」且导出按钮禁用
+[22m[39mWarning: [antd: Modal] `destroyOnClose` is deprecated. Please use `destroyOnHidden` instead.
+
+[90mstderr[2m | src/tests/ReadinessDashboard.test.tsx[2m > [22m[2mReadinessDashboard · 交付就绪度总检[2m > [22m[2m一键总检 → 渲染综合评分 / 等级 / 放行结论 / 来源标签
+[22m[39mWarning: [antd: Modal] `destroyOnClose` is deprecated. Please use `destroyOnHidden` instead.
+Warning: [antd: Modal] `destroyOnClose` is deprecated. Please use `destroyOnHidden` instead.
+
+[90mstderr[2m | src/tests/ReadinessDashboard.test.tsx[2m > [22m[2mReadinessDashboard · 交付就绪度总检[2m > [22m[2m一键总检 → 渲染综合评分 / 等级 / 放行结论 / 来源标签
+[22m[39mWarning: [antd: Modal] `destroyOnClose` is deprecated. Please use `destroyOnHidden` instead.
+
+[90mstderr[2m | src/tests/ReadinessDashboard.test.tsx[2m > [22m[2mReadinessDashboard · 交付就绪度总检[2m > [22m[2m一键总检 → 渲染综合评分 / 等级 / 放行结论 / 来源标签
+[22m[39mWarning: [antd: Modal] `destroyOnClose` is deprecated. Please use `destroyOnHidden` instead.
+
+[90mstderr[2m | src/tests/ReadinessDashboard.test.tsx[2m > [22m[2mReadinessDashboard · 交付就绪度总检[2m > [22m[2m一键总检 → 渲染综合评分 / 等级 / 放行结论 / 来源标签
+[22m[39mWarning: [antd: Modal] `destroyOnClose` is deprecated. Please use `destroyOnHidden` instead.
+
+[90mstderr[2m | src/tests/ReadinessDashboard.test.tsx[2m > [22m[2mReadinessDashboard · 交付就绪度总检[2m > [22m[2m一键总检后阻断项 Alert + 六维得分卡 + 客观统计齐全
+[22m[39mWarning: [antd: Modal] `destroyOnClose` is deprecated. Please use `destroyOnHidden` instead.
+Warning: [antd: Modal] `destroyOnClose` is deprecated. Please use `destroyOnHidden` instead.
+
+[90mstderr[2m | src/tests/ReadinessDashboard.test.tsx[2m > [22m[2mReadinessDashboard · 交付就绪度总检[2m > [22m[2m一键总检后阻断项 Alert + 六维得分卡 + 客观统计齐全
+[22m[39mWarning: [antd: Modal] `destroyOnClose` is deprecated. Please use `destroyOnHidden` instead.
+
+[90mstderr[2m | src/tests/ReadinessDashboard.test.tsx[2m > [22m[2mReadinessDashboard · 交付就绪度总检[2m > [22m[2m一键总检后阻断项 Alert + 六维得分卡 + 客观统计齐全
+[22m[39mWarning: [antd: Modal] `destroyOnClose` is deprecated. Please use `destroyOnHidden` instead.
+
+[90mstderr[2m | src/tests/ReadinessDashboard.test.tsx[2m > [22m[2mReadinessDashboard · 交付就绪度总检[2m > [22m[2m一键总检后阻断项 Alert + 六维得分卡 + 客观统计齐全
+[22m[39mWarning: [antd: Modal] `destroyOnClose` is deprecated. Please use `destroyOnHidden` instead.
+
+[90mstderr[2m | src/tests/ReadinessDashboard.test.tsx[2m > [22m[2mReadinessDashboard · 交付就绪度总检[2m > [22m[2m严重度筛选：默认显示「阻断」置顶（sorter 语义正确）；切「提示」/「阻断+严重」过滤
+[22m[39mWarning: [antd: Modal] `destroyOnClose` is deprecated. Please use `destroyOnHidden` instead.
+Warning: [antd: Modal] `destroyOnClose` is deprecated. Please use `destroyOnHidden` instead.
+
+[90mstderr[2m | src/tests/ReadinessDashboard.test.tsx[2m > [22m[2mReadinessDashboard · 交付就绪度总检[2m > [22m[2m严重度筛选：默认显示「阻断」置顶（sorter 语义正确）；切「提示」/「阻断+严重」过滤
+[22m[39mWarning: [antd: Modal] `destroyOnClose` is deprecated. Please use `destroyOnHidden` instead.
+
+[90mstderr[2m | src/tests/ReadinessDashboard.test.tsx[2m > [22m[2mReadinessDashboard · 交付就绪度总检[2m > [22m[2m严重度筛选：默认显示「阻断」置顶（sorter 语义正确）；切「提示」/「阻断+严重」过滤
+[22m[39mWarning: [antd: Modal] `destroyOnClose` is deprecated. Please use `destroyOnHidden` instead.
+
+[90mstderr[2m | src/tests/ReadinessDashboard.test.tsx[2m > [22m[2mReadinessDashboard · 交付就绪度总检[2m > [22m[2m严重度筛选：默认显示「阻断」置顶（sorter 语义正确）；切「提示」/「阻断+严重」过滤
+[22m[39mWarning: [antd: Modal] `destroyOnClose` is deprecated. Please use `destroyOnHidden` instead.
+
+[90mstderr[2m | src/tests/ReadinessDashboard.test.tsx[2m > [22m[2mReadinessDashboard · 交付就绪度总检[2m > [22m[2m严重度筛选：默认显示「阻断」置顶（sorter 语义正确）；切「提示」/「阻断+严重」过滤
+[22m[39mWarning: [antd: Modal] `destroyOnClose` is deprecated. Please use `destroyOnHidden` instead.
+
+[90mstderr[2m | src/tests/ReadinessDashboard.test.tsx[2m > [22m[2mReadinessDashboard · 交付就绪度总检[2m > [22m[2m严重度筛选：默认显示「阻断」置顶（sorter 语义正确）；切「提示」/「阻断+严重」过滤
+[22m[39mWarning: [antd: Modal] `destroyOnClose` is deprecated. Please use `destroyOnHidden` instead.
+
+[90mstderr[2m | src/tests/ReadinessDashboard.test.tsx[2m > [22m[2mReadinessDashboard · 交付就绪度总检[2m > [22m[2m问题行展开 → 显示证据 / 整改建议 / 行业依据
+[22m[39mWarning: [antd: Modal] `destroyOnClose` is deprecated. Please use `destroyOnHidden` instead.
+Warning: [antd: Modal] `destroyOnClose` is deprecated. Please use `destroyOnHidden` instead.
+
+[90mstderr[2m | src/tests/ReadinessDashboard.test.tsx[2m > [22m[2mReadinessDashboard · 交付就绪度总检[2m > [22m[2m问题行展开 → 显示证据 / 整改建议 / 行业依据
+[22m[39mWarning: [antd: Modal] `destroyOnClose` is deprecated. Please use `destroyOnHidden` instead.
+
+[90mstderr[2m | src/tests/ReadinessDashboard.test.tsx[2m > [22m[2mReadinessDashboard · 交付就绪度总检[2m > [22m[2m问题行展开 → 显示证据 / 整改建议 / 行业依据
+[22m[39mWarning: [antd: Modal] `destroyOnClose` is deprecated. Please use `destroyOnHidden` instead.
+
+[90mstderr[2m | src/tests/ReadinessDashboard.test.tsx[2m > [22m[2mReadinessDashboard · 交付就绪度总检[2m > [22m[2m问题行展开 → 显示证据 / 整改建议 / 行业依据
+[22m[39mWarning: [antd: Modal] `destroyOnClose` is deprecated. Please use `destroyOnHidden` instead.
+
+[90mstderr[2m | src/tests/ReadinessDashboard.test.tsx[2m > [22m[2mReadinessDashboard · 交付就绪度总检[2m > [22m[2m规则说明 → 打开抽屉并展示维度 + 权重
+[22m[39mWarning: [antd: Modal] `destroyOnClose` is deprecated. Please use `destroyOnHidden` instead.
+Warning: [antd: Modal] `destroyOnClose` is deprecated. Please use `destroyOnHidden` instead.
+
+[90mstderr[2m | src/tests/ReadinessDashboard.test.tsx[2m > [22m[2mReadinessDashboard · 交付就绪度总检[2m > [22m[2m规则说明 → 打开抽屉并展示维度 + 权重
+[22m[39mWarning: [antd: Modal] `destroyOnClose` is deprecated. Please use `destroyOnHidden` instead.
+
+[90mstderr[2m | src/tests/ReadinessDashboard.test.tsx[2m > [22m[2mReadinessDashboard · 交付就绪度总检[2m > [22m[2m规则说明 → 打开抽屉并展示维度 + 权重
+[22m[39mWarning: [antd: Modal] `destroyOnClose` is deprecated. Please use `destroyOnHidden` instead.
+Not implemented: Window's getComputedStyle() method: with pseudo-elements
+
+[90mstderr[2m | src/tests/ReadinessDashboard.test.tsx[2m > [22m[2mReadinessDashboard · 交付就绪度总检[2m > [22m[2m规则说明 → 打开抽屉并展示维度 + 权重
+[22m[39mWarning: [antd: Modal] `destroyOnClose` is deprecated. Please use `destroyOnHidden` instead.
+Not implemented: Window's getComputedStyle() method: with pseudo-elements
+
+[90mstderr[2m | src/tests/ReadinessDashboard.test.tsx[2m > [22m[2mReadinessDashboard · 交付就绪度总检[2m > [22m[2m导出整改清单 → 调用 report + 触发下载
+[22m[39mWarning: [antd: Modal] `destroyOnClose` is deprecated. Please use `destroyOnHidden` instead.
+Warning: [antd: Modal] `destroyOnClose` is deprecated. Please use `destroyOnHidden` instead.
+
+[90mstderr[2m | src/tests/ReadinessDashboard.test.tsx[2m > [22m[2mReadinessDashboard · 交付就绪度总检[2m > [22m[2m导出整改清单 → 调用 report + 触发下载
+[22m[39mWarning: [antd: Modal] `destroyOnClose` is deprecated. Please use `destroyOnHidden` instead.
+
+[90mstderr[2m | src/tests/ReadinessDashboard.test.tsx[2m > [22m[2mReadinessDashboard · 交付就绪度总检[2m > [22m[2m导出整改清单 → 调用 report + 触发下载
+[22m[39mWarning: [antd: Modal] `destroyOnClose` is deprecated. Please use `destroyOnHidden` instead.
+
+[90mstderr[2m | src/tests/ReadinessDashboard.test.tsx[2m > [22m[2mReadinessDashboard · 交付就绪度总检[2m > [22m[2m导出整改清单 → 调用 report + 触发下载
+[22m[39mWarning: [antd: Modal] `destroyOnClose` is deprecated. Please use `destroyOnHidden` instead.
+
+[90mstderr[2m | src/tests/ReadinessDashboard.test.tsx[2m > [22m[2mReadinessDashboard · 交付就绪度总检[2m > [22m[2m导出整改清单 → 调用 report + 触发下载
+[22m[39mWarning: [antd: Modal] `destroyOnClose` is deprecated. Please use `destroyOnHidden` instead.
+
+[90mstderr[2m | src/tests/ReadinessDashboard.test.tsx[2m > [22m[2mReadinessDashboard · 交付就绪度总检[2m > [22m[2m导出整改清单 → 调用 report + 触发下载
+[22m[39mWarning: [antd: Modal] `destroyOnClose` is deprecated. Please use `destroyOnHidden` instead.
+
+[90mstderr[2m | src/tests/ReadinessDashboard.test.tsx[2m > [22m[2mReadinessDashboard · 交付就绪度总检[2m > [22m[2m历史趋势：runs ≥ 2 → 显示「本次」与历史分数标签
+[22m[39mWarning: [antd: Modal] `destroyOnClose` is deprecated. Please use `destroyOnHidden` instead.
+Warning: [antd: Modal] `destroyOnClose` is deprecated. Please use `destroyOnHidden` instead.
+
+[90mstderr[2m | src/tests/ReadinessDashboard.test.tsx[2m > [22m[2mReadinessDashboard · 交付就绪度总检[2m > [22m[2m历史趋势：runs ≥ 2 → 显示「本次」与历史分数标签
+[22m[39mWarning: [antd: Modal] `destroyOnClose` is deprecated. Please use `destroyOnHidden` instead.
+
+[90mstderr[2m | src/tests/ReadinessDashboard.test.tsx[2m > [22m[2mReadinessDashboard · 交付就绪度总检[2m > [22m[2m历史趋势：runs ≥ 2 → 显示「本次」与历史分数标签
+[22m[39mWarning: [antd: Modal] `destroyOnClose` is deprecated. Please use `destroyOnHidden` instead.
+
+[90mstderr[2m | src/tests/ReadinessDashboard.test.tsx[2m > [22m[2mReadinessDashboard · 交付就绪度总检[2m > [22m[2m历史趋势：runs ≥ 2 → 显示「本次」与历史分数标签
+[22m[39mWarning: [antd: Modal] `destroyOnClose` is deprecated. Please use `destroyOnHidden` instead.
+
+[90mstderr[2m | src/tests/ReadinessDashboard.test.tsx[2m > [22m[2mReadinessDashboard · 交付就绪度总检[2m > [22m[2mSTALE 提示：runs 出现比 overview 更新的记录 → warning + 重新总检按钮
+[22m[39mWarning: [antd: Modal] `destroyOnClose` is deprecated. Please use `destroyOnHidden` instead.
+Warning: [antd: Modal] `destroyOnClose` is deprecated. Please use `destroyOnHidden` instead.
+
+[90mstderr[2m | src/tests/ReadinessDashboard.test.tsx[2m > [22m[2mReadinessDashboard · 交付就绪度总检[2m > [22m[2mSTALE 提示：runs 出现比 overview 更新的记录 → warning + 重新总检按钮
+[22m[39mWarning: [antd: Modal] `destroyOnClose` is deprecated. Please use `destroyOnHidden` instead.
+
+[90mstderr[2m | src/tests/ReadinessDashboard.test.tsx[2m > [22m[2mReadinessDashboard · 交付就绪度总检[2m > [22m[2mSTALE 提示：runs 出现比 overview 更新的记录 → warning + 重新总检按钮
+[22m[39mWarning: [antd: Modal] `destroyOnClose` is deprecated. Please use `destroyOnHidden` instead.
+
+[90mstderr[2m | src/tests/ReadinessDashboard.test.tsx[2m > [22m[2mReadinessDashboard · 交付就绪度总检[2m > [22m[2mSTALE 提示：runs 出现比 overview 更新的记录 → warning + 重新总检按钮
+[22m[39mWarning: [antd: Modal] `destroyOnClose` is deprecated. Please use `destroyOnHidden` instead.
+
+[90mstderr[2m | src/tests/ReadinessDashboard.test.tsx[2m > [22m[2mReadinessDashboard · 交付就绪度总检[2m > [22m[2m总检接口失败 → 不进入结果态（catch 兜底，页面仍显示空态）
+[22m[39mWarning: [antd: Modal] `destroyOnClose` is deprecated. Please use `destroyOnHidden` instead.
+Warning: [antd: Modal] `destroyOnClose` is deprecated. Please use `destroyOnHidden` instead.
+
+[90mstderr[2m | src/tests/ReadinessDashboard.test.tsx[2m > [22m[2mReadinessDashboard · 交付就绪度总检[2m > [22m[2m总检接口失败 → 不进入结果态（catch 兜底，页面仍显示空态）
+[22m[39mWarning: [antd: Modal] `destroyOnClose` is deprecated. Please use `destroyOnHidden` instead.
+
+[90mstderr[2m | src/tests/ReadinessDashboard.test.tsx[2m > [22m[2mReadinessDashboard · 交付就绪度总检[2m > [22m[2m总检接口失败 → 不进入结果态（catch 兜底，页面仍显示空态）
+[22m[39mWarning: [antd: Modal] `destroyOnClose` is deprecated. Please use `destroyOnHidden` instead.
+
+[90mstderr[2m | src/tests/ReadinessDashboard.test.tsx[2m > [22m[2mReadinessDashboard · 交付就绪度总检[2m > [22m[2m总检接口失败 → 不进入结果态（catch 兜底，页面仍显示空态）
+[22m[39mWarning: [antd: Modal] `destroyOnClose` is deprecated. Please use `destroyOnHidden` instead.
+
+[90mstderr[2m | src/tests/ReadinessDashboard.test.tsx[2m > [22m[2mReadinessDashboard · 交付就绪度总检[2m > [22m[2m切换 schemeId → 重新拉取 runs（schemeId 依赖）
+[22m[39mWarning: [antd: Modal] `destroyOnClose` is deprecated. Please use `destroyOnHidden` instead.
+Warning: [antd: Modal] `destroyOnClose` is deprecated. Please use `destroyOnHidden` instead.
+
+[90mstderr[2m | src/tests/ReadinessDashboard.test.tsx[2m > [22m[2mReadinessDashboard · 交付就绪度总检[2m > [22m[2m切换 schemeId → 重新拉取 runs（schemeId 依赖）
+[22m[39mWarning: [antd: Modal] `destroyOnClose` is deprecated. Please use `destroyOnHidden` instead.
+
+[90mstderr[2m | src/tests/ReadinessDashboard.test.tsx[2m > [22m[2mReadinessDashboard · 交付就绪度总检[2m > [22m[2m切换 schemeId → 重新拉取 runs（schemeId 依赖）
+[22m[39mWarning: [antd: Modal] `destroyOnClose` is deprecated. Please use `destroyOnHidden` instead.
+Warning: [antd: Modal] `destroyOnClose` is deprecated. Please use `destroyOnHidden` instead.
+
+[90mstderr[2m | src/tests/ReadinessDashboard.test.tsx[2m > [22m[2mReadinessDashboard · 交付就绪度总检[2m > [22m[2m切换 schemeId → 重新拉取 runs（schemeId 依赖）
+[22m[39mWarning: [antd: Modal] `destroyOnClose` is deprecated. Please use `destroyOnHidden` instead.
+
+[90mstderr[2m | src/tests/ReadinessDashboard.test.tsx[2m > [22m[2mReadinessDashboard · 交付就绪度总检[2m > [22m[2m刷新键递增 → 重新拉取 runs
+[22m[39mWarning: [antd: Modal] `destroyOnClose` is deprecated. Please use `destroyOnHidden` instead.
+Warning: [antd: Modal] `destroyOnClose` is deprecated. Please use `destroyOnHidden` instead.
+
+[90mstderr[2m | src/tests/ReadinessDashboard.test.tsx[2m > [22m[2mReadinessDashboard · 交付就绪度总检[2m > [22m[2m刷新键递增 → 重新拉取 runs
+[22m[39mWarning: [antd: Modal] `destroyOnClose` is deprecated. Please use `destroyOnHidden` instead.
+
+[90mstderr[2m | src/tests/ReadinessDashboard.test.tsx[2m > [22m[2mReadinessDashboard · 交付就绪度总检[2m > [22m[2m刷新键递增 → 重新拉取 runs
+[22m[39mWarning: [antd: Modal] `destroyOnClose` is deprecated. Please use `destroyOnHidden` instead.
+
+[90mstderr[2m | src/tests/ReadinessDashboard.test.tsx[2m > [22m[2mReadinessDashboard · 交付就绪度总检[2m > [22m[2m后端明确标记最新运行 stale=true → 主结论立即进入过期态
+[22m[39mWarning: [antd: Modal] `destroyOnClose` is deprecated. Please use `destroyOnHidden` instead.
+Warning: [antd: Modal] `destroyOnClose` is deprecated. Please use `destroyOnHidden` instead.
+
+[90mstderr[2m | src/tests/ReadinessDashboard.test.tsx[2m > [22m[2mReadinessDashboard · 交付就绪度总检[2m > [22m[2m后端明确标记最新运行 stale=true → 主结论立即进入过期态
+[22m[39mWarning: [antd: Modal] `destroyOnClose` is deprecated. Please use `destroyOnHidden` instead.
+
+[90mstderr[2m | src/tests/ReadinessDashboard.test.tsx[2m > [22m[2mReadinessDashboard · 交付就绪度总检[2m > [22m[2m后端明确标记最新运行 stale=true → 主结论立即进入过期态
+[22m[39mWarning: [antd: Modal] `destroyOnClose` is deprecated. Please use `destroyOnHidden` instead.
+
+[90mstderr[2m | src/tests/ReadinessDashboard.test.tsx[2m > [22m[2mReadinessDashboard · 交付就绪度总检[2m > [22m[2m后端明确标记最新运行 stale=true → 主结论立即进入过期态
+[22m[39mWarning: [antd: Modal] `destroyOnClose` is deprecated. Please use `destroyOnHidden` instead.
+
+[90mstderr[2m | src/tests/ReadinessDashboard.test.tsx[2m > [22m[2mReadinessDashboard · 交付就绪度总检[2m > [22m[2mR179：问题行「章节」列可定位跳转（不再是只能看的文字）
+[22m[39mWarning: [antd: Modal] `destroyOnClose` is deprecated. Please use `destroyOnHidden` instead.
+Warning: [antd: Modal] `destroyOnClose` is deprecated. Please use `destroyOnHidden` instead.
+
+[90mstderr[2m | src/tests/ReadinessDashboard.test.tsx[2m > [22m[2mReadinessDashboard · 交付就绪度总检[2m > [22m[2mR179：问题行「章节」列可定位跳转（不再是只能看的文字）
+[22m[39mWarning: [antd: Modal] `destroyOnClose` is deprecated. Please use `destroyOnHidden` instead.
+
+[90mstderr[2m | src/tests/ReadinessDashboard.test.tsx[2m > [22m[2mReadinessDashboard · 交付就绪度总检[2m > [22m[2mR179：问题行「章节」列可定位跳转（不再是只能看的文字）
+[22m[39mWarning: [antd: Modal] `destroyOnClose` is deprecated. Please use `destroyOnHidden` instead.
+
+[90mstderr[2m | src/tests/ReadinessDashboard.test.tsx[2m > [22m[2mReadinessDashboard · 交付就绪度总检[2m > [22m[2mR179：问题行「章节」列可定位跳转（不再是只能看的文字）
+[22m[39mWarning: [antd: Modal] `destroyOnClose` is deprecated. Please use `destroyOnHidden` instead.
+
+[90mstderr[2m | src/tests/ReadinessDashboard.test.tsx[2m > [22m[2mReadinessDashboard · 交付就绪度总检[2m > [22m[2mR179：无 section_id 的跨章节问题只展示文字，不提供跳转入口
+[22m[39mWarning: [antd: Modal] `destroyOnClose` is deprecated. Please use `destroyOnHidden` instead.
+Warning: [antd: Modal] `destroyOnClose` is deprecated. Please use `destroyOnHidden` instead.
+
+[90mstderr[2m | src/tests/ReadinessDashboard.test.tsx[2m > [22m[2mReadinessDashboard · 交付就绪度总检[2m > [22m[2mR179：无 section_id 的跨章节问题只展示文字，不提供跳转入口
+[22m[39mWarning: [antd: Modal] `destroyOnClose` is deprecated. Please use `destroyOnHidden` instead.
+
+[90mstderr[2m | src/tests/ReadinessDashboard.test.tsx[2m > [22m[2mReadinessDashboard · 交付就绪度总检[2m > [22m[2mR179：无 section_id 的跨章节问题只展示文字，不提供跳转入口
+[22m[39mWarning: [antd: Modal] `destroyOnClose` is deprecated. Please use `destroyOnHidden` instead.
+
+[90mstderr[2m | src/tests/ReadinessDashboard.test.tsx[2m > [22m[2mReadinessDashboard · 交付就绪度总检[2m > [22m[2mR179：无 section_id 的跨章节问题只展示文字，不提供跳转入口
+[22m[39mWarning: [antd: Modal] `destroyOnClose` is deprecated. Please use `destroyOnHidden` instead.
+
+[90mstderr[2m | src/tests/ReadinessDashboard.test.tsx[2m > [22m[2mReadinessDashboard · 交付就绪度总检[2m > [22m[2m切换 schemeId：旧方案迟到的 runs 响应不得覆盖新方案
+[22m[39mWarning: [antd: Modal] `destroyOnClose` is deprecated. Please use `destroyOnHidden` instead.
+Warning: [antd: Modal] `destroyOnClose` is deprecated. Please use `destroyOnHidden` instead.
+
+[90mstderr[2m | src/tests/ReadinessDashboard.test.tsx[2m > [22m[2mReadinessDashboard · 交付就绪度总检[2m > [22m[2m切换 schemeId：旧方案迟到的 runs 响应不得覆盖新方案
+[22m[39mWarning: [antd: Modal] `destroyOnClose` is deprecated. Please use `destroyOnHidden` instead.
+Warning: [antd: Modal] `destroyOnClose` is deprecated. Please use `destroyOnHidden` instead.
+
+[90mstderr[2m | src/tests/ReadinessDashboard.test.tsx[2m > [22m[2mReadinessDashboard · 交付就绪度总检[2m > [22m[2m切换 schemeId：旧方案迟到的 runs 响应不得覆盖新方案
+[22m[39mWarning: [antd: Modal] `destroyOnClose` is deprecated. Please use `destroyOnHidden` instead.
+
+[90mstderr[2m | src/tests/ReadinessDashboard.test.tsx[2m > [22m[2mReadinessDashboard · 交付就绪度总检[2m > [22m[2m切换 schemeId：旧方案迟到的 runs 响应不得覆盖新方案
+[22m[39mWarning: [antd: Modal] `destroyOnClose` is deprecated. Please use `destroyOnHidden` instead.
+
+[90mstderr[2m | src/tests/ReadinessDashboard.test.tsx[2m > [22m[2mReadinessDashboard · 交付就绪度总检[2m > [22m[2m切换 schemeId：旧方案迟到的 runs 响应不得覆盖新方案
+[22m[39mWarning: [antd: Modal] `destroyOnClose` is deprecated. Please use `destroyOnHidden` instead.
+
+[90mstderr[2m | src/tests/ReadinessDashboard.test.tsx[2m > [22m[2mReadinessDashboard · 交付就绪度总检[2m > [22m[2mruns 只有 1 条 → 不显示历史趋势区（边界）
+[22m[39mWarning: [antd: Modal] `destroyOnClose` is deprecated. Please use `destroyOnHidden` instead.
+Warning: [antd: Modal] `destroyOnClose` is deprecated. Please use `destroyOnHidden` instead.
+
+[90mstderr[2m | src/tests/ReadinessDashboard.test.tsx[2m > [22m[2mReadinessDashboard · 交付就绪度总检[2m > [22m[2mruns 只有 1 条 → 不显示历史趋势区（边界）
+[22m[39mWarning: [antd: Modal] `destroyOnClose` is deprecated. Please use `destroyOnHidden` instead.
+
+[90mstderr[2m | src/tests/ReadinessDashboard.test.tsx[2m > [22m[2mReadinessDashboard · 交付就绪度总检[2m > [22m[2mruns 只有 1 条 → 不显示历史趋势区（边界）
+[22m[39mWarning: [antd: Modal] `destroyOnClose` is deprecated. Please use `destroyOnHidden` instead.
+
+[90mstderr[2m | src/tests/ReadinessDashboard.test.tsx[2m > [22m[2mReadinessDashboard · 交付就绪度总检[2m > [22m[2mruns 只有 1 条 → 不显示历史趋势区（边界）
+[22m[39mWarning: [antd: Modal] `destroyOnClose` is deprecated. Please use `destroyOnHidden` instead.
+
+[90mstderr[2m | src/tests/ReadinessDashboard.test.tsx[2m > [22m[2mReadinessDashboard · 自动修复入口接线[2m > [22m[2m可修项行内「自动修复」→ 打开 AutoFixModal，定位按钮按该行 rule_id 调 plan
+[22m[39mWarning: [antd: Modal] `destroyOnClose` is deprecated. Please use `destroyOnHidden` instead.
+Warning: [antd: Modal] `destroyOnClose` is deprecated. Please use `destroyOnHidden` instead.
+
+[90mstderr[2m | src/tests/ReadinessDashboard.test.tsx[2m > [22m[2mReadinessDashboard · 自动修复入口接线[2m > [22m[2m可修项行内「自动修复」→ 打开 AutoFixModal，定位按钮按该行 rule_id 调 plan
+[22m[39mWarning: [antd: Modal] `destroyOnClose` is deprecated. Please use `destroyOnHidden` instead.
+
+[90mstderr[2m | src/tests/ReadinessDashboard.test.tsx[2m > [22m[2mReadinessDashboard · 自动修复入口接线[2m > [22m[2m可修项行内「自动修复」→ 打开 AutoFixModal，定位按钮按该行 rule_id 调 plan
+[22m[39mWarning: [antd: Modal] `destroyOnClose` is deprecated. Please use `destroyOnHidden` instead.
+
+[90mstderr[2m | src/tests/ReadinessDashboard.test.tsx[2m > [22m[2mReadinessDashboard · 自动修复入口接线[2m > [22m[2m可修项行内「自动修复」→ 打开 AutoFixModal，定位按钮按该行 rule_id 调 plan
+[22m[39mWarning: [antd: Modal] `destroyOnClose` is deprecated. Please use `destroyOnHidden` instead.
+
+[90mstderr[2m | src/tests/ReadinessDashboard.test.tsx[2m > [22m[2mReadinessDashboard · 自动修复入口接线[2m > [22m[2m可修项行内「自动修复」→ 打开 AutoFixModal，定位按钮按该行 rule_id 调 plan
+[22m[39mWarning: [antd: Modal] `destroyOnClose` is deprecated. Please use `destroyOnHidden` instead.
+Warning: [antd: Modal] `destroyOnClose` is deprecated. Please use `destroyOnHidden` instead.
+Not implemented: Window's getComputedStyle() method: with pseudo-elements
+
+[90mstderr[2m | src/tests/ReadinessDashboard.test.tsx[2m > [22m[2mReadinessDashboard · 自动修复入口接线[2m > [22m[2m可修项行内「自动修复」→ 打开 AutoFixModal，定位按钮按该行 rule_id 调 plan
+[22m[39mWarning: [antd: Modal] `destroyOnClose` is deprecated. Please use `destroyOnHidden` instead.
+
+[90mstderr[2m | src/tests/ReadinessDashboard.test.tsx[2m > [22m[2mReadinessDashboard · 自动修复入口接线[2m > [22m[2m可修项行内「自动修复」→ 打开 AutoFixModal，定位按钮按该行 rule_id 调 plan
+[22m[39mWarning: [antd: Modal] `destroyOnClose` is deprecated. Please use `destroyOnHidden` instead.
+
+[90mstderr[2m | src/tests/ReadinessDashboard.test.tsx[2m > [22m[2mReadinessDashboard · 自动修复入口接线[2m > [22m[2m不可修项显示「需人工」且无行内按钮；无 block+fixable 项时批量按钮不出现
+[22m[39mWarning: [antd: Modal] `destroyOnClose` is deprecated. Please use `destroyOnHidden` instead.
+Warning: [antd: Modal] `destroyOnClose` is deprecated. Please use `destroyOnHidden` instead.
+
+[90mstderr[2m | src/tests/ReadinessDashboard.test.tsx[2m > [22m[2mReadinessDashboard · 自动修复入口接线[2m > [22m[2m不可修项显示「需人工」且无行内按钮；无 block+fixable 项时批量按钮不出现
+[22m[39mWarning: [antd: Modal] `destroyOnClose` is deprecated. Please use `destroyOnHidden` instead.
+
+[90mstderr[2m | src/tests/ReadinessDashboard.test.tsx[2m > [22m[2mReadinessDashboard · 自动修复入口接线[2m > [22m[2m不可修项显示「需人工」且无行内按钮；无 block+fixable 项时批量按钮不出现
+[22m[39mWarning: [antd: Modal] `destroyOnClose` is deprecated. Please use `destroyOnHidden` instead.
+
+[90mstderr[2m | src/tests/ReadinessDashboard.test.tsx[2m > [22m[2mReadinessDashboard · 自动修复入口接线[2m > [22m[2m不可修项显示「需人工」且无行内按钮；无 block+fixable 项时批量按钮不出现
+[22m[39mWarning: [antd: Modal] `destroyOnClose` is deprecated. Please use `destroyOnHidden` instead.
+
+[90mstderr[2m | src/tests/ReadinessDashboard.test.tsx[2m > [22m[2mReadinessDashboard · 自动修复入口接线[2m > [22m[2m存在 block+fixable 项 → 批量按钮带计数，点击后 BatchFixModal 发起 collect
+[22m[39mWarning: [antd: Modal] `destroyOnClose` is deprecated. Please use `destroyOnHidden` instead.
+Warning: [antd: Modal] `destroyOnClose` is deprecated. Please use `destroyOnHidden` instead.
+
+[90mstderr[2m | src/tests/ReadinessDashboard.test.tsx[2m > [22m[2mReadinessDashboard · 自动修复入口接线[2m > [22m[2m存在 block+fixable 项 → 批量按钮带计数，点击后 BatchFixModal 发起 collect
+[22m[39mWarning: [antd: Modal] `destroyOnClose` is deprecated. Please use `destroyOnHidden` instead.
+
+[90mstderr[2m | src/tests/ReadinessDashboard.test.tsx[2m > [22m[2mReadinessDashboard · 自动修复入口接线[2m > [22m[2m存在 block+fixable 项 → 批量按钮带计数，点击后 BatchFixModal 发起 collect
+[22m[39mWarning: [antd: Modal] `destroyOnClose` is deprecated. Please use `destroyOnHidden` instead.
+
+[90mstderr[2m | src/tests/ReadinessDashboard.test.tsx[2m > [22m[2mReadinessDashboard · 自动修复入口接线[2m > [22m[2m存在 block+fixable 项 → 批量按钮带计数，点击后 BatchFixModal 发起 collect
+[22m[39mWarning: [antd: Modal] `destroyOnClose` is deprecated. Please use `destroyOnHidden` instead.
+
+[90mstderr[2m | src/tests/ReadinessDashboard.test.tsx[2m > [22m[2mReadinessDashboard · 自动修复入口接线[2m > [22m[2m存在 block+fixable 项 → 批量按钮带计数，点击后 BatchFixModal 发起 collect
+[22m[39mWarning: [antd: Modal] `destroyOnClose` is deprecated. Please use `destroyOnHidden` instead.
+Warning: [antd: Modal] `destroyOnClose` is deprecated. Please use `destroyOnHidden` instead.
+Not implemented: Window's getComputedStyle() method: with pseudo-elements
+
+[90mstderr[2m | src/tests/ReadinessDashboard.test.tsx[2m > [22m[2mReadinessDashboard · 自动修复入口接线[2m > [22m[2m存在 block+fixable 项 → 批量按钮带计数，点击后 BatchFixModal 发起 collect
+[22m[39mWarning: [antd: Modal] `destroyOnClose` is deprecated. Please use `destroyOnHidden` instead.
+
+[90mstderr[2m | src/tests/ReadinessDashboard.test.tsx[2m > [22m[2mReadinessDashboard · 自动修复入口接线[2m > [22m[2mBatchFixModal onFixed → 父组件强制 runOverview(true) 重算
+[22m[39mWarning: [antd: Modal] `destroyOnClose` is deprecated. Please use `destroyOnHidden` instead.
+Warning: [antd: Modal] `destroyOnClose` is deprecated. Please use `destroyOnHidden` instead.
+
+[90mstderr[2m | src/tests/ReadinessDashboard.test.tsx[2m > [22m[2mReadinessDashboard · 自动修复入口接线[2m > [22m[2mBatchFixModal onFixed → 父组件强制 runOverview(true) 重算
+[22m[39mWarning: [antd: Modal] `destroyOnClose` is deprecated. Please use `destroyOnHidden` instead.
+
+[90mstderr[2m | src/tests/ReadinessDashboard.test.tsx[2m > [22m[2mReadinessDashboard · 自动修复入口接线[2m > [22m[2mBatchFixModal onFixed → 父组件强制 runOverview(true) 重算
+[22m[39mWarning: [antd: Modal] `destroyOnClose` is deprecated. Please use `destroyOnHidden` instead.
+
+[90mstderr[2m | src/tests/ReadinessDashboard.test.tsx[2m > [22m[2mReadinessDashboard · 自动修复入口接线[2m > [22m[2mBatchFixModal onFixed → 父组件强制 runOverview(true) 重算
+[22m[39mWarning: [antd: Modal] `destroyOnClose` is deprecated. Please use `destroyOnHidden` instead.
+
+[90mstderr[2m | src/tests/ReadinessDashboard.test.tsx[2m > [22m[2mReadinessDashboard · 自动修复入口接线[2m > [22m[2mBatchFixModal onFixed → 父组件强制 runOverview(true) 重算
+[22m[39mWarning: [antd: Modal] `destroyOnClose` is deprecated. Please use `destroyOnHidden` instead.
+Warning: [antd: Modal] `destroyOnClose` is deprecated. Please use `destroyOnHidden` instead.
+Not implemented: Window's getComputedStyle() method: with pseudo-elements
+
+[90mstderr[2m | src/tests/ReadinessDashboard.test.tsx[2m > [22m[2mReadinessDashboard · 自动修复入口接线[2m > [22m[2mBatchFixModal onFixed → 父组件强制 runOverview(true) 重算
+[22m[39mWarning: [antd: Modal] `destroyOnClose` is deprecated. Please use `destroyOnHidden` instead.
+
+[90mstderr[2m | src/tests/ReadinessDashboard.test.tsx[2m > [22m[2mReadinessDashboard · 自动修复入口接线[2m > [22m[2mBatchFixModal onFixed → 父组件强制 runOverview(true) 重算
+[22m[39mWarning: [antd: Modal] `destroyOnClose` is deprecated. Please use `destroyOnHidden` instead.
+
+[90mstderr[2m | src/tests/ReadinessDashboard.test.tsx[2m > [22m[2mReadinessDashboard · 自动修复入口接线[2m > [22m[2mBatchFixModal onFixed → 父组件强制 runOverview(true) 重算
+[22m[39mWarning: [antd: Modal] `destroyOnClose` is deprecated. Please use `destroyOnHidden` instead.
+
+[90mstderr[2m | src/tests/ReadinessDashboard.test.tsx[2m > [22m[2mReadinessDashboard · 自动修复入口接线[2m > [22m[2mBatchFixModal onFixed → 父组件强制 runOverview(true) 重算
+[22m[39mWarning: [antd: Modal] `destroyOnClose` is deprecated. Please use `destroyOnHidden` instead.
+
+[90mstderr[2m | src/tests/ReadinessDashboard.test.tsx[2m > [22m[2mReadinessDashboard · 自动修复入口接线[2m > [22m[2mBatchFixModal onFixed → 父组件强制 runOverview(true) 重算
+[22m[39mWarning: [antd: Modal] `destroyOnClose` is deprecated. Please use `destroyOnHidden` instead.
+
+[90mstderr[2m | src/tests/ReadinessDashboard.test.tsx[2m > [22m[2mReadinessDashboard · 自动修复入口接线[2m > [22m[2mBatchFixModal onFixed → 父组件强制 runOverview(true) 重算
+[22m[39mWarning: [antd: Modal] `destroyOnClose` is deprecated. Please use `destroyOnHidden` instead.
+
+[90mstderr[2m | src/tests/ReadinessDashboard.test.tsx[2m > [22m[2mReadinessDashboard · 过期恢复与告警链路[2m > [22m[2m过期告警里的「重新总检」以 force=true 重算（不得复用旧缓存）
+[22m[39mWarning: [antd: Modal] `destroyOnClose` is deprecated. Please use `destroyOnHidden` instead.
+Warning: [antd: Modal] `destroyOnClose` is deprecated. Please use `destroyOnHidden` instead.
+
+[90mstderr[2m | src/tests/ReadinessDashboard.test.tsx[2m > [22m[2mReadinessDashboard · 过期恢复与告警链路[2m > [22m[2m过期告警里的「重新总检」以 force=true 重算（不得复用旧缓存）
+[22m[39mWarning: [antd: Modal] `destroyOnClose` is deprecated. Please use `destroyOnHidden` instead.
+
+[90mstderr[2m | src/tests/ReadinessDashboard.test.tsx[2m > [22m[2mReadinessDashboard · 过期恢复与告警链路[2m > [22m[2m过期告警里的「重新总检」以 force=true 重算（不得复用旧缓存）
+[22m[39mWarning: [antd: Modal] `destroyOnClose` is deprecated. Please use `destroyOnHidden` instead.
+
+[90mstderr[2m | src/tests/ReadinessDashboard.test.tsx[2m > [22m[2mReadinessDashboard · 过期恢复与告警链路[2m > [22m[2m过期告警里的「重新总检」以 force=true 重算（不得复用旧缓存）
+[22m[39mWarning: [antd: Modal] `destroyOnClose` is deprecated. Please use `destroyOnHidden` instead.
+
+[90mstderr[2m | src/tests/ReadinessDashboard.test.tsx[2m > [22m[2mReadinessDashboard · 过期恢复与告警链路[2m > [22m[2m过期告警里的「重新总检」以 force=true 重算（不得复用旧缓存）
+[22m[39mWarning: [antd: Modal] `destroyOnClose` is deprecated. Please use `destroyOnHidden` instead.
+
+[90mstderr[2m | src/tests/ReadinessDashboard.test.tsx[2m > [22m[2mReadinessDashboard · 过期恢复与告警链路[2m > [22m[2m过期告警里的「重新总检」以 force=true 重算（不得复用旧缓存）
+[22m[39mWarning: [antd: Modal] `destroyOnClose` is deprecated. Please use `destroyOnHidden` instead.
+
+[90mstderr[2m | src/tests/ReadinessDashboard.test.tsx[2m > [22m[2mReadinessDashboard · 过期恢复与告警链路[2m > [22m[2m单条自动修复 onFixed → 同样 force=true 重算（与批量同口径）
+[22m[39mWarning: [antd: Modal] `destroyOnClose` is deprecated. Please use `destroyOnHidden` instead.
+Warning: [antd: Modal] `destroyOnClose` is deprecated. Please use `destroyOnHidden` instead.
+
+[90mstderr[2m | src/tests/ReadinessDashboard.test.tsx[2m > [22m[2mReadinessDashboard · 过期恢复与告警链路[2m > [22m[2m单条自动修复 onFixed → 同样 force=true 重算（与批量同口径）
+[22m[39mWarning: [antd: Modal] `destroyOnClose` is deprecated. Please use `destroyOnHidden` instead.
+
+[90mstderr[2m | src/tests/ReadinessDashboard.test.tsx[2m > [22m[2mReadinessDashboard · 过期恢复与告警链路[2m > [22m[2m单条自动修复 onFixed → 同样 force=true 重算（与批量同口径）
+[22m[39mWarning: [antd: Modal] `destroyOnClose` is deprecated. Please use `destroyOnHidden` instead.
+
+[90mstderr[2m | src/tests/ReadinessDashboard.test.tsx[2m > [22m[2mReadinessDashboard · 过期恢复与告警链路[2m > [22m[2m单条自动修复 onFixed → 同样 force=true 重算（与批量同口径）
+[22m[39mWarning: [antd: Modal] `destroyOnClose` is deprecated. Please use `destroyOnHidden` instead.
+
+[90mstderr[2m | src/tests/ReadinessDashboard.test.tsx[2m > [22m[2mReadinessDashboard · 过期恢复与告警链路[2m > [22m[2m单条自动修复 onFixed → 同样 force=true 重算（与批量同口径）
+[22m[39mWarning: [antd: Modal] `destroyOnClose` is deprecated. Please use `destroyOnHidden` instead.
+Warning: [antd: Modal] `destroyOnClose` is deprecated. Please use `destroyOnHidden` instead.
+Not implemented: Window's getComputedStyle() method: with pseudo-elements
+
+[90mstderr[2m | src/tests/ReadinessDashboard.test.tsx[2m > [22m[2mReadinessDashboard · 过期恢复与告警链路[2m > [22m[2m单条自动修复 onFixed → 同样 force=true 重算（与批量同口径）
+[22m[39mWarning: [antd: Modal] `destroyOnClose` is deprecated. Please use `destroyOnHidden` instead.
+
+[90mstderr[2m | src/tests/ReadinessDashboard.test.tsx[2m > [22m[2mReadinessDashboard · 过期恢复与告警链路[2m > [22m[2m单条自动修复 onFixed → 同样 force=true 重算（与批量同口径）
+[22m[39mWarning: [antd: Modal] `destroyOnClose` is deprecated. Please use `destroyOnHidden` instead.
+
+[90mstderr[2m | src/tests/ReadinessDashboard.test.tsx[2m > [22m[2mReadinessDashboard · 过期恢复与告警链路[2m > [22m[2m单条自动修复 onFixed → 同样 force=true 重算（与批量同口径）
+[22m[39mWarning: [antd: Modal] `destroyOnClose` is deprecated. Please use `destroyOnHidden` instead.
+
+[90mstderr[2m | src/tests/ReadinessDashboard.test.tsx[2m > [22m[2mReadinessDashboard · 过期恢复与告警链路[2m > [22m[2m单条自动修复 onFixed → 同样 force=true 重算（与批量同口径）
+[22m[39mWarning: [antd: Modal] `destroyOnClose` is deprecated. Please use `destroyOnHidden` instead.
+Warning: [antd: Modal] `destroyOnClose` is deprecated. Please use `destroyOnHidden` instead.
+
+[90mstderr[2m | src/tests/ReadinessDashboard.test.tsx[2m > [22m[2mReadinessDashboard · 过期恢复与告警链路[2m > [22m[2m单条自动修复 onFixed → 同样 force=true 重算（与批量同口径）
+[22m[39mWarning: [antd: Modal] `destroyOnClose` is deprecated. Please use `destroyOnHidden` instead.
+Warning: [antd: Modal] `destroyOnClose` is deprecated. Please use `destroyOnHidden` instead.
+
+[90mstderr[2m | src/tests/ReadinessDashboard.test.tsx[2m > [22m[2mReadinessDashboard · 过期恢复与告警链路[2m > [22m[2m导出报告 stale=true 时额外告警（报告会被抄进评审意见）
+[22m[39mWarning: [antd: Modal] `destroyOnClose` is deprecated. Please use `destroyOnHidden` instead.
+Warning: [antd: Modal] `destroyOnClose` is deprecated. Please use `destroyOnHidden` instead.
+
+[90mstderr[2m | src/tests/ReadinessDashboard.test.tsx[2m > [22m[2mReadinessDashboard · 过期恢复与告警链路[2m > [22m[2m导出报告 stale=true 时额外告警（报告会被抄进评审意见）
+[22m[39mWarning: [antd: Modal] `destroyOnClose` is deprecated. Please use `destroyOnHidden` instead.
+
+[90mstderr[2m | src/tests/ReadinessDashboard.test.tsx[2m > [22m[2mReadinessDashboard · 过期恢复与告警链路[2m > [22m[2m导出报告 stale=true 时额外告警（报告会被抄进评审意见）
+[22m[39mWarning: [antd: Modal] `destroyOnClose` is deprecated. Please use `destroyOnHidden` instead.
+
+[90mstderr[2m | src/tests/ReadinessDashboard.test.tsx[2m > [22m[2mReadinessDashboard · 过期恢复与告警链路[2m > [22m[2m导出报告 stale=true 时额外告警（报告会被抄进评审意见）
+[22m[39mWarning: [antd: Modal] `destroyOnClose` is deprecated. Please use `destroyOnHidden` instead.
+
+[90mstderr[2m | src/tests/ReadinessDashboard.test.tsx[2m > [22m[2mReadinessDashboard · 过期恢复与告警链路[2m > [22m[2m导出报告 stale=true 时额外告警（报告会被抄进评审意见）
+[22m[39mNot implemented: navigation to another Document
+
+[90mstderr[2m | src/tests/ReadinessDashboard.test.tsx[2m > [22m[2mReadinessDashboard · 过期恢复与告警链路[2m > [22m[2m报告导出失败 → 报错且按钮恢复可点（不得卡在 loading）
+[22m[39mWarning: [antd: Modal] `destroyOnClose` is deprecated. Please use `destroyOnHidden` instead.
+Warning: [antd: Modal] `destroyOnClose` is deprecated. Please use `destroyOnHidden` instead.
+
+[90mstderr[2m | src/tests/ReadinessDashboard.test.tsx[2m > [22m[2mReadinessDashboard · 过期恢复与告警链路[2m > [22m[2m报告导出失败 → 报错且按钮恢复可点（不得卡在 loading）
+[22m[39mWarning: [antd: Modal] `destroyOnClose` is deprecated. Please use `destroyOnHidden` instead.
+
+[90mstderr[2m | src/tests/ReadinessDashboard.test.tsx[2m > [22m[2mReadinessDashboard · 过期恢复与告警链路[2m > [22m[2m报告导出失败 → 报错且按钮恢复可点（不得卡在 loading）
+[22m[39mWarning: [antd: Modal] `destroyOnClose` is deprecated. Please use `destroyOnHidden` instead.
+
+[90mstderr[2m | src/tests/ReadinessDashboard.test.tsx[2m > [22m[2mReadinessDashboard · 过期恢复与告警链路[2m > [22m[2m报告导出失败 → 报错且按钮恢复可点（不得卡在 loading）
+[22m[39mWarning: [antd: Modal] `destroyOnClose` is deprecated. Please use `destroyOnHidden` instead.
+
+[90mstderr[2m | src/tests/ReadinessDashboard.test.tsx[2m > [22m[2mReadinessDashboard · 过期恢复与告警链路[2m > [22m[2m零发现 → 绿色「未检出任何问题」成功态
+[22m[39mWarning: [antd: Modal] `destroyOnClose` is deprecated. Please use `destroyOnHidden` instead.
+Warning: [antd: Modal] `destroyOnClose` is deprecated. Please use `destroyOnHidden` instead.
+
+[90mstderr[2m | src/tests/ReadinessDashboard.test.tsx[2m > [22m[2mReadinessDashboard · 过期恢复与告警链路[2m > [22m[2m零发现 → 绿色「未检出任何问题」成功态
+[22m[39mWarning: [antd: Modal] `destroyOnClose` is deprecated. Please use `destroyOnHidden` instead.
+
+[90mstderr[2m | src/tests/ReadinessDashboard.test.tsx[2m > [22m[2mReadinessDashboard · 过期恢复与告警链路[2m > [22m[2m零发现 → 绿色「未检出任何问题」成功态
+[22m[39mWarning: [antd: Modal] `destroyOnClose` is deprecated. Please use `destroyOnHidden` instead.
+
+[90mstderr[2m | src/tests/ReadinessDashboard.test.tsx[2m > [22m[2mReadinessDashboard · 过期恢复与告警链路[2m > [22m[2m零发现 → 绿色「未检出任何问题」成功态
+[22m[39mWarning: [antd: Modal] `destroyOnClose` is deprecated. Please use `destroyOnHidden` instead.
+
+[90mstderr[2m | src/tests/ReadinessDashboard.test.tsx[2m > [22m[2mReadinessDashboard · 过期恢复与告警链路[2m > [22m[2m零发现但检查不完整 / 未放行 → 不得声称「已具备交付条件」
+[22m[39mWarning: [antd: Modal] `destroyOnClose` is deprecated. Please use `destroyOnHidden` instead.
+Warning: [antd: Modal] `destroyOnClose` is deprecated. Please use `destroyOnHidden` instead.
+
+[90mstderr[2m | src/tests/ReadinessDashboard.test.tsx[2m > [22m[2mReadinessDashboard · 过期恢复与告警链路[2m > [22m[2m零发现但检查不完整 / 未放行 → 不得声称「已具备交付条件」
+[22m[39mWarning: [antd: Modal] `destroyOnClose` is deprecated. Please use `destroyOnHidden` instead.
+
+[90mstderr[2m | src/tests/ReadinessDashboard.test.tsx[2m > [22m[2mReadinessDashboard · 过期恢复与告警链路[2m > [22m[2m零发现但检查不完整 / 未放行 → 不得声称「已具备交付条件」
+[22m[39mWarning: [antd: Modal] `destroyOnClose` is deprecated. Please use `destroyOnHidden` instead.
+
+[90mstderr[2m | src/tests/ReadinessDashboard.test.tsx[2m > [22m[2mReadinessDashboard · 过期恢复与告警链路[2m > [22m[2m零发现但检查不完整 / 未放行 → 不得声称「已具备交付条件」
+[22m[39mWarning: [antd: Modal] `destroyOnClose` is deprecated. Please use `destroyOnHidden` instead.
+
+[90mstderr[2m | src/tests/ReadinessDashboard.test.tsx[2m > [22m[2mReadinessDashboard · 过期恢复与告警链路[2m > [22m[2mpartial_sources 非空 → 必须提示「只在部分正文上完成检查」
+[22m[39mWarning: [antd: Modal] `destroyOnClose` is deprecated. Please use `destroyOnHidden` instead.
+Warning: [antd: Modal] `destroyOnClose` is deprecated. Please use `destroyOnHidden` instead.
+
+[90mstderr[2m | src/tests/ReadinessDashboard.test.tsx[2m > [22m[2mReadinessDashboard · 过期恢复与告警链路[2m > [22m[2mpartial_sources 非空 → 必须提示「只在部分正文上完成检查」
+[22m[39mWarning: [antd: Modal] `destroyOnClose` is deprecated. Please use `destroyOnHidden` instead.
+
+[90mstderr[2m | src/tests/ReadinessDashboard.test.tsx[2m > [22m[2mReadinessDashboard · 过期恢复与告警链路[2m > [22m[2mpartial_sources 非空 → 必须提示「只在部分正文上完成检查」
+[22m[39mWarning: [antd: Modal] `destroyOnClose` is deprecated. Please use `destroyOnHidden` instead.
+
+[90mstderr[2m | src/tests/ReadinessDashboard.test.tsx[2m > [22m[2mReadinessDashboard · 过期恢复与告警链路[2m > [22m[2mpartial_sources 非空 → 必须提示「只在部分正文上完成检查」
+[22m[39mWarning: [antd: Modal] `destroyOnClose` is deprecated. Please use `destroyOnHidden` instead.
+
+[90mstderr[2m | src/tests/ReadinessDashboard.test.tsx[2m > [22m[2mReadinessDashboard · 过期恢复与告警链路[2m > [22m[2m规则目录加载失败 → 报错（不得静默给一个空抽屉）
+[22m[39mWarning: [antd: Modal] `destroyOnClose` is deprecated. Please use `destroyOnHidden` instead.
+Warning: [antd: Modal] `destroyOnClose` is deprecated. Please use `destroyOnHidden` instead.
+
+[90mstderr[2m | src/tests/ReadinessDashboard.test.tsx[2m > [22m[2mReadinessDashboard · 过期恢复与告警链路[2m > [22m[2m规则目录加载失败 → 报错（不得静默给一个空抽屉）
+[22m[39mWarning: [antd: Modal] `destroyOnClose` is deprecated. Please use `destroyOnHidden` instead.
+
+[90mstderr[2m | src/tests/ReadinessDashboard.test.tsx[2m > [22m[2mReadinessDashboard · 过期恢复与告警链路[2m > [22m[2m规则目录加载失败 → 报错（不得静默给一个空抽屉）
+[22m[39mWarning: [antd: Modal] `destroyOnClose` is deprecated. Please use `destroyOnHidden` instead.
+Not implemented: Window's getComputedStyle() method: with pseudo-elements
+
+[90mstderr[2m | src/tests/ReadinessDashboard.test.tsx[2m > [22m[2mReadinessDashboard · 过期恢复与告警链路[2m > [22m[2m规则目录缓存命中：二次打开不再重复请求
+[22m[39mWarning: [antd: Modal] `destroyOnClose` is deprecated. Please use `destroyOnHidden` instead.
+Warning: [antd: Modal] `destroyOnClose` is deprecated. Please use `destroyOnHidden` instead.
+
+[90mstderr[2m | src/tests/ReadinessDashboard.test.tsx[2m > [22m[2mReadinessDashboard · 过期恢复与告警链路[2m > [22m[2m规则目录缓存命中：二次打开不再重复请求
+[22m[39mWarning: [antd: Modal] `destroyOnClose` is deprecated. Please use `destroyOnHidden` instead.
+
+[90mstderr[2m | src/tests/ReadinessDashboard.test.tsx[2m > [22m[2mReadinessDashboard · 过期恢复与告警链路[2m > [22m[2m规则目录缓存命中：二次打开不再重复请求
+[22m[39mWarning: [antd: Modal] `destroyOnClose` is deprecated. Please use `destroyOnHidden` instead.
+Not implemented: Window's getComputedStyle() method: with pseudo-elements
+
+[90mstderr[2m | src/tests/ReadinessDashboard.test.tsx[2m > [22m[2mReadinessDashboard · 过期恢复与告警链路[2m > [22m[2m规则目录缓存命中：二次打开不再重复请求
+[22m[39mWarning: [antd: Modal] `destroyOnClose` is deprecated. Please use `destroyOnHidden` instead.
+Not implemented: Window's getComputedStyle() method: with pseudo-elements
+
+[90mstderr[2m | src/tests/ReadinessDashboard.test.tsx[2m > [22m[2mReadinessDashboard · 过期恢复与告警链路[2m > [22m[2m规则目录缓存命中：二次打开不再重复请求
+[22m[39mWarning: [antd: Modal] `destroyOnClose` is deprecated. Please use `destroyOnHidden` instead.
+Warning: [antd: Modal] `destroyOnClose` is deprecated. Please use `destroyOnHidden` instead.
+Not implemented: Window's getComputedStyle() method: with pseudo-elements
+
+[90mstderr[2m | src/tests/ReadinessDashboard.test.tsx[2m > [22m[2mReadinessDashboard · 过期恢复与告警链路[2m > [22m[2m严重度筛选：全部 / 一般 两档均可用（此前只锁了提示与阻断+严重）
+[22m[39mWarning: [antd: Modal] `destroyOnClose` is deprecated. Please use `destroyOnHidden` instead.
+Warning: [antd: Modal] `destroyOnClose` is deprecated. Please use `destroyOnHidden` instead.
+
+[90mstderr[2m | src/tests/ReadinessDashboard.test.tsx[2m > [22m[2mReadinessDashboard · 过期恢复与告警链路[2m > [22m[2m严重度筛选：全部 / 一般 两档均可用（此前只锁了提示与阻断+严重）
+[22m[39mWarning: [antd: Modal] `destroyOnClose` is deprecated. Please use `destroyOnHidden` instead.
+
+[90mstderr[2m | src/tests/ReadinessDashboard.test.tsx[2m > [22m[2mReadinessDashboard · 过期恢复与告警链路[2m > [22m[2m严重度筛选：全部 / 一般 两档均可用（此前只锁了提示与阻断+严重）
+[22m[39mWarning: [antd: Modal] `destroyOnClose` is deprecated. Please use `destroyOnHidden` instead.
+
+[90mstderr[2m | src/tests/ReadinessDashboard.test.tsx[2m > [22m[2mReadinessDashboard · 过期恢复与告警链路[2m > [22m[2m严重度筛选：全部 / 一般 两档均可用（此前只锁了提示与阻断+严重）
+[22m[39mWarning: [antd: Modal] `destroyOnClose` is deprecated. Please use `destroyOnHidden` instead.
+
+[90mstderr[2m | src/tests/ReadinessDashboard.test.tsx[2m > [22m[2mReadinessDashboard · 过期恢复与告警链路[2m > [22m[2m严重度筛选：全部 / 一般 两档均可用（此前只锁了提示与阻断+严重）
+[22m[39mWarning: [antd: Modal] `destroyOnClose` is deprecated. Please use `destroyOnHidden` instead.
+
+[90mstderr[2m | src/tests/ReadinessDashboard.test.tsx[2m > [22m[2mReadinessDashboard · 过期恢复与告警链路[2m > [22m[2m严重度筛选：全部 / 一般 两档均可用（此前只锁了提示与阻断+严重）
+[22m[39mWarning: [antd: Modal] `destroyOnClose` is deprecated. Please use `destroyOnHidden` instead.
+
+[90mstderr[2m | src/tests/ReadinessDashboard.test.tsx[2m > [22m[2mReadinessDashboard · 过期恢复与告警链路[2m > [22m[2m切换方案后旧方案的迟到总检响应不得覆盖新方案结论
+[22m[39mWarning: [antd: Modal] `destroyOnClose` is deprecated. Please use `destroyOnHidden` instead.
+Warning: [antd: Modal] `destroyOnClose` is deprecated. Please use `destroyOnHidden` instead.
+
+[90mstderr[2m | src/tests/ReadinessDashboard.test.tsx[2m > [22m[2mReadinessDashboard · 过期恢复与告警链路[2m > [22m[2m切换方案后旧方案的迟到总检响应不得覆盖新方案结论
+[22m[39mWarning: [antd: Modal] `destroyOnClose` is deprecated. Please use `destroyOnHidden` instead.
+
+[90mstderr[2m | src/tests/ReadinessDashboard.test.tsx[2m > [22m[2mReadinessDashboard · 过期恢复与告警链路[2m > [22m[2m切换方案后旧方案的迟到总检响应不得覆盖新方案结论
+[22m[39mWarning: [antd: Modal] `destroyOnClose` is deprecated. Please use `destroyOnHidden` instead.
+
+[90mstderr[2m | src/tests/ReadinessDashboard.test.tsx[2m > [22m[2mReadinessDashboard · 过期恢复与告警链路[2m > [22m[2m切换方案后旧方案的迟到总检响应不得覆盖新方案结论
+[22m[39mWarning: [antd: Modal] `destroyOnClose` is deprecated. Please use `destroyOnHidden` instead.
+Warning: [antd: Modal] `destroyOnClose` is deprecated. Please use `destroyOnHidden` instead.
+
+[90mstderr[2m | src/tests/ReadinessDashboard.test.tsx[2m > [22m[2mReadinessDashboard · 过期恢复与告警链路[2m > [22m[2m切换方案后旧方案的迟到总检响应不得覆盖新方案结论
+[22m[39mWarning: [antd: Modal] `destroyOnClose` is deprecated. Please use `destroyOnHidden` instead.
+
+[90mstderr[2m | src/tests/ReadinessDashboard.test.tsx[2m > [22m[2mReadinessDashboard · 过期恢复与告警链路[2m > [22m[2mcached=true 且非 force → 告知用户「未重复计入历史趋势」
+[22m[39mWarning: [antd: Modal] `destroyOnClose` is deprecated. Please use `destroyOnHidden` instead.
+Warning: [antd: Modal] `destroyOnClose` is deprecated. Please use `destroyOnHidden` instead.
+
+[90mstderr[2m | src/tests/ReadinessDashboard.test.tsx[2m > [22m[2mReadinessDashboard · 过期恢复与告警链路[2m > [22m[2mcached=true 且非 force → 告知用户「未重复计入历史趋势」
+[22m[39mWarning: [antd: Modal] `destroyOnClose` is deprecated. Please use `destroyOnHidden` instead.
+
+[90mstderr[2m | src/tests/ReadinessDashboard.test.tsx[2m > [22m[2mReadinessDashboard · 过期恢复与告警链路[2m > [22m[2mcached=true 且非 force → 告知用户「未重复计入历史趋势」
+[22m[39mWarning: [antd: Modal] `destroyOnClose` is deprecated. Please use `destroyOnHidden` instead.
+
+[90mstderr[2m | src/tests/ReadinessDashboard.test.tsx[2m > [22m[2mReadinessDashboard · 过期恢复与告警链路[2m > [22m[2mcached=true 且非 force → 告知用户「未重复计入历史趋势」
+[22m[39mWarning: [antd: Modal] `destroyOnClose` is deprecated. Please use `destroyOnHidden` instead.
+
+[90mstderr[2m | src/tests/ReadinessDashboard.test.tsx[2m > [22m[2mReadinessDashboard · 过期恢复与告警链路[2m > [22m[2munknown_dimension_count > 0 → 提示核对规则库与后端维度口径
+[22m[39mWarning: [antd: Modal] `destroyOnClose` is deprecated. Please use `destroyOnHidden` instead.
+Warning: [antd: Modal] `destroyOnClose` is deprecated. Please use `destroyOnHidden` instead.
+
+[90mstderr[2m | src/tests/ReadinessDashboard.test.tsx[2m > [22m[2mReadinessDashboard · 过期恢复与告警链路[2m > [22m[2munknown_dimension_count > 0 → 提示核对规则库与后端维度口径
+[22m[39mWarning: [antd: Modal] `destroyOnClose` is deprecated. Please use `destroyOnHidden` instead.
+
+[90mstderr[2m | src/tests/ReadinessDashboard.test.tsx[2m > [22m[2mReadinessDashboard · 过期恢复与告警链路[2m > [22m[2munknown_dimension_count > 0 → 提示核对规则库与后端维度口径
+[22m[39mWarning: [antd: Modal] `destroyOnClose` is deprecated. Please use `destroyOnHidden` instead.
+
+[90mstderr[2m | src/tests/ReadinessDashboard.test.tsx[2m > [22m[2mReadinessDashboard · 过期恢复与告警链路[2m > [22m[2munknown_dimension_count > 0 → 提示核对规则库与后端维度口径
+[22m[39mWarning: [antd: Modal] `destroyOnClose` is deprecated. Please use `destroyOnHidden` instead.
+
+[90mstderr[2m | src/tests/ReadinessDashboard.test.tsx[2m > [22m[2mReadinessDashboard · 过期恢复与告警链路[2m > [22m[2m总检失败 → 报错，且保留上一轮结论（不得清空面板）
+[22m[39mWarning: [antd: Modal] `destroyOnClose` is deprecated. Please use `destroyOnHidden` instead.
+Warning: [antd: Modal] `destroyOnClose` is deprecated. Please use `destroyOnHidden` instead.
+
+[90mstderr[2m | src/tests/ReadinessDashboard.test.tsx[2m > [22m[2mReadinessDashboard · 过期恢复与告警链路[2m > [22m[2m总检失败 → 报错，且保留上一轮结论（不得清空面板）
+[22m[39mWarning: [antd: Modal] `destroyOnClose` is deprecated. Please use `destroyOnHidden` instead.
+
+[90mstderr[2m | src/tests/ReadinessDashboard.test.tsx[2m > [22m[2mReadinessDashboard · 过期恢复与告警链路[2m > [22m[2m总检失败 → 报错，且保留上一轮结论（不得清空面板）
+[22m[39mWarning: [antd: Modal] `destroyOnClose` is deprecated. Please use `destroyOnHidden` instead.
+
+[90mstderr[2m | src/tests/ReadinessDashboard.test.tsx[2m > [22m[2mReadinessDashboard · 过期恢复与告警链路[2m > [22m[2m总检失败 → 报错，且保留上一轮结论（不得清空面板）
+[22m[39mWarning: [antd: Modal] `destroyOnClose` is deprecated. Please use `destroyOnHidden` instead.
+
+[90mstderr[2m | src/tests/ReadinessDashboard.test.tsx[2m > [22m[2mReadinessDashboard · 过期恢复与告警链路[2m > [22m[2m总检失败 → 报错，且保留上一轮结论（不得清空面板）
+[22m[39mWarning: [antd: Modal] `destroyOnClose` is deprecated. Please use `destroyOnHidden` instead.
+
+[90mstderr[2m | src/tests/ReadinessDashboard.test.tsx[2m > [22m[2mReadinessDashboard · 过期恢复与告警链路[2m > [22m[2m总检失败 → 报错，且保留上一轮结论（不得清空面板）
+[22m[39mWarning: [antd: Modal] `destroyOnClose` is deprecated. Please use `destroyOnHidden` instead.
+
+[90mstderr[2m | src/tests/ReadinessDashboard.test.tsx[2m > [22m[2mReadinessDashboard · R55 陈旧 AI 结论告警[2m > [22m[2mstale_ai_sources 非空 → 告警列出未采用的 AI 来源（中文名映射）
+[22m[39mWarning: [antd: Modal] `destroyOnClose` is deprecated. Please use `destroyOnHidden` instead.
+Warning: [antd: Modal] `destroyOnClose` is deprecated. Please use `destroyOnHidden` instead.
+
+[90mstderr[2m | src/tests/ReadinessDashboard.test.tsx[2m > [22m[2mReadinessDashboard · R55 陈旧 AI 结论告警[2m > [22m[2mstale_ai_sources 非空 → 告警列出未采用的 AI 来源（中文名映射）
+[22m[39mWarning: [antd: Modal] `destroyOnClose` is deprecated. Please use `destroyOnHidden` instead.
+
+[90mstderr[2m | src/tests/ReadinessDashboard.test.tsx[2m > [22m[2mReadinessDashboard · R55 陈旧 AI 结论告警[2m > [22m[2mstale_ai_sources 非空 → 告警列出未采用的 AI 来源（中文名映射）
+[22m[39mWarning: [antd: Modal] `destroyOnClose` is deprecated. Please use `destroyOnHidden` instead.
+
+[90mstderr[2m | src/tests/ReadinessDashboard.test.tsx[2m > [22m[2mReadinessDashboard · R55 陈旧 AI 结论告警[2m > [22m[2mstale_ai_sources 非空 → 告警列出未采用的 AI 来源（中文名映射）
+[22m[39mWarning: [antd: Modal] `destroyOnClose` is deprecated. Please use `destroyOnHidden` instead.
+
+[90mstderr[2m | src/tests/ReadinessDashboard.test.tsx[2m > [22m[2mReadinessDashboard · R55 陈旧 AI 结论告警[2m > [22m[2m无 stale_ai_sources（正常/旧后端）→ 不渲染该告警
+[22m[39mWarning: [antd: Modal] `destroyOnClose` is deprecated. Please use `destroyOnHidden` instead.
+Warning: [antd: Modal] `destroyOnClose` is deprecated. Please use `destroyOnHidden` instead.
+
+[90mstderr[2m | src/tests/ReadinessDashboard.test.tsx[2m > [22m[2mReadinessDashboard · R55 陈旧 AI 结论告警[2m > [22m[2m无 stale_ai_sources（正常/旧后端）→ 不渲染该告警
+[22m[39mWarning: [antd: Modal] `destroyOnClose` is deprecated. Please use `destroyOnHidden` instead.
+
+[90mstderr[2m | src/tests/ReadinessDashboard.test.tsx[2m > [22m[2mReadinessDashboard · R55 陈旧 AI 结论告警[2m > [22m[2m无 stale_ai_sources（正常/旧后端）→ 不渲染该告警
+[22m[39mWarning: [antd: Modal] `destroyOnClose` is deprecated. Please use `destroyOnHidden` instead.
+
+[90mstderr[2m | src/tests/ReadinessDashboard.test.tsx[2m > [22m[2mReadinessDashboard · R55 陈旧 AI 结论告警[2m > [22m[2m无 stale_ai_sources（正常/旧后端）→ 不渲染该告警
+[22m[39mWarning: [antd: Modal] `destroyOnClose` is deprecated. Please use `destroyOnHidden` instead.
+
+[90mstderr[2m | src/tests/ReadinessDashboard.test.tsx[2m > [22m[2mReadinessDashboard · R76 来源读取失败告警[2m > [22m[2mfailed_sources 非空 → 错误级告警列出读取失败的数据来源（中文名映射）
+[22m[39mWarning: [antd: Modal] `destroyOnClose` is deprecated. Please use `destroyOnHidden` instead.
+Warning: [antd: Modal] `destroyOnClose` is deprecated. Please use `destroyOnHidden` instead.
+
+[90mstderr[2m | src/tests/ReadinessDashboard.test.tsx[2m > [22m[2mReadinessDashboard · R76 来源读取失败告警[2m > [22m[2mfailed_sources 非空 → 错误级告警列出读取失败的数据来源（中文名映射）
+[22m[39mWarning: [antd: Modal] `destroyOnClose` is deprecated. Please use `destroyOnHidden` instead.
+
+[90mstderr[2m | src/tests/ReadinessDashboard.test.tsx[2m > [22m[2mReadinessDashboard · R76 来源读取失败告警[2m > [22m[2mfailed_sources 非空 → 错误级告警列出读取失败的数据来源（中文名映射）
+[22m[39mWarning: [antd: Modal] `destroyOnClose` is deprecated. Please use `destroyOnHidden` instead.
+
+[90mstderr[2m | src/tests/ReadinessDashboard.test.tsx[2m > [22m[2mReadinessDashboard · R76 来源读取失败告警[2m > [22m[2mfailed_sources 非空 → 错误级告警列出读取失败的数据来源（中文名映射）
+[22m[39mWarning: [antd: Modal] `destroyOnClose` is deprecated. Please use `destroyOnHidden` instead.
+
+[90mstderr[2m | src/tests/ReadinessDashboard.test.tsx[2m > [22m[2mReadinessDashboard · R76 来源读取失败告警[2m > [22m[2m无 failed_sources（正常/旧后端）→ 不渲染该告警
+[22m[39mWarning: [antd: Modal] `destroyOnClose` is deprecated. Please use `destroyOnHidden` instead.
+Warning: [antd: Modal] `destroyOnClose` is deprecated. Please use `destroyOnHidden` instead.
+
+[90mstderr[2m | src/tests/ReadinessDashboard.test.tsx[2m > [22m[2mReadinessDashboard · R76 来源读取失败告警[2m > [22m[2m无 failed_sources（正常/旧后端）→ 不渲染该告警
+[22m[39mWarning: [antd: Modal] `destroyOnClose` is deprecated. Please use `destroyOnHidden` instead.
+
+[90mstderr[2m | src/tests/ReadinessDashboard.test.tsx[2m > [22m[2mReadinessDashboard · R76 来源读取失败告警[2m > [22m[2m无 failed_sources（正常/旧后端）→ 不渲染该告警
+[22m[39mWarning: [antd: Modal] `destroyOnClose` is deprecated. Please use `destroyOnHidden` instead.
+
+[90mstderr[2m | src/tests/ReadinessDashboard.test.tsx[2m > [22m[2mReadinessDashboard · R76 来源读取失败告警[2m > [22m[2m无 failed_sources（正常/旧后端）→ 不渲染该告警
+[22m[39mWarning: [antd: Modal] `destroyOnClose` is deprecated. Please use `destroyOnHidden` instead.
+

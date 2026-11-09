@@ -161,6 +161,20 @@ def record_injection_hit(pattern: str) -> None:
     _inc(prompt_injection_hits, pattern or "unknown")
 
 
+#: 提示词缓存加载**失败但保留上次成功缓存**的次数（key = 失败原因归类）。
+#: ✅ R205（2026-11-09 · L-13 · 加载失败静默回退出厂默认）：旧实现加载异常即
+#:   ``_prompt_cache = None`` → ``get_prompt`` 回退 ``_ALL_PROMPTS`` 出厂默认，且**无
+#:   任何「本次用的是默认回退」指标**。现改为保留上次成功缓存（不丢已生效的定制），
+#:   并打点本计数器（含缺失 key 列表），使「配置库挂了但服务仍跑、用的是旧缓存」
+#:   这一事实可观测。
+prompt_cache_degraded: Counter = Counter()
+
+
+def record_prompt_cache_degraded(reason: str) -> None:
+    """记一次提示词缓存加载失败（保留上次成功缓存）。"""
+    _inc(prompt_cache_degraded, reason or "unknown")
+
+
 def get_snapshot() -> dict:
     """导出结构化快照（全部为 dict 拷贝，调用方持有后修改不影响内部计数）。
 

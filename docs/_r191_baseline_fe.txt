@@ -1,0 +1,52 @@
+
+[1m[46m RUN [49m[22m [36mv3.2.4 [39m[90mJ:/编程/专项方案工具箱/frontend[39m
+
+[1m[43m DEPRECATED [49m[22m [33m'basic' reporter is deprecated and will be removed in Vitest v3.
+Remove 'basic' from 'reporters' option. To match 'basic' reporter 100%, use configuration:
+{
+  "test": {
+    "reporters": [
+      [
+        "default",
+        {
+          "summary": false
+        }
+      ]
+    ]
+  }
+}[39m
+ [32m✓[39m src/tests/parseSourceNotice.test.ts [2m([22m[2m14 tests[22m[2m)[22m[32m 67[2mms[22m[39m
+ [32m✓[39m src/tests/uploadAccept.test.ts [2m([22m[2m19 tests[22m[2m)[22m[32m 47[2mms[22m[39m
+ [32m✓[39m src/tests/uploadOutlineApi.test.ts [2m([22m[2m6 tests[22m[2m)[22m[32m 16[2mms[22m[39m
+ [32m✓[39m src/tests/useDocumentWorkflowRace.test.tsx [2m([22m[2m15 tests[22m[2m)[22m[32m 117[2mms[22m[39m
+ [32m✓[39m src/tests/importParseWarningWiringR72.test.ts [2m([22m[2m4 tests[22m[2m)[22m[32m 9[2mms[22m[39m
+ [32m✓[39m src/tests/importSubTabBar.test.tsx [2m([22m[2m6 tests[22m[2m)[22m[33m 967[2mms[22m[39m
+   [33m[2m✓[22m[39m ImportSubTabBar[2m > [22m渲染两个子标签：文档解析 / 项目提取 [33m 518[2mms[22m[39m
+ [32m✓[39m src/tests/DocumentPipelineSummary.test.tsx [2m([22m[2m18 tests[22m[2m)[22m[33m 1755[2mms[22m[39m
+   [33m[2m✓[22m[39m DocumentPipelineSummary[2m > [22mloading 态：显示读取中提示，不渲染质量数据 [33m 402[2mms[22m[39m
+   [33m[2m✓[22m[39m DocumentPipelineSummary 管线操作[2m > [22m传入 onAction 且解析成功：四个动作按钮齐全，点击回传对应 key [33m 492[2mms[22m[39m
+[90mstderr[2m | src/tests/parseResultCategoryPanel.test.tsx[2m > [22m[2mParseResultCategoryPanel · 窄屏抽屉[2m > [22m[2m窄屏：桌面左栏隐藏，点击「解析分类」打开抽屉展示分类
+[22m[39mNot implemented: Window's getComputedStyle() method: with pseudo-elements
+
+ [32m✓[39m src/tests/parseResultCategoryPanel.test.tsx [2m([22m[2m21 tests[22m[2m)[22m[33m 2145[2mms[22m[39m
+   [33m[2m✓[22m[39m ParseResultCategoryPanel · 分类栏与数量角标[2m > [22m渲染分类名称与「已完成/总数」数量角标 [33m 397[2mms[22m[39m
+   [33m[2m✓[22m[39m ParseResultCategoryPanel · 选中详情与操作[2m > [22m选中项：右侧显示详情与 复制 / 人工校正 / 查看完整 操作 [33m 602[2mms[22m[39m
+ [32m✓[39m src/tests/documentParseList.test.tsx [2m([22m[2m25 tests[22m[2m)[22m[33m 3044[2mms[22m[39m
+   [33m[2m✓[22m[39m DocumentParseList[2m > [22m待解析文档：点击「解析」回调 onParse(id, name) [33m 731[2mms[22m[39m
+[90mstderr[2m | src/tests/uploadParseTab.test.tsx[2m > [22m[2mUploadParseTab[2m > [22m[2m全部重解析：弹确认框，确认后才回调 onReparseAll
+[22m[39mNot implemented: Window's getComputedStyle() method: with pseudo-elements
+
+[90mstderr[2m | src/tests/uploadParseTab.test.tsx[2m > [22m[2mUploadParseTab[2m > [22m[2m重解析确认框点「取消」：不回调 onReparseAll
+[22m[39mNot implemented: Window's getComputedStyle() method: with pseudo-elements
+
+ [32m✓[39m src/tests/uploadParseTab.test.tsx [2m([22m[2m50 tests[22m[2m)[22m[33m 7611[2mms[22m[39m
+   [33m[2m✓[22m[39m UploadParseTab[2m > [22m上传区：多选文件只触发一次 onUploadFiles，且携带全部文件 [33m 1072[2mms[22m[39m
+   [33m[2m✓[22m[39m UploadParseTab[2m > [22m下一步按钮：无已解析文档时禁用；有则跳转；项数随后端定义动态生成 [33m 307[2mms[22m[39m
+
+
+[2m Test Files [22m [1m[32m10 passed[39m[22m[90m (10)[39m
+[2m      Tests [22m [1m[32m178 passed[39m[22m[90m (178)[39m
+[2m   Start at [22m 01:16:27
+[2m   Duration [22m 22.07s[2m (transform 4.51s, setup 4.66s, collect 52.07s, tests 15.78s, environment 19.56s, prepare 2.83s)[22m
+
+EXIT=0

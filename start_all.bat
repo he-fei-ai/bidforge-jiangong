@@ -1,36 +1,36 @@
 @echo off
-title å·¥ç¨‹é¡¹ç›®ä¸“é¡¹æ–¹æ¡ˆæ™ºèƒ½ç¼–åˆ¶å¹³å°
+title ¹¤³ÌÏîÄ¿×¨Ïî·½°¸ÖÇÄÜ±àÖÆÆ½Ì¨
 setlocal EnableExtensions
 
 REM ============================================================================
 REM  Encoding: GBK / CP936 + CRLF.   *** DO NOT re-save this file as UTF-8 ***
 REM ============================================================================
-REM  æœ¬æ–‡ä»¶å¿…é¡»ä¿æŒ GBK(CP936) ç¼–ç  + CRLF æ¢è¡Œï¼Œä¸”ä¸è¦åœ¨è„šæœ¬å†…æ‰§è¡Œ chcp åˆ‡æ¢ä»£ç é¡µã€‚
-REM  åŸå› ï¼šcmd.exe æ˜¯é€æ®µè¯»å– bat æ–‡ä»¶å¹¶è®°ä½ã€Œä¸‹ä¸€ä¸ªå­—èŠ‚åç§»ã€çš„ã€‚
-REM  ä¸€æ—¦è„šæœ¬ä¸­é€”ç”¨ chcp åˆ‡æ¢äº†ä»£ç é¡µï¼ŒåŒä¸€æ®µæ–‡æœ¬æŒ‰ä¸¤ç§ä»£ç é¡µç®—å‡ºçš„ã€Œå­—ç¬¦æ•°/å­—èŠ‚æ•°ã€
-REM  ä¸ä¸€è‡´ï¼Œcmd çš„åç§»è®°ç®—å°±ä¼šé”™ä½ï¼Œäºæ˜¯ä»æŸä¸€è¡Œä¸­é—´å¼€å§‹æŠŠåŠæˆªä¸­æ–‡å½“å‘½ä»¤æ‰§è¡Œï¼Œ
-REM  è¡¨ç°ä¸ºä¸€å †ã€Œxxx ä¸æ˜¯å†…éƒ¨æˆ–å¤–éƒ¨å‘½ä»¤ã€ï¼Œæœ€åè„šæœ¬ç›´æ¥é€€å‡ºï¼ˆä¹Ÿå°±æ˜¯ã€Œé—ªé€€ã€ï¼‰ã€‚
-REM  å®æµ‹ï¼šæ—§è„šæœ¬ï¼ˆUTF-8 + LF æ¢è¡Œ + chcp 65001ï¼‰é€€å‡ºç  255ï¼Œå®Œå…¨è·‘ä¸èµ·æ¥ã€‚
-REM  è§£å†³åŠæ³•ï¼šä¸åœ¨è„šæœ¬å†…åˆ‡ä»£ç é¡µï¼Œè®©æ–‡ä»¶ç¼–ç ä¸æ§åˆ¶å°é»˜è®¤ä»£ç é¡µä¸€è‡´ï¼ˆç®€ä½“ä¸­æ–‡
-REM  ç³»ç»Ÿå³ GBKï¼‰ã€‚è‹¥ç¡®å®éœ€è¦ UTF-8 ç‰ˆæœ¬ï¼Œè¯·æŠŠæ‰€æœ‰ä¸­æ–‡æç¤ºæ”¹æˆçº¯ ASCIIã€‚
+REM  ±¾ÎÄ¼ş±ØĞë±£³Ö GBK(CP936) ±àÂë + CRLF »»ĞĞ£¬ÇÒ²»ÒªÔÚ½Å±¾ÄÚÖ´ĞĞ chcp ÇĞ»»´úÂëÒ³¡£
+REM  Ô­Òò£ºcmd.exe ÊÇÖğ¶Î¶ÁÈ¡ bat ÎÄ¼ş²¢¼Ç×¡¡¸ÏÂÒ»¸ö×Ö½ÚÆ«ÒÆ¡¹µÄ¡£
+REM  Ò»µ©½Å±¾ÖĞÍ¾ÓÃ chcp ÇĞ»»ÁË´úÂëÒ³£¬Í¬Ò»¶ÎÎÄ±¾°´Á½ÖÖ´úÂëÒ³Ëã³öµÄ¡¸×Ö·ûÊı/×Ö½ÚÊı¡¹
+REM  ²»Ò»ÖÂ£¬cmd µÄÆ«ÒÆ¼ÇËã¾Í»á´íÎ»£¬ÓÚÊÇ´ÓÄ³Ò»ĞĞÖĞ¼ä¿ªÊ¼°Ñ°ë½ØÖĞÎÄµ±ÃüÁîÖ´ĞĞ£¬
+REM  ±íÏÖÎªÒ»¶Ñ¡¸xxx ²»ÊÇÄÚ²¿»òÍâ²¿ÃüÁî¡¹£¬×îºó½Å±¾Ö±½ÓÍË³ö£¨Ò²¾ÍÊÇ¡¸ÉÁÍË¡¹£©¡£
+REM  Êµ²â£º¾É½Å±¾£¨UTF-8 + LF »»ĞĞ + chcp 65001£©ÍË³öÂë 255£¬ÍêÈ«ÅÜ²»ÆğÀ´¡£
+REM  ½â¾ö°ì·¨£º²»ÔÚ½Å±¾ÄÚÇĞ´úÂëÒ³£¬ÈÃÎÄ¼ş±àÂëÓë¿ØÖÆÌ¨Ä¬ÈÏ´úÂëÒ³Ò»ÖÂ£¨¼òÌåÖĞÎÄ
+REM  ÏµÍ³¼´ GBK£©¡£ÈôÈ·ÊµĞèÒª UTF-8 °æ±¾£¬Çë°ÑËùÓĞÖĞÎÄÌáÊ¾¸Ä³É´¿ ASCII¡£
 REM
-REM  ç¬¬äºŒä¸ªå‘ï¼šè·¯å¾„å¸¦ç©ºæ ¼çš„å¯æ‰§è¡Œæ–‡ä»¶å¿…é¡»ä¿ç•™å¼•å·ã€‚
-REM    å®æµ‹å¤±è´¥ï¼šfor %%P in ("C:\Program Files\X\x.exe") do %%~P ...
-REM               â†’ cmd æŒ‰ C:\Program æ‰§è¡Œï¼ŒæŠ¥ã€ŒC:\Program ä¸æ˜¯å†…éƒ¨æˆ–å¤–éƒ¨å‘½ä»¤ã€ï¼Œ
-REM                 è¿ else åˆ†æ”¯éƒ½ä¸ä¼šæ‰§è¡Œã€‚
-REM    æ­£ç¡®å†™æ³•ï¼šåˆ¤æ–­ä¸æ‰§è¡Œç”¨ %%Pï¼ˆä¿ç•™åŸå§‹å¼•å·ï¼‰ï¼Œåªåœ¨ set èµ‹å€¼æ—¶ç”¨ %%~Pã€‚
+REM  µÚ¶ş¸ö¿Ó£ºÂ·¾¶´ø¿Õ¸ñµÄ¿ÉÖ´ĞĞÎÄ¼ş±ØĞë±£ÁôÒıºÅ¡£
+REM    Êµ²âÊ§°Ü£ºfor %%P in ("C:\Program Files\X\x.exe") do %%~P ...
+REM               ¡ú cmd °´ C:\Program Ö´ĞĞ£¬±¨¡¸C:\Program ²»ÊÇÄÚ²¿»òÍâ²¿ÃüÁî¡¹£¬
+REM                 Á¬ else ·ÖÖ§¶¼²»»áÖ´ĞĞ¡£
+REM    ÕıÈ·Ğ´·¨£ºÅĞ¶ÏÓëÖ´ĞĞÓÃ %%P£¨±£ÁôÔ­Ê¼ÒıºÅ£©£¬Ö»ÔÚ set ¸³ÖµÊ±ÓÃ %%~P¡£
 REM ============================================================================
 
 echo ============================================
-echo   å·¥ç¨‹é¡¹ç›®ä¸“é¡¹æ–¹æ¡ˆæ™ºèƒ½ç¼–åˆ¶å¹³å° v5.3
-echo   ä¸€é”®å¯åŠ¨è„šæœ¬ (Windows)
+echo   ¹¤³ÌÏîÄ¿×¨Ïî·½°¸ÖÇÄÜ±àÖÆÆ½Ì¨ v5.3
+echo   Ò»¼üÆô¶¯½Å±¾ (Windows)
 echo ============================================
 echo.
 
-REM ---- 0.0 æ§åˆ¶å°ä»£ç é¡µè‡ªæ£€ ----
-REM æœ¬æ–‡ä»¶æ˜¯ GBK ç¼–ç ã€‚è‹¥æ§åˆ¶å° OEM ä»£ç é¡µä¸æ˜¯ 936ï¼ˆWindows 11 æˆ–å¼€å¯ã€Œä½¿ç”¨
-REM Unicode UTF-8 æä¾›å…¨çƒè¯­è¨€æ”¯æŒã€åå¸¸è§çš„ 65001ï¼‰ï¼Œä¸‹é¢çš„ä¸­æ–‡æç¤ºä¼šå˜æˆä¹±ç ï¼Œ
-REM åŠŸèƒ½ä¸å—å½±å“ã€‚è¿™é‡Œç»™ä¸€æ¡ ASCII æç¤ºï¼Œä¹±ç æ—¶ä¹Ÿèƒ½è®¤å‡ºæ¥ã€‚
+REM ---- 0.0 ¿ØÖÆÌ¨´úÂëÒ³×Ô¼ì ----
+REM ±¾ÎÄ¼şÊÇ GBK ±àÂë¡£Èô¿ØÖÆÌ¨ OEM ´úÂëÒ³²»ÊÇ 936£¨Windows 11 »ò¿ªÆô¡¸Ê¹ÓÃ
+REM Unicode UTF-8 Ìá¹©È«ÇòÓïÑÔÖ§³Ö¡¹ºó³£¼ûµÄ 65001£©£¬ÏÂÃæµÄÖĞÎÄÌáÊ¾»á±ä³ÉÂÒÂë£¬
+REM ¹¦ÄÜ²»ÊÜÓ°Ïì¡£ÕâÀï¸øÒ»Ìõ ASCII ÌáÊ¾£¬ÂÒÂëÊ±Ò²ÄÜÈÏ³öÀ´¡£
 set "CP_OK="
 for /f "tokens=*" %%c in ('chcp 2^>nul ^| findstr "936"') do set "CP_OK=1"
 if not defined CP_OK (
@@ -39,28 +39,28 @@ if not defined CP_OK (
     echo     uncheck "Beta: Use Unicode UTF-8 for worldwide language support".
 )
 
-REM ========== 0. ç¯å¢ƒæ£€æŸ¥ ==========
-echo [0/5] æ£€æŸ¥è¿è¡Œç¯å¢ƒ...
+REM ========== 0. »·¾³¼ì²é ==========
+echo [0/5] ¼ì²éÔËĞĞ»·¾³...
 
-REM å¯é çš„å»¶æ—¶å‘½ä»¤ï¼šPATH é‡Œå¯èƒ½å­˜åœ¨ Git è‡ªå¸¦çš„ GNU timeout.exeï¼Œ
-REM å®ƒä¼šæŠŠ "timeout /t 1" å½“æˆéæ³•å‚æ•°è€Œç›´æ¥æŠ¥é”™ï¼ˆé€€å‡ºç  125ï¼‰ï¼Œ
-REM æ‰€ä»¥è¿™é‡Œæ˜¾å¼ä½¿ç”¨ Windows è‡ªå¸¦çš„ timeout.exeã€‚
+REM ¿É¿¿µÄÑÓÊ±ÃüÁî£ºPATH Àï¿ÉÄÜ´æÔÚ Git ×Ô´øµÄ GNU timeout.exe£¬
+REM Ëü»á°Ñ "timeout /t 1" µ±³É·Ç·¨²ÎÊı¶øÖ±½Ó±¨´í£¨ÍË³öÂë 125£©£¬
+REM ËùÒÔÕâÀïÏÔÊ½Ê¹ÓÃ Windows ×Ô´øµÄ timeout.exe¡£
 set "SLEEP=%SystemRoot%\System32\timeout.exe"
 if not exist "%SLEEP%" set "SLEEP=timeout"
 
-REM å°±ç»ªæ¢æµ‹å·¥å…·ï¼šä¼˜å…ˆç³»ç»Ÿè‡ªå¸¦ curl.exeï¼ˆæ›´å¿«ï¼‰ï¼Œç¼ºå¤±æ—¶å›é€€åˆ° Python æ ‡å‡†åº“ã€‚
-REM æ—§è„šæœ¬è£¸ç”¨ curlï¼šç²¾ç®€ç³»ç»Ÿ / æ—§ç‰ˆ Windows ä¸Šæ²¡æœ‰ curl.exe æ—¶ï¼Œå¥åº·æ£€æŸ¥ä¼š
-REM æ°¸è¿œå¤±è´¥å¹¶è¯¯æŠ¥ã€Œåç«¯å¯åŠ¨è¶…æ—¶ã€ï¼Œå³ä½¿åç«¯å…¶å®è¿è¡Œå¾—å¾ˆå¥½ã€‚
+REM ¾ÍĞ÷Ì½²â¹¤¾ß£ºÓÅÏÈÏµÍ³×Ô´ø curl.exe£¨¸ü¿ì£©£¬È±Ê§Ê±»ØÍËµ½ Python ±ê×¼¿â¡£
+REM ¾É½Å±¾ÂãÓÃ curl£º¾«¼òÏµÍ³ / ¾É°æ Windows ÉÏÃ»ÓĞ curl.exe Ê±£¬½¡¿µ¼ì²é»á
+REM ÓÀÔ¶Ê§°Ü²¢Îó±¨¡¸ºó¶ËÆô¶¯³¬Ê±¡¹£¬¼´Ê¹ºó¶ËÆäÊµÔËĞĞµÃºÜºÃ¡£
 set "CURL="
 if exist "%SystemRoot%\System32\curl.exe" set "CURL=%SystemRoot%\System32\curl.exe"
 if not defined CURL (
     where curl >nul 2>&1 && set "CURL=curl"
 )
 
-REM ---- 0.1 é€‰æ‹©ã€Œè£…æœ‰é¡¹ç›®ä¾èµ–ã€çš„ Python è§£é‡Šå™¨ ----
-REM PATH ä¸Šçš„ç¬¬ä¸€ä¸ª python æœªå¿…æ˜¯æœ¬é¡¹ç›®çš„è§£é‡Šå™¨ï¼ˆå¯èƒ½ç¼ºå°‘ fastapi/uvicornï¼‰ã€‚
-REM ä¾æ¬¡æ¢æµ‹ï¼šPYTHON_EXE ç¯å¢ƒå˜é‡ > PATH ä¸­çš„ python > where python å…¨éƒ¨å‘½ä¸­
-REM > å¸¸è§å®‰è£…è·¯å¾„ï¼Œå–ç¬¬ä¸€ä¸ªèƒ½ import æ ¸å¿ƒä¾èµ–çš„ã€‚
+REM ---- 0.1 Ñ¡Ôñ¡¸×°ÓĞÏîÄ¿ÒÀÀµ¡¹µÄ Python ½âÊÍÆ÷ ----
+REM PATH ÉÏµÄµÚÒ»¸ö python Î´±ØÊÇ±¾ÏîÄ¿µÄ½âÊÍÆ÷£¨¿ÉÄÜÈ±ÉÙ fastapi/uvicorn£©¡£
+REM ÒÀ´ÎÌ½²â£ºPYTHON_EXE »·¾³±äÁ¿ > PATH ÖĞµÄ python > where python È«²¿ÃüÖĞ
+REM > ³£¼û°²×°Â·¾¶£¬È¡µÚÒ»¸öÄÜ import ºËĞÄÒÀÀµµÄ¡£
 set "PY="
 if defined PYTHON_EXE (
     if exist "%PYTHON_EXE%" (
@@ -91,10 +91,10 @@ if not defined PY (
     )
 )
 if not defined PY (
-    echo [é”™è¯¯] æœªæ‰¾åˆ°è£…æœ‰é¡¹ç›®ä¾èµ–çš„ Python è§£é‡Šå™¨
-    echo   å·²å°è¯• PATH ä¸­çš„ python åŠå¸¸è§å®‰è£…è·¯å¾„ï¼Œå‡æ— æ³• import æ ¸å¿ƒä¾èµ–ã€‚
-    echo   è¯·å…ˆå®‰è£…ä¾èµ–ï¼špip install -r backend\requirements.txt
-    echo   æˆ–æ˜¾å¼æŒ‡å®šè§£é‡Šå™¨åé‡è¯•ï¼šset PYTHON_EXE=^<python.exe å®Œæ•´è·¯å¾„^>
+    echo [´íÎó] Î´ÕÒµ½×°ÓĞÏîÄ¿ÒÀÀµµÄ Python ½âÊÍÆ÷
+    echo   ÒÑ³¢ÊÔ PATH ÖĞµÄ python ¼°³£¼û°²×°Â·¾¶£¬¾ùÎŞ·¨ import ºËĞÄÒÀÀµ¡£
+    echo   ÇëÏÈ°²×°ÒÀÀµ£ºpip install -r backend\requirements.txt
+    echo   »òÏÔÊ½Ö¸¶¨½âÊÍÆ÷ºóÖØÊÔ£ºset PYTHON_EXE=^<python.exe ÍêÕûÂ·¾¶^>
     pause
     exit /b 1
 )
@@ -103,26 +103,26 @@ echo   Python: %PY_VER%
 echo            %PY%
 
 REM ---- Node.js ----
-REM å…ˆæ‰¾ nodeï¼Œæ‰¾ä¸åˆ°å†æ¢æµ‹å¸¸è§å®‰è£…ç›®å½•ï¼ˆå« nvm4w çš„ç¬¦å·é“¾æ¥ç›®å½•ï¼‰ã€‚
-REM å®æµ‹è¸©åˆ°çš„å‘ï¼šæŸäº›ç»ˆç«¯ / åŒ…è£…å™¨ä¼šæŠŠ NVM_HOMEã€NVM_SYMLINK è¿™ä¸¤ä¸ªå˜é‡å
-REM åŸæ ·ï¼ˆæœªå±•å¼€ï¼‰å†™è¿› PATHï¼Œæ­¤æ—¶ node æ˜æ˜è£…ç€ï¼ˆæœ¬æœº C:\nvm4w\nodejs ä¸‹
-REM node.exe v25.8.0ï¼‰ï¼Œä½† where node æ°¸è¿œæ‰¾ä¸åˆ°ï¼Œè„šæœ¬å¡åœ¨ã€Œæœªæ‰¾åˆ° Node.jsã€ã€‚
-REM è¿™é‡Œä¸ä¸Šé¢çš„ Python è§£é‡Šå™¨æ¢æµ‹ä¿æŒä¸€è‡´ï¼Œåšä¸€æ¬¡è‡ªæ„ˆã€‚
+REM ÏÈÕÒ node£¬ÕÒ²»µ½ÔÙÌ½²â³£¼û°²×°Ä¿Â¼£¨º¬ nvm4w µÄ·ûºÅÁ´½ÓÄ¿Â¼£©¡£
+REM Êµ²â²Èµ½µÄ¿Ó£ºÄ³Ğ©ÖÕ¶Ë / °ü×°Æ÷»á°Ñ NVM_HOME¡¢NVM_SYMLINK ÕâÁ½¸ö±äÁ¿Ãû
+REM Ô­Ñù£¨Î´Õ¹¿ª£©Ğ´½ø PATH£¬´ËÊ± node Ã÷Ã÷×°×Å£¨±¾»ú C:\nvm4w\nodejs ÏÂ
+REM node.exe v25.8.0£©£¬µ« where node ÓÀÔ¶ÕÒ²»µ½£¬½Å±¾¿¨ÔÚ¡¸Î´ÕÒµ½ Node.js¡¹¡£
+REM ÕâÀïÓëÉÏÃæµÄ Python ½âÊÍÆ÷Ì½²â±£³ÖÒ»ÖÂ£¬×öÒ»´Î×ÔÓú¡£
 set "NODE_DIR="
 if defined NVM_SYMLINK if exist "%NVM_SYMLINK%\node.exe" set "NODE_DIR=%NVM_SYMLINK%"
 if not defined NODE_DIR if exist "C:\nvm4w\nodejs\node.exe" set "NODE_DIR=C:\nvm4w\nodejs"
 if not defined NODE_DIR if exist "C:\Program Files\nodejs\node.exe" set "NODE_DIR=C:\Program Files\nodejs"
 if not defined NODE_DIR if exist "C:\Program Files (x86)\nodejs\node.exe" set "NODE_DIR=C:\Program Files (x86)\nodejs"
 if defined NODE_DIR (
-    echo   [!] node ä¸åœ¨ PATH ä¸­ï¼Œæ”¹ç”¨: %NODE_DIR%
+    echo   [!] node ²»ÔÚ PATH ÖĞ£¬¸ÄÓÃ: %NODE_DIR%
     set "PATH=%NODE_DIR%;%PATH%"
 )
 where node >nul 2>&1
 if errorlevel 1 (
-    echo [é”™è¯¯] æœªæ‰¾åˆ° Node.js
-    echo   è¯·å®‰è£… Node.js 20+ : https://nodejs.org/
-    echo   è‹¥ç”¨ nvm-windows / Volta ç®¡ç† Nodeï¼Œè¯·å…ˆæ‰§è¡Œ nvm use æˆ– volta install node
-    echo   å·²å®‰è£…ä½†æ‰¾ä¸åˆ°æ—¶ï¼Œè¯·æŠŠ node.exe æ‰€åœ¨ç›®å½•åŠ å…¥ PATHï¼ˆå¦‚ C:\nvm4w\nodejsï¼‰
+    echo [´íÎó] Î´ÕÒµ½ Node.js
+    echo   Çë°²×° Node.js 20+ : https://nodejs.org/
+    echo   ÈôÓÃ nvm-windows / Volta ¹ÜÀí Node£¬ÇëÏÈÖ´ĞĞ nvm use »ò volta install node
+    echo   ÒÑ°²×°µ«ÕÒ²»µ½Ê±£¬Çë°Ñ node.exe ËùÔÚÄ¿Â¼¼ÓÈë PATH£¨Èç C:\nvm4w\nodejs£©
     pause
     exit /b 1
 )
@@ -131,7 +131,7 @@ echo   Node.js: %NODE_VER%
 
 where npm >nul 2>&1
 if errorlevel 1 (
-    echo [é”™è¯¯] æœªæ‰¾åˆ° npm ^(éš Node.js å®‰è£…^)
+    echo [´íÎó] Î´ÕÒµ½ npm ^(Ëæ Node.js °²×°^)
     pause
     exit /b 1
 )
@@ -140,29 +140,29 @@ echo   npm: %NPM_VER%
 
 echo.
 
-REM ========== 1. æ¸…ç†ç«¯å£ ==========
-echo [1/5] æ¸…ç†ç«¯å£å ç”¨ (8000 / 5175)...
-REM å…ˆ taskkill å†æŒ‰ç»“æœæ‰“å°ï¼švite ä¼šåŒæ—¶ç»‘å®š 0.0.0.0 ä¸ [::]ï¼ŒåŒä¸€ PID åœ¨
-REM netstat é‡Œå‡ºç°ä¸¤è¡Œï¼Œè‹¥å…ˆæ‰“å°å°±ä¼šé‡å¤æŠ¥ä¸€æ¬¡ã€‚ç¬¬äºŒæ¬¡ taskkill å¿…ç„¶å¤±è´¥ï¼Œ
-REM å› æ­¤å¤©ç„¶å»é‡ï¼Œæªè¾ä¹Ÿä»ã€Œå°è¯•ç»ˆæ­¢ã€å˜æˆå‡†ç¡®çš„ã€Œå·²ç»ˆæ­¢ã€ã€‚
+REM ========== 1. ÇåÀí¶Ë¿Ú ==========
+echo [1/5] ÇåÀí¶Ë¿ÚÕ¼ÓÃ (8000 / 5175)...
+REM ÏÈ taskkill ÔÙ°´½á¹û´òÓ¡£ºvite »áÍ¬Ê±°ó¶¨ 0.0.0.0 Óë [::]£¬Í¬Ò» PID ÔÚ
+REM netstat Àï³öÏÖÁ½ĞĞ£¬ÈôÏÈ´òÓ¡¾Í»áÖØ¸´±¨Ò»´Î¡£µÚ¶ş´Î taskkill ±ØÈ»Ê§°Ü£¬
+REM Òò´ËÌìÈ»È¥ÖØ£¬´ë´ÇÒ²´Ó¡¸³¢ÊÔÖÕÖ¹¡¹±ä³É×¼È·µÄ¡¸ÒÑÖÕÖ¹¡¹¡£
 for /f "tokens=5" %%a in ('netstat -ano ^| findstr ":8000 " ^| findstr "LISTENING"') do (
     if not "%%a"=="0" (
         taskkill /PID %%a /T /F >nul 2>&1
-        if not errorlevel 1 echo   ç«¯å£ 8000 è¢« PID %%a å ç”¨ï¼Œå·²ç»ˆæ­¢
+        if not errorlevel 1 echo   ¶Ë¿Ú 8000 ±» PID %%a Õ¼ÓÃ£¬ÒÑÖÕÖ¹
     )
 )
 for /f "tokens=5" %%a in ('netstat -ano ^| findstr ":5175 " ^| findstr "LISTENING"') do (
     if not "%%a"=="0" (
         taskkill /PID %%a /T /F >nul 2>&1
-        if not errorlevel 1 echo   ç«¯å£ 5175 è¢« PID %%a å ç”¨ï¼Œå·²ç»ˆæ­¢
+        if not errorlevel 1 echo   ¶Ë¿Ú 5175 ±» PID %%a Õ¼ÓÃ£¬ÒÑÖÕÖ¹
     )
 )
 %SLEEP% /t 1 >nul 2>&1
-REM å¤æ ¸ï¼štaskkill å¤±è´¥æ—¶ï¼ˆä¾‹å¦‚è¢«å ç”¨çš„æ˜¯ç®¡ç†å‘˜è¿›ç¨‹/ç³»ç»ŸæœåŠ¡ï¼‰æ—§è„šæœ¬ä¼šé™é»˜è·³è¿‡ï¼Œ
-REM ç»“æœæ˜¯æ–°èµ·çš„ uvicorn æŠ¥ã€Œaddress already in useã€è€Œçª—å£ä¸€é—ªè€Œè¿‡ï¼Œç”¨æˆ·å®Œå…¨ä¸çŸ¥æƒ…ï¼›
-REM æ›´ç³Ÿçš„æ˜¯åç»­å¥åº·æ¢æµ‹ä¼šæ‰“åˆ°ã€Œæ®‹ç•™çš„æ—§åç«¯ã€ä¸Šï¼Œè„šæœ¬è¯¯æŠ¥ [OK] æœåŠ¡å·²å¯åŠ¨ï¼Œ
-REM ç”¨æˆ·å®é™…è·‘çš„æ˜¯ä¸€ä»½è¿‡æœŸå®ä¾‹ã€‚å› æ­¤ 8000 ä»è¢«å ç”¨æ—¶ç›´æ¥ç¡¬å¤±è´¥å¹¶æç¤ºç”¨ç®¡ç†å‘˜æƒé™é‡è·‘ï¼Œ
-REM ç»ä¸å¸¦ç€å‡ OK ç»§ç»­ã€‚
+REM ¸´ºË£ºtaskkill Ê§°ÜÊ±£¨ÀıÈç±»Õ¼ÓÃµÄÊÇ¹ÜÀíÔ±½ø³Ì/ÏµÍ³·şÎñ£©¾É½Å±¾»á¾²Ä¬Ìø¹ı£¬
+REM ½á¹ûÊÇĞÂÆğµÄ uvicorn ±¨¡¸address already in use¡¹¶ø´°¿ÚÒ»ÉÁ¶ø¹ı£¬ÓÃ»§ÍêÈ«²»ÖªÇé£»
+REM ¸üÔãµÄÊÇºóĞø½¡¿µÌ½²â»á´òµ½¡¸²ĞÁôµÄ¾Éºó¶Ë¡¹ÉÏ£¬½Å±¾Îó±¨ [OK] ·şÎñÒÑÆô¶¯£¬
+REM ÓÃ»§Êµ¼ÊÅÜµÄÊÇÒ»·İ¹ıÆÚÊµÀı¡£Òò´Ë 8000 ÈÔ±»Õ¼ÓÃÊ±Ö±½ÓÓ²Ê§°Ü²¢ÌáÊ¾ÓÃ¹ÜÀíÔ±È¨ÏŞÖØÅÜ£¬
+REM ¾ø²»´ø×Å¼Ù OK ¼ÌĞø¡£
 
 REM ---- pass 2: kill_port.ps1 sweeps the real socket holder -----------------
 REM "taskkill /PID <owner> /T /F" alone is NOT enough for uvicorn --reload:
@@ -209,31 +209,31 @@ for /f "tokens=5" %%a in ('netstat -ano ^| findstr ":5175 " ^| findstr "LISTENIN
     if not "%%a"=="0" set "PORT_5175_BUSY=%%a"
 )
 if defined PORT_8000_BUSY (
-    echo   [!] ç«¯å£ 8000 ä»è¢« PID %PORT_8000_BUSY% å ç”¨ï¼ˆtaskkill å¯èƒ½å› æƒé™ä¸è¶³è€Œå¤±è´¥ï¼‰
-    echo      åç«¯æ— æ³•åœ¨æ–°çª—å£ç»‘å®š 8000ï¼›è‹¥ä»å¯åŠ¨ä¼šå¾—åˆ°ã€Œå‡ OKã€ï¼ˆæ¢æµ‹å‘½ä¸­æ®‹ç•™æ—§åç«¯ï¼‰ã€‚
-    echo      è¯·å…ˆç»“æŸè¯¥è¿›ç¨‹ï¼Œæˆ–ã€Œä»¥ç®¡ç†å‘˜èº«ä»½ã€é‡è·‘æœ¬è„šæœ¬ï¼š
-    echo      ï¼ˆå³é”® start_all.bat - ä»¥ç®¡ç†å‘˜èº«ä»½è¿è¡Œï¼‰
+    echo   [!] ¶Ë¿Ú 8000 ÈÔ±» PID %PORT_8000_BUSY% Õ¼ÓÃ£¨taskkill ¿ÉÄÜÒòÈ¨ÏŞ²»×ã¶øÊ§°Ü£©
+    echo      ºó¶ËÎŞ·¨ÔÚĞÂ´°¿Ú°ó¶¨ 8000£»ÈôÈÔÆô¶¯»áµÃµ½¡¸¼Ù OK¡¹£¨Ì½²âÃüÖĞ²ĞÁô¾Éºó¶Ë£©¡£
+    echo      ÇëÏÈ½áÊø¸Ã½ø³Ì£¬»ò¡¸ÒÔ¹ÜÀíÔ±Éí·İ¡¹ÖØÅÜ±¾½Å±¾£º
+    echo      £¨ÓÒ¼ü start_all.bat - ÒÔ¹ÜÀíÔ±Éí·İÔËĞĞ£©
     pause
     exit /b 1
 )
 if defined PORT_5175_BUSY (
-    echo   [!] ç«¯å£ 5175 ä»è¢«å ç”¨ï¼ˆtaskkill å¯èƒ½å› æƒé™ä¸è¶³è€Œå¤±è´¥ï¼‰
-    echo      å‰ç«¯å¯èƒ½æ”¹ç»‘å…¶å®ƒç«¯å£æˆ–å¯åŠ¨å¤±è´¥ï¼Œè¯·æ‰‹åŠ¨ç»“æŸè¯¥è¿›ç¨‹åé‡è¯•ï¼ˆå»ºè®®ç®¡ç†å‘˜èº«ä»½é‡è·‘ï¼‰
+    echo   [!] ¶Ë¿Ú 5175 ÈÔ±»Õ¼ÓÃ£¨taskkill ¿ÉÄÜÒòÈ¨ÏŞ²»×ã¶øÊ§°Ü£©
+    echo      Ç°¶Ë¿ÉÄÜ¸Ä°óÆäËü¶Ë¿Ú»òÆô¶¯Ê§°Ü£¬ÇëÊÖ¶¯½áÊø¸Ã½ø³ÌºóÖØÊÔ£¨½¨Òé¹ÜÀíÔ±Éí·İÖØÅÜ£©
 )
-echo   å®Œæˆ
+echo   Íê³É
 
-REM ========== 2. åç«¯ä¾èµ– ==========
+REM ========== 2. ºó¶ËÒÀÀµ ==========
 echo.
-echo [2/5] åç«¯ä¾èµ– (FastAPI + Uvicorn + AI æœåŠ¡)...
+echo [2/5] ºó¶ËÒÀÀµ (FastAPI + Uvicorn + AI ·şÎñ)...
 cd /d "%~dp0backend"
 
 if not exist ".env" (
     if exist ".env.example" (
         copy ".env.example" ".env" >nul
-        echo   å·²ä» .env.example åˆ›å»º .env
-        echo   [!] è¯·ç¼–è¾‘ backend\.env å¡«å†™ FERNET_KEY å’Œ AI API Key
+        echo   ÒÑ´Ó .env.example ´´½¨ .env
+        echo   [!] Çë±à¼­ backend\.env ÌîĞ´ FERNET_KEY ºÍ AI API Key
     ) else (
-        echo   [!] æœªæ‰¾åˆ° .env.exampleï¼Œè·³è¿‡
+        echo   [!] Î´ÕÒµ½ .env.example£¬Ìø¹ı
     )
 )
 
@@ -249,97 +249,97 @@ if errorlevel 1 (
     exit /b 1
 )
 
-REM å¼ºæ ¡éªŒï¼šç›´æ¥ import æ•´ä¸ªåº”ç”¨ï¼Œç­‰ä»·äº uvicorn å¯åŠ¨æ—¶çš„å®Œæ•´å¯¼å…¥å›¾ã€‚
-REM æ—§è„šæœ¬åªæŸ¥ 4 ä¸ªåŒ…ï¼špydantic è¢«é™çº§åˆ° v1ã€lxml / pymupdf ç¼ºå¤±ç­‰æƒ…å†µä¸‹
-REM è¯¥æ£€æŸ¥ä¼šé€šè¿‡ï¼Œä½† uvicorn ä¸€å¯åŠ¨å°±å´©ï¼Œç”¨æˆ·çœ‹åˆ°çš„æ˜¯ã€Œå·²å°±ç»ªã€å´æ‰“ä¸å¼€é¡µé¢ã€‚
+REM Ç¿Ğ£Ñé£ºÖ±½Ó import Õû¸öÓ¦ÓÃ£¬µÈ¼ÛÓÚ uvicorn Æô¶¯Ê±µÄÍêÕûµ¼ÈëÍ¼¡£
+REM ¾É½Å±¾Ö»²é 4 ¸ö°ü£ºpydantic ±»½µ¼¶µ½ v1¡¢lxml / pymupdf È±Ê§µÈÇé¿öÏÂ
+REM ¸Ã¼ì²é»áÍ¨¹ı£¬µ« uvicorn Ò»Æô¶¯¾Í±À£¬ÓÃ»§¿´µ½µÄÊÇ¡¸ÒÑ¾ÍĞ÷¡¹È´´ò²»¿ªÒ³Ãæ¡£
 "%PY%" -c "import app.main" >nul 2>&1
 if errorlevel 1 (
-    echo   æ­£åœ¨å®‰è£…/ä¿®å¤åç«¯ä¾èµ– ^(é¦–æ¬¡å¯èƒ½è¾ƒæ…¢ï¼Œè¯·è€å¿ƒç­‰å¾…^)...
+    echo   ÕıÔÚ°²×°/ĞŞ¸´ºó¶ËÒÀÀµ ^(Ê×´Î¿ÉÄÜ½ÏÂı£¬ÇëÄÍĞÄµÈ´ı^)...
     "%PY%" -m pip install --upgrade pip
     "%PY%" -m pip install -r requirements.txt
     if errorlevel 1 (
-        echo [é”™è¯¯] åç«¯ä¾èµ–å®‰è£…å¤±è´¥
-        echo   æ‰‹åŠ¨å°è¯•: "%PY%" -m pip install -r requirements.txt
+        echo [´íÎó] ºó¶ËÒÀÀµ°²×°Ê§°Ü
+        echo   ÊÖ¶¯³¢ÊÔ: "%PY%" -m pip install -r requirements.txt
         pause
         exit /b 1
     )
     "%PY%" -c "import app.main" >nul 2>&1
     if errorlevel 1 (
-        echo [é”™è¯¯] ä¾èµ–å·²å®‰è£…ä½†åº”ç”¨ä»æ— æ³•å¯¼å…¥ï¼Œè¯·æ‰‹åŠ¨æ’æŸ¥ï¼š
+        echo [´íÎó] ÒÀÀµÒÑ°²×°µ«Ó¦ÓÃÈÔÎŞ·¨µ¼Èë£¬ÇëÊÖ¶¯ÅÅ²é£º
         echo   cd backend ^&^& "%PY%" -c "import app.main"
         pause
         exit /b 1
     )
-    echo   [OK] åç«¯ä¾èµ–å·²å®‰è£…å®Œæˆ
+    echo   [OK] ºó¶ËÒÀÀµÒÑ°²×°Íê³É
 ) else (
-    echo   [OK] åç«¯ä¾èµ–å·²å°±ç»ª
+    echo   [OK] ºó¶ËÒÀÀµÒÑ¾ÍĞ÷
 )
 
-REM æ£€æŸ¥å›¾è¡¨æ¸²æŸ“å™¨
-REM æ³¨æ„ï¼špython -c çš„å‚æ•°é‡Œç»å¯¹ä¸èƒ½å†™ä¸­æ–‡ã€‚å½“æ§åˆ¶å° OEM ä»£ç é¡µä¸æ˜¯ 936 æ—¶
-REM ï¼ˆWindows 11ï¼Œæˆ–å¼€å¯ã€Œä½¿ç”¨ Unicode UTF-8ã€åå¸¸è§çš„ 65001ï¼‰ï¼Œcmd ä¼šæŠŠæœ¬æ–‡ä»¶
-REM é‡Œçš„ GBK ä¸­æ–‡å­—èŠ‚æŒ‰é”™è¯¯ä»£ç é¡µè§£ç æˆ U+FFFDï¼Œpython å†ä»¥ gbk ç¼–ç è¾“å‡ºå°±æŠ›
-REM UnicodeEncodeErrorï¼Œå¯¼è‡´æœ¬è¡Œè¯¯æŠ¥ã€Œæ¸²æŸ“å™¨åŠ è½½å¼‚å¸¸ã€â€”â€”è€Œæ¸²æŸ“å™¨å…¶å®æ˜¯å¥½çš„ã€‚
-REM æ‰€ä»¥ -c é‡Œåªæ”¾ ASCIIï¼Œä¸­æ–‡æç¤ºæ”¹ç”±æœ¬è„šæœ¬çš„ echo è¾“å‡ºã€‚
+REM ¼ì²éÍ¼±íäÖÈ¾Æ÷
+REM ×¢Òâ£ºpython -c µÄ²ÎÊıÀï¾ø¶Ô²»ÄÜĞ´ÖĞÎÄ¡£µ±¿ØÖÆÌ¨ OEM ´úÂëÒ³²»ÊÇ 936 Ê±
+REM £¨Windows 11£¬»ò¿ªÆô¡¸Ê¹ÓÃ Unicode UTF-8¡¹ºó³£¼ûµÄ 65001£©£¬cmd »á°Ñ±¾ÎÄ¼ş
+REM ÀïµÄ GBK ÖĞÎÄ×Ö½Ú°´´íÎó´úÂëÒ³½âÂë³É U+FFFD£¬python ÔÙÒÔ gbk ±àÂëÊä³ö¾ÍÅ×
+REM UnicodeEncodeError£¬µ¼ÖÂ±¾ĞĞÎó±¨¡¸äÖÈ¾Æ÷¼ÓÔØÒì³£¡¹¡ª¡ª¶øäÖÈ¾Æ÷ÆäÊµÊÇºÃµÄ¡£
+REM ËùÒÔ -c ÀïÖ»·Å ASCII£¬ÖĞÎÄÌáÊ¾¸ÄÓÉ±¾½Å±¾µÄ echo Êä³ö¡£
 "%PY%" -c "from app.services.ai.mermaid_renderer import _chart_cache" >nul 2>&1 && (
-    echo   [OK] Mermaid æ¸²æŸ“å™¨å¯ç”¨ ^(PIL v2 å›é€€^)
+    echo   [OK] Mermaid äÖÈ¾Æ÷¿ÉÓÃ ^(PIL v2 »ØÍË^)
 ) || (
-    echo   [!] Mermaid æ¸²æŸ“å™¨åŠ è½½å¼‚å¸¸ï¼Œé¦–æ¬¡å¯åŠ¨æ—¶ä¼šè‡ªåŠ¨é‡å»º
+    echo   [!] Mermaid äÖÈ¾Æ÷¼ÓÔØÒì³££¬Ê×´ÎÆô¶¯Ê±»á×Ô¶¯ÖØ½¨
 )
 
-REM ========== 2.5 å¯é€‰ä¾èµ–ï¼ˆOCR å¼•æ“ + Windows PDF å¯¼å‡ºæ§ä»¶ï¼‰ ==========
+REM ========== 2.5 ¿ÉÑ¡ÒÀÀµ£¨OCR ÒıÇæ + Windows PDF µ¼³ö¿Ø¼ş£© ==========
 echo.
-echo [2.5] å¯é€‰ä¾èµ– (ç¦»çº¿ OCR å¼•æ“ / Windows PDF å¯¼å‡ºæ§ä»¶)...
+echo [2.5] ¿ÉÑ¡ÒÀÀµ (ÀëÏß OCR ÒıÇæ / Windows PDF µ¼³ö¿Ø¼ş)...
 
-REM ç¦»çº¿ OCR å¼•æ“ï¼ˆæ‰«æä»¶/å›¾ç‰‡å‹èµ„æ–™æ–‡å­—è¯†åˆ«ï¼Œçº¦ 100~200MBï¼Œå¤±è´¥ä¸å½±å“ä¸»æµç¨‹ï¼‰
+REM ÀëÏß OCR ÒıÇæ£¨É¨Ãè¼ş/Í¼Æ¬ĞÍ×ÊÁÏÎÄ×ÖÊ¶±ğ£¬Ô¼ 100~200MB£¬Ê§°Ü²»Ó°ÏìÖ÷Á÷³Ì£©
 "%PY%" -c "import rapidocr_onnxruntime" >nul 2>&1 || (
-    echo   æ­£åœ¨å®‰è£… OCR å¼•æ“ ^(requirements-ocr.txt^)...
+    echo   ÕıÔÚ°²×° OCR ÒıÇæ ^(requirements-ocr.txt^)...
     "%PY%" -m pip install -r requirements-ocr.txt >nul 2>&1 && (
-        echo   [OK] OCR å¼•æ“å·²å®‰è£…
+        echo   [OK] OCR ÒıÇæÒÑ°²×°
     ) || (
-        echo   [!] OCR å¼•æ“å®‰è£…å¤±è´¥ï¼Œæ‰«æä»¶è¯†åˆ«å°†èµ° Tesseract/è§†è§‰æ¨¡å‹å…œåº•
+        echo   [!] OCR ÒıÇæ°²×°Ê§°Ü£¬É¨Ãè¼şÊ¶±ğ½«×ß Tesseract/ÊÓ¾õÄ£ĞÍ¶µµ×
     )
 )
 
-REM Windows ä¸“ç”¨ï¼šDOCX->PDF é«˜è´¨é‡å¯¼å‡ºï¼ˆéœ€æœ¬æœº Microsoft Wordï¼‰
+REM Windows ×¨ÓÃ£ºDOCX->PDF ¸ßÖÊÁ¿µ¼³ö£¨Ğè±¾»ú Microsoft Word£©
 "%PY%" -c "import win32com" >nul 2>&1 || (
-    echo   æ­£åœ¨å®‰è£… Windows PDF å¯¼å‡ºæ§ä»¶ ^(requirements-windows.txt^)...
+    echo   ÕıÔÚ°²×° Windows PDF µ¼³ö¿Ø¼ş ^(requirements-windows.txt^)...
     "%PY%" -m pip install -r requirements-windows.txt >nul 2>&1 && (
-        echo   [OK] Windows PDF å¯¼å‡ºæ§ä»¶å·²å®‰è£…
+        echo   [OK] Windows PDF µ¼³ö¿Ø¼şÒÑ°²×°
     ) || (
-        echo   [!] Windows PDF æ§ä»¶å®‰è£…å¤±è´¥ï¼Œå°†å›é€€ LibreOffice/soffice
+        echo   [!] Windows PDF ¿Ø¼ş°²×°Ê§°Ü£¬½«»ØÍË LibreOffice/soffice
     )
 )
 
-REM æ£€æŸ¥ OCR å¼•æ“ï¼ˆæ‰«æä»¶ / å›¾ç‰‡å‹èµ„æ–™çš„æ–‡å­—è¯†åˆ«ï¼‰
+REM ¼ì²é OCR ÒıÇæ£¨É¨Ãè¼ş / Í¼Æ¬ĞÍ×ÊÁÏµÄÎÄ×ÖÊ¶±ğ£©
 "%PY%" -c "import sys; from app.services.ocr import ocr_capabilities as c; cap=c(); sys.exit(0 if (cap['tesseract'] or cap['rapidocr']) else 1)" >nul 2>&1 && (
-    echo   [OK] OCR å¼•æ“å·²å°±ç»ªï¼Œæ‰«æä»¶/å›¾ç‰‡å‹èµ„æ–™å¯æå–
+    echo   [OK] OCR ÒıÇæÒÑ¾ÍĞ÷£¬É¨Ãè¼ş/Í¼Æ¬ĞÍ×ÊÁÏ¿ÉÌáÈ¡
 ) || (
-    echo   [!] æœªæ£€æµ‹åˆ°æœ¬åœ° OCR å¼•æ“ï¼›è‹¥æœªé…ç½®è§†è§‰æ¨¡å‹ï¼Œæ‰«æä»¶å°†æ— æ³•æå–æ–‡å­—
-    echo      å¯ç”¨æ–¹å¼ï¼šcd backend ^&^& pip install -r requirements-ocr.txt
-    echo      æˆ–å®‰è£… Tesseract-OCR å¹¶é…ç½® TESSERACT_PATHï¼Œæˆ–åœ¨ã€ŒAI é…ç½®ã€æ·»åŠ è§†è§‰æ¨¡å‹
-    echo      è¯¦æƒ…ï¼šhttp://localhost:8000/api/v1/diagnostics/capabilities
+    echo   [!] Î´¼ì²âµ½±¾µØ OCR ÒıÇæ£»ÈôÎ´ÅäÖÃÊÓ¾õÄ£ĞÍ£¬É¨Ãè¼ş½«ÎŞ·¨ÌáÈ¡ÎÄ×Ö
+    echo      ÆôÓÃ·½Ê½£ºcd backend ^&^& pip install -r requirements-ocr.txt
+    echo      »ò°²×° Tesseract-OCR ²¢ÅäÖÃ TESSERACT_PATH£¬»òÔÚ¡¸AI ÅäÖÃ¡¹Ìí¼ÓÊÓ¾õÄ£ĞÍ
+    echo      ÏêÇé£ºhttp://localhost:8000/api/v1/diagnostics/capabilities
 )
 
-REM ========== 3. å‰ç«¯ä¾èµ– ==========
+REM ========== 3. Ç°¶ËÒÀÀµ ==========
 echo.
-echo [3/5] å‰ç«¯ä¾èµ– (React + Vite + Ant Design)...
+echo [3/5] Ç°¶ËÒÀÀµ (React + Vite + Ant Design)...
 cd /d "%~dp0frontend"
 
-REM åªåˆ¤æ–­ node_modules ç›®å½•ä¼šæ¼åˆ¤ï¼šnpm install è¢« Ctrl+C / æ–­ç”µä¸­æ–­æ—¶ç›®å½•
-REM å·²å­˜åœ¨ä½†ä¸å®Œæ•´ï¼Œæ—§è„šæœ¬ä¼šç›´æ¥æŠ¥ã€Œå·²å°±ç»ªã€ï¼Œéšå npm run dev æ‰ä»¥éš¾ä»¥
-REM ç†è§£çš„ ENOENT æŠ¥é”™å¤±è´¥ã€‚è¿™é‡Œæ£€æŸ¥ vite çš„å…¥å£è„šæœ¬æ˜¯å¦çœŸçš„å­˜åœ¨ã€‚
+REM Ö»ÅĞ¶Ï node_modules Ä¿Â¼»áÂ©ÅĞ£ºnpm install ±» Ctrl+C / ¶ÏµçÖĞ¶ÏÊ±Ä¿Â¼
+REM ÒÑ´æÔÚµ«²»ÍêÕû£¬¾É½Å±¾»áÖ±½Ó±¨¡¸ÒÑ¾ÍĞ÷¡¹£¬Ëæºó npm run dev ²ÅÒÔÄÑÒÔ
+REM Àí½âµÄ ENOENT ±¨´íÊ§°Ü¡£ÕâÀï¼ì²é vite µÄÈë¿Ú½Å±¾ÊÇ·ñÕæµÄ´æÔÚ¡£
 if not exist "node_modules\.bin\vite.cmd" (
-    echo   node_modules ç¼ºå¤±æˆ–ä¸å®Œæ•´ï¼Œæ­£åœ¨å®‰è£… ^(å¯èƒ½éœ€è¦ 1-3 åˆ†é’Ÿ^)...
-    REM ä¼˜å…ˆ npm ciï¼šæŒ‰ lock ç²¾ç¡®å¤è£…ï¼Œé¿å… install æ‚„æ‚„å‡çº§ä¾èµ–ã€‚
+    echo   node_modules È±Ê§»ò²»ÍêÕû£¬ÕıÔÚ°²×° ^(¿ÉÄÜĞèÒª 1-3 ·ÖÖÓ^)...
+    REM ÓÅÏÈ npm ci£º°´ lock ¾«È·¸´×°£¬±ÜÃâ install ÇÄÇÄÉı¼¶ÒÀÀµ¡£
     if not exist "package-lock.json" (
-        echo   [!] æœªå‘ç° package-lock.jsonï¼Œnpm ci ä¸å¯ç”¨ï¼Œå›é€€ npm install
+        echo   [!] Î´·¢ÏÖ package-lock.json£¬npm ci ²»¿ÉÓÃ£¬»ØÍË npm install
         call npm install --registry=https://registry.npmmirror.com
     ) else (
         call npm ci --registry=https://registry.npmmirror.com
     )
     if errorlevel 1 (
-        echo   ^(é•œåƒå®‰è£…å¤±è´¥ï¼Œå°è¯•å®˜æ–¹æº...^)
+        echo   ^(¾µÏñ°²×°Ê§°Ü£¬³¢ÊÔ¹Ù·½Ô´...^)
         if exist "package-lock.json" (
             call npm ci
         ) else (
@@ -347,30 +347,30 @@ if not exist "node_modules\.bin\vite.cmd" (
         )
     )
     if errorlevel 1 (
-        echo   ^(npm ci å®˜æ–¹æºä»å¤±è´¥ï¼Œå›é€€ npm install åšæœ€åå…œåº•...^)
+        echo   ^(npm ci ¹Ù·½Ô´ÈÔÊ§°Ü£¬»ØÍË npm install ×ö×îºó¶µµ×...^)
         call npm install
     )
     if errorlevel 1 (
-        echo [é”™è¯¯] å‰ç«¯ä¾èµ–å®‰è£…å¤±è´¥
-        echo   æ‰‹åŠ¨å°è¯•: cd frontend ^&^& npm install
+        echo [´íÎó] Ç°¶ËÒÀÀµ°²×°Ê§°Ü
+        echo   ÊÖ¶¯³¢ÊÔ: cd frontend ^&^& npm install
         pause
         exit /b 1
     )
     if not exist "node_modules\.bin\vite.cmd" (
-        echo [é”™è¯¯] å®‰è£…å®Œæˆä½†ä»æ‰¾ä¸åˆ° node_modules\.bin\vite.cmd
-        echo   å»ºè®®ï¼šåˆ é™¤ frontend\node_modules åé‡æ–°è¿è¡Œæœ¬è„šæœ¬
+        echo [´íÎó] °²×°Íê³Éµ«ÈÔÕÒ²»µ½ node_modules\.bin\vite.cmd
+        echo   ½¨Òé£ºÉ¾³ı frontend\node_modules ºóÖØĞÂÔËĞĞ±¾½Å±¾
         pause
         exit /b 1
     )
-    echo   [OK] å‰ç«¯ä¾èµ–å·²å®‰è£…å®Œæˆ
+    echo   [OK] Ç°¶ËÒÀÀµÒÑ°²×°Íê³É
 ) else (
-    echo   [OK] å‰ç«¯ä¾èµ–å·²å°±ç»ª
+    echo   [OK] Ç°¶ËÒÀÀµÒÑ¾ÍĞ÷
 )
 
 
-REM ========== 4. å¯åŠ¨åç«¯ ==========
+REM ========== 4. Æô¶¯ºó¶Ë ==========
 echo.
-echo [4/5] å¯åŠ¨åç«¯æœåŠ¡ (FastAPI :8000)...
+echo [4/5] Æô¶¯ºó¶Ë·şÎñ (FastAPI :8000)...
 cd /d "%~dp0backend"
 
 REM ---- 4.0 security notice: non-loopback bind with empty API_AUTH_TOKEN ----
@@ -394,20 +394,20 @@ if not defined AUTH_TOKEN_SET (
     echo     LAN/server use: set API_AUTH_TOKEN in backend\.env before exposing.
     echo.
 )
-REM ç”¨ start /D æŒ‡å®šå·¥ä½œç›®å½•ï¼Œé…åˆ cmd /S /K ä¿è¯å¼•å·æŒ‰å­—é¢é‡è§£æ
-REM ï¼ˆä¸å†å†™æˆ cmd /k "cd /d "path" && ..." è¿™ç§åµŒå¥—å¼•å·å†™æ³•ï¼‰
+REM ÓÃ start /D Ö¸¶¨¹¤×÷Ä¿Â¼£¬ÅäºÏ cmd /S /K ±£Ö¤ÒıºÅ°´×ÖÃæÁ¿½âÎö
+REM £¨²»ÔÙĞ´³É cmd /k "cd /d "path" && ..." ÕâÖÖÇ¶Ì×ÒıºÅĞ´·¨£©
 REM NOTE: single-process mode (no --reload). The reloader parent owns the
 REM :8000 listen socket and the worker child inherits the handle, which
 REM produced parent/child accept() races plus orphan workers holding the
 REM port after the parent died. One process = one socket owner.
 REM For hot reload during development, stop the server and restart it.
-start "åç«¯-ä¸“é¡¹æ–¹æ¡ˆå·¥å…·ç®±" /D "%~dp0backend" cmd /S /K ""%PY%" -m uvicorn app.main:app --host 0.0.0.0 --port 8000 --timeout-graceful-shutdown 30"
+start "ºó¶Ë-×¨Ïî·½°¸¹¤¾ßÏä" /D "%~dp0backend" cmd /S /K ""%PY%" -m uvicorn app.main:app --host 0.0.0.0 --port 8000 --timeout-graceful-shutdown 30"
 
-REM ç­‰åç«¯èµ·æ¥ã€‚æ—§è„šæœ¬ç”¨ for /l %%i in (1,1,15) åªç­‰ 15 ç§’ï¼Œä¸”ç›´æ¥è°ƒè£¸ curlï¼š
-REM ç²¾ç®€ç³»ç»Ÿ / æ—§ç‰ˆ Windows æ²¡æœ‰ curl.exe æ—¶ä¼šæ°¸è¿œåˆ¤å®šæœªå°±ç»ªå¹¶è¯¯æŠ¥ã€Œè¶…æ—¶ã€ï¼Œ
-REM å³ä½¿åç«¯å…¶å®è¿è¡Œå¾—å¾ˆå¥½ã€‚è¿™é‡Œæ”¹æˆ label + set /a çš„æ˜¾å¼å¾ªç¯ï¼Œç”¨ %CURL%
-REM æ¢æµ‹ã€ç¼ºå¤±æ—¶å›é€€åˆ° Python æ ‡å‡†åº“ï¼ˆPython æ­¤æ—¶å¿…ç„¶å¯ç”¨ï¼‰ã€‚
-echo   ç­‰å¾…åç«¯å°±ç»ª ^(æœ€å¤š 60 ç§’^)...
+REM µÈºó¶ËÆğÀ´¡£¾É½Å±¾ÓÃ for /l %%i in (1,1,15) Ö»µÈ 15 Ãë£¬ÇÒÖ±½Óµ÷Âã curl£º
+REM ¾«¼òÏµÍ³ / ¾É°æ Windows Ã»ÓĞ curl.exe Ê±»áÓÀÔ¶ÅĞ¶¨Î´¾ÍĞ÷²¢Îó±¨¡¸³¬Ê±¡¹£¬
+REM ¼´Ê¹ºó¶ËÆäÊµÔËĞĞµÃºÜºÃ¡£ÕâÀï¸Ä³É label + set /a µÄÏÔÊ½Ñ­»·£¬ÓÃ %CURL%
+REM Ì½²â¡¢È±Ê§Ê±»ØÍËµ½ Python ±ê×¼¿â£¨Python ´ËÊ±±ØÈ»¿ÉÓÃ£©¡£
+echo   µÈ´ıºó¶Ë¾ÍĞ÷ ^(×î¶à 60 Ãë^)...
 set "PROBE_URL=http://127.0.0.1:8000/api/v1/health"
 set "TRIES=0"
 :probe_backend
@@ -421,17 +421,17 @@ goto :probe_backend_after
 :probe_backend_after
 if not errorlevel 1 goto :backend_ready
 if %TRIES% LSS 60 goto :probe_backend
-echo   [!] 60 ç§’å†…åç«¯ä»æœªå°±ç»ªï¼Œè¯·æŸ¥çœ‹ã€Œåç«¯-ä¸“é¡¹æ–¹æ¡ˆå·¥å…·ç®±ã€çª—å£çš„æ—¥å¿—
+echo   [!] 60 ÃëÄÚºó¶ËÈÔÎ´¾ÍĞ÷£¬Çë²é¿´¡¸ºó¶Ë-×¨Ïî·½°¸¹¤¾ßÏä¡¹´°¿ÚµÄÈÕÖ¾
 :backend_ready
 
-REM ========== 5. å¯åŠ¨å‰ç«¯ ==========
+REM ========== 5. Æô¶¯Ç°¶Ë ==========
 echo.
-echo [5/5] å¯åŠ¨å‰ç«¯æœåŠ¡ (Vite :5175)...
+echo [5/5] Æô¶¯Ç°¶Ë·şÎñ (Vite :5175)...
 cd /d "%~dp0frontend"
-start "å‰ç«¯-ä¸“é¡¹æ–¹æ¡ˆå·¥å…·ç®±" /D "%~dp0frontend" cmd /S /K "npm run dev"
+start "Ç°¶Ë-×¨Ïî·½°¸¹¤¾ßÏä" /D "%~dp0frontend" cmd /S /K "npm run dev"
 
-REM ç­‰å‰ç«¯èµ·æ¥å†æ‰“å¼€æµè§ˆå™¨ï¼ˆæ—§è„šæœ¬å›ºå®šç­‰ 4 ç§’ï¼Œæ…¢æœºå™¨ä¸Šä¼šæ‰“å¼€ç©ºç™½é¡µï¼‰
-echo   ç­‰å¾…å‰ç«¯å°±ç»ª ^(æœ€å¤š 30 ç§’^)...
+REM µÈÇ°¶ËÆğÀ´ÔÙ´ò¿ªä¯ÀÀÆ÷£¨¾É½Å±¾¹Ì¶¨µÈ 4 Ãë£¬Âı»úÆ÷ÉÏ»á´ò¿ª¿Õ°×Ò³£©
+echo   µÈ´ıÇ°¶Ë¾ÍĞ÷ ^(×î¶à 30 Ãë^)...
 set "PROBE_URL=http://127.0.0.1:5175/"
 set "TRIES=0"
 :probe_frontend
@@ -445,23 +445,23 @@ goto :probe_frontend_after
 :probe_frontend_after
 if not errorlevel 1 goto :frontend_ready
 if %TRIES% LSS 30 goto :probe_frontend
-echo   [!] 30 ç§’å†…å‰ç«¯ä»æœªå°±ç»ªï¼Œè¯·æŸ¥çœ‹ã€Œå‰ç«¯-ä¸“é¡¹æ–¹æ¡ˆå·¥å…·ç®±ã€çª—å£çš„æ—¥å¿—
+echo   [!] 30 ÃëÄÚÇ°¶ËÈÔÎ´¾ÍĞ÷£¬Çë²é¿´¡¸Ç°¶Ë-×¨Ïî·½°¸¹¤¾ßÏä¡¹´°¿ÚµÄÈÕÖ¾
 :frontend_ready
 
 echo.
 echo ============================================
-echo   [OK] æœåŠ¡å·²å¯åŠ¨ï¼
+echo   [OK] ·şÎñÒÑÆô¶¯£¡
 echo.
-echo   å‰ç«¯é¡µé¢: http://localhost:5175
-echo   åç«¯ API: http://localhost:8000
-echo   API æ–‡æ¡£: http://localhost:8000/docs
+echo   Ç°¶ËÒ³Ãæ: http://localhost:5175
+echo   ºó¶Ë API: http://localhost:8000
+echo   API ÎÄµµ: http://localhost:8000/docs
 echo ============================================
 echo.
 
-REM å¿…é¡»å¸¦ç©ºæ ‡é¢˜ ""ï¼šstart çš„ç¬¬ä¸‰ä¸ªå‚æ•°è‹¥ä»¥å¼•å·å¼€å¤´ä¼šè¢«å½“ä½œçª—å£æ ‡é¢˜ï¼Œ
-REM URL å°±ä¸ä¼šè¢«æ‰“å¼€ï¼ˆå†™æˆ start "http://..." æ˜¯å¸¸è§å‘ï¼‰ã€‚
+REM ±ØĞë´ø¿Õ±êÌâ ""£ºstart µÄµÚÈı¸ö²ÎÊıÈôÒÔÒıºÅ¿ªÍ·»á±»µ±×÷´°¿Ú±êÌâ£¬
+REM URL ¾Í²»»á±»´ò¿ª£¨Ğ´³É start "http://..." ÊÇ³£¼û¿Ó£©¡£
 start "" http://localhost:5175
 
-echo   åç«¯ä¸å‰ç«¯å„è¿è¡Œåœ¨ç‹¬ç«‹çª—å£ä¸­ï¼Œå…³é—­æœ¬çª—å£ä¸ä¼šå½±å“å®ƒä»¬ã€‚
+echo   ºó¶ËÓëÇ°¶Ë¸÷ÔËĞĞÔÚ¶ÀÁ¢´°¿ÚÖĞ£¬¹Ø±Õ±¾´°¿Ú²»»áÓ°ÏìËüÃÇ¡£
 pause
 

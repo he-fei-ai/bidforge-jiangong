@@ -580,6 +580,11 @@ class Settings(BaseSettings):
     # 单次 AI 调用**输出** token 的硬上限（provider 请求体的 max_tokens）。
     #    正常章节折算值（≤2 万字 → ≤2 万 token）远低于该值 ⇒ 逐字节不变。
     max_output_tokens: int = 32768
+    # ✅ R205（2026-11-09 · PII 脱敏缺口）：独立的**个人敏感信息**脱敏开关。
+    #    既有 ``prompt_redact_sensitive`` 只覆盖高置信度**凭据**形态
+    #    （sk-/gsk_/api_key=…），身份证/手机号/邮箱**原样外发**。
+    #    本开关默认关闭（零行为变化）；开启后对出站消息串联 PII 正则脱敏。
+    prompt_pii_redact_enabled: bool = False
     # ✅ 编号统一（2026-09-25）：正文子标题编号落库前规范化（默认开启）。
     #    落库前用与导出 write_section 完全同一套算法（numbering.renumber_section_body_subheadings）
     #    重写正文内 Markdown/纯文本子标题编号，使「前端预览 = 落库正文 = 导出成稿」三处同源，

@@ -8,6 +8,7 @@
 - 事实提取：文档分块逐块提取（services/facts_extractor.py，FACTS_CHUNK_RETRIES）。
 """
 
+import asyncio
 import json
 import logging
 import re
@@ -38,6 +39,25 @@ GENERIC_REPAIR_KEY = "json_schema_fix_system"
 #: 目录族专用修复提示词（唯一需要「目录」语义的场景）。
 OUTLINE_REPAIR_KEY = "outline_json_fix_system"
 
+#: ✅ R205（2026-11-09 · 修复轮坏 JSON 无长度上限）：旧实现把 ``raw`` 原样塞进
+#:   修复提示词的 ``invalid_content``，facts 段一份资料可能数万字 → 每轮修复都
+#:   把整份坏 JSON 重发一次，既浪费 token 又把上下文撑爆。现截断到本上限
+#:   （保留尾部错误区，前端模型据截断后的首尾定位即可修复）。
+_INVALID_CONTENT_CAP = 8000
+
+#: ✅ R205（2026-11-09 · 整体截止时间）：``timeout`` 只约束**单次**调用，
+#:   多轮修复叠加可无限拉长。``total_timeout`` 约束**整段**生成+修复。
+_TOTAL_TIMEOUT_DEFAULT = None
+
+
+def _clip_invalid(raw: str, limit: int = _INVALID_CONTENT_CAP) -> str:
+    """截断修复提示词里的「坏 JSON」，保留尾部错误区。"""
+    if not raw:
+        return ""
+    if len(raw) <= limit:
+        return raw
+    return raw[: limit // 2] + "\n…（中间已省略）…\n" + raw[-limit // 2 :]
+
 #: 事实提取族专用修复提示词（facts_extractor 分块提取消费）。
 #: 具名常量存在的目的是避免调用点直接拼字符串，导致与注册条目漂移。
 FACTS_REPAIR_KEY = "facts_json_fix_system"
@@ -60,7 +80,8 @@ def _build_repair_user_prompt(issues: list, raw: str, repair_key: str = GENERIC_
             repair_key,
             target_description="JSON 结果",
             issues=_format_json_issues(issues or ["JSON 语法错误，无法解析"]),
-            invalid_content=raw or "",
+            # ✅ R205（2026-11-09 · 坏 JSON 无长度上限）：截断后注入，保留尾部错误区。
+            invalid_content=_clip_invalid(raw or ""),
         )
     except Exception:
         # ✅ R204（2026-11-09 · 兜底必须尊重调用方请求的 repair_key）：
@@ -81,7 +102,7 @@ def _build_repair_user_prompt(issues: list, raw: str, repair_key: str = GENERIC_
                 return (
                     _tpl.replace("{target_description}", "JSON 结果")
                     .replace("{issues}", _format_json_issues(issues or ["JSON 语法错误，无法解析"]))
-                    .replace("{invalid_content}", raw or "")
+                    .replace("{invalid_content}", _clip_invalid(raw or ""))
                 )
             except Exception:  # noqa: BLE001 - 逐个 key 尝试，失败即试下一个
                 continue
@@ -478,6 +499,7 @@ async def collect_json_response_with_chat(
     repair_key: str = GENERIC_REPAIR_KEY,
     scene: str = "",
     max_tokens: int | None = None,
+    total_timeout: int | None = _TOTAL_TIMEOUT_DEFAULT,
 ):
     """统一 JSON 收集编排：生成 → 解析 → 校验 → 定向修复 → 有界重试。
 
@@ -487,6 +509,8 @@ async def collect_json_response_with_chat(
     Args:
         chat_fn: 与 ``chat_with_fallback`` 同签名的异步可调用对象。
         其余参数、语义、返回值与 :func:`collect_json_response` 完全一致。
+        total_timeout: ✅ R205（2026-11-09 · 整体截止）：约束「首轮+全部修复轮」
+            总耗时（秒）；``None`` 不限制（逐字节兼容旧行为）。
     """
 
     async def _call(repair_messages: list) -> str:
@@ -500,7 +524,7 @@ async def collect_json_response_with_chat(
             max_tokens=max_tokens,
         )
 
-    return await _run_json_generation(
+    coro = _run_json_generation(
         _call,
         messages,
         lambda text: parse_and_validate(text, validate_fn),
@@ -509,6 +533,9 @@ async def collect_json_response_with_chat(
         on_call_failure=lambda: record_ai_failure(scene),
         on_repair=lambda: record_repair_triggered(repair_key),
     )
+    if total_timeout and total_timeout > 0:
+        return await asyncio.wait_for(coro, total_timeout)
+    return await coro
 
 
 async def collect_json_response(
@@ -522,6 +549,7 @@ async def collect_json_response(
     repair_key: str = GENERIC_REPAIR_KEY,
     scene: str = "",
     max_tokens: int | None = None,
+    total_timeout: int | None = _TOTAL_TIMEOUT_DEFAULT,
 ):
     """统一 JSON 收集入口：生成 → 解析 → 校验 → 定向修复 → 重试。
 
@@ -533,6 +561,8 @@ async def collect_json_response(
       可能触发 provider 默认上限（8192）被截断；None 表示沿用 provider 默认。
     - ``scene``：业务场景标记，透传至 ``chat_with_fallback`` 写入
       ``ai_audit_logs.scene``，``/ai/stats`` 可按场景聚合调用次数。
+    - ``total_timeout``：✅ R205（2026-11-09）约束「首轮+全部修复轮」总耗时（秒）；
+      ``None`` 不限制（逐字节兼容）。
 
     消息列表只有 system 时自动补一条最小 user 指令（见 :func:`_ensure_user_message`）。
 
@@ -554,6 +584,7 @@ async def collect_json_response(
         repair_key=repair_key,
         scene=scene,
         max_tokens=max_tokens,
+        total_timeout=total_timeout,
     )
 
 

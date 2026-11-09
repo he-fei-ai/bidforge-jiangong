@@ -434,9 +434,16 @@ class TestPdfConversionSerialized:
         assert "import threading" in src
 
     def test_call_site_still_offloaded_to_thread(self):
-        """转换仍在工作线程执行（COM 要求调用线程先 CoInitialize）。"""
+        """转换仍在工作线程执行（COM 要求调用线程先 CoInitialize）。
+
+        ✅ R205（2026-11-09 · 收口 R195 遗留红灯）：R195 把裸 ``asyncio.to_thread``
+        改为**专用隔离执行器** ``_PDF_COM_EXECUTOR``（与默认 to_thread 池物理隔离，
+        防止 Word 挂死线程侵蚀全应用 to_thread 面）。锚点同步到新调用点。
+        """
         src = _src(EX_PATH)
-        assert "asyncio.to_thread(_convert_docx_to_pdf" in src, "PDF 转换必须经 asyncio.to_thread 执行"
+        assert "run_in_executor(_PDF_COM_EXECUTOR, _convert_docx_to_pdf" in src, (
+            "PDF 转换必须经专用隔离执行器 _PDF_COM_EXECUTOR 执行"
+        )
 
 
 # =====================================================================

@@ -1,0 +1,13 @@
+# 行尾规范（2026-11-08）
+# 前端源码与文档统一 LF：Windows 全新 clone（core.autocrlf=true）也不得被转成 CRLF。
+*.ts   text eol=lf
+*.tsx  text eol=lf
+*.js   text eol=lf
+*.jsx  text eol=lf
+*.css  text eol=lf
+*.md   text eol=lf
+
+# 脚本保持原样，不做任何换行/编码转换（start_all.bat 为 GBK + CRLF）
+*.bat  -text
+*.cmd  -text
+*.ps1  -text

@@ -297,7 +297,9 @@ async def _finish_stopped_with_partial(task_id: str, holder: dict) -> str:
     """
     outline = holder.get("outline") or []
     failed = holder.get("failed_chapters") or []
-    payload = {"event": "stopped", "task_id": task_id}
+    # ✅ R205（目录链→前端同步）：补 message（与 finish_task 同文案），
+    #    前端在线 stopped 分支此前硬编码「已停止」，后端检查点失败原因无处可达。
+    payload = {"event": "stopped", "task_id": task_id, "message": "用户已停止"}
     _ckpt_ok = not outline  # 无成果本来就不写 checkpoint，也无需清 holder
     if outline:
         payload["outline"] = outline
@@ -328,6 +330,7 @@ async def _finish_stopped_with_partial(task_id: str, holder: dict) -> str:
                     task_id, exc_info=True,
                 )
                 payload["checkpoint_failed"] = True
+                payload["message"] = "用户已停止（检查点写入失败，半份成果可能无法恢复，请立即手动保存）"
     if _ckpt_ok:
         holder["outline"] = []
         holder["failed_chapters"] = []

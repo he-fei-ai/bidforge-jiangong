@@ -16,6 +16,30 @@ import pytest
 from app.services.ai.mermaid_renderer import ChartCache
 from app.services.crypto import encrypt_api_key
 
+
+def _valid_png_bytes() -> bytes:
+    """生成 1×1 真 PNG 字节（供 mock render 返回）。
+
+    ✅ R205（2026-11-09 · 收口 R199 遗留红灯）：R199 给 ChartCache 命中校验加了
+    ``_cached_bytes_ok``（PIL 全文件 verify），旧 fixture 用的假字节
+    ``b"PNG"*40`` 无法通过 verify → 命中被判击穿 → 重复渲染 → 断言 ``calls==1/2``
+    失败。现返回**真 PNG**，使缓存命中校验通过（这才是「命中缓存」的真实前提）。
+    """
+    # 用带噪声的较大图：纯色 PNG 会被压到 ≤100 字节（_cached_bytes_ok 要求 >100）。
+    import random
+
+    from PIL import Image
+
+    img = Image.new("RGB", (64, 64))
+    px = img.load()
+    random.seed(7)
+    for y in range(64):
+        for x in range(64):
+            px[x, y] = (random.randint(0, 255), random.randint(0, 255), random.randint(0, 255))
+    buf = BytesIO()
+    img.save(buf, "PNG")
+    return buf.getvalue()
+
 # ---------------------------------------------------------------------------
 # ChartCache（对应 P0-2 单飞去重 / P0-1 缓存命中，优化均以此不变量为基座）
 # ---------------------------------------------------------------------------
@@ -46,7 +70,7 @@ class TestChartCache:
 
         def fake_render(mermaid_code, chart_type, *, skip_http=False, allow_pil=True):
             calls["n"] += 1
-            return BytesIO(b"PNG" * 40)
+            return BytesIO(_valid_png_bytes())
 
         monkeypatch.setattr(mr, "render_mermaid_to_bytes", fake_render)
         cache = ChartCache(cache_dir=str(tmp_path))
@@ -66,7 +90,7 @@ class TestChartCache:
 
         def fake_render(mermaid_code, chart_type, *, skip_http=False, allow_pil=True):
             calls["n"] += 1
-            return BytesIO(b"PNG" * 40)
+            return BytesIO(_valid_png_bytes())
 
         monkeypatch.setattr(mr, "render_mermaid_to_bytes", fake_render)
         cache = ChartCache(cache_dir=str(tmp_path))
@@ -95,7 +119,7 @@ class TestChartCache:
             import time
 
             time.sleep(0.15)  # 扩大并发窗口
-            return BytesIO(b"PNG" * 40)
+            return BytesIO(_valid_png_bytes())
 
         monkeypatch.setattr(mr, "render_mermaid_to_bytes", fake_render)
         cache = ChartCache(cache_dir=str(tmp_path))
@@ -118,7 +142,8 @@ class TestChartCache:
 
         assert not errors
         assert calls["n"] == 1, "并发相同 key 应只渲染一次（thundering herd 防护）"
-        assert all(r == b"PNG" * 40 for r in results)
+        _ref = _valid_png_bytes()
+        assert all(r == _ref for r in results), "并发相同 key 应返回同一份渲染结果（缓存命中）"
         st = cache.get_stats()
         assert st["misses"] == 1
 

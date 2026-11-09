@@ -802,7 +802,7 @@ async def collect_export_issues(
     _ba_summary = None
     if ba_pid:
         cur2 = await db.execute(
-            "SELECT item_id, label, status, required FROM bid_analysis_items "
+            "SELECT item_id, label, status, required, content, output_type FROM bid_analysis_items "
             "WHERE project_id=? AND COALESCE(required,0)=1",
             (ba_pid,),
         )
@@ -811,8 +811,22 @@ async def collect_export_issues(
             for r in await _db_fetch_all(cur2, what="collect_export_issues:bid_analysis_items", strict=strict_read)
         ]
         ba_total = len(ba_required)
-        ba_success = sum(1 for r in ba_required if r["status"] == "success")
-        ba_failed = [r for r in ba_required if r["status"] not in ("success", "idle")]
+        # ✅ R205（解析→导出跨模块口径统一）：bid_analysis 在「全部分段无有效
+        #    结果」时写入 status='success' + content='{}' 的失败哨兵，旧实现只按
+        #    status 计数 → 导出预检显示「必选项 17/17 成功」却放行缺资料的成稿。
+        #    判据与 /bid-analysis/results、目录注入、提取层物化同源于
+        #    bid_analysis_service.is_missing_result，避免四处口径分叉。
+        from app.services.bid_analysis_service import is_missing_result as _is_missing_ba
+
+        def _ba_has_valid_result(r: dict) -> bool:
+            if r.get("status") != "success":
+                return False
+            return not _is_missing_ba(str(r.get("content") or ""), str(r.get("output_type") or "markdown"))
+
+        ba_success = sum(1 for r in ba_required if _ba_has_valid_result(r))
+        ba_failed = [
+            r for r in ba_required if r["status"] not in ("success", "idle") or not _ba_has_valid_result(r)
+        ]
         if ba_total > 0 and ba_success < ba_total:
             _ba_summary = {
                 "required_total": ba_total,
