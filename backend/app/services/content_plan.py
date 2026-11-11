@@ -33,6 +33,38 @@ logger = logging.getLogger(__name__)
 #: ``ai_reasoning_output_floor``（默认 4096）。
 CONTENT_PLAN_MAX_TOKENS = 1536
 
+#: ✅ R211（2026-11-10 · P2-1）：编排步图表类型的**唯一白名单**（7 种数据图）。
+#: 此前白名单内联在 :meth:`ContentPlanData.validate` 里，而 :meth:`from_json`
+#: （回读入口）**不钳制** ⇒ 同一份数据两个入口两个结论。现提到模块级，两个
+#: 入口共用同一份定义。
+CHART_TYPE_WHITELIST: tuple[str, ...] = (
+    "flowchart",
+    "gantt",
+    "architecture",
+    "labor",
+    "comparison",
+    "layout",
+    "timeline",
+)
+
+
+def coerce_bool_flag(value) -> bool:
+    """把模型/外部写入的布尔形态统一归一为 ``bool``（**唯一判据出口**）。
+
+    ✅ R211（2026-11-10 · P2-1）：此前 ``table_needed`` / ``chart_needed`` 的
+    字符串归一（``"true"/"是"/"yes"/"1"``）在 :meth:`validate` 有、而
+    :meth:`from_json` **没有** ⇒ 同一份 JSON，``"chart_needed": "false"``
+    在 ``validate`` 判「不配图」、在 ``from_json`` 判「配图」
+    （Python 里 ``bool("false") is True``）—— 同一判据两份实现、强度漂移。
+
+    归一口径与既有 ``validate`` **逐字一致**（向后兼容）：
+      · 字符串：``strip().lower()`` 后命中白名单才算真；
+      · 其余：``bool(value)``。
+    """
+    if isinstance(value, str):
+        return value.strip().lower() in ("true", "是", "yes", "1")
+    return bool(value)
+
 
 @dataclass
 class ContentPlanData:
@@ -95,19 +127,31 @@ class ContentPlanData:
         ft = d.get("fact_titles") or []
         kn = [str(x).strip() for x in kn if isinstance(x, str) and x.strip()] if isinstance(kn, list) else []
         ft = [str(x).strip() for x in ft if isinstance(x, str) and x.strip()] if isinstance(ft, list) else []
-        tn = d.get("table_needed", False)
-        if isinstance(tn, str):
-            tn = tn.strip().lower() in ("true", "是", "yes", "1")
+        # ✅ R217（2026-11-11 · P3）：table_needed 与 chart_needed 同型，但
+        #    R211 收口时只把后者提到模块级唯一出口，前者仍在本入口与 validate
+        #    各留一份内联归一（当前逐字等价、无行为差异）——下次调整白名单
+        #    只改 coerce_bool_flag 必然漏改，正是本仓「同族漏改」病根形态。
+        tn = coerce_bool_flag(d.get("table_needed", False))
+        # ✅ R211（P2-1）：与 validate 同口径 —— 布尔归一 + 图表类型白名单钳制。
+        #    此前 from_json 对 chart_needed 用 ``bool(...)``（字符串 "false" 判真）
+        #    且**不钳制** chart_types ⇒ 回读入口与产出入口对同一份数据给出
+        #    两个结论（同一判据两份实现）。此处统一走模块级唯一出口。
+        cn = coerce_bool_flag(d.get("chart_needed", False))
+        ct_raw = d.get("chart_types") or []
+        if not isinstance(ct_raw, list):
+            ct_raw = []
+        ct = [str(x).strip() for x in ct_raw if str(x).strip()]
+        ct = [x for x in ct if x in CHART_TYPE_WHITELIST]
+        if not cn:
+            ct = []
         return cls(
             writing_focus=str(d.get("writing_focus") or "").strip(),
             knowledge_names=kn,
             fact_titles=ft,
             table_needed=bool(tn),
             table_purpose=str(d.get("table_purpose") or "").strip(),
-            chart_needed=bool(d.get("chart_needed") or False),
-            chart_types=[str(x).strip() for x in (d.get("chart_types") or []) if str(x).strip()]
-            if isinstance(d.get("chart_types"), list)
-            else [],
+            chart_needed=cn,
+            chart_types=ct,
             chart_note=str(d.get("chart_note") or "").strip(),
         )
 
@@ -143,34 +187,21 @@ class ContentPlanData:
         ft = [str(x).strip() for x in ft_raw if str(x).strip()]
         ft = [x for x in ft if x in fact_pool]
 
-        tn = d.get("table_needed", False)
-        if isinstance(tn, str):
-            tn = tn.strip().lower() in ("true", "是", "yes", "1")
-        tn = bool(tn)
+        # ✅ R217（2026-11-11 · P3）：与 from_json 同型，一并按唯一出口归一
+        #    （R211 只收口了 chart_needed；行为逐字不变，纯防同族漏改回流）。
+        tn = coerce_bool_flag(d.get("table_needed", False))
 
         table_purpose = str(d.get("table_purpose") or "").strip()
 
         # ✅ R196：编排步图表维度 —— chart_types 只保留 7 种数据图白名单内的类型
         #    （模型编造/超纲类型一律丢弃，与素材/事实池同一「白名单钳制」思想）；
         #    chart_needed 为假时类型清零（无图建议）。ai_image 不进白名单。
-        _CHART_TYPE_WHITELIST = (
-            "flowchart",
-            "gantt",
-            "architecture",
-            "labor",
-            "comparison",
-            "layout",
-            "timeline",
-        )
-        cn = d.get("chart_needed", False)
-        if isinstance(cn, str):
-            cn = cn.strip().lower() in ("true", "是", "yes", "1")
-        cn = bool(cn)
+        cn = coerce_bool_flag(d.get("chart_needed", False))
         ct_raw = d.get("chart_types") or []
         if not isinstance(ct_raw, list):
             ct_raw = []
         ct = [str(x).strip() for x in ct_raw if str(x).strip()]
-        ct = [x for x in ct if x in _CHART_TYPE_WHITELIST]
+        ct = [x for x in ct if x in CHART_TYPE_WHITELIST]
         if not cn:
             ct = []
 
@@ -277,17 +308,27 @@ async def plan_section_content(
         knowledge_names / fact_titles: 候选池（决定模型可挑选的范围）。
     """
     from app.services.ai.prompts._registry import render
+    from app.services.numbering import stored_id_to_display  # ✅ R218（C-2）：编号形态统一
 
     sys_prompt = render("content_plan_system")
     knowledge_names_text = "\n".join(f"- {n}" for n in knowledge_names) or "（无）"
     fact_titles_text = "\n".join(f"- {t}" for t in fact_titles) or "（无）"
+    # ✅ R218（2026-11-11 · P3 · C-2）：`_prompt_number` 是**存储态**编号（"3.2.4"），
+    #    正文提示词（sse_handlers R214 FIX-1）已用 `stored_id_to_display` 转展示态
+    #    （"2.4"），唯独编排提示词仍直传存储态 ⇒ 同一章节编号在两个提示词里形态
+    #    分叉（模型看到「3.2.4」与「2.4」两个版本，易把前者当正文子标题号写进
+    #    内容）。现统一转展示态；空/非法编号回退存储态（fail-safe，不注入空号）。
+    _sec_stored = str(
+        leaf.get("_prompt_number") or leaf.get("outline_number") or leaf.get("number") or ""
+    )
+    _sec_display = str(stored_id_to_display(_sec_stored) or _sec_stored)
 
     try:
         user_prompt = render(
             "content_plan_user",
             scheme_name=scheme_name,
             scheme_type=scheme_type,
-            section_number=str(leaf.get("outline_number") or leaf.get("number") or ""),
+            section_number=_sec_display,
             section_title=str(leaf.get("title") or ""),
             section_description=str(leaf.get("description") or ""),
             word_budget=int(word_budget or 0),

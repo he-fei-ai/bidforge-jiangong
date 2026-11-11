@@ -19,8 +19,17 @@ interface PendingRow {
 const LOW_CONFIDENCE = 0.8;
 
 /**
- * 与底稿附件三同口径：事实待确认 = 未 resolve 或 confidence < 0.8。
+ * 与底稿附件三同口径：事实待确认 = 未 resolve / confidence < 0.8 / 来源已过期。
  * 来源为 backend/app/services/dossier.py::collect_facts。
+ *
+ * ✅ R210（2026-11-10 · P2）：补「来源已变化（过期）」一档。
+ * 旧实现的注释声称口径含「过期」，实现却只有两项；而**注入门控**
+ * （`facts_extractor._FACTS_INJECT_WHERE`）是四档：
+ * `has_conflict=0 AND is_resolved=1 AND is_simulated=0 AND is_stale=0`。
+ * 一条**已确认但来源已过期**的事实（资料重传/重解析后被批量标 stale）：
+ *   · 不满足注入门控 ⇒ 被正文与导出**静默丢弃**；
+ *   · 不满足旧待确认口径 ⇒ 本面板显示「0 项待确认」。
+ * 两头不靠 ⇒ 审核环节**看不出**有事实掉出交付物（与底稿口径一并收口）。
  */
 function factReasons(fact: FactItem): string[] {
   const reasons: string[] = [];
@@ -28,6 +37,7 @@ function factReasons(fact: FactItem): string[] {
   if (typeof fact.confidence === "number" && fact.confidence < LOW_CONFIDENCE) {
     reasons.push(`低置信度 ${fact.confidence.toFixed(2)}`);
   }
+  if (fact.is_stale) reasons.push("来源已变化");
   return reasons;
 }
 
@@ -51,6 +61,30 @@ export interface PendingConfirmPanelProps {
  *
  * 任一数据源不可用时该半区显示「无法判定」而不是「0 条」——空集与不可达必须区分。
  */
+/**
+ * ✅ R212（2026-11-10 · P2-3）：刷新提示的**三态判定**（纯函数，可单测）。
+ *
+ * 背景：``load`` 用 ``Promise.allSettled`` 吞掉失败（只置 error 态、不抛错），
+ * 而 ``refresh`` 无条件弹绿色「已刷新」⇒ 后端抖动时用户先看到「已刷新」，
+ * 随即看到两条红色「无法判定」—— 成功提示与错误告警互相矛盾。
+ *
+ * 口径：全成功 → success；任一数据源不可达 → warning 并**指明失败源**
+ * （与同屏 Alert 的「无法判定」口径一致）。
+ */
+export function pendingRefreshTone(outcome: { facts: string; defects: string }): {
+  kind: "success" | "warning";
+  text: string;
+} {
+  const failed: string[] = [];
+  if (outcome.facts === "error") failed.push("事实数据");
+  if (outcome.defects === "error") failed.push("缺陷数据");
+  if (failed.length === 0) return { kind: "success", text: "待确认清单已刷新" };
+  return {
+    kind: "warning",
+    text: `待确认清单已刷新，但部分数据源无法判定：${failed.join("、")}`,
+  };
+}
+
 export function PendingConfirmPanel({ schemeId }: PendingConfirmPanelProps) {
   const { message } = App.useApp();
   const [rows, setRows] = useState<PendingRow[]>([]);
@@ -58,8 +92,8 @@ export function PendingConfirmPanel({ schemeId }: PendingConfirmPanelProps) {
   const [factsState, setFactsState] = useState<"ok" | "error">("ok");
   const [defectsState, setDefectsState] = useState<"ok" | "off" | "error">("ok");
 
-  const load = useCallback(async () => {
-    if (!schemeId) return;
+  const load = useCallback(async (): Promise<{ facts: string; defects: string }> => {
+    if (!schemeId) return { facts: "ok", defects: "ok" };
     setLoading(true);
     const [factsResult, defectsResult] = await Promise.allSettled([
       factsApi.list(schemeId),
@@ -67,6 +101,8 @@ export function PendingConfirmPanel({ schemeId }: PendingConfirmPanelProps) {
     ]);
 
     const nextRows: PendingRow[] = [];
+    let factsOutcome = "ok";
+    let defectsOutcome = "ok";
 
     if (factsResult.status === "fulfilled") {
       setFactsState("ok");
@@ -86,6 +122,7 @@ export function PendingConfirmPanel({ schemeId }: PendingConfirmPanelProps) {
         }
       }
     } else {
+      factsOutcome = "error";
       setFactsState("error");
     }
 
@@ -108,11 +145,14 @@ export function PendingConfirmPanel({ schemeId }: PendingConfirmPanelProps) {
       }
     } else {
       const err = defectsResult.reason as { response?: { status?: number } };
-      setDefectsState(err?.response?.status === 404 ? "off" : "error");
+      defectsOutcome = err?.response?.status === 404 ? "off" : "error";
+      setDefectsState(defectsOutcome as "ok" | "off" | "error");
     }
 
     setRows(nextRows);
     setLoading(false);
+    // ✅ R212（P2-3）：回传本次实际结果，供刷新提示分流（三态）
+    return { facts: factsOutcome, defects: defectsOutcome };
   }, [schemeId]);
 
   useEffect(() => {
@@ -120,8 +160,11 @@ export function PendingConfirmPanel({ schemeId }: PendingConfirmPanelProps) {
   }, [load]);
 
   const refresh = async () => {
-    await load();
-    message.success("待确认清单已刷新");
+    // ✅ R212（P2-3）：刷新提示**三态**（判定逻辑见 pendingRefreshTone 纯函数）
+    const outcome = await load();
+    const tone = pendingRefreshTone(outcome);
+    if (tone.kind === "success") message.success(tone.text);
+    else message.warning(tone.text);
   };
 
   return (

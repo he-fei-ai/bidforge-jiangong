@@ -489,6 +489,12 @@ export interface ExportBlockedIssue {
   severity: string;
   count: number;
   title: string;
+  /** ✅ R212（2026-11-10 · P3-4）：**可区分标题**（R207 A5 后端已产出：
+   *  同 rule_id 的不同子类（待审 / 驳回 / 无记录）拼成「标题·子类」）。
+   *    前端结构化解析此前把它丢了 —— 用户能看到区分文案，只是因为后端把
+   *    display_title 拼进了 detail 字符串这一条**偶然**路径；任何按 issues[]
+   *    逐条渲染的改动都会退回同名。 */
+  display_title?: string;
 }
 
 /** 导出被阻断的结构化信息。 */
@@ -536,6 +542,8 @@ export async function parseExportBlock(error: unknown): Promise<ExportBlockedInf
       severity: typeof rec.severity === "string" ? rec.severity : "high",
       count: typeof rec.count === "number" ? rec.count : 1,
       title: typeof rec.title === "string" ? rec.title : "",
+      // ✅ R212（P3-4）：保留后端产出的可区分标题（此前被丢弃）
+      display_title: typeof rec.display_title === "string" ? rec.display_title : undefined,
     };
   });
   const issueCount =

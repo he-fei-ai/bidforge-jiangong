@@ -13,8 +13,6 @@
  * - 并发调用共享同一个 pending Promise，避免重复加载与重复 initialize。
  */
 
-import DOMPurify from "dompurify";
-
 /**
  * mermaid 动态导入实例的最小 API 面。
  * mermaid 为 ESM/CJS 双构建且版本演进快（第三方库版本不可控），完整类型面不稳定；
@@ -72,22 +70,55 @@ export function nextMermaidId(prefix = "mmd"): string {
 }
 
 /**
- * ✅ R196（2026-11-09）：SVG 注入前的安全清洗（唯一出口）。
+ * ✅ R196（2026-11-10）：mermaid 渲染前的输入侧安全闸（唯一出口）。
  *
  * 背景：initialize 用 securityLevel:"loose"（htmlLabels/<br/> 等富标签渲染
- * 依赖它，R66 三轨同款配色与渲染保真的刻意选择），LLM 产出的图表代码经
- * mermaid.render 产出的 SVG 可能携带内联事件（onerror 等）或 script 类节点。
- * 所有 `innerHTML = svg` 注入点（正文渲染 / 修复回填）必须先过本函数：
- * 默认 profile 剔除 script 与 on* 事件属性，ADD_TAGS/ADD_ATTR 保留 mermaid
- * 合法视觉结构（foreignObject / 样式属性 / xmlns），渲染保真不受影响。
+ * 依赖它，R66 三轨同款配色与渲染保真的刻意选择），LLM 产出的图表代码在
+ * loose 模式下允许内嵌 HTML。首轮方案（DOMPurify 清洗 render 产出的 SVG）
+ * 经真实浏览器实测被否决：DOMPurify 对 foreignObject 内的 htmlLabels 内容
+ * **确定性清空**（jsdom 与 Chrome 行为一致，labelKept=false）—— 所有流程图
+ * 节点文字消失，渲染保真代价不可接受。
+ *
+ * 现改为**渲染前拦截**：含危险特征的代码拒绝进 mermaid.render（走既有
+ * 渲染失败占位：红框 + 原因 + AI 修复按钮），产出 SVG 即不含可执行面；
+ * 合法富标签（<br/>、<b>、<img src> 等无事件形态）不受影响。
+ * 注：导出 PNG 轨（exportCharts svgToPng）经 img→canvas 绘制，事件属性
+ * 不执行、无注入面，无需过闸。
  */
-export function sanitizeMermaidSvg(svg: string): string {
-  if (!svg) return "";
-  return DOMPurify.sanitize(svg, {
-    USE_PROFILES: { html: true, svg: true, svgFilters: true },
-    ADD_TAGS: ["foreignObject"],
-    ADD_ATTR: ["xmlns", "style", "class", "transform", "dominant-baseline", "text-anchor"],
-    // mermaid 生成的 id/class 带下划线与连字符（mmd-xxx），默认正则已允许；
-    // data-* 与 aria-* 默认放行，保持可访问性结构。
-  });
+export interface MermaidGate {
+  safe: boolean;
+  reason: string;
 }
+
+const _MERMAID_DANGER_RE =
+  /<\s*script|<\s*iframe|<\s*object|<\s*embed|javascript\s*:|data\s*:\s*text\s*\/\s*html/i;
+
+/**
+ * ✅ R211（2026-11-10 · P2）：事件属性必须带**左边界**。
+ *
+ * 旧实现把 `on\w+\s*=` 直接并进主危险正则（无左边界）⇒ 只要「on」后还有词字符
+ * 再接 `=` 就命中：AI 生成的工程图标签 `Connection=` / `Condition=` /
+ * `Monitoring=` / `Consumption=` 全部被判危险 ⇒ 合法图被拒渲染（红框 + AI 修复
+ * 按钮），而用户点修复后**再过同一闸**（MarkdownRenderer 的修复回填同样调用
+ * assertMermaidCodeSafe）⇒ 若修复结果保留该标签即「修复后仍渲染失败」⇒
+ * **无出路**（闸门把合法标签变成死路）。
+ *
+ * 现把事件特征拆成独立正则并要求左边界（前面不是字母/数字/下划线）：
+ * `onclick=` / ` onerror =` / `x-onload=` 仍被拒；`Connection=` / `Condition=`
+ * 放行。安全方向不变（真正的内联事件属性必带分隔符或标签边界）。
+ */
+const _MERMAID_EVENT_RE = /(^|[^A-Za-z0-9_])(on\w+\s*=)/i;
+
+export function assertMermaidCodeSafe(code: string): MermaidGate {
+  if (!code || !code.trim()) return { safe: false, reason: "图表代码为空" };
+  const m = _MERMAID_DANGER_RE.exec(code);
+  if (m) {
+    return { safe: false, reason: "图表代码包含不允许的脚本/事件特征（" + m[0] + "），已拒绝渲染" };
+  }
+  const ev = _MERMAID_EVENT_RE.exec(code);
+  if (ev) {
+    return { safe: false, reason: "图表代码包含不允许的脚本/事件特征（" + ev[2] + "），已拒绝渲染" };
+  }
+  return { safe: true, reason: "" };
+}
+

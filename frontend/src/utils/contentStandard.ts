@@ -75,11 +75,29 @@ export const STANDARD_ISSUE_LABELS: Record<string, string> = {
   value_mismatch: "数值不一致",
   value_conflict: "数值与事实冲突",
   model_conflict: "型号与事实冲突",
+  /**
+   * ✅ R211（2026-11-10 · P1）：未闭合围栏「吞正文」告警。
+   * 后端 `content_standard.FENCE_SWALLOWED_CODE` 用的是 **`code`** 键（R181
+   * 统一后的载荷形状），而本表的既有条目都是 `type` 键 —— 前端只读 `type` 时
+   * 该告警的标签为空串 ⇒ 日志 Popover 里出现一个**无文字的色块**，用户看不到
+   * 「N 行疑似正文被困在代码块内」，R179 FIX-3 / R181 两轮修复的用户可见效果
+   * 被前端断链吃掉。
+   */
+  fence_swallowed_prose: "未闭合围栏吞正文",
 };
 
-/** 报告问题条目的展示文案（缺失类型时原样回退 type，避免空白） */
-export function issueLabel(issue: { type?: string } | null | undefined): string {
-  const t = issue?.type || "";
+/**
+ * 报告问题条目的展示文案（缺失类型时原样回退，避免空白）。
+ *
+ * ✅ R211：**双键兜底** —— 后端 issue 的键名有两种：
+ *   · `type`：既有校验问题（模糊表述 / 数值不一致 …）；
+ *   · `code`：R181 统一的围栏吞正文告警。
+ * 只读 `type` 会让后者渲染成空标签（见 STANDARD_ISSUE_LABELS 注释）。
+ */
+export function issueLabel(
+  issue: { type?: string; code?: string } | null | undefined,
+): string {
+  const t = issue?.code || issue?.type || "";
   return STANDARD_ISSUE_LABELS[t] || t;
 }
 

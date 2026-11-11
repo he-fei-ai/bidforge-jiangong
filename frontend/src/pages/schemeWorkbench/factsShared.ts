@@ -29,6 +29,39 @@ export function safeFactText(value: unknown): string {
   }
 }
 
+/**
+ * ✅ R210（2026-11-10）：后端错误文案统一出口。
+ *
+ * 事实写保护冲突（409）的 `detail` 是**对象**：
+ * `{"code": "facts_write_conflict", "message": "项目事实正在被「…」写入…"}`
+ * （后端 `routers/global_facts.py::_facts_write_guard_dependency`）。
+ * 此前各调用点一律按 `string` 消费 `response.data.detail` ⇒
+ * `msg.error({...})` 在 React 18 下抛 "Objects are not valid as a React child"
+ * ⇒ **整条提示不出现**（用户体感「点了没反应」），退化形态是 "[object Object]"。
+ *
+ * 本函数是事实模块**唯一**的错误文案出口：字符串 detail 原样取；对象 detail
+ * 优先取 `message`，其次取 `code`；再退回顶层 `message` / axios `message` /
+ * 调用方给的兜底文案。
+ */
+export function factErrorText(err: unknown, fallback: string): string {
+  const e = err as {
+    response?: { data?: { detail?: unknown; message?: unknown } };
+    message?: unknown;
+  };
+  const detail = e?.response?.data?.detail;
+  if (typeof detail === "string" && detail.trim()) return detail;
+  if (detail && typeof detail === "object") {
+    const obj = detail as { message?: unknown; code?: unknown };
+    if (typeof obj.message === "string" && obj.message.trim()) return obj.message;
+    if (typeof obj.code === "string" && obj.code.trim()) return obj.code;
+  }
+  const top = e?.response?.data?.message;
+  if (typeof top === "string" && top.trim()) return top;
+  const m = e?.message;
+  if (typeof m === "string" && m.trim()) return m;
+  return fallback;
+}
+
 /** ✅ R189：置信度百分比。缺失 / 非数 / 越界一律返回 null（不渲染 NaN%）。
  *  优先级：0~1 小数直接乘 100；0~100 的百分制值按原值；其余钳制到 0~100。
  */
@@ -694,8 +727,7 @@ export function mergeFactsDiagnosticsSettled<TChapters = unknown, TDanger = unkn
     return { warning: null, aborted: true };
   }
   if (realFailures.length > 0) {
-    const e = realFailures[0] as { response?: { data?: { detail?: string } }; message?: string };
-    out.warning = e?.response?.data?.detail || e?.message || "加载事实诊断失败";
+    out.warning = factErrorText(realFailures[0], "加载事实诊断失败");
   }
   return out;
 }

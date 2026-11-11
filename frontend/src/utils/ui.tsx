@@ -4,7 +4,7 @@
  * Blueprint 工程蓝图主题配套组件。
  * 所有组件零业务依赖，纯表现层。
  */
-import React, { useEffect, useState } from "react";
+import React, { useEffect, useState, useSyncExternalStore } from "react";
 import { Button, Skeleton, Tooltip } from "antd";
 import { BulbOutlined, BulbFilled } from "@ant-design/icons";
 import { useBlueprintTheme, type ThemeMode } from "./theme";
@@ -30,31 +30,58 @@ export const BP_MEDIUM = 900;
 export const BP_TABLET = 1200; // 平板（侧边栏自动折叠阈值）
 export const BP_DESKTOP = 1440;
 
-export function useBreakpoint() {
-  const [w, setW] = useState(() =>
-    typeof window !== "undefined" ? window.innerWidth : BP_DESKTOP,
-  );
-  useEffect(() => {
-    // ✅ 性能优化：resize 在拖动窗口边缘时会以远高于 60Hz 的频率连续触发，
-    // 且本页有 6 处调用方各挂一个监听器 —— 同帧内 6 个组件重复 setState、
-    // 6 次整树 diff，掉帧明显。改为按 rAF 合帧：一帧只取一次最新宽度。
-    // 语义不变：挂载时仍同步读取 window.innerWidth（初始值不受影响）。
-    let raf = 0;
-    let latest = window.innerWidth;
-    const onResize = () => {
-      latest = window.innerWidth;
-      if (raf) return;
-      raf = requestAnimationFrame(() => {
-        raf = 0;
-        setW(latest);
+/**
+ * ✅ 2026-11-11 性能：断点宽度改为**单一模块级外部 store**。
+ *
+ * 旧实现每个 useBreakpoint() 调用方各自挂一个 resize 监听 + 各自 setState，
+ * 本仓有 5 个调用点 ⇒ 拖窗口时同帧 5 次订阅通知、5 次组件树 diff。
+ * 现在全局只挂 1 个监听、按 rAF 合帧，5 个组件通过 useSyncExternalStore
+ * 共享同一个宽度快照；最后一个订阅者卸载时移除监听/取消 rAF（无泄漏）。
+ * 初始值、各断点计算与返回字段逐字不变。
+ */
+let bpWidth = typeof window !== "undefined" ? window.innerWidth : BP_DESKTOP;
+const bpListeners = new Set<() => void>();
+let bpRaf = 0;
+let bpAttached = false;
+let bpOnResize: (() => void) | null = null;
+
+function bpGetWidth(): number {
+  // 直接读实时宽度而非模块缓存：测试/SSR 在 mount 前改 window.innerWidth 时，
+  // 语义与旧 useState initializer 保持一致。number 是不可变原始值，
+  // 满足 useSyncExternalStore 对 getSnapshot 返回稳定值的要求。
+  return typeof window !== "undefined" ? window.innerWidth : BP_DESKTOP;
+}
+
+function bpSubscribe(cb: () => void): () => void {
+  if (!bpAttached && typeof window !== "undefined") {
+    bpAttached = true;
+    bpOnResize = () => {
+      if (bpRaf) return;
+      bpRaf = window.requestAnimationFrame(() => {
+        bpRaf = 0;
+        const next = window.innerWidth;
+        if (next === bpWidth) return;
+        bpWidth = next;
+        for (const listener of bpListeners) listener();
       });
     };
-    window.addEventListener("resize", onResize);
-    return () => {
-      if (raf) cancelAnimationFrame(raf);
-      window.removeEventListener("resize", onResize);
-    };
-  }, []);
+    window.addEventListener("resize", bpOnResize, { passive: true });
+  }
+  bpListeners.add(cb);
+  return () => {
+    bpListeners.delete(cb);
+    if (bpListeners.size === 0 && bpAttached) {
+      if (bpOnResize) window.removeEventListener("resize", bpOnResize);
+      if (bpRaf) window.cancelAnimationFrame(bpRaf);
+      bpRaf = 0;
+      bpOnResize = null;
+      bpAttached = false;
+    }
+  };
+}
+
+export function useBreakpoint() {
+  const w = useSyncExternalStore(bpSubscribe, bpGetWidth, () => BP_DESKTOP);
   return {
     width: w,
     isXs: w < BP_XS, // 极窄屏 (<380)

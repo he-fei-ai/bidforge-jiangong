@@ -266,13 +266,17 @@ export function NumberingConsistencyPanel({ schemeId }: { schemeId: string }) {
       )}
 
       {report && !report.error && driftSections.length > 0 && (
+        /* ✅ 2026-11-11：旧实现用 Math.random() 作兜底 rowKey —— 每次渲染都是新值，
+           antd 会把整张表销毁重建（滚动位置、展开态、焦点全丢）。改为确定性 key，
+           并启用与项目既有 5 张表同款的 virtual 滚动。 */
         <Table
           size="small"
           style={{ marginTop: 8 }}
-          rowKey={(r) => r.section_id || String(r.diffs?.[0]?.old || Math.random())}
+          rowKey={(r, i) => r.section_id || `drift-${r.diffs?.[0]?.old || ""}-${i}`}
           data-testid="numbering-drift-table"
           pagination={false}
           scroll={{ y: 240 }}
+          virtual
           dataSource={driftSections}
           locale={{ emptyText: "无漂移章节" }}
           columns={[
@@ -320,10 +324,11 @@ export function NumberingConsistencyPanel({ schemeId }: { schemeId: string }) {
           size="small"
           style={{ marginTop: 8 }}
           loading={loadingVersions}
-          rowKey={(r) => r.snapshot_id || String(Math.random())}
+          rowKey={(r, i) => r.snapshot_id || `version-${i}`}
           data-testid="numbering-versions-table"
           pagination={false}
           scroll={{ y: 200 }}
+          virtual
           dataSource={versions}
           locale={{ emptyText: "暂无编号修复 / 回滚快照" }}
           columns={[

@@ -610,6 +610,17 @@ async def submit_scheme_review(scheme_id: str, body: SchemeReviewIn, db=Depends(
         )
 
     # 放行门禁（仅在推进到 approved 时校验）
+    # ✅ R212（2026-11-10 · P2-4）：审核状态指纹比对**只提示、不阻断**。
+    #    背景：R181 引入 ``review_state_hash``（章节 (id, review_status) 的哈希）
+    #    正是为了「审核通过/驳回不改正文，却会让『章节未审核』类结论失真」，
+    #    但 /submit 的 SELECT 只取 ``content_fingerprint`` ⇒ 章节审核状态变更后
+    #    旧的 ``released=True`` 仍被采信。
+    #    为何**不**改成 422 硬拦：``body.require_all_sections_reviewed=false``
+    #    是文档化的「强制提交」逃生门（见上方 422 文案），硬拦会把这条显式
+    #    用户意图路径整个堵死（属产品口径，需裁决）。现改为**加法式回传**
+    #    ``review_state_stale`` + WARNING 日志：调用方（前端）可据此提示
+    #    「最近一次总检的章节审核结论已过期」，但不改变既有放行语义。
+    review_state_stale = False
     if body.to_status == "approved":
         # released 与 content_fingerprint 必须同查：只查 blocked 会放过 C/D 级
         # 未放行结论；只查 updated_at 又会漏掉内容变了但时间戳未变的历史脏数据。
@@ -624,7 +635,8 @@ async def submit_scheme_review(scheme_id: str, body: SchemeReviewIn, db=Depends(
         #    与合规侧 check_deliverability 的 ORDER BY 口径一致。
         pf = await review_db.fetch_one(
             db,
-            "SELECT blocked, released, content_fingerprint, total, created_at FROM preflight_runs"
+            "SELECT blocked, released, content_fingerprint, review_state_hash, total, created_at"
+            " FROM preflight_runs"
             " WHERE scheme_id=? ORDER BY created_at DESC, rowid DESC LIMIT 1",
             (scheme_id,),
             what="方案评审提交：读取最近预检结论",
@@ -662,6 +674,25 @@ async def submit_scheme_review(scheme_id: str, body: SchemeReviewIn, db=Depends(
             raise HTTPException(
                 422, f"最近一次总检结论为 {pf['total'] or 0} 分，未达到放行条件，" "请整改后重新执行「一键总检」"
             )
+        # ✅ R212：审核状态指纹比对（**只标记、不阻断**）。历史行没有该列
+        #    （或算不出当前值）→ 不判定（fail-open，与 _run_is_stale 同口径）。
+        try:
+            _stored_rh = str(pf["review_state_hash"] or "")
+        except (IndexError, KeyError):
+            _stored_rh = ""
+        if _stored_rh:
+            try:
+                from app.routers.compliance import _review_state_hash
+
+                _cur_rh = await _review_state_hash(db, scheme_id)
+            except Exception as e:  # noqa: BLE001 - 算不出就按「无法判定」放行
+                logger.warning("方案评审提交：审核状态指纹计算失败（按无法判定放行）scheme=%s err=%s", scheme_id, e)
+                _cur_rh = ""
+            if _cur_rh and _cur_rh != _stored_rh:
+                review_state_stale = True
+                logger.warning(
+                    "方案评审提交：章节审核状态自最近一次总检后已变更（结论可能过期）scheme=%s", scheme_id
+                )
 
     # ✅ 修复（2026-09-17）：审核状态改走独立列 review_status。旧实现直接
     #    UPDATE schemes SET status=?，评审通过后把编译状态（草稿/目录已确认）
@@ -713,6 +744,10 @@ async def submit_scheme_review(scheme_id: str, body: SchemeReviewIn, db=Depends(
         "from_status": from_status,
         "to_status": body.to_status,
         "section_review_check": section_review_check,
+        # ✅ R212（加法式新键，旧消费方零影响）：章节审核状态自最近一次总检后
+        #    是否已变更（true = 总检里的「章节未审核」类结论已过期，建议重跑总检）。
+        #    只提示不阻断 —— 强制提交（require_all_sections_reviewed=false）语义不变。
+        "review_state_stale": review_state_stale,
     }
 
 

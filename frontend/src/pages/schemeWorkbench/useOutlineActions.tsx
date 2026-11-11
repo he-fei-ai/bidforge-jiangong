@@ -1,9 +1,10 @@
-import { useCallback } from "react";
+import { useCallback, useRef } from "react";
 import type { Dispatch, Key, MutableRefObject, SetStateAction } from "react";
 import type { FormInstance, ModalFuncProps, TreeProps } from "antd";
 import type { MessageInstance } from "antd/es/message/interface";
 import { sectionsApi, outlineLibraryApi, uploadOutlineApi } from "../../api";
 import { MAX_OUTLINE_DEPTH } from "../../utils/outlineConstants";
+import { outlineClampNotice, outlineUnmountedNotice } from "./outlineNotices";
 import {
   collectAllKeys,
   countOutline,
@@ -147,7 +148,25 @@ export function useOutlineActions(deps: OutlineActionsDeps): OutlineActions {
     await doSaveOutlineTree();
   }, [id, modal, msg, load]);
 
+  // ✅ R216（2026-11-11 · P3 · D-7）：同步在飞锁（ref 判据，非异步 state）——
+  //    同帧双击「保存目录」此前双发 save-outline（双 success、双 cleared toast、
+  //    双 reviewTick bump、双快照归档）。与 R212 专家论证同帧双击修法同型。
+  const saveInFlightRef = useRef(false);
   async function doSaveOutlineTree(opts?: { allowEmptyChapters?: boolean }) {
+    if (!id) return;
+    if (saveInFlightRef.current) {
+      msg.info("目录保存正在进行中，请稍候");
+      return;
+    }
+    saveInFlightRef.current = true;
+    try {
+      await doSaveOutlineTreeInner(opts);
+    } finally {
+      saveInFlightRef.current = false;
+    }
+  }
+
+  async function doSaveOutlineTreeInner(opts?: { allowEmptyChapters?: boolean }) {
     if (!id) return;
     const outline = renumberOutline(treeToOutline(treeRef.current));
     try {
@@ -159,6 +178,10 @@ export function useOutlineActions(deps: OutlineActionsDeps): OutlineActions {
         ...(opts?.allowEmptyChapters ? { allow_empty_chapters: true } : {}),
       });
       msg.success(`目录已保存，共 ${data.count || collectAllKeys(treeRef.current).length} 章节`);
+      // ✅ R213（FIX-13）：后端 save-outline 回传「超三级被折叠」的信号（R209），
+      //    前端此前零消费 ⇒ 用户以为四级目录已完整保存。加法式，未折叠零提示。
+      const _clamp = outlineClampNotice(data);
+      if (_clamp) msg.warning(_clamp);
       notifyClearedContent(data);
       notifyGenericResidual(data);
       // ✅ G10：目录结构变更会改变预检的章节集合 → 刷新审核 / 就绪度工作台
@@ -240,6 +263,11 @@ export function useOutlineActions(deps: OutlineActionsDeps): OutlineActions {
     setExportingTree(true);
     try {
       const { data } = await sectionsApi.exportTree(id);
+      // ✅ R218（2026-11-11 · P3 · D-D）：/export-tree 回传 `unmounted_count`
+      //    （R216），前端此前零消费 ⇒ 导出目录 JSON 对成环/悬挂章节静默缺章却
+      //    无任何提示。与 list_sections（R213 FIX-12）同口径消费（不阻断导出）。
+      const _unmounted = outlineUnmountedNotice(data);
+      if (_unmounted) msg.warning(_unmounted);
       const outline = data.outline || [];
       const total = countOutline(outline);
       if (total === 0) {
@@ -323,6 +351,12 @@ export function useOutlineActions(deps: OutlineActionsDeps): OutlineActions {
           //      后端 R79 起就回传，经 R88 FIX-8 才真正透传到此处。
           notifyClearedContent(data);
           notifyGenericResidual(data);
+          // ✅ R216（2026-11-11 · P3 · D-8）：套用消费 clamped_* 信号 ——
+          //    库内存量深树（R209 normalize 入库之前的历史行）套用时后端会
+          //    折叠并经 passthrough_additive 透传 clamped_depth/clamped_nodes，
+          //    此处此前零消费 ⇒ 静默折叠（与保存主路径 :165 同一文案出口）。
+          const _applyClamp = outlineClampNotice(data);
+          if (_applyClamp) msg.warning(_applyClamp);
           setLibOpen(false);
           setSelectedSection(null);
           await load();
@@ -401,7 +435,24 @@ export function useOutlineActions(deps: OutlineActionsDeps): OutlineActions {
   }
 
   /** 从上传文件识别目录 */
+  // ✅ R216（2026-11-11 · P3 · D-7）：同步在飞锁 —— 导入目录此前无任何在飞
+  //    防护（按钮连 importing 态都没有），同帧双选文件可双份上传 + 双 AI
+  //    识别 + 双替换确认弹窗。
+  const importInFlightRef = useRef(false);
   const handleUploadParseOutline = async (file: File) => {
+    if (importInFlightRef.current) {
+      msg.info("目录导入正在进行中，请稍候");
+      return;
+    }
+    importInFlightRef.current = true;
+    try {
+      await handleUploadParseOutlineInner(file);
+    } finally {
+      importInFlightRef.current = false;
+    }
+  };
+
+  const handleUploadParseOutlineInner = async (file: File) => {
     // ✅ BUG 修复：上传识别结果会直接替换本地目录树（尚未保存也会丢）。
     // 若当前树中已有生成正文的章节，误操作会让用户在调整后保存时整组重建、
     // 溯源/正文归属被重置。这里先要求显式确认。

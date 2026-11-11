@@ -164,14 +164,32 @@ def _terminal_payload(done: int, failed: int, total: int) -> dict:
 
 
 def test_runtime_and_terminal_counts_consistent():
-    """含失败章节：运行期 stats 与终态 checkpoint 的 done/processed/failed 一致。"""
+    """含失败章节：运行期 stats 与终态 checkpoint 的 done/processed/failed 一致。
+
+    ✅ R215 重锚（意图保留、强度不减）：R194 已确立终态计数 = **done_ids 口径**
+    （failed_count = total - done，未处理章计入「未成功」；在线 stopped/error
+    通道此前已用该口径），R215 把 checkpoint 通道拉齐（原 len(failed_ids) 是
+    分叉时代的旧形态）。两个口径的语义差 = 未处理章数：
+      · terminal["failed_count"] = total - done → 面向用户「几章没成功」；
+      · runtime["failed"]（_count_failed 累加）= 实际失败数 → 面向明细。
+    本场景 total=6、done=3、实际失败=2、未处理=1 ⇒ 终态 3、实际 2。
+    另补「无未处理章时两口径重合」的正例，保住原「一致」意图的适用域。
+    """
     processed, failed, total = 5, 2, 6
     runtime = _done_counters(processed, failed)
     terminal = _terminal_payload(done=runtime["done"], failed=failed, total=total)
     assert terminal["done"] == runtime["done"] == 3
     assert terminal["processed"] == runtime["processed"] == 5
-    assert terminal["failed_count"] == runtime["failed"] == 2
+    # ✅ R215：done_ids 口径 —— total(6) - done(3) = 3（含 1 个未处理章）
+    assert terminal["failed_count"] == 3
+    # 实际失败数（明细口径）：failed_sections 明细按 failed_reasons 下发（本 helper 传空）
+    assert runtime["failed"] == 2
+    assert terminal["failed_sections"] == []
     assert terminal["total"] == total
+
+    # 正例：全部章节都已处理（无未处理章）时，两口径重合（原意图适用域）
+    terminal2 = _terminal_payload(done=4, failed=2, total=6)
+    assert terminal2["failed_count"] == 2
 
 
 def test_terminal_payload_processed_is_additive():

@@ -71,7 +71,19 @@ def test_fix_locks_at_least_one_dot_segment():
     """结构锁：点分编号分支的捕获量词必须是 `+`（至少一个点段），不得回退成 `*`。
 
     回退成 `*` 即复活「单段数字紧邻 CJK 被误剥」的数量型标题缺陷。
+
+    ✅ R216 重锚（意图保留、强度不减）：全角归一把字符类由 `[0-9]` 扩为
+    `[0-9０-９]`、点号由 `\\.` 扩为 `[.．]`，「至少一个点段」的语义与量词
+    强度**未变**。旧断言锁的是 ASCII 实现字面量，改为锁新字面量 + 旧形态
+    不得回流 + 行为实证，避免把「实现」当成「意图」。
     """
     pat = _STRIP_NUMBER_RE.pattern
-    assert r"([0-9]+(?:\.[0-9]+)+)" in pat, "点分编号捕获缺少『至少一个点段』限定"
-    assert r"([0-9]+(?:\.[0-9]+)*)" not in pat, "点分编号捕获回退成星号将误剥数量型标题"
+    assert r"([0-9０-９]+(?:[.．][0-9０-９]+)+)" in pat, "点分编号捕获缺少『至少一个点段』限定（R216 全角归一后）"
+    assert r"([0-9０-９]+(?:[.．][0-9０-９]+)*)" not in pat, "点分编号捕获回退成星号将误剥数量型标题"
+    assert r"([0-9]+(?:\.[0-9]+)+)" not in pat, "R216 全角归一不得回退为纯 ASCII 实现"
+    # 行为实证（语义级，不依赖字面量）
+    assert strip_outline_numbering("2层作业平台") == "2层作业平台"
+    assert strip_outline_numbering("10个人") == "10个人"
+    assert strip_outline_numbering("2.4.1钢筋工程") == "钢筋工程"
+    assert strip_outline_numbering("１.２ 施工布置") == "施工布置"
+    assert strip_outline_numbering("２.５m 深") == "２.５m 深"

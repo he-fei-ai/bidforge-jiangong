@@ -1,4 +1,4 @@
-﻿/**
+/**
  * 就绪度总览仪表盘（审核与预检模块的"总入口"）
  *
  * 解决的问题
@@ -26,6 +26,7 @@ import {
   Col,
   Descriptions,
   Drawer,
+  Dropdown,
   Empty,
   List,
   Progress,
@@ -784,21 +785,68 @@ function ReadinessDashboard({
                     width: 132,
                     ellipsis: true,
                     render: (_: unknown, r: PreflightFinding) => {
-                      const label = r.section_title || (r.section_id ? "（章节已删除）" : "跨章节");
-                      if (!r.section_id || !onLocateSection) {
+                      // ✅ R212（2026-11-10 · P1-1）：章节列标签**三态**回退。
+                      //    旧实现是二态：`section_title || (section_id ? "（章节已删除）"
+                      //    : "跨章节")` —— 聚合类 finding（导出预检的 review_pending /
+                      //    chart_failed 等）后端**不回 section_title**（title 语义是
+                      //    章节标题，聚合项没有），但**回 section_ids** ⇒ 旧实现把
+                      //    「没有标题」误判成「章节已删除」，用户看到「（章节已删除）」
+                      //    却能点击跳到一个**真实存在**的章节（假标签 + 误导跳转）。
+                      //    现按「有标题 / 多章节 / 单章节未知名 / 无定位」四态展示：
+                      //    只有真的拿不到任何定位信息才显示「跨章节」。
+                      const ids = r.section_ids?.length
+                        ? r.section_ids
+                        : r.section_id
+                          ? [r.section_id]
+                          : [];
+                      const label =
+                        r.section_title ||
+                        (ids.length > 1
+                          ? `${ids.length} 处章节`
+                          : ids.length === 1
+                            ? "章节（标题未知）"
+                            : "跨章节");
+                      // ✅ R214（2026-11-10 · R212 D-6）：定位判据改为 ``ids.length``。
+                      //    旧实现用 ``!r.section_id`` —— 聚合类 finding（review_pending
+                      //    / chart_failed 等）后端**只回 section_ids、不回 section_id**
+                      //    ⇒ 有定位信息却不可跳转（显示纯文本「N 处章节」）。现按 ids
+                      //    判据：有 ids 即可跳；多章时用 Dropdown 列出各章节（标签取
+                      //    section_titles[i]，缺省按 id 简写），单章直接跳。
+                      if (!ids.length || !onLocateSection) {
                         return (
                           <Text type="secondary" style={{ fontSize: 11 }}>
                             {label}
                           </Text>
                         );
                       }
+                      const titles = r.section_titles?.length ? r.section_titles : [];
+                      const labelOf = (i: number) =>
+                        titles[i] || String(ids[i] || "").slice(0, 8) || `章节 ${i + 1}`;
+                      if (ids.length > 1) {
+                        return (
+                          <Dropdown
+                            trigger={["click"]}
+                            menu={{
+                              items: ids.map((sid, i) => ({
+                                key: String(sid),
+                                label: labelOf(i),
+                              })),
+                              onClick: ({ key }) => onLocateSection(key),
+                            }}
+                          >
+                            <Button type="link" size="small" style={{ padding: 0, fontSize: 11 }}>
+                              {label} ▾
+                            </Button>
+                          </Dropdown>
+                        );
+                      }
                       return (
-                        <Tooltip title={`定位到「${r.section_title || r.section_id}」`}>
+                        <Tooltip title={`定位到「${r.section_title || ids[0]}」`}>
                           <Button
                             type="link"
                             size="small"
                             style={{ padding: 0, fontSize: 11 }}
-                            onClick={() => onLocateSection(r.section_id)}
+                            onClick={() => onLocateSection(ids[0])}
                           >
                             {label}
                           </Button>

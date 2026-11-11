@@ -1,6 +1,7 @@
-import {
+import type {
   facts_result as GeneratedFactsResult,
-  type facts_result,
+  outline_result as GeneratedOutlineResult,
+  content_result as GeneratedContentResult,
 } from "../../types/checkpointSchema";
 import { isTerminalTaskStatus } from "../../utils/contentEvents";
 import { applyFactsCompletedEvent } from "./factsShared.ts";
@@ -10,7 +11,14 @@ export interface TaskTerminalInfo {
   status: string;
   message?: string;
   progress?: number;
-  outline_result?: {
+  /**
+   * ✅ R213（FIX-6/D5）：与生成契约**交叉**（intersection）—— 后端在
+   *   `checkpoint_schema.py` 加键并重跑生成器后，新键自动在此可见，不再出现
+   *   「SSE 有、checkpoint 无、重挂读键 TS2339」的分叉（R210 的
+   *   resumed_chapters 曾手工补过第二份）。下方本地成员只保留历史语义注释，
+   *   不再是独立契约。
+   */
+  outline_result?: GeneratedOutlineResult & {
     outline?: unknown[];
     // ✅ R79 对齐单一事实源 `backend/app/services/checkpoint_schema.py`
     //    （原声明 list[dict] 是文档失真，实收值是章标题字符串数组）；
@@ -18,6 +26,14 @@ export interface TaskTerminalInfo {
     //    两处必须同口径，否则前端读法会把字符串当对象遍历。
     failed_chapters?: string[];
     failed_count?: number;
+    /**
+     * ✅ 断点续跑**复用章数**（int）—— 与生成源 `types/checkpointSchema.ts`
+     *   （由 `tools/generate_checkpoint_schema.py` 从后端 `checkpoint_schema.py`
+     *   生成）**同口径**。本文件的本地副本此前漏此键 ⇒ `useOutlineGeneration`
+     *   读 `ckpt.resumed_chapters` 时 tsc 报 TS2339（工作树既有红灯，
+     *   连带击穿仓库内「守 tsc 退出码」的护栏）。
+     */
+    resumed_chapters?: number;
     /**
      * ✅ 契约补齐（2026-09-21）：后端 `_CHECKPOINT_KINDS.outline_generation`
      * 白名单含 `review`，断线重挂后目录的审核/修复结果此前在前端无处安放。
@@ -35,8 +51,10 @@ export interface TaskTerminalInfo {
      *  断线重挂/刷新接管与在线 completed 的自动确认判定同构（加法式）。 */
     auto_confirm?: unknown;
   };
-  /** ✅ G12-6：正文生成 checkpoint（后端 `_CHECKPOINT_KINDS.content_generation` 白名单） */
-  content_result?: {
+  /** ✅ G12-6：正文生成 checkpoint（后端 `_CHECKPOINT_KINDS.content_generation` 白名单）
+   *  ✅ R213（FIX-6/D5）：同样与生成契约交叉，本地副本曾漏 7 个键
+   *  （word_audit / order_check / charts 等），重挂读它们会 TS2339。 */
+  content_result?: GeneratedContentResult & {
     event?: string;
     message?: string;
     done?: number;

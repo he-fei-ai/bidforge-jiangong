@@ -1,5 +1,6 @@
 import { memo, useEffect, useState } from "react";
 import { Typography } from "antd";
+import { fmtDuration } from "./statsFormat";
 const { Title, Text } = Typography;
 
 // ============================================================
@@ -14,7 +15,9 @@ export const ElapsedTimer = memo(function ElapsedTimer({ startTime }: { startTim
   }, []);
   return (
     <Text type="secondary" style={{ fontSize: 11, marginLeft: 4, flexShrink: 0 }}>
-      {Math.max(0, Math.floor((Date.now() - startTime) / 1000))}s
+      {/* ✅ R215（2026-11-11 · P3）：复用 fmtDuration 进位口径 —— 正文单章常态
+          1-5 分钟，旧实现恒以「247s」裸秒显示，与进度卡「已耗时 4分7秒」割裂。 */}
+      {fmtDuration(Math.max(0, Date.now() - startTime))}
     </Text>
   );
 });

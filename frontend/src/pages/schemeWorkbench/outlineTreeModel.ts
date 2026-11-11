@@ -74,6 +74,13 @@ export function buildTree(nodes: OutlineNodeInput[]): TreeNode[] {
       outlineId,
       // ✅ 2026-09-29：事实变更失效标记（后端 _build_tree 读侧派生）
       facts_stale: !!n.facts_stale,
+      // ✅ R218（2026-11-11 · P2 · D-C）：补齐章节级生成标准覆盖 / 最近一次
+      //    生成标准 / 字数档位映射 —— 后端 `_build_tree` `dict(r)` 原样保留这些
+      //    键，前端 buildTree 此前漏映射 ⇒ 刷新后「沿用方案（X）」覆盖回显丢失
+      //    （SchemeWorkbenchPage / useSectionEditing 读 selectedSection.generation_standard）。
+      word_status: n.word_status,
+      generation_standard: n.generation_standard || "",
+      last_generation_standard: n.last_generation_standard,
       children: n.children ? buildTree(n.children) : [],
     };
   });
@@ -110,6 +117,40 @@ export function collectAllKeys(nodes: TreeNode[]): string[] {
   }
   nodes.forEach(walk);
   return keys;
+}
+
+/**
+ * ✅ R215（2026-11-11）：把旧树的 content 回填到新树（按 key 对齐）。
+ *
+ * 背景：正文生成期间每 3s 轻量轮询（include_content:false）拿到的是**无 content**
+ * 的树，字数/状态变化后指纹必不相同 → 整树被替换为无 content 节点；用户点击目录
+ * 树其他章节时 handleTreeSelect 直取节点，正文卡一边显示「已生成 N 字」一边渲染
+ * 「（章节尚未生成…）」占位 —— 同一卡片自相矛盾，直到生成结束 load() 才恢复。
+ *
+ * 纯函数：不改入参；只回填旧树**有而新树缺失**的 content（新树有值时以新树为准
+ * —— 轻量轮询虽不含 content，但完整 load() 的树以服务端为准）。
+ */
+export function mergeTreeContents(prev: TreeNode[], next: TreeNode[]): TreeNode[] {
+  const prevContent = new Map<string, string | undefined>();
+  function walkP(ns: TreeNode[]) {
+    for (const n of ns) {
+      if (n.content !== undefined) prevContent.set(n.key, n.content);
+      if (n.children?.length) walkP(n.children);
+    }
+  }
+  walkP(prev || []);
+  if (!prevContent.size) return next;
+  function walkN(ns: TreeNode[]): TreeNode[] {
+    return ns.map((n) => {
+      const merged: TreeNode = { ...n };
+      if (merged.content === undefined && prevContent.has(n.key)) {
+        merged.content = prevContent.get(n.key);
+      }
+      if (n.children?.length) merged.children = walkN(n.children);
+      return merged;
+    });
+  }
+  return walkN(next);
 }
 
 /**

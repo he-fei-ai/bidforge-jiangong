@@ -79,18 +79,38 @@ describe("formatOutlineTitle · 接线面行为", () => {
   //   撞上 vitest **默认 60s** 用例超时就在并行负载下假红（R88 实测：与另一文件
   //   并跑时本文件 93s、该用例 timed out；隔离跑 8.7s 全绿）。
   //   ⇒ 改为 **一次 beforeAll 预热 + 显式超时预算**（loadMs 自证预热确实做了事）。
+  //
+  // ✅ R209 加固（假红根除）：R88 的预热目标仍是**页面组件**，实测在**目录簇
+  //   并行跑（15 文件同跑）**下该 import 的 transform 成本再次突破 120s 预算
+  //   ⇒ 2026-11-10 基线跑出现「1 failed suite」（beforeAll Hook timed out），
+  //   而该文件**隔离跑 37/37 全绿**（10.9s）—— 属测试基础设施假红，非产品缺陷。
+  //   现改为：**行为断言直接 import 真实实现模块**
+  //   （``pages/schemeWorkbench/outlineNumbering``，页面第 296 行的 import 源），
+  //   页面「确实接线到该模块」由下方**静态源码断言**锁定（import.meta.glob ?raw，
+  //   零 transform 成本）—— 覆盖面不降（行为 + 接线双锁），成本从「整个页面模块图」
+  //   降到「一个小模块」。
   let formatOutlineTitle: (id: string, level: number, title: string) => string;
   let loadMs = -1;
 
   beforeAll(async () => {
     const t0 = Date.now();
-    ({ formatOutlineTitle } = await import("../pages/SchemeWorkbenchPage"));
+    ({ formatOutlineTitle } = await import("../pages/schemeWorkbench/outlineNumbering"));
     loadMs = Date.now() - t0;
-  }, 120_000);
+  }, 60_000);
 
   it("模块预热确实完成（否则下面的断言是在测 undefined）", () => {
     expect(typeof formatOutlineTitle).toBe("function");
     expect(loadMs).toBeGreaterThanOrEqual(0);
+  });
+
+  it("页面确实接线到该共享实现（静态断言，零 transform 成本）", async () => {
+    const pages = import.meta.glob("../pages/SchemeWorkbenchPage.tsx", {
+      query: "?raw",
+      import: "default",
+    });
+    const src = await pages["../pages/SchemeWorkbenchPage.tsx"]();
+    expect(src).toContain('from "./schemeWorkbench/outlineNumbering.ts"');
+    expect(src).toContain("formatOutlineTitle");
   });
 
   it("canonical 仍渲染编号（修复不得改变正常数据）", () => {

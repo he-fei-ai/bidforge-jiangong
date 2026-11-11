@@ -103,11 +103,40 @@ async def collect_defects(db, scheme_id: str) -> dict:
 
 
 async def collect_facts(db, scheme_id: str, project_id: str) -> dict:
-    """事实待确认：低置信度或未 resolve（含同项目共享事实）。"""
+    """事实待确认：低置信度 / 未 resolve / **来源已过期**（含同项目共享事实）。
+
+    ✅ R210（2026-11-10 · P2）：补「过期（is_stale=1）」这一档。
+
+    旧口径只收「未 resolve 或低置信度」，但**注入门控**
+    （``facts_extractor._FACTS_INJECT_WHERE``）是四档：
+    ``has_conflict=0 AND is_resolved=1 AND is_simulated=0 AND is_stale=0``。
+    一条**已确认但来源已过期**的事实（``is_resolved=1 AND is_stale=1``，典型来源：
+    项目资料被重传/重解析后 ``_mark_project_facts_stale`` 批量标记）：
+
+      · **不满足**注入门控 ⇒ 被正文与导出**静默丢弃**（事实内容从交付物里消失）；
+      · **不满足**旧待确认口径 ⇒ 不进本清单 ⇒ 底稿写「事实待确认 0 项」。
+
+    两头不靠 ⇒ 交付前复核清单**看不出**有事实掉出正文（数据真实性缺口：
+    用户看到「无需复核」，正文却少了一整条关键事实）。
+
+    现把 ``is_stale`` 纳入待确认口径，并回传该列供附录标注，
+    使「清单 = 注入门控的补集」这一**可裁决口径**成立。
+
+    ✅ R217（2026-11-11 · P1）：门控实际是**四档**，而上面这句「补集成立」
+    只在 ``is_stale`` 一档上为真 —— ``has_conflict=1``（跨条目冲突回写的
+    合法路径，见 facts_cross_validators._mark_cross_conflicts_on_items）与
+    ``is_simulated=1``（模拟事实）同样被 ``_FACTS_INJECT_WHERE`` 排除，
+    却因清单 SQL 不认这两档而**不进待确认清单** ⇒ 事实在交付物与复核清单里
+    同时消失（导出预检却报 global_facts_blocked，两侧互相矛盾）。
+    现补齐两档；低置信度是既有复核口径（门控不排除但用户应复核），**刻意
+    保留**，故准确口径为「清单 ⊇ 注入门控的补集」而非严格相等。
+    """
     sql = (
-        "SELECT id, title, content, confidence, is_resolved, source_ref, category "
+        "SELECT id, title, content, confidence, is_resolved, is_stale, source_ref, category "
         f"FROM global_facts WHERE {FACT_SCOPE_PREDICATE} "
-        "AND (COALESCE(is_resolved, 1) = 0 OR COALESCE(confidence, 1.0) < ?) "
+        "AND (COALESCE(is_resolved, 1) = 0 OR COALESCE(confidence, 1.0) < ? "
+        "OR COALESCE(is_stale, 0) = 1 OR COALESCE(has_conflict, 0) = 1 "
+        "OR COALESCE(is_simulated, 0) = 1) "
         "ORDER BY confidence, title"
     )
     rows, err = await _fetch_rows(db, sql, (scheme_id, project_id, LOW_CONFIDENCE), what="global_facts")
@@ -313,7 +342,14 @@ def _add_review_checklist(doc, data: dict) -> None:
                     _cell(f.get("title")),
                     _cell(f.get("category")),
                     _cell(f.get("confidence")),
-                    "是" if int(f.get("is_resolved") or 0) else "否",
+                    # ✅ R210：过期事实（来源已变化）**不会进入正文与导出**，
+                    #    「已确认」列不得再显示为「是」——否则复核清单会让人以为
+                    #    该事实已生效。口径与注入门控 is_stale=0 对齐。
+                    (
+                        "是（来源已过期，不进正文）"
+                        if int(f.get("is_stale") or 0)
+                        else ("是" if int(f.get("is_resolved") or 0) else "否")
+                    ),
                     _cell(f.get("source_ref")),
                     _cell(f.get("content")),
                 ]

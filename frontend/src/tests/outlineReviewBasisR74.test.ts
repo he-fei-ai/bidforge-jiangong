@@ -94,7 +94,7 @@ describe("R74·G1 A组 · summarizeOutlineReviewBasis 纯函数", () => {
   });
 });
 
-describe("R74·G1 B组 · 三处消费点静态接线锁", () => {
+describe("R74·G1 B组 · 生成链消费点静态接线锁", () => {
   const CALL = "summarizeOutlineReviewBasis(";
 
   it("前提：能取到被测文件源码（防 glob 空跑成常绿）", () => {
@@ -103,11 +103,17 @@ describe("R74·G1 B组 · 三处消费点静态接线锁", () => {
     expect(GEN).toBeTruthy();
   });
 
-  it("三处调用都在生成链（在线 completed / 刷新接管 / 断线重挂，一处都不能少）", () => {
-    // 正文链重挂收尾仍在页面（1 处），目录链两处随 G12 进 hook —— 计数跨两文件，
-    // 任一消费点被摘掉都会掉到 2 并红。
+  it("四处调用都在生成链（在线 completed / 刷新接管 / 断线重挂，一处都不能少）", () => {
+    // ✅ 2026-11-11 既有护栏重锚（意图保留、强度不减）：
+    //    工作树早已加法式新增第 4 个消费点（页面刷新接管路径也消费
+    //    ckpt.review），旧断言把「三处」这一当时的实现数量锁成了 `toBe(3)`，
+    //    于是源码更强反而报红。现按当前真实基线锁精确计数 4（摘掉任一处
+    //    仍立刻变红），并追加三条路径的关键词锚，防止只靠总数凑数。
     const n = (PAGE + "\n" + GEN).split(CALL).length - 1;
-    expect(n).toBe(3); // 3 消费点（定义在 reviewShared，不在页面/hook）
+    expect(n).toBe(4); // 定义在 reviewShared，不计入页面/hook
+    expect(GEN).toContain("summarizeOutlineReviewBasis(evt.review)"); // 在线 completed
+    expect(GEN).toContain("summarizeOutlineReviewBasis(ckpt.review)"); // 目录链 checkpoint
+    expect(PAGE).toContain("summarizeOutlineReviewBasis(ckpt.review)"); // 页面/刷新接管
   });
 
   it("completed 分支：消费点位于质量摘要之后、开闸确认之前（同口径顺序）", () => {
@@ -119,9 +125,10 @@ describe("R74·G1 B组 · 三处消费点静态接线锁", () => {
     expect(gi).toBeGreaterThan(ri);
   });
 
-  it("两条 checkpoint 恢复路径都必须消费 ckpt.review", () => {
+  it("每条 checkpoint 恢复路径都必须消费 ckpt.review", () => {
+    // 与上方同一口径重锚：页面 2 处 + 目录 hook 1 处 = 3 处，逐处消失都会红。
     const n = (PAGE + "\n" + GEN).split("summarizeOutlineReviewBasis(ckpt.review)").length - 1;
-    expect(n).toBe(2);
+    expect(n).toBe(3);
   });
 
   it("反向锚：摘除全部消费点后，接线判据必须归零（证明扫描在守）", () => {

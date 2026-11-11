@@ -240,24 +240,18 @@ async def delete_scheme(project_id: str, scheme_id: str, db=Depends(get_db)):
         logging.getLogger("schemes").warning("删除前取消运行任务失败（继续删除）: %s", e)
 
     await db.execute("DELETE FROM sections WHERE scheme_id=?", (scheme_id,))
-    # ✅ 级联补全：consistency_conflicts / consistency_repairs / scheme_snapshots
-    # 均以 scheme_id 关联且无外键约束，旧清单遗漏会残留孤儿行。
-    for table in (
-        "global_facts",
-        "chart_predictions",
-        "compliance_check",
-        "consistency_audit",
-        "consistency_conflicts",
-        "consistency_repairs",
-        "scheme_snapshots",
-        "export_cache",
-        "task_registry",
-        "preflight_runs",
-        "review_records",
-        # ✅ R175（2026-11-03）：事实模块新增两表（无外键，显式清理）
-        "facts_chunk_failures",
-        "facts_cross_conflicts",
-    ):
+    # ✅ R216（2026-11-11 · P3）：级联清单与 projects._SCHEME_SCOPED_TABLES 收口为
+    #    **单一事实源** —— 此前两份清单各自演进，单删方案漏了 4 张表：
+    #    consistency_scan_cache（「章节正文 hash → 扫描结果」缓存，同名 scheme_id
+    #    复用会命中早已不存在的章节，projects.py 注释明言的长期教训）、
+    #    scheme_defects / fix_decisions（R179 Phase C 缺陷账本，已删方案的缺陷
+    #    仍整单返回）、placeholder_baselines（测试连接未开 PRAGMA foreign_keys
+    #    时 FK 级联不生效）。表内 "sections" 对刚清空的表是幂等 no-op；
+    #    facts_chunk_failures / facts_cross_conflicts 属项目级清单（projects.py
+    #    按 project_id 清理），单删方案仍需按 scheme_id 清其维度行，故保留。
+    from app.routers.projects import _SCHEME_SCOPED_TABLES
+
+    for table in (*_SCHEME_SCOPED_TABLES, "facts_chunk_failures", "facts_cross_conflicts"):
         await db.execute(f"DELETE FROM {table} WHERE scheme_id=?", (scheme_id,))
     await db.execute("DELETE FROM facts_extracted_chunks WHERE project_id=? AND scheme_id=?", (project_id, scheme_id))
     # ✅ 级联补全（2026-09-20）：uploaded_outlines 以 scheme_id 关联但无外键 ——

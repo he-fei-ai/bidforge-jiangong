@@ -275,11 +275,32 @@ class TestDownstreamSourceLocks:
         assert "content_generation_in_progress(scheme_id)" in src[i_guard : i_guard + 300]
 
     def test_fix11_gate_text_compare_both_paths(self):
-        """FIX-11：手工保存与全量重规范化两处门控都改为文本比较。"""
+        """FIX-11：手工保存与全量重规范化两处门控都改为文本比较。
+
+        ✅ R211 重锚（意图保留、强度不减）：R194 的实现形态是**内联字面量**
+        ``if _changed or _new_content != _renorm_src:``；R211 把该判据下沉为
+        **唯一出口** ``numbering.content_actually_changed(source, normalized, changed)``
+        —— 同一判据已漂移到 6 处调用点（手工保存 / 改名残留 / 批量重规范化 ×2 /
+        压缩路径 / 正文生成路径），本轮一次收口，内联字面量随之消失。
+        故断言改为**意图层**且更严：
+          ① 两处门控都走唯一判据出口；
+          ② 该出口本身必须做文本比较（净化型改写 → 判「变了」，行为断言）；
+          ③ 旧内联字面量**不得回流**（否则又出现第 7 份实现）。
+        """
+        from app.services.numbering import content_actually_changed
+
         src = _sections_src()
-        assert "if _changed or _new_content != _renorm_src:" in src
-        assert "new_content != content_by_id.get(sec_id" in src
-        assert "if changed or new_content != content:" in src
+        assert "content_actually_changed(_renorm_src, _new_content, _changed)" in src
+        assert "content_actually_changed(content_by_id.get(sec_id" in src
+        assert "content_actually_changed(content, new_content, changed)" in src
+        # 旧内联形态不得回流
+        assert "if _changed or _new_content != _renorm_src:" not in src
+        assert "if changed or new_content != content:" not in src
+        assert "changed or new_content != content_by_id.get(sec_id" not in src
+        # 唯一出口本身必须做文本比较（行为断言，非字面量）
+        assert content_actually_changed("a", "b", False) is True
+        assert content_actually_changed("a", "a", False) is False
+        assert content_actually_changed("a", "a", True) is True
 
     def test_fix9_whitelist_contains_table(self):
         """FIX-9：_drop_leadin_without_visual 后继白名单含 table。"""

@@ -424,7 +424,15 @@ class TestOutlineDdBoundaryClip:
 class TestSourceRatchets:
     def test_replaced_count_excludes_request_doc_ids(self):
         assert "request_doc_ids: set[str] = set()" in _GFD_SRC
-        seg = _GFD_SRC[_GFD_SRC.index("for old in await cur.fetchall()") : _GFD_SRC.index("# 落库（parsed_markdown 留空")]
+        # ✅ R208 重锚到**意图**（断言强度不减）：
+        #    原切片起点是字面量 "for old in await cur.fetchall()" —— 那是
+        #    **实现细节**；R208 BE-11（同名重传保留人工分类）把旧行先取出
+        #    （`_old_rows = await cur.fetchall()`）再遍历（`for old in
+        #    _old_rows:`）⇒ 起点字符串消失 ⇒ 护栏假红。
+        #    该护栏真正要守的是「replaced 计数必须排除本请求 doc_id」——
+        #    即「not in request_doc_ids」必须落在「旧行遍历 → 落库」区间内。
+        #    故改用语义化且稳定的锚点（R193 注释行 / 落库注释行）。
+        seg = _GFD_SRC[_GFD_SRC.index("# ✅ R193：replaced 只数") : _GFD_SRC.index("# 落库（parsed_markdown 留空")]
         assert "not in request_doc_ids" in seg, "replaced 计数必须排除本请求 doc_id"
         assert "request_doc_ids.add(doc_id)" in _GFD_SRC
 

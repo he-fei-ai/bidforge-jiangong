@@ -3,6 +3,7 @@ import type { ModalFuncProps } from "antd";
 import type { MessageInstance } from "antd/es/message/interface";
 import { factsApi, sseFetch, tasksApi } from "../../api";
 import { createSseBatcher } from "../../utils/sseBatcher";
+import { appendBoundedLog } from "../../utils/perf/logBuffer";
 import { isTerminalContentEvent, isTerminalTaskStatus } from "../../utils/contentEvents";
 import { isDocFailed, isDocParsed, type DocRecord } from "../../utils/workflowDerived";
 import { applyFactsCompletedEvent } from "./factsShared";
@@ -124,7 +125,13 @@ export function useFactsGeneration(deps: FactsGenerationDeps) {
       if (!m) return;
       const list = factsLogsRef.current;
       if (list.length && list[list.length - 1].message === m) return;
-      factsLogsRef.current = [...list, { progress: p, message: m, time: Date.now() }];
+      // ✅ 2026-11-11 性能：写入端有界缓冲。旧实现 [...list, item] 无限追加，
+      //    渲染层的 200 行截断只管 DOM，数据源仍随 SSE 事件线性增长并每次 O(n) 复制。
+      factsLogsRef.current = appendBoundedLog(list, {
+        progress: p,
+        message: m,
+        time: Date.now(),
+      });
       batcher.schedule("factsLogs", () => setFactsLogs(factsLogsRef.current));
     };
     let taskId = "";
@@ -162,9 +169,11 @@ export function useFactsGeneration(deps: FactsGenerationDeps) {
         //    不刷新。终态判定统一走共享出口（contentEvents 单一事实源）。
         if (isTerminalContentEvent(evt)) {
           lastProgress = 1;
-          setProgress(1);
           const doneMsg = evt.message || "全局事实提取完成";
-          setProgressMsg(doneMsg);
+          // 终态也走同一批量器：按 key 覆盖挂起的旧进度，避免收尾 flushNow
+          // 把已排队的 p<1 写回去造成进度条回退。
+          batcher.schedule("progress", () => setProgress(1));
+          batcher.schedule("progressMsg", () => setProgressMsg(doneMsg));
           // 降级完成用 ⚠️ 日志与 warning toast，避免用户误以为全部成功
           const _isDegraded = evt.event !== "completed";
           pushLog(1, `${_isDegraded ? "⚠️" : "✅"} ${doneMsg}`);
@@ -193,9 +202,13 @@ export function useFactsGeneration(deps: FactsGenerationDeps) {
         //    该分支是 R203 登记的死分支，删除以免误以为本链有建连阶段。
         } else if (evt.event === "progress") {
           lastProgress = evt.progress || 0;
-          setProgress(lastProgress);
-          setProgressMsg(evt.message || "");
-          pushLog(lastProgress, evt.message || "");
+          const p = lastProgress;
+          const m = evt.message || "";
+          // ✅ 2026-11-11 性能：心跳级事件必须走 rAF 批量器，避免跨 await
+          //    边界退化成「每事件 2 次独立 render」。
+          batcher.schedule("progress", () => setProgress(p));
+          batcher.schedule("progressMsg", () => setProgressMsg(m));
+          pushLog(p, m);
         } else if (evt.event === "stats" || evt.event === "ping") {
           // ✅ P1 修复（2026-09-27 · 心跳统计消费）：后端 facts 链路已接入
           //    stats_provider（sse_handlers.py generate_facts），单段 AI 调用期间
@@ -216,11 +229,13 @@ export function useFactsGeneration(deps: FactsGenerationDeps) {
           const p = typeof evt.progress === "number" ? evt.progress : null;
           if (p !== null && p > lastProgress) {
             lastProgress = p;
-            setProgress(p);
+            const snapshot = p;
+            batcher.schedule("progress", () => setProgress(snapshot));
           }
           const el = typeof evt.elapsed_ms === "number" ? evt.elapsed_ms : null;
           if (el !== null && el >= 0) {
-            setProgressMsg(`正在提取全局事实…（已用时 ${Math.round(el / 1000)}s）`);
+            const m = `正在提取全局事实…（已用时 ${Math.round(el / 1000)}s）`;
+            batcher.schedule("progressMsg", () => setProgressMsg(m));
           }
         }
       }
@@ -244,7 +259,10 @@ export function useFactsGeneration(deps: FactsGenerationDeps) {
           {
             taskId,
             typeFilter: "facts_generation",
-            onReattach: () => setProgressMsg("连接中断，正在重新挂接后台任务..."),
+            onReattach: () =>
+              batcher.schedule("progressMsg", () =>
+                setProgressMsg("连接中断，正在重新挂接后台任务..."),
+              ),
           },
         );
         // ✅ R174 F2：轮询耗尽/连续网络失败（final=null）→ 显式进入可恢复未知态。
@@ -281,8 +299,8 @@ export function useFactsGeneration(deps: FactsGenerationDeps) {
               //    :5420-5423 的 setProgress(1) + setProgressMsg(doneMsg)）。
               const _doneMsg = _fin?.message || fin.message || "全局事实提取已在后台完成";
               lastProgress = 1;
-              setProgress(1);
-              setProgressMsg(_doneMsg);
+              batcher.schedule("progress", () => setProgress(1));
+              batcher.schedule("progressMsg", () => setProgressMsg(_doneMsg));
               pushLog(1, `${_isDegraded ? "⚠️" : "✅"} ${_doneMsg}`);
               if (_fin) {
                 const _d = applyFactsCompletedEvent(_fin);

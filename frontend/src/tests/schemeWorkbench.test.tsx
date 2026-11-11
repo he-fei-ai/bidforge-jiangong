@@ -19,9 +19,14 @@
  *   触发 act 警告与状态更新）。
  */
 import { describe, it, expect, vi, beforeEach, afterEach } from "vitest";
-// ✅ 页面级重渲染测试：jsdom + 完整 React 树 + 大量 waitFor，单跑最长 ~30s
-//    全量并发下 worker 争用 CPU，30s 全局 timeout 不够。此处提到 60s。
-vi.setConfig({ testTimeout: 60000 });
+// ✅ 页面级重渲染测试：jsdom + 完整 React 树 + 大量 waitFor；单文件独占
+//    34 用例 / 167.8s tests + 87.9s collect（418KB 页面模块 import 热点）。
+//    R213/R214 实测并行跑 pytest+vitest 时 ~12s 的用例被放大到 >60s ⇒ 假红
+//    `Test timed out in 60000ms`（独占串行复跑 34/34 全绿，非代码回归）。
+//    R210 登记的触发判据已达成 ⇒ **文件级**放宽到 120s（不动全局
+//    vitest.config.ts，其余 92 个测试文件的失败反馈速度不变）；本文件无
+//    beforeAll，仅同步 beforeEach，放宽 hookTimeout 不会掩盖 hook 卡死。
+vi.setConfig({ testTimeout: 120000, hookTimeout: 120000 });
 import { render, screen, fireEvent, waitFor, cleanup, act } from "@testing-library/react";
 import { MemoryRouter, Routes, Route } from "react-router-dom";
 import React from "react";
@@ -506,7 +511,12 @@ describe("SchemeWorkbenchPage · 组件级冒烟与目录树编辑", () => {
     renderPage();
     await runExportCheck();
 
-    await waitFor(() => expect(exportCheckActivity()).toContain("发现 1 个问题，建议处理后再导出"));
+    // ✅ R213 重锚（意图保留、强度不减）：R212 FE-6 把导出预检文案升级为
+    //    「发现 1 个问题（共 1 处），建议处理后再导出」，旧断言把整句文案逐字
+    //    锁死（锁实现而非锁意图）⇒ 产品文案一改就假红。现锁「问题计数」与
+    //    「建议处理」两个意图片段，两个信号都必须在活动记录里出现。
+    await waitFor(() => expect(exportCheckActivity()).toContain("发现 1 个问题"));
+    expect(exportCheckActivity()).toContain("建议处理后再导出");
     expect(screen.getAllByText(/导出预检发现 1 个问题/).length).toBeGreaterThan(0);
     expect(screen.getAllByText(/图表未生成/).length).toBeGreaterThan(0);
     expect(screen.getAllByText(/正文仅占位/).length).toBeGreaterThan(0);

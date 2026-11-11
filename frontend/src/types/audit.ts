@@ -57,6 +57,12 @@ export interface PreflightFinding {
   //    聚合为一条），前端此前未声明 → 只能当 any 透传，"涉及 N 处"无法展示。
   /** 同类问题涉及的章节 id（聚合项，单条为空） */
   section_ids?: string[];
+  /**
+   * ✅ R214（2026-11-10 · R212 D-6）：聚合项各章节标题（与 section_ids 一一对应，
+   *    后端 R212 已加法式回传）。用于「N 处章节」多章跳转弹层列出可读标签；
+   *    缺省时按 section_ids 的 id 简写兜底。
+   */
+  section_titles?: string[];
   /** 聚合条数 */
   count?: number;
   /** 来源（如 export_check / preflight / ai_compliance …） */

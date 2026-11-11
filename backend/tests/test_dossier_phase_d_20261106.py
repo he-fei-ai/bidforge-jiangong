@@ -94,12 +94,24 @@ async def _add_fact(
     *,
     confidence: float = 0.5,
     is_resolved: int = 0,
+    is_stale: int = 0,
 ) -> None:
     await db.execute(
         "INSERT INTO global_facts"
-        " (id, project_id, scheme_id, title, content, category, source_ref, confidence, is_resolved)"
-        " VALUES (?,?,?,?,?,?,?,?,?)",
-        (str(uuid.uuid4()), pid, sid, title, f"{title}-内容", "尺寸", "招标文件", confidence, is_resolved),
+        " (id, project_id, scheme_id, title, content, category, source_ref, confidence, is_resolved, is_stale)"
+        " VALUES (?,?,?,?,?,?,?,?,?,?)",
+        (
+            str(uuid.uuid4()),
+            pid,
+            sid,
+            title,
+            f"{title}-内容",
+            "尺寸",
+            "招标文件",
+            confidence,
+            is_resolved,
+            is_stale,
+        ),
     )
     await db.commit()
 
@@ -270,6 +282,10 @@ async def test_review_checklist_rows_match_db_row_by_row(db_conn, monkeypatch, t
     await _add_fact(db_conn, pid, sid, "事实-低置信-甲", confidence=0.35, is_resolved=1)
     await _add_fact(db_conn, pid, sid, "事实-未确认-乙", confidence=0.95, is_resolved=0)
     await _add_fact(db_conn, pid, sid, "事实-已确认-丙", confidence=0.95, is_resolved=1)
+    # ✅ R210：已确认但**来源已过期**（is_stale=1）→ 不进正文/导出（注入门控
+    #    is_stale=0），必须出现在待确认清单里，否则复核清单显示「0 项」而正文
+    #    实际少了一条事实（交付前的数据真实性缺口）。
+    await _add_fact(db_conn, pid, sid, "事实-已过期-丁", confidence=0.95, is_resolved=1, is_stale=1)
     # 缺陷：d1 suggested；d2 protected；d3 已应用且 free → 不进待决策清单
     await _add_defect(db_conn, pid, sid, rule_id="R-1", status="suggested", fix_policy="free")
     await _add_defect(db_conn, pid, sid, rule_id="R-2", status="applied", fix_policy="protected")
@@ -284,7 +300,8 @@ async def test_review_checklist_rows_match_db_row_by_row(db_conn, monkeypatch, t
         for r in await (
             await db_conn.execute(
                 f"SELECT title FROM global_facts WHERE {FACT_SCOPE_PREDICATE}"
-                " AND (COALESCE(is_resolved,1)=0 OR COALESCE(confidence,1.0) < ?)"
+                " AND (COALESCE(is_resolved,1)=0 OR COALESCE(confidence,1.0) < ?"
+                " OR COALESCE(is_stale,0)=1)"
                 " ORDER BY confidence, title",
                 (sid, pid, dossier.LOW_CONFIDENCE),
             )
@@ -292,6 +309,10 @@ async def test_review_checklist_rows_match_db_row_by_row(db_conn, monkeypatch, t
     ]
     assert [row[0] for row in facts_table[1:]] == db_facts
     assert "事实-已确认-丙" not in [row[0] for row in facts_table[1:]]
+    # ✅ R210：过期事实必须在清单里，且「已确认」列不得显示为「是」
+    assert "事实-已过期-丁" in [row[0] for row in facts_table[1:]]
+    _stale_row = next(r for r in facts_table[1:] if r[0] == "事实-已过期-丁")
+    assert "已过期" in _stale_row[3]
 
     pending_table = _find_table_by_headers(path, ["规则ID", "状态", "策略", "标题"])
     assert pending_table is not None

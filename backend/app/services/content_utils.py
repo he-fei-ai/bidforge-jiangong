@@ -1478,7 +1478,13 @@ def build_sibling_context(
         content = (generated_contents or {}).get(s["id"]) or s.get("content") or ""
         content = content.strip()
         if content:
-            prev_summary = content[-summary_chars:]
+            # ✅ R215（2026-11-11 · P3）：切尾前剔代码围栏 —— 与承接参考的另一出口
+            #    prev_leaf_tail_summary（本模块 :1313 起，明确「mermaid / chart-json /
+            #    公式源码不是承接语境」先 strip_fenced_code_blocks）同口径。旧实现
+            #    直接切原始正文尾 300 字：上一章以图表块收尾时，下一章提示词的
+            #    「前序同级章节结尾参考（衔接风格，勿重复）」塞进 mermaid/JSON 源码，
+            #    300 字承接窗口被代码挤占，模型可能把图表语法带进散文。
+            prev_summary = strip_fenced_code_blocks(content)[-summary_chars:]
             break
 
     return "\n".join(lines), prev_summary

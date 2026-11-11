@@ -128,7 +128,9 @@ export default defineConfig({
   },
   build: {
     outDir: "dist",
-    chunkSizeWarningLimit: 1500,
+    // ✅ 2026-11-11：从 1500 KB 收紧到 800 KB，让「某个 lazy 页面拖入巨型
+    //    模块」在构建日志里立刻可见（此前 1500 KB 会把工作台 chunk 的告警吃掉）。
+    chunkSizeWarningLimit: 800,
     rollupOptions: {
       output: {
         // 拆包策略：把稳定不变的第三方依赖与频繁变动的业务代码分离，

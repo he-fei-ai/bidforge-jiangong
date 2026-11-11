@@ -106,7 +106,10 @@ class TestOutlineDotForms:
     def test_dot_pattern_precedes_separator_pattern(self):
         """源码锁：无分隔符点分条必须排在有分隔符点分条之前（回溯命中问题）。"""
         patterns = fp._OUTLINE_PATTERNS
-        assert len(patterns) == 9
+        # ✅ R209 重锚（意图不放宽）：条目数 9→11（新增罗马数字 2 条，插在兜底条
+        # 之前）；本用例锁的是**相对顺序**，用「首个无分隔符点分条 < 首个有分隔符
+        # 点分条」表达，不依赖绝对长度。
+        assert len(patterns) == 11
         idx_nosep = next(i for i, (_, p) in enumerate(patterns) if "u4e00" in p.pattern)
         idx_sep = next(
             i

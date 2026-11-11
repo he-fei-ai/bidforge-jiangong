@@ -332,10 +332,17 @@ class TestRestoreRollbackStartup:
         assert "自检失败不得阻断回退" in src
 
     def test_library_restore_version_normalizes(self):
+        # ✅ R214 重锚（意图保留、强度加强）：R188 L2 锁的是「写回主表前必须
+        #    规范化」，旧断言把「用哪个函数」也锁死了（锁实现）。R214 把三条
+        #    版本路径收口到统一出口 `_normalize_for_write`（内含标题清洗 +
+        #    三级裁剪 + 编号重排 + 校验），并补上此前缺失的空目录 400 ⇒
+        #    照旧断言反而会阻止加固。现锁「统一出口 + 空目录拒绝 + 结果落库」。
         src = _src("routers/outline_library.py")
-        assert "from app.services.outline_utils import normalize_outline_json" in src
-        assert "_restored_json = normalize_outline_json(target.get(\"outline_json\"))" in src
+        assert "_restored_json = _normalize_for_write(" in src
+        assert 'context="restore_version"' in src
+        assert 'raise HTTPException(400, "历史版本目录内容为空或格式非法，无法回滚")' in src
         assert "_restored_json," in src
+        assert "normalize_outline_for_library" in src  # 统一出口的唯一实现
 
     def test_numbering_rollback_resync_wired(self):
         assert "resync_fn=None" in _src("services/numbering.py")

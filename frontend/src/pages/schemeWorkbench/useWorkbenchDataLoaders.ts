@@ -51,10 +51,22 @@ export function useWorkbenchDataLoaders(deps: WorkbenchDataLoadersDeps) {
 
   // ✅ 加固：以 scheme id 为主查询（后端反查 project_id），
   //    不再依赖 scheme.project_id —— 该字段缺失时旧实现会静默 return，导致列表恒空
-  const loadDocuments = useCallback(async () => {
+  //
+  // ✅ R210（2026-11-10 · P1）：补 ``skipAbortPrev`` 参数（轮询专用）。
+  //    旧行为：每次调用都 abort 上一次在飞的列表请求（后发者胜），这与「刷新」
+  //    按钮语义一致；但 R203 FE-9 的 3s 轮询也走同一入口 ⇒ **轮询会 abort
+  //    用户自己点的「刷新」**，被 abort 的请求在下方 ``ac.signal.aborted`` 处
+  //    **静默吞掉**（无 toast / 无日志）⇒ 用户点了刷新却什么都没发生，且解析
+  //    结束后轮询停摆 ⇒ 列表停在旧状态直到用户再点一次（R208 FE-4 只解决了
+  //    「轮询打轮询」，本轮补上「轮询打用户请求」这一面）。
+  //    现在：轮询入口传 ``skipAbortPrev=true`` ⇒ **不打断**在飞的用户请求；
+  //    用户手动刷新仍保持「后发者胜」（默认路径 abort 前一次）。
+  const loadDocuments = useCallback(async (skipAbortPrev = false) => {
     if (!id) return;
     const requestedSchemeId = id;
-    factsDocsListAbortRef.current?.abort();
+    if (!skipAbortPrev) {
+      factsDocsListAbortRef.current?.abort();
+    }
     const ac = new AbortController();
     factsDocsListAbortRef.current = ac;
     try {

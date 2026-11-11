@@ -33,9 +33,11 @@ const { renderMock, ensureMermaidMock, nextMermaidIdMock, chartsRenderMock, char
 vi.mock("../components/mermaidRuntime", () => ({
   ensureMermaid: ensureMermaidMock,
   nextMermaidId: nextMermaidIdMock,
-  // ✅ R199：组件侧 DOMPurify 出口 sanitizeMermaidSvg（mermaidRuntime.ts 导出），
-  //    mock 缺该导出会让所有走 SVG 注入分支的用例直接报 mock 漂移
-  sanitizeMermaidSvg: (svg: string) => svg,
+  // ✅ R196 重锚（2026-11-10）：渲染入口安全闸由 sanitizeMermaidSvg（SVG 清洗，
+  //    经真实浏览器实测否决：foreignObject 内 htmlLabels 被清空）演进为
+  //    assertMermaidCodeSafe（渲染前输入侧闸）。组件用例聚焦渲染/缓存/修复行为，
+  //    闸默认放行；闸自身行为由 mermaidR196.test.ts 行为实证覆盖。
+  assertMermaidCodeSafe: () => ({ safe: true, reason: "" }),
 }));
 
 vi.mock("../api", () => ({

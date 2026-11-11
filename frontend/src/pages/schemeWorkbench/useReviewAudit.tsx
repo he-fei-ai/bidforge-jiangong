@@ -243,6 +243,14 @@ export function useReviewAudit(deps: ReviewAuditDeps) {
   const crRepairAbortRef = useRef<AbortController | null>(null);
   // ✅ R197（F3/F4）：重入/在飞锁（合规检查双击、CR confirm 四按钮共用 handler）
   const complianceInFlightRef = useRef(false);
+  // ✅ R212（2026-11-10 · P2-2）：专家论证 / 一致性审计补**同步**在飞锁。
+  //    此前两者入口只判 React 异步 state（`expertRunning` / `auditRunning`）：
+  //    同帧双击时 state 尚未提交 ⇒ 两个请求都会发出 ⇒ 后者 abort 前者，
+  //    前者的 AI 计算**白烧**（服务端仍在跑），用户只看到一次结果 +
+  //    一条「已取消」噪声提示。与 R197（F3）给 compliance 补的 ref 锁**同型**，
+  //    此处一次补齐两个 handler（口径分裂本仓已反复登记）。
+  const expertInFlightRef = useRef(false);
+  const auditInFlightRef = useRef(false);
   const [crConfirming, setCrConfirming] = useState(false);
 
   // ✅ R197（F1/F2）：本域 AbortController 生命周期收口 + 跨方案落地守卫。
@@ -287,6 +295,9 @@ export function useReviewAudit(deps: ReviewAuditDeps) {
 
   const handleExpertReview = async () => {
     if (!id || expertRunning) return;
+    // ✅ R212（P2-2）：同步在飞锁（ref 判据，state 尚未提交时也拦得住同帧双击）
+    if (expertInFlightRef.current) return;
+    expertInFlightRef.current = true;
     const sid = id;
     expertAbortRef.current?.abort();
     const controller = new AbortController();
@@ -310,6 +321,8 @@ export function useReviewAudit(deps: ReviewAuditDeps) {
         expertAbortRef.current = null;
         setExpertRunning(false);
       }
+      // ✅ R212（P2-2）：在飞锁复位（与 complianceInFlightRef 同一收口位置）
+      expertInFlightRef.current = false;
     }
   };
 
@@ -408,6 +421,9 @@ export function useReviewAudit(deps: ReviewAuditDeps) {
 
   const handleConsistencyAudit = async () => {
     if (!id || auditRunning) return;
+    // ✅ R212（P2-2）：同步在飞锁（ref 判据，state 尚未提交时也拦得住同帧双击）
+    if (auditInFlightRef.current) return;
+    auditInFlightRef.current = true;
     const sid = id;
     // ✅ R106 FIX-5：审计是最长的同步 AI 调用（长方案 1-3 分钟），此前无任何取消入口
     auditAbortRef.current?.abort();
@@ -454,6 +470,8 @@ export function useReviewAudit(deps: ReviewAuditDeps) {
         auditAbortRef.current = null;
         setAuditRunning(false);
       }
+      // ✅ R212（P2-2）：在飞锁复位（与 complianceInFlightRef 同一收口位置）
+      auditInFlightRef.current = false;
     }
   };
 

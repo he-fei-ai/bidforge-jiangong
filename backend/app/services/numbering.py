@@ -64,6 +64,35 @@ CHINESE_NUMBERS: list[str] = [
 # 英文小写字母（a-z 之后回到 aa…az，共 52 个）
 ALPHABET: list[str] = [chr(ord("a") + i) if i < 26 else f"a{chr(ord('a') + i - 26)}" for i in range(52)]
 
+
+def alpha_label(n: int) -> str:
+    """Excel 风格字母序号的**唯一实现**：1→a, …, 26→z, 27→aa, 28→ab, …
+
+    ✅ R209（2026-11-10 · 同族漏改收口）：L7 字母编号此前有**四份**实现：
+
+    1. ``services/ai/heading_templates._alpha_label``（Excel 续编）；
+    2. ``services/ai/heading_v2._alpha_label``（Excel 续编）；
+    3. 前端 ``pages/schemeWorkbench/outlineNumbering.alphaLabel``（Excel 续编）；
+    4. ``services/content_blocks._compute_subheading`` —— 用 52 项的 ``ALPHABET``
+       **钳制**（``min(l7 - 1, len(ALPHABET) - 1)``）。
+
+    R203b #18 统一了前三处，**漏了第 4 处** ⇒ 正文子标题的 L7 字母自**第 53 项**
+    起永久塌缩为 "az"（成稿里出现多个同号子标题、交叉引用失效）。
+    现把 Excel 续编下沉到本模块作为唯一实现，四处统一引用。
+
+    兼容性：Excel 续编的**前 52 项与旧 ``ALPHABET`` 逐字相同**
+    （a..z + aa..az），故 1..52 的既有输出**完全不变**，仅第 53 项起由
+    "az" 变为 "ba"（数学上不重复）。
+    """
+    letters = "abcdefghijklmnopqrstuvwxyz"
+    x = max(1, int(n))
+    out = ""
+    while x > 0:
+        x -= 1
+        out = letters[x % 26] + out
+        x //= 26
+    return out
+
 # 目录树编号递归最大深度（失控兜底 · 编号域唯一口径；sse_handlers 校验/计数的
 # depth 止损阈值（10/12）语义不同，刻意不并入本常量，强行统一会改变异常输入行为）。
 # ✅ 2026-10-08（D-1 加固）：环引用防护已由 renumber_outline_nodes 的
@@ -89,9 +118,14 @@ _CJK_BOUNDARY = r"[\u3000-\u303f\u4e00-\u9fff\uff00-\uffef]"
 
 _STRIP_NUMBER_RE = re.compile(
     r"^\s*(?:"
-    r"第\s*[一二三四五六七八九十百千零0-9]+\s*[章节]"  # 第X章 / 第X节 / 第 1 章
-    r"|[（(][一二三四五六七八九十0-9]+[)）]"  # （三） / (3)
-    r"|[0-9]+[)）]"  # 1） / 2）
+    # ✅ R216（2026-11-11 · 全角编号）：数字类全部并入全角 ０-９ —— AI/上传来源
+    #    实证会输出全角编号（R208 解析侧已收口 raw_id，本侧剥离漏接），不剥则
+    #    成稿双重编号（"1.2 １.２ 施工布置"）。⚠️ 同步把单段分支的负向断言
+    #    `(?![0-9])` 扩为 `(?![0-9０-９])`：否则全角小数数量（"２.５m"）会被
+    #    剥成 "５m"（2026-10-03 数量型修复的全角复现）。
+    r"第\s*[一二三四五六七八九十百千零0-9０-９]+\s*[章节]"  # 第X章 / 第X节 / 第 1 章
+    r"|[（(][一二三四五六七八九十0-9０-９]+[)）]"  # （三） / (3)
+    r"|[0-9０-９]+[)）]"  # 1） / 2）
     # ✅ BUG 修复（2026-09-27 · 标题损坏）：点分编号（1.2 / 1.2.3 …）此前写作
     #    `[0-9]+(?:\.[0-9]+){0,7}[分隔符]+` —— 路径后**没有**分隔符时，
     #    正则引擎会回退成「更短的前缀 + 把点当分隔符」，把标题剥成残句：
@@ -109,23 +143,39 @@ _STRIP_NUMBER_RE = re.compile(
     #    多段点分路径（"2.4.1钢筋工程"）设计。现把捕获限定为**至少一个点段**
     #    `(?:\.[0-9]+)+`，单段数字（"2、施工安排" / "2 施工准备"）的剥离仍由下方
     #    「[0-9]+分隔符+(?![0-9])」分支负责，多段路径紧邻 CJK 的剥离行为不变。
-    r"|(?=([0-9]+(?:\.[0-9]+)+))\1(?:" + _SEP_CLASS + r"+|(?=" + _CJK_BOUNDARY + r"))"
+    r"|(?=([0-9０-９]+(?:[.．][0-9０-９]+)+))\1(?:" + _SEP_CLASS + r"+|(?=" + _CJK_BOUNDARY + r"))"
     # 单段编号（"1 施工准备"）：必须带分隔符，且分隔符后不能仍是数字 ——
     # 否则 "1.5m 深" 会被剥成 "5m 深"（把数值/单位剥坏）。
-    r"|[0-9]+" + _SEP_CLASS + r"+(?![0-9])"
+    # ✅ R216：负向断言同步认全角数字（"２.５m" 与 "1.5m" 同保护）。
+    r"|[0-9０-９]+" + _SEP_CLASS + r"+(?![0-9０-９])"
     r"|[一二三四五六七八九十百千零]+" + _SEP_CLASS + r"+"  # 一、 / 十二、
+    # ✅ R218（2026-11-11 · P3 · N4）：Unicode 罗马数字（Ⅰ. 总则）与中文大写
+    #    （壹、总则）此前不在剥离类 ⇒ 标题自带这两类编号时，显示层再套一层
+    #    （「Ⅰ. Ⅰ. 总则」叠写）。ASCII 罗马（I. / II.）**刻意不剥** —— 与
+    #    导入识别侧一致（R209 只修了上传识别罗马数字，剥离侧保持 ASCII 罗马
+    #    原样，避免把 "I 型钢" 等误剥）。Unicode 罗马与中文大写是**纯编号形态**
+    #    （无歧义），仅后接分隔符才剥（"Ⅰ. 总则"），紧邻字符不剥（"Ⅳ级"）。
+    r"|[ⅠⅡⅢⅣⅤⅥⅦⅧⅨⅩⅪⅫⅬⅭⅮⅯⅰⅱⅲⅳⅴⅵⅶⅷⅸⅹⅺⅻ]+" + _SEP_CLASS + r"+"
+    r"|[壹贰叁肆伍陆柒捌玖拾佰仟零貳參陸]+" + _SEP_CLASS + r"+"
     r")" + _SEP_CLASS + r"*"
 )
 # 纯数字路径型标题（整个标题就是一个编号，如 "1" / "1.1" / "1.2.3"）
-_PURE_NUMBER_TITLE_RE = re.compile(r"[0-9]+(?:[.．][0-9]+)*")
+# ✅ R216：同步认全角数字（"１．２" 整体即编号 → 原样返回的契约一致）。
+_PURE_NUMBER_TITLE_RE = re.compile(r"[0-9０-９]+(?:[.．][0-9０-９]+)*")
 
 # ✅ 增强（2026-09-27 · 年份不是编号）：4 位数字后紧跟「年」是年份
 #    （"2023 年度安全生产计划" / "2024年施工计划"），旧实现对带空格的写法
 #    会剥成「年度安全生产计划」（标题丢年份）。命中即原样保留。
-_YEAR_PREFIX_RE = re.compile(r"^\s*[0-9]{4}\s*年")
+# ✅ R216：同步认全角数字（"２０２３年施工计划" 同保护）。
+_YEAR_PREFIX_RE = re.compile(r"^\s*[0-9０-９]{4}\s*年")
 
 # 合法存储编号：点分数字路径（1 / 1.1 / 1.1.1）
 _DOT_PATH_RE = re.compile(r"\d+(\.\d+)*")
+
+# ✅ R216（2026-11-11 · 存储编号全角/前导零归一）：全角数字与全角点 → ASCII。
+#    `\d` 在 Python 里匹配全角 ０-９ ⇒ "０.３" 此前原样通过 _DOT_PATH_RE；
+#    归一后与 R208 解析侧 raw_id 的归一口径一致（数值语义不变，仅收窄形态）。
+_FULLWIDTH_DIGITS_TRANS = str.maketrans("０１２３４５６７８９．", "0123456789.")
 
 
 def strip_outline_numbering(title: str) -> str:
@@ -428,10 +478,17 @@ def _stored_id_parts(stored_id) -> list[str]:
     """
     if isinstance(stored_id, bool) or not isinstance(stored_id, (str, int)):
         return []
-    s = str(stored_id).strip()
+    # ✅ R216（2026-11-11 · P3）：全角数字/全角点先归一，段内前导零折叠
+    #    （"1.01" → 段 [1,1]）。旧实现原样放行两类形态：display/prefix 直接
+    #    把 "01"/"３" 拼进正文子标题编号与展示标题（实证
+    #    stored_id_to_display("1.01")="01"、renumber_section_body_subheadings
+    #    对 "01.02" 落库写出 "02.1"），与导出模板的 int 渲染（{num}/{last2}）
+    #    分叉 ⇒ 预览≠成稿。归一只收窄「数值语义不变」的形态，
+    #    "abc1.2"/"1.a"/"0.3" 等真垃圾仍 fail-closed（返回 []）。
+    s = str(stored_id).strip().translate(_FULLWIDTH_DIGITS_TRANS)
     if not _DOT_PATH_RE.fullmatch(s):
         return []
-    parts = s.split(".")
+    parts = [str(int(p)) for p in s.split(".")]
     if any(p == "0" for p in parts):
         return []
     return parts
@@ -920,6 +977,32 @@ async def normalize_section_content_subheadings(
 
         logging.getLogger("numbering").warning("章节 %s 正文子标题编号规范化失败（保留原文）: %s", section_id[:8], e)
         return content, False
+
+
+def content_actually_changed(source: str, normalized: str, changed: bool) -> bool:
+    """规范化后正文是否**真的变了**（子标题改写 **或** 净化型改写）。
+
+    ✅ R211（2026-11-10 · P1）：``normalize_section_content_subheadings`` 的
+    ``changed`` 布尔**只统计「子标题改写」**，而它返回的 ``content`` 恒是
+    **净化后**文本（``numbering.py`` 入口先跑 ``normalize_raw_content``：字面
+    ``\\n`` 还原 / 分页标记与页脚整行删除 / 表题粘连行拆分 —— 三者都会改变
+    行数与字数）。
+
+    ⇒ 只看 ``changed`` 会漏掉「仅净化」的改写：以它为门控的落库路径会落
+    **净化前的旧字数**（DB ``word_count`` ≠ 实际字数），并让「字数档位 /
+    续写触发 / 自动压缩触发」判错。R194 FIX-11 已在**手工保存**与**批量重
+    规范化**两处用文本比较修过同一 bug，而**压缩路径**（sections.py）与
+    **正文生成路径**（sse_handlers.py）两处漏改 —— 又一次「同族漏改」。
+
+    ⚠️ 刻意**不改** ``changed`` 的返回语义本身：
+    ``validate_section_content_numbering`` 的「一致性」判定与导出 strict
+    守卫依赖现行语义（仅杂质章若被判漂移，会让 strict 导出对新 400 ——
+    见 sections.py 的 R194 FIX-11 注释）。
+
+    本函数是**唯一判据出口**：所有以「规范化结果是否需要落库 / 重算字数」
+    为门控的调用点都必须走它，不得各写一份 ``changed or new != old``。
+    """
+    return bool(changed) or (normalized or "") != (source or "")
 
 
 # ============================================================

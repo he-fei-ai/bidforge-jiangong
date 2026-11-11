@@ -173,6 +173,7 @@ class TestUtf16QualityGateCounterExample:
 # ---------------------------------------------------------------------------
 class TestBinaryDisguisedAsText:
     def test_pdf_renamed_txt_is_rejected(self):
+        pytest.importorskip("reportlab", reason="生成 PDF 夹具需要可选依赖 reportlab")
         with pytest.raises(fp.ParseError) as ei:
             fp.parse_file_content_ex(_pdf_bytes(), "a.txt")
         assert "PDF" in str(ei.value)

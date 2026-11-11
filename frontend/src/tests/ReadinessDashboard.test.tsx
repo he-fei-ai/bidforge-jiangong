@@ -343,6 +343,15 @@ function btnByText(container: HTMLElement, text: string): HTMLButtonElement | nu
   );
 }
 
+/** 在 antd Dropdown 弹层（挂到 document.body）里按文本找菜单项 */
+function dropdownItem(text: string): HTMLElement | null {
+  return (
+    (Array.from(document.body.querySelectorAll(".ant-dropdown-menu-item")).find(
+      (el) => (el.textContent || "").trim() === text,
+    ) as HTMLElement) || null
+  );
+}
+
 describe("ReadinessDashboard · 交付就绪度总检", () => {
   it("空态：runs 无历史 → 显示「尚未总检」且导出按钮禁用", async () => {
     (complianceApi.runs as any).mockResolvedValueOnce({ data: { items: [] } });
@@ -649,6 +658,82 @@ describe("ReadinessDashboard · 交付就绪度总检", () => {
     fireEvent.click(btnByText(container, "一键总检")!);
     await waitFor(() => expect(container.textContent || "").toContain("跨章节"));
     expect(locate).not.toHaveBeenCalled();
+  });
+
+  it("R212：聚合 finding（无 section_title、有 section_ids）不得谎报「（章节已删除）」", async () => {
+    // ✅ R212（2026-11-10 · P1-1）：聚合类 finding（导出预检的 review_pending /
+    //    chart_failed 等）后端**不回 section_title**（title 语义是章节标题），
+    //    但**回 section_ids** ⇒ 旧实现 `section_title || (section_id ? "（章节已删除）"
+    //    : "跨章节")` 把「没有标题」误判成「章节已删除」：20 章待审核显示成
+    //    「章节已删除」，点击却跳到一个**真实存在**的章节（假标签 + 误导跳转）。
+    const locate = vi.fn();
+    (complianceApi.overview as any).mockResolvedValueOnce({
+      data: {
+        ...mocks.OVERVIEW,
+        findings: [
+          {
+            ...mocks.OVERVIEW.findings[0],
+            rule_id: "DLV-09",
+            title: "正文均已通过审核",
+            section_id: "sec-1",
+            section_ids: ["sec-1", "sec-2", "sec-3"],
+            section_title: "",
+          },
+        ],
+      },
+    });
+    const { container } = render(
+      <App>
+        <ReadinessDashboard schemeId="s1" onLocateSection={locate} />
+      </App>,
+    );
+    await waitFor(() => expect(container.textContent || "").toContain("尚未总检"));
+    fireEvent.click(btnByText(container, "一键总检")!);
+    await waitFor(() => expect(container.textContent || "").toContain("处章节"));
+    expect(container.textContent || "").not.toContain("（章节已删除）");
+    // ✅ R214（2026-11-10 · R212 D-6）：多章聚合 finding 现在走 Dropdown 弹层
+    //    （旧实现点「3 处章节」直接定位首个命中章节）。点击触发器 → 从菜单选
+    //    目标章节 → 定位链不丢。意图保留（可定位），强度不降（每章都可定位）。
+    fireEvent.click(btnByText(container, "3 处章节")!);
+    await waitFor(() => expect(dropdownItem("sec-1")).toBeTruthy());
+    fireEvent.click(dropdownItem("sec-1")!);
+    expect(locate).toHaveBeenCalledWith("sec-1");
+  });
+
+  it("R214：多章聚合 finding 用 Dropdown 列出各章节标题，逐章可定位", async () => {
+    // ✅ R214（2026-11-10 · R212 D-6）：聚合类 finding 后端加法式回传
+    //    section_titles，前端必须**逐章**列出并跳转（旧实现只定位首个命中章节，
+    //    其余章节用户只能盲猜）。section_title 缺省时按 id 简写兜底。
+    const locate = vi.fn();
+    (complianceApi.overview as any).mockResolvedValueOnce({
+      data: {
+        ...mocks.OVERVIEW,
+        findings: [
+          {
+            ...mocks.OVERVIEW.findings[0],
+            rule_id: "DLV-09",
+            title: "正文均已通过审核",
+            section_id: "sec-1",
+            section_ids: ["sec-1", "sec-2", "sec-3"],
+            section_title: "",
+            section_titles: ["第1章 编制依据", "第3章 施工部署", "第8章 安全措施"],
+          },
+        ],
+      },
+    });
+    const { container } = render(
+      <App>
+        <ReadinessDashboard schemeId="s1" onLocateSection={locate} />
+      </App>,
+    );
+    await waitFor(() => expect(container.textContent || "").toContain("尚未总检"));
+    fireEvent.click(btnByText(container, "一键总检")!);
+    await waitFor(() => expect(container.textContent || "").toContain("3 处章节"));
+    fireEvent.click(btnByText(container, "3 处章节")!);
+    await waitFor(() => expect(dropdownItem("第3章 施工部署")).toBeTruthy());
+    // 每个标题都能定位到对应章节（不只首个）
+    fireEvent.click(dropdownItem("第3章 施工部署")!);
+    expect(locate).toHaveBeenCalledWith("sec-2");
   });
 
   it("切换 schemeId：旧方案迟到的 runs 响应不得覆盖新方案", async () => {

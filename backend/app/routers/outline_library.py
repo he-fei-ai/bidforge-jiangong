@@ -32,11 +32,31 @@ _SORTABLE = {
 REVIEW_STATUSES = ("待审核", "已通过", "已停用")
 
 
-def _normalize_outline(raw) -> str:
-    """入库前统一规范化（三级裁剪 + 编号重排 + 解包 {"outline": [...]}）"""
-    from app.services.outline_utils import normalize_outline_json
+def _normalize_for_write(raw, *, context: str, library_id: str = "") -> str:
+    """目录库**写路径统一出口**（R214 · 承 R213 L-2）。
 
-    return normalize_outline_json(raw)
+    与 ``create_library`` / ``update_library`` 的 400 硬闸门不同，版本推进 /
+    回滚 / 方案沉淀 / 复制都属于「恢复或派生」动作：历史脏数据不应让整条链
+    失败 ⇒ ``problems`` 只记 WARNING（规范化结果已消除脏编号/不可见字符），
+    但**空目录必须显式拒绝**（由调用方按各自语义 400），且异常分支由
+    ``normalize_outline_for_library`` 保证 fail-closed（返回 ``"[]"``）。
+
+    统一前：``new_version`` / ``restore_version`` / ``create_from_scheme`` 走
+    ``normalize_outline_json``（只裁剪重排，不清洗标题、不校验编号/长度），
+    ``restore_version`` 甚至连空目录校验都没有 ⇒ 脏历史 JSON 会静默写回主表。
+    """
+    from app.services.outline_utils import normalize_outline_for_library
+
+    normalized, problems = normalize_outline_for_library(raw)
+    if problems:
+        logger.warning(
+            "目录库写路径 %s（%s）检出 %d 项编号/标题问题（已规范化，不阻断）: %s",
+            context,
+            library_id,
+            len(problems),
+            "；".join(problems[:3]),
+        )
+    return normalized
 
 
 def _count_nodes(nodes, _depth: int = 0) -> int:
@@ -192,9 +212,15 @@ async def create_library(data: OutlineLibraryCreate, db=Depends(get_db)):
     lid = str(uuid.uuid4())
     # ✅ BUG 修复：入库前统一规范化（三级裁剪 + 编号重排），
     #    保证新建目录库与上传识别/套用路径产出一致的目录结构。
-    from app.services.outline_utils import normalize_outline_json
+    # ✅ R209（2026-11-10 · 目录库入库闸门）：改用 `normalize_outline_for_library`
+    #    单一入口 —— 在「裁剪 + 重排」之外补**标题不可见字符清洗**与
+    #    **落库闸门校验**（标题非空 / ≤200 字 / 编号合法）。
+    #    旧实现「库里能存、套用时被拒」：超长标题入库成功，套用时
+    #    `_save_outline_to_db` 的落库闸门 400 且文案说的是「编号校验未通过」
+    #    （归因误导）；零宽字符标题原样入库并随目录库导出进 .md/.txt。
+    from app.services.outline_utils import normalize_outline_for_library
 
-    outline_json = normalize_outline_json(data.outline_json)
+    outline_json, _lib_problems = normalize_outline_for_library(data.outline_json)
     # ✅ 与上传识别入库（save_as_library）口径一致：拒绝空目录库。
     #    旧实现在 outline_json 非法（如 {"foo": 1} / "[]" / 节点全是字符串）时
     #    静默写入空库 —— 目录库列表出现"看似正常、点进去空白"的脏数据，
@@ -205,6 +231,12 @@ async def create_library(data: OutlineLibraryCreate, db=Depends(get_db)):
         _nodes = []
     if not isinstance(_nodes, list) or not _nodes:
         raise HTTPException(400, "目录内容为空或格式非法（应为非空节点数组），无法创建目录库")
+    if _lib_problems:
+        raise HTTPException(
+            400,
+            "目录库内容校验未通过（标题需非空且不超过 200 字，章节编号须合法）："
+            + "；".join(_lib_problems[:3]),
+        )
     await db.execute(
         "INSERT INTO outline_library (id, name, type, engineering_type, profession, applicable_conditions, basis, outline_json, tags, source, review_status)"
         " VALUES (?,?,?,?,?,?,?,?,?,?,?)",
@@ -235,8 +267,12 @@ async def get_library(library_id: str, db=Depends(get_db)):
         raise HTTPException(404, "目录库不存在")
     item = dict(row)
     # 版本列表（附带节点数，便于 UI 直接对比各版本规模）
+    # ✅ R216（2026-11-11 · P3）：加 LIMIT 50 —— 每次建版本都归档一条（含整份
+    #    outline_json），长生命周期库可积累数百条，历史抽屉此前全量渲染。
+    #    UI 展示「最近版本」语义不变，超大历史不再随库无限膨胀。
     cur = await db.execute(
-        "SELECT * FROM outline_library_versions WHERE library_id=? ORDER BY created_at DESC", (library_id,)
+        "SELECT * FROM outline_library_versions WHERE library_id=? ORDER BY created_at DESC LIMIT 50",
+        (library_id,),
     )
     versions = [dict(r) for r in await cur.fetchall()]
     for v in versions:
@@ -260,11 +296,23 @@ async def update_library(library_id: str, data: OutlineLibraryUpdate, db=Depends
     if not await cur.fetchone():
         raise HTTPException(404, "目录库不存在")
     fields = {k: v for k, v in data.model_dump(exclude_none=True).items()}
+    # ✅ R216（2026-11-11 · P3）：PATCH 此前把 review_status 当普通字段直写主表，
+    #    绕过专用审核端点（/review、/batch-review）的 REVIEW_STATUSES 白名单 ——
+    #    直连 API 传任意字符串即落库：条目从「已通过」筛选中消失（无法套用）、
+    #    /stats 三态计数全部漏计。这是目录库写路径中唯一未过审核状态闸门的
+    #    入口（outline_json 本身已被 R209 闸门覆盖，状态字段漏了）。
+    if "review_status" in fields and fields["review_status"] not in REVIEW_STATUSES:
+        raise HTTPException(
+            400,
+            f"review_status 非法（允许值：{'、'.join(REVIEW_STATUSES)}），审核状态请使用 /review 或 /batch-review 端点",
+        )
     # ✅ BUG 修复：编辑保存的目录同样走规范化，避免绕过三裁剪/重编号写入脏结构。
     if "outline_json" in fields:
-        from app.services.outline_utils import normalize_outline_json
+        # ✅ R209：同 create_library —— 统一走 `normalize_outline_for_library`
+        #    （含标题清洗 + 落库闸门校验），杜绝「编辑能存、套用被拒」。
+        from app.services.outline_utils import normalize_outline_for_library
 
-        fields["outline_json"] = normalize_outline_json(fields["outline_json"])
+        fields["outline_json"], _upd_problems = normalize_outline_for_library(fields["outline_json"])
         # ✅ 修复（2026-09-17）：编辑保存同样校验非空，与 create_library 口径一致，
         #    避免把目录库静默清空成脏数据（点进去空白、套用后方案目录被清空无提示）。
         try:
@@ -273,6 +321,12 @@ async def update_library(library_id: str, data: OutlineLibraryUpdate, db=Depends
             _upd_nodes = []
         if not isinstance(_upd_nodes, list) or not _upd_nodes:
             raise HTTPException(400, "目录内容为空或格式非法（应为非空节点数组），无法保存")
+        if _upd_problems:
+            raise HTTPException(
+                400,
+                "目录库内容校验未通过（标题需非空且不超过 200 字，章节编号须合法）："
+                + "；".join(_upd_problems[:3]),
+            )
     if fields:
         fields["updated_at"] = datetime.now().isoformat()
         sets = ", ".join(f"{k}=?" for k in fields)
@@ -367,10 +421,11 @@ async def _new_version_locked(library_id: str, body: dict, db) -> dict:
     )
     # 更新为新版本
     new_ver = body.get("version") or "v2.0"
-    # ✅ BUG 修复：新版本目录同样规范化，保证版本间结构口径一致。
-    from app.services.outline_utils import normalize_outline_json
-
-    new_json = normalize_outline_json(body.get("outline_json", old_json))
+    # ✅ R214（FIX-2）：改走目录库写路径统一出口（清洗 + 裁剪 + 重排 + 校验）。
+    #    历史脏版本只 WARNING 不 400（版本推进不该被旧数据卡死），空目录仍 400。
+    new_json = _normalize_for_write(
+        body.get("outline_json", old_json), context="new_version", library_id=library_id
+    )
     # ✅ 修复（2026-09-17）：新版本同样校验非空，避免版本推进把目录库静默清空。
     try:
         _new_nodes = json.loads(new_json)
@@ -447,13 +502,19 @@ async def _restore_version_locked(library_id: str, body: dict, db) -> dict:
             (str(uuid.uuid4()), library_id, lib.get("version") or "v1.0", lib.get("outline_json") or "[]"),
         )
 
-    # ✅ R188（L2）：写回主表前与 new_version 同口径规范化。
-    #    normalize_outline_json 对已规范 JSON 是恒等变换（重排点分编号 + 裁剪三级），
-    #    干净版本逐字节不变；脏历史版本落到方案时也不会再绕过 _save_outline_to_db
-    #    的 R187 编号校验。历史版本「逐字回滚」的语义对规范数据完全保持。
-    from app.services.outline_utils import normalize_outline_json
-
-    _restored_json = normalize_outline_json(target.get("outline_json"))
+    # ✅ R214（FIX-2）：与 new_version 同口径（R188 L2「写回前规范化」意图保留、
+    #    强度加强）：统一出口额外做标题清洗与编号校验，并补上此前缺失的
+    #    **空目录拒绝** —— 旧实现把脏历史 JSON 规范化成 "[]" 后直接写回主表，
+    #    目录库被静默清空且零提示。规范数据仍是逐字节恒等变换。
+    _restored_json = _normalize_for_write(
+        target.get("outline_json"), context="restore_version", library_id=library_id
+    )
+    try:
+        _restored_nodes = json.loads(_restored_json)
+    except (json.JSONDecodeError, TypeError):
+        _restored_nodes = []
+    if not isinstance(_restored_nodes, list) or not _restored_nodes:
+        raise HTTPException(400, "历史版本目录内容为空或格式非法，无法回滚")
     await db.execute(
         "UPDATE outline_library SET outline_json=?, version=?, review_status='待审核', updated_at=?" " WHERE id=?",
         (
@@ -546,7 +607,7 @@ async def create_from_scheme(body: dict, db=Depends(get_db)):
             (body or {}).get("profession") or scheme.get("profession") or "",
             (body or {}).get("applicable_conditions") or "",
             (body or {}).get("basis") or "",
-            _normalize_outline(outline),
+            _normalize_for_write(outline, context="from_scheme", library_id=new_id),
             (body or {}).get("tags") or f"{scheme.get('type') or ''},方案沉淀".strip(","),
             "v1.0",
             "方案沉淀",
@@ -576,6 +637,15 @@ async def duplicate_library(library_id: str, body: dict | None = None, db=Depend
     src = dict(row)
     name = ((body or {}).get("name") or f"{src['name']} - 副本").strip()
     new_id = str(uuid.uuid4())
+    # ✅ R213（FIX-2）：复制此前把 src["outline_json"] **原样** INSERT —— 这是目录库
+    #    唯一一条完全绕过编号重排/三级裁剪的写入口（create/update/new_version/
+    #    restore_version/save_scheme_as_library 都已规范化）。历史脏库（4 级节点、
+    #    重复 id、标题内嵌编号）复制后原样放大，导出 .json 回吐脏编号。现与
+    #    create_library 同口径；problems 只记 WARNING 不 400 —— 复制旧库是恢复
+    #    动作，不该因历史脏标题整条失败（规范化结果已消除脏编号）。
+    _copy_json = _normalize_for_write(
+        src.get("outline_json") or "[]", context="duplicate", library_id=library_id
+    )
     await db.execute(
         "INSERT INTO outline_library (id, name, type, engineering_type, profession,"
         " applicable_conditions, basis, outline_json, tags, version, source,"
@@ -588,7 +658,7 @@ async def duplicate_library(library_id: str, body: dict | None = None, db=Depend
             src.get("profession", ""),
             src.get("applicable_conditions", ""),
             src.get("basis", ""),
-            src.get("outline_json") or "[]",
+            _copy_json,
             src.get("tags", ""),
             "v1.0",
             "复制",
@@ -769,38 +839,51 @@ async def apply_library_and_save(library_id: str, body: dict, db=Depends(get_db)
     #    匹配思路，为目录库节点注入 __original_id = 已有 section 的 DB 主键，
     #    使 _save_outline_to_db 能匹配旧章节、保留 content/word_count/status。
     #    匹配不到的节点不注入（仍为 is_new → 正常 INSERT）。
-    import re as _re
-
     from app.routers.sections import _save_outline_to_db, passthrough_additive
 
-    def _norm_title(t: str) -> str:
-        return _re.sub(r"\s+", "", str(t or "")).strip()
+    # ✅ R209（2026-11-10 · 孪生实现收口）：本路径旧用「归一化标题 → 首个 DB 主键」
+    #    的一维字典做匹配（无消费、无结构维度），与 upload_outline.save_as_outline
+    #    的「三层索引 + consumed 集合」强度相差一个量级，实测两类真实故障：
+    #      ① **同名节点撞主键**：目录库树里两个同名节点（标准骨架里「施工准备」
+    #         同时出现在多章下是常态）被注入**同一个** __original_id →
+    #         _save_outline_to_db 的重复主键闸门 400 → **整个套用失败**；
+    #      ② **跨父级张冠李戴**：同名但不同父级的章节被互换，正文挂到
+    #         结构不对应的章节上（upload 路径早已修复，此处漏改）。
+    #    现统一复用 services.outline_matcher（结构感知 + 消费式，单一事实源）。
+    from app.services.outline_matcher import build_outline_matcher
 
     _cur_existing = await db.execute(
-        "SELECT id, title FROM sections WHERE scheme_id=?", (scheme_id,)
+        "SELECT id, parent_id, title, level FROM sections WHERE scheme_id=?", (scheme_id,)
     )
-    _existing_by_title: dict[str, str] = {}
-    for _r in await _cur_existing.fetchall():
-        _nt = _norm_title(dict(_r).get("title", ""))
-        if _nt and _nt not in _existing_by_title:
-            _existing_by_title[_nt] = str(dict(_r).get("id") or "")
+    _matcher = build_outline_matcher([dict(_r) for _r in await _cur_existing.fetchall()])
 
     _matched = 0
 
-    def _inject_original_ids(nodes: list) -> None:
+    def _inject_original_ids(nodes: list, path_titles: tuple = (), depth: int = 0) -> None:
+        """按结构（标题路径 → 同层 → 同名）认领旧章节，注入 __original_id。
+
+        消费式认领：每个旧章节至多被一个节点认领 ⇒ 同名节点不会撞成同一主键。
+        层级按**树深度**计算（不信任节点自带的 level —— 目录库存的是编号而非
+        结构，节点可能缺 level 或带旧层级，落库前还会被 normalize 重排）。
+        """
         nonlocal _matched
         for node in nodes:
             if not isinstance(node, dict):
                 continue
             if not node.get("__original_id"):
-                _nt = _norm_title(node.get("title", ""))
-                _db_id = _existing_by_title.get(_nt, "")
-                if _db_id:
-                    node["__original_id"] = _db_id
+                _old = _matcher.take(
+                    title=node.get("title", ""),
+                    level=depth + 1,
+                    parent_id="",  # 目录库树尚未落库，无 DB 父主键 ⇒ 走路径/层级桶
+                    path_titles=path_titles,
+                )
+                if _old:
+                    node["__original_id"] = str(_old.get("id") or "")
                     _matched += 1
             _kids = node.get("children")
             if isinstance(_kids, list) and _kids:
-                _inject_original_ids(_kids)
+                _nt = str(node.get("title") or "").strip()
+                _inject_original_ids(_kids, path_titles + ((_nt,) if _nt else ()), depth + 1)
 
     _inject_original_ids(outline_data)
     if _matched:
@@ -815,7 +898,12 @@ async def apply_library_and_save(library_id: str, body: dict, db=Depends(get_db)
         library_id[:8],
         len(outline_data),
     )
-    result = await _save_outline_to_db(db, scheme_id, outline_data, source="目录库")
+    # ✅ R216 收口：本路径已用 build_outline_matcher 做**消费式**认领，未认领
+    #    节点即「确认不存在对应旧章节」；必须让 sections 侧跳过兜底匹配，
+    #    否则同名节点会二次匹配回同一旧主键 → 重复主键 400（套用目录库整链失败）。
+    result = await _save_outline_to_db(
+        db, scheme_id, outline_data, source="目录库", skip_fallback_match=True
+    )
     logger.info("方案 %s 套用目录库 %s：整表重建完成", scheme_id[:8], library_id[:8])
 
     # 更新引用计数

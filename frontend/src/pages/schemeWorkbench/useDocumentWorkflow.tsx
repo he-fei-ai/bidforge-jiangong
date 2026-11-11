@@ -132,7 +132,13 @@ export interface DocumentWorkflowDeps {
   parsingDocId: string | null;
   setParsingDocId: (v: string | null) => void;
   docList: DocRecord[];
-  loadDocuments: () => void | Promise<void>;
+  /**
+   * ✅ R210（2026-11-10）：补可选 ``skipAbortPrev`` 参数（**轮询专用**）。
+   * 默认（用户手动刷新 / 常规加载）仍为「后发者胜」：abort 上一次在飞请求；
+   * 轮询入口传 ``true`` ⇒ 不打断用户自己点的刷新（R208 注释承诺、本轮落地）。
+   * 传参类型对 `() => void` 的消费方**向后兼容**（可选参数可省略）。
+   */
+  loadDocuments: (skipAbortPrev?: boolean) => void | Promise<void>;
   // 预览 / 四层管线
   setPreviewDoc: (v: DocRecord | null) => void;
   setPreviewText: (v: string) => void;
@@ -212,12 +218,39 @@ export function useDocumentWorkflow(deps: DocumentWorkflowDeps) {
   //    经 ref 间接调用避免过期闭包。
   const loadDocumentsRef = useRef(loadDocuments);
   loadDocumentsRef.current = loadDocuments;
+  // ✅ R208 修复（轮询与列表自中止互锁）：``loadDocuments``（useWorkbenchDataLoaders）
+  //    每次调用**先 abort 上一次在飞的列表请求**（:57）——这与「刷新」按钮的
+  //    语义一致（后发者胜）。但 R203 FE-9 的 3s 轮询也走同一个入口，于是：
+  //    列表请求耗时 >3s 时，每个轮询 tick 都会把上一个 tick 的请求 abort 掉，
+  //    请求永远走不完 → 异常被 ``ac.signal.aborted`` 静默吞掉（:70）
+  //    → **列表永不更新**，FE-9 的「逐份进度可见」在慢网/大项目下完全失效，
+  //    用户看到的仍是「待解析」；用户自己点的「刷新」也会被自家轮询打断。
+  //    修法：轮询走**独立**的加载入口，不与交互刷新共用中止通道——
+  //    在轮询窗口内只保留「上一次轮询结果」，不打断正在飞行的轮询请求。
+  //    实现：给 loadDocuments 增加可选 ``skipAbortPrev`` 参数。
+  //    ✅ R210（2026-11-10）：该参数本轮**真正落地**（此前只有注释、代码未实现）
+  //    —— 轮询入口传 ``skipAbortPrev=true`` ⇒ 轮询**不再 abort 用户自己点的
+  //    「刷新」**；用户手动刷新仍保持「后发者胜」的默认语义。
+  const loadDocumentsPollRef = useRef(loadDocuments);
+  loadDocumentsPollRef.current = loadDocuments;
+  const pollInFlightRef = useRef(false);
   useEffect(() => {
     if (!parsingDocs) return;
     const t = setInterval(() => {
-      void loadDocumentsRef.current();
+      // 上一轮轮询仍在飞 → 本轮跳过（不再叠加请求，也不 abort 上一轮）
+      if (pollInFlightRef.current) return;
+      pollInFlightRef.current = true;
+      // skipAbortPrev=true：轮询不得打断在飞的用户刷新请求（R210）
+      void Promise.resolve(loadDocumentsPollRef.current(true))
+        .catch(() => undefined)
+        .finally(() => {
+          pollInFlightRef.current = false;
+        });
     }, 3000);
-    return () => clearInterval(t);
+    return () => {
+      clearInterval(t);
+      pollInFlightRef.current = false;
+    };
   }, [parsingDocs]);
   // ✅ 真正的取消通道（ref 由页面持有，见 DocumentWorkflowDeps.previewAbortRef）：
   //    关闭弹窗 / 切换文档时中断在途预览（不只是丢弃结果）；页面卸载时由
@@ -226,7 +259,15 @@ export function useDocumentWorkflow(deps: DocumentWorkflowDeps) {
   // ✅ 分步工作流 ①：上传保存（仅存文件，不解析不提取）
   const handleUploadDocuments = async (files: File[]) => {
     if (!id || files.length === 0) return;
-    if (uploadingFacts || uploadInFlightRef.current) return;
+    if (uploadingFacts || uploadInFlightRef.current) {
+      // ✅ R208 修复（假动作）：此前静默 return —— 用户点击上传后
+      //    「完全没反应」（无 toast / 无 loading）。R203 FE-1 的门禁口径
+      //    修好了一部分入口（按钮 disabled），但仍有可达路径绕过组件层
+      //    （FactsTab「① 上传文件保存」整批直传本函数、并发双击同 tick）。
+      //    现给出明确反馈，行为不变（仍不发起请求）。
+      msg.info(uploadingFacts ? "文件正在上传，请稍候" : "上传正在进行中，请勿重复提交");
+      return;
+    }
     // ✅ R203 修复（P1）：置位从函数头迁到三段预检全部早退之后（与下方
     //    parse 侧 C-F9 形态对齐）——旧实现置位后有三段预检各含一个裸 return
     //    早退（全被拒/超配额/超数量且无一通过），全部位于 try 块之外，
@@ -360,7 +401,14 @@ export function useDocumentWorkflow(deps: DocumentWorkflowDeps) {
     // ✅ 防重入：单份解析（OCR 可能数分钟）进行中时不得叠加批量解析，
     //    否则同一文档被两路并发解析，四层产物与版本列互相覆盖。
     //    （组件侧已禁用入口，此处是页面层防御，避免其他调用点绕过）
-    if (parsingDocs || parsingDocId || parseInFlightRef.current) return;
+    if (parsingDocs || parsingDocId || parseInFlightRef.current) {
+      // ✅ R208 修复（假动作）：见上传侧同类注释——静默 return 让用户
+      //    点击「解析全部」毫无反馈。给出明确提示，行为不变。
+      msg.info(
+        parsingDocId ? "该文档正在解析中，请稍候" : "解析正在进行中，请勿重复提交",
+      );
+      return;
+    }
     // ✅ 2026-09-24 B4：与后端 parse-all 选取口径（parsed_markdown 为空，含 failed）
     //    及 UploadParseTab 按钮统一到 computeDocStats.actionableCount；
     //    旧实现用 !text_len 自行计数，与组件按钮的 pendingCount（排除 failed）口径不一致。
@@ -465,7 +513,13 @@ export function useDocumentWorkflow(deps: DocumentWorkflowDeps) {
   // force=true 时强制重解析（用于补齐早期被截断的文档内容）
   // ✅ 单文档解析防重入：parsingDocId 非空时忽略新的单份解析请求
   const handleParseDocument = async (docId: string, fileName: string, force = false) => {
-    if (parsingDocId || parsingDocs || parseInFlightRef.current) return;
+    if (parsingDocId || parsingDocs || parseInFlightRef.current) {
+      // ✅ R208 修复（假动作）：单份解析 guard 此前同样静默 return。
+      msg.info(
+        parsingDocId ? "该文档正在解析中，请稍候" : "解析正在进行中，请勿重复提交",
+      );
+      return;
+    }
     parseInFlightRef.current = true;
     setParsingDocId(docId);
     parseAbortRef.current?.abort();

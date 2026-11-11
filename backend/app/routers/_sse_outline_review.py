@@ -37,6 +37,32 @@ class _LazySseHandlers:
 
 _sh = _LazySseHandlers()
 
+# ✅ R213（FIX-11）：目录分步生成的「配额/认证确定性失败」熔断标记（任务级）。
+#    背景：402/403/429 这类错误重试几乎必然再失败（R190 O8/O9 已据此禁止
+#    重试），但批量失败后仍会「逐章回退 K 次 + 定向重试 K 次」⇒ 一个 K 章
+#    单元白烧 1+2K 次请求。标记后：本轮剩余章直接判 failed，零额外请求。
+_QUOTA_BLOCKED_TASKS: set[str] = set()
+_QUOTA_BLOCKED_MAX = 128
+
+
+def _mark_quota_blocked(task_id: str) -> None:
+    """标记某任务的目录生成本轮已熔断（有界清理防 set 长期泄漏）。"""
+    if len(_QUOTA_BLOCKED_TASKS) >= _QUOTA_BLOCKED_MAX:
+        # 仅在 128 个任务同时熔断时触发；后果只是回到旧行为（不再熔断），
+        # 不会产生错误成果，且 finally 会逐个清理。
+        _QUOTA_BLOCKED_TASKS.clear()
+    _QUOTA_BLOCKED_TASKS.add(str(task_id))
+
+
+def _is_quota_blocked(task_id: str) -> bool:
+    return str(task_id) in _QUOTA_BLOCKED_TASKS
+
+
+def _clear_quota_blocked(task_id: str) -> None:
+    """任务收尾清理（sse_handlers 的入口/终态各调一次，幂等）。"""
+    _QUOTA_BLOCKED_TASKS.discard(str(task_id))
+
+
 # ---------- 提示词治理 · SSE 侧薄封装（2026-09-24 · G5 / G6） ----------
 
 #: 句子边界（截断时在这些标点之后断开，尽量不切碎句子）
@@ -300,6 +326,19 @@ async def _finish_stopped_with_partial(task_id: str, holder: dict) -> str:
     # ✅ R205（目录链→前端同步）：补 message（与 finish_task 同文案），
     #    前端在线 stopped 分支此前硬编码「已停止」，后端检查点失败原因无处可达。
     payload = {"event": "stopped", "task_id": task_id, "message": "用户已停止"}
+    # ✅ R210（L1-8）：续跑复用章数（前端提示「已复用 N 章」）。
+    _resumed = int(holder.get("resumed_chapters") or 0)
+    if _resumed:
+        payload["resumed_chapters"] = _resumed
+    # ✅ R213（FIX-5）：停止态此前只带复用章数，一级章被上限截断时零信号 ⇒
+    #    「停止并保存部分成果」会把截断目录当完整成果。payload 与 checkpoint
+    #    共用同一份字典（下方 dict(payload) 拷贝），两路一次补齐。
+    _truncated = int(holder.get("level1_truncated") or 0)
+    if _truncated:
+        payload["level1_truncated"] = _truncated
+        payload["level1_total"] = int(holder.get("level1_total") or 0)
+    # ✅ R210（L1-7）：输入指纹**只进 checkpoint**（续跑判据），不进 SSE 事件载荷。
+    _fp = str(holder.get("input_fingerprint") or "")
     _ckpt_ok = not outline  # 无成果本来就不写 checkpoint，也无需清 holder
     if outline:
         payload["outline"] = outline
@@ -307,8 +346,14 @@ async def _finish_stopped_with_partial(task_id: str, holder: dict) -> str:
         if failed:
             payload["failed_chapters"] = list(failed)
             payload["failed_count"] = len(failed)
+        # ⚠️ 拷贝**必须**放在成果字段写入之后：早一步拷到的是半成品字典，
+        #    checkpoint 会丢掉 outline/failed_count ⇒ 断线重挂拿不到任何成果
+        #    （R210 回归：`ckpt["outline"]` KeyError，既有护栏当场抓红）。
+        _ckpt_payload = dict(payload)
+        if _fp:
+            _ckpt_payload["input_fingerprint"] = _fp
         try:
-            await _sh._save_outline_checkpoint(task_id, payload)
+            await _sh._save_outline_checkpoint(task_id, _ckpt_payload)
             _ckpt_ok = True
         except Exception:
             # ✅ R188（L8）：旧实现吞异常后无条件清空 holder，而 finish_task 之后
@@ -322,7 +367,7 @@ async def _finish_stopped_with_partial(task_id: str, holder: dict) -> str:
                 task_id, exc_info=True,
             )
             try:
-                await _sh._save_outline_checkpoint(task_id, payload)
+                await _sh._save_outline_checkpoint(task_id, _ckpt_payload)
                 _ckpt_ok = True
             except Exception:
                 _sh.logger.error(
@@ -363,6 +408,11 @@ async def _fetch_chapter_children(
     停止语义：进入前 / 排队拿到许可后各复检一次 is_stopped，已停止则
     **不发起 AI 调用**（省一次配额，也避免"点了停止还在烧 token"）。
     """
+    # ✅ R213（FIX-11）：本轮已判定配额/认证类确定性失败 ⇒ 后续章零请求，
+    #    直接判 failed（否则 K 章各发 1 次必然失败的请求 + 定向重试再 1 次）。
+    if _is_quota_blocked(task_id):
+        _sh.logger.warning("第%d章子目录跳过：本轮配额/认证类失败已熔断", index + 1)
+        return "failed", []
     # ① 闸门在前：暂停期间不占许可
     await _sh.wait_resume(task_id)
     if _sh.is_stopped(task_id):
@@ -398,6 +448,8 @@ async def _fetch_chapter_children(
             #    与超时；`AI_RETRY_ON_QUOTA_ERROR=True` 可恢复旧行为。
             if not _sh.AI_RETRY_ON_QUOTA_ERROR and _sh._is_quota_error(e):
                 _sh.logger.warning("第%d章子目录生成失败（配额/认证类，不重试）: %s", index + 1, e)
+                # ✅ R213（FIX-11）：确定性失败 → 熔断本轮后续章，避免逐章白烧。
+                _mark_quota_blocked(task_id)
                 return "failed", []
             _sh.logger.warning("第%d章子目录首次生成失败: %s，重试一次", index + 1, e)
             # 重试前再过一次闸门与停止检查：用户在首试失败后可能已点
@@ -460,6 +512,13 @@ async def _fetch_unit_children(
     """
     if _sh.is_stopped(task_id):
         return "stopped", []
+    # ✅ R216（2026-11-11 · P3）：熔断后批量单元直接整单元 failed —— 与单章入口
+    #    （_fetch_chapter_children 的 R213 FIX-11 前置）同口径。旧实现缺该检查：
+    #    OUTLINE_CHAPTER_BATCH_SIZE>1 时，熔断后每个含多章单元仍发 1 次注定失败
+    #    的批量调用、吃一次配额错误后才重新熔断返回（与 R213「本轮剩余章零
+    #    额外请求」的声明不符）。
+    if _is_quota_blocked(task_id):
+        return "failed", [("failed", []) for _ in unit_chapters]
 
     # 单元内单章：直接委托（保持与旧实现逐字一致）
     if len(unit_chapters) == 1:
@@ -479,7 +538,16 @@ async def _fetch_unit_children(
     # 单元内多章：一次批量调用
     batch_obj = None
     last_err: Exception | None = None
+    _quota_broken = False  # ✅ R213（FIX-11）：批量是否因配额/认证确定性失败中断
     for attempt in (1, 2):
+        # ✅ R216（2026-11-11 · P2）：每次尝试前复检暂停/停止闸门 —— 与单章路径
+        #    （_fetch_chapter_children 首试失败后重试前的同款复检）对称。暂停不会
+        #    取消在飞调用：首试超时失败后，重试会立刻照发 ⇒ 暂停期间继续烧配额；
+        #    停止发生在首试之后则第二次批量调用照发（request_control("stop") 的
+        #    cancel 只作用于注册时刻已有的 child_tasks）。
+        await _sh.wait_resume(task_id)
+        if _sh.is_stopped(task_id):
+            return "stopped", []
         try:
             obj, _raw = await _sh._await_with_stats(
                 _sh.collect_json_response(
@@ -508,9 +576,21 @@ async def _fetch_unit_children(
                 _sh.logger.warning(
                     "批量子目录（第%d次，%d章）配额/认证类错误（不重试）: %s", attempt, len(unit_chapters), e
                 )
+                _quota_broken = True  # ✅ R213（FIX-11）：不再逐章回退
                 break
             _sh.logger.warning("批量子目录（第%d次，%d章）失败: %s", attempt, len(unit_chapters), e)
     if batch_obj is None:
+        # ✅ R213（FIX-11）：配额/认证确定性失败不再「逐章回退」—— 旧实现
+        #    对一个 K 章单元发 1（批量）+ K（逐章回退）+ K（定向重试）次必然
+        #    失败的请求。直接整单元判 failed，并把本轮标记为熔断。
+        if _quota_broken:
+            _sh.logger.warning(
+                "批量子目录因配额/认证类确定性失败，熔断本轮后续 AI 调用（task=%s，%d 章）",
+                task_id,
+                len(unit_chapters),
+            )
+            _mark_quota_blocked(task_id)
+            return "failed", [("failed", []) for _ in unit_chapters]
         _sh.logger.warning("批量子目录重试仍失败（%s），逐章回退单章调用", last_err)
 
     # 按 chapter_id 归位（章号以「章序号+1」的字符串为准，与提示词一致）
@@ -572,6 +652,9 @@ async def _retry_empty_chapters(
       供 progress 事件消费（前端可显示「第 N 章重试 1 次后补齐 / 仍为空」）。
     """
     out = list(per or [])
+    # ✅ R213（FIX-11）：熔断后 failed 章不再定向重试（必然再失败，白烧配额）。
+    if _is_quota_blocked(task_id):
+        return out
     for idx, (i, ch) in enumerate(unit_chapters or []):
         if idx >= len(out):
             break
@@ -1342,6 +1425,7 @@ async def _review_and_fix_outline(
     scheme_basis: str | None = None,
     basis=None,
     standards_text: str = "",
+    task_id: str = "",
 ) -> tuple[list, dict]:
     """目录审核 + 超时保护的自动修复。返回 (outline, review_obj)。
 
@@ -1358,9 +1442,20 @@ async def _review_and_fix_outline(
     standards_text: 【编制依据规范】文本（_outline_standards_text 的产物）。
     ✅ R89 G3：外科式标题重写需要它才能确定标题的具体工序/部位；默认 "" 表示
     不注入（渲染为空串），既有未传参的调用点行为不变。
+
+    task_id: 任务标识（R216 起）。仅用于熔断前置检查；缺省 "" 时跳过检查
+    （既有直调方/测试行为逐字不变）。
     """
     if scheme_basis is None:
         scheme_basis = construction_scope
+    # ✅ R216（2026-11-11 · P3）：子目录阶段已熔断（配额/认证类确定性失败）时，
+    #    审核链不再按序发起 1~5 次必然失败的 AI 调用（patch / title_fix×3 /
+    #    review / feedback fix），异常虽被吞成 review_skipped 但纯属白烧。
+    #    与 R213 FIX-11 的熔断语义同源；显式开启 AI_RETRY_ON_QUOTA_ERROR 时
+    #    _mark_quota_blocked 不发生，本检查天然不触发。
+    if task_id and _is_quota_blocked(task_id):
+        _sh.logger.warning("目录审核跳过：本轮配额/认证类失败已熔断（task=%s）", task_id)
+        return outline, {"review_skipped": True, "skip_reason": "quota_blocked"}
     if not outline:
         return outline, {"passed": False, "suggestions": ["目录为空，无法审核"]}
 

@@ -2,6 +2,9 @@
 
 单人项目，约定从简。当前仅约定提交信息规范；commitlint 配置已就位（`commitlint.config.js`），依赖与钩子暂未安装（见文末）。
 
+> **代码规范总纲**：分支模型（main/develop/feature/test/release/hotfix）、构建分级闸门与协作守则
+> 见 `docs/代码规范原则_Git协作与构建约束_20261109.md`（2026-11-09 生效），与本文件冲突时以该文件为准。
+
 ## 提交信息规范
 
 采用 Conventional Commits 格式：

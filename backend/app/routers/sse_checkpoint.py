@@ -177,15 +177,40 @@ async def _load_task_checkpoint(task_id: str, kind: str) -> dict | None:
     return None
 
 
-async def _checkpoint_partial_outline(task_id: str, outline, failed_chapters, *, event: str = "stopped") -> bool:
+async def _checkpoint_partial_outline(
+    task_id: str,
+    outline,
+    failed_chapters,
+    *,
+    event: str = "stopped",
+    input_fingerprint: str = "",
+    resumed_chapters: int = 0,
+    level1_truncated: int = 0,
+    level1_total: int = 0,
+) -> bool:
     """落库「部分成果」checkpoint（客户端断开/用户停止时的兜底）。
 
     返回是否成功落库（失败静默，绝不影响收尾流程）。
+
+    ✅ R210（L1-7）：``input_fingerprint`` = 本次目录生成的**输入指纹**
+    （见 ``sse_handlers._outline_input_fingerprint``）—— 断点续跑时据此判断
+    「上次成果是否已过时」；指纹不一致 ⇒ 不复用旧章（防陈旧复用）。
+    该键**不进前端白名单**（内部判据，不外泄）。
     """
     outline = outline or []
     if not outline and not failed_chapters:
         return False
     payload = {"event": event, "task_id": task_id, "outline": outline}
+    if input_fingerprint:
+        payload["input_fingerprint"] = str(input_fingerprint)
+    # ✅ R213（FIX-5）：断线重挂必须与在线终态同构 —— 复用章数 / 一级章截断
+    #    信号此前只进 completed 的 SSE 载荷，checkpoint 通道全丢（用户把被
+    #    截断的目录当完整成果保存）。加法式，未发生时不出现该键。
+    if resumed_chapters:
+        payload["resumed_chapters"] = int(resumed_chapters)
+    if level1_truncated:
+        payload["level1_truncated"] = int(level1_truncated)
+        payload["level1_total"] = int(level1_total)
     # ✅ R197（B10，R89 S3 同口径）：本函数只服务「部分成果」场景（断线兜底 /
     #    用户停止），必须带 ``partial: True`` —— 缺省时前端 buildPartialOutlineHint
     #    收到 partial=undefined，把半份目录当成完整目录（sse_handlers 在线三处
@@ -205,3 +230,81 @@ async def _checkpoint_partial_outline(task_id: str, outline, failed_chapters, *,
 async def _load_outline_checkpoint(task_id: str) -> dict | None:
     """读取目录生成成果 checkpoint（薄封装，语义与 kind 校验见 _load_task_checkpoint）。"""
     return await _load_task_checkpoint(task_id, "outline_result")
+
+
+#: 可作为「断点续跑」来源的目录生成任务终态。
+#:
+#: ✅ R209（2026-11-10 · P1-1）：**只有被中断的任务**才允许被复用 ——
+#:   stopped（用户停止 / 客户端断开兜底）、failed（异常终止 / 全章失败）。
+#:   completed（正常跑完）**刻意不在此列**：用户显式「重新生成目录」时必须全量重算，
+#:   否则第二次点击会静默复用上一次的成果（用户感知 = 「AI 一次没调，目录却没变」）。
+_RESUMABLE_TASK_STATUSES = ("stopped", "failed")
+
+#: 单次续跑取数扫描的最大候选任务行数（防「历史任务过多」时的全表扫描）。
+_RESUMABLE_SCAN_LIMIT = 10
+
+
+async def _load_resumable_outline_checkpoint(scheme_id: str, *, exclude_task_id: str = "") -> dict | None:
+    """取同方案**最近一次被中断**的目录生成成果（断点续跑取数的唯一入口）。
+
+    ✅ R209（2026-11-10 · P1-1 · 断点续跑从未生效）：
+      R203b #21 的续跑逻辑读的是**本次** ``task_id`` 的 checkpoint，而
+      ``task_registry.register_task`` 每次请求都生成**新 uuid** ⇒ 上次的成果落在
+      **上次的任务行**上，本次读到恒为空 ⇒ ``_resumed_indices`` 恒空 ⇒
+      「断线后重新生成复用已有章节」这一验收锚（R203b #21 效果第 6 条：日志出现
+      「断点续跑」）在生产中**零命中**，长方案每次重跑都要重烧全部配额。
+
+    本函数按 ``scheme_id`` 找**最近一次被中断**（stopped/failed）的目录生成任务，
+    取其 checkpoint 里的部分成果。completed 任务**不参与**（见
+    :data:`_RESUMABLE_TASK_STATUSES` 的说明）—— 保持「正常跑完后重新生成 = 全量
+    重算」的既有行为不变。
+
+    Args:
+        scheme_id: 方案 id。
+        exclude_task_id: 需要排除的任务 id（通常是本次任务自身，避免自引用）。
+
+    Returns:
+        目录成果 checkpoint 字典（kind=outline_result，且 outline 非空）；
+        没有可用来源时返回 ``None``。
+    """
+    if not scheme_id:
+        return None
+    conn = await get_read_conn()
+    try:
+        # ✅ R218（2026-11-11 · P3 · O-2）：SQL 硬编码可复用终态字面量（原 status IN 字面量）
+        #    与 `_RESUMABLE_TASK_STATUSES` 同义但**两份来源** —— 若将来终态集合
+        #    演进（如新增可复用状态），只改常量则本 SQL 漏接（续跑取数与复用判据
+        #    漂移）。现参数化引用常量（单一事实源），状态集合变时自动同步。
+        _status_ph = ",".join("?" for _ in _RESUMABLE_TASK_STATUSES)
+        cur = await conn.execute(
+            "SELECT checkpoint_json FROM task_registry "
+            "WHERE scheme_id=? AND task_type='outline_generation' "
+            f"AND status IN ({_status_ph}) AND id<>? "
+            "ORDER BY updated_at DESC, id DESC LIMIT ?",
+            (scheme_id, *_RESUMABLE_TASK_STATUSES, exclude_task_id or "", _RESUMABLE_SCAN_LIMIT),
+        )
+        rows = await cur.fetchall() if cur is not None else []
+    finally:
+        await release_read_conn(conn)
+    for row in rows or []:
+        raw = row[0] if row else None
+        if not raw:
+            continue
+        try:
+            data = json.loads(raw)
+        except (TypeError, ValueError):
+            # 同 _load_task_checkpoint：损坏留痕（载荷前 80 字符），按「无成果」跳过。
+            logger.warning(
+                "任务 checkpoint_json 解析失败（续跑取数跳过 · scheme=%s，长度=%d）: %.80s",
+                scheme_id,
+                len(str(raw)),
+                str(raw),
+            )
+            continue
+        if not isinstance(data, dict) or data.get("kind") != "outline_result":
+            continue
+        outline = data.get("outline")
+        if not isinstance(outline, list) or not outline:
+            continue
+        return data
+    return None

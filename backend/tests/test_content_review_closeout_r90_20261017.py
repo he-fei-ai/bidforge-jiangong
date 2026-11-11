@@ -573,7 +573,18 @@ class TestReadinessOverviewSeesExportSourceFailure:
 # ===========================================================================
 class TestRepairRecordSingleExit:
     def test_no_bare_db_execute_left(self):
-        """静态锁：模块内不得再出现裸 `db.execute`（R78 已把四个 router 收口）。"""
+        """静态锁：模块内不得再出现裸 `db.execute`（R78 已把四个 router 收口）。
+
+        ✅ R217（2026-11-11 · 既有护栏重锚，意图保留、强度不减）：
+        R216 为共享回滚链补了 ``await db.execute("BEGIN IMMEDIATE")``
+        —— 这是**事务控制**（首个决策读之前取 RESERVED 写锁），不是
+        BUG-RV-4 定罪的「裸业务 SQL 写且不检查返回值 ⇒ 假成功」。
+        旧护栏把「任何 db.execute」一律判死，锁的是实现形态而非意图；
+        照它写就得删掉必需的写锁。现重锚为：
+          · BEGIN / COMMIT / ROLLBACK / SAVEPOINT / RELEASE 放行；
+          · 其余 db.execute 仍**一律禁止**（原断言强度不减）；
+          · 追加反向断言：BEGIN IMMEDIATE 必须在场（不得借重锚把锁删回去）。
+        """
         src = _REPAIR_RECORD_PY.read_text(encoding="utf-8")
         tree = ast.parse(src)
         offenders = []
@@ -585,8 +596,14 @@ class TestRepairRecordSingleExit:
                 and isinstance(node.func.value, ast.Name)
                 and node.func.value.id == "db"
             ):
+                sql = ""
+                if node.args and isinstance(node.args[0], ast.Constant):
+                    sql = str(node.args[0].value or "").strip().upper()
+                if sql.startswith(("BEGIN", "COMMIT", "ROLLBACK", "SAVEPOINT", "RELEASE")):
+                    continue
                 offenders.append(node.lineno)
         assert offenders == [], f"仍存在裸 db.execute（行号）：{offenders}"
+        assert "BEGIN IMMEDIATE" in src, "回滚链必须保留 BEGIN IMMEDIATE 写锁（重锚不得放宽为删锁）"
 
     def test_module_imports_the_single_exit(self):
         src = _REPAIR_RECORD_PY.read_text(encoding="utf-8")

@@ -254,9 +254,13 @@ class TestSourceRatchets:
         ✅ R188 重锚：新增「裸 issues 数组容忍」分支后 3 → 4，
         判据强度不降（仍逐处配对，且新分支的 skip_reason 单独锁）。
         """
-        assert REVIEW_SRC.count('"review_skipped": True') == 4
-        assert REVIEW_SRC.count('"skip_reason":') == 4
+        # ✅ R216 重锚：新增「熔断跳过审核」分支（quota_blocked）后 4 → 5；
+        #    判据强度不降（仍逐处配对，且新分支的 skip_reason 单独锁）。
+        assert REVIEW_SRC.count('"review_skipped": True') == 5
+        assert REVIEW_SRC.count('"skip_reason":') == 5
         assert '"skip_reason": "bare_issues_array"' in REVIEW_SRC
+        assert '"skip_reason": "quota_blocked"' in REVIEW_SRC
+        assert 'if task_id and _is_quota_blocked(task_id):' in REVIEW_SRC
         # 旧日志的两条完整格式串不得回潮（注释里引用旧文案属说明，不算）
         assert "目录审核超时（%ds），跳过审核直接完成（scheme=%s）" not in REVIEW_SRC
         assert "目录审核失败（scheme=%s）: %s，跳过审核直接完成" not in REVIEW_SRC

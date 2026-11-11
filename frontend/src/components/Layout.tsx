@@ -66,12 +66,24 @@ function ProjectTreeMenu({
   //    已加载的项目不再重复请求。
   const loadedProjectIdsRef = useRef<Set<string>>(new Set());
 
+  // ✅ 2026-11-11：卸载守卫。侧栏常驻但路由/弹窗切换仍可能卸载 Layout，
+  //    loadSchemes / loadProjects / refreshTree 的 async 回调此前无取消标志，
+  //    请求回包后会在已卸载组件上 setState。
+  const mountedRef = useRef(true);
+  useEffect(() => {
+    mountedRef.current = true;
+    return () => {
+      mountedRef.current = false;
+    };
+  }, []);
+
   const loadSchemes = useCallback(async (projectId: string) => {
     // 即时去重：已加载或正在加载的项目直接跳过，不再发 API 请求
     if (loadedProjectIdsRef.current.has(projectId)) return;
     loadedProjectIdsRef.current.add(projectId);
     try {
       const { data } = await schemesApi.list(projectId);
+      if (!mountedRef.current) return;
       setSchemesMap((prev) => ({ ...prev, [projectId]: data.items || [] }));
     } catch {
       // 失败则从已加载集合中移除，允许下次重试
@@ -84,6 +96,7 @@ function ProjectTreeMenu({
     setLoading(true);
     try {
       const { data } = await projectsApi.list();
+      if (!mountedRef.current) return;
       const list = data.items || [];
       setProjects(list);
       // 默认展开所有有方案的项目，并加载其方案列表
@@ -135,6 +148,7 @@ function ProjectTreeMenu({
     async (projectId?: string) => {
       try {
         const { data } = await projectsApi.list();
+        if (!mountedRef.current) return;
         const list: ProjectItem[] = data.items || [];
         const prevIds = new Set(projectsRef.current.map((p) => p.id));
         setProjects(list);

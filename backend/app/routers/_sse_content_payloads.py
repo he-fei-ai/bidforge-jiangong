@@ -148,7 +148,12 @@ def build_content_checkpoint(
         "done": ckpt.get("done", len(done_ids)),
         "processed": int(ckpt.get("processed") or (ckpt.get("done", len(done_ids)) + len(failed_ids))),
         "total": ckpt.get("total", total),
-        "failed_count": len(failed_ids),
+        # ✅ R215（2026-11-11 · P3）：计数口径与在线终态（_stopped_payload /
+        #    _error_payload 的 max(total - len(done_ids), 0)）同源 —— R194 已确立
+        #    「done_ids 口径，_failed_reasons 只作明细」，而本通道（断线重挂读的
+        #    checkpoint）此前仍用 len(failed_ids) ⇒ 用户停止/断线后重挂摘要的
+        #    失败数与停止瞬间横幅突变（差额 = 未处理章节）。
+        "failed_count": max(int(total) - len(done_ids), 0),
         "failed_sections": list(failed_reasons.values())[:50],
         "words": ckpt.get("words", 0),
         # ✅ 本次运行统计（前端终态横幅 / 重挂接页展示）：

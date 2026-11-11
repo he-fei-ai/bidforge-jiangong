@@ -1,8 +1,9 @@
 import { memo, useEffect, useMemo, useRef, useState } from "react";
+import { useResizePhase } from "../utils/perf/resizeCoordinator";
 import { marked } from "marked";
 import DOMPurify from "dompurify";
 import { chartsApi } from "../api";
-import { ensureMermaid, nextMermaidId, sanitizeMermaidSvg } from "./mermaidRuntime";
+import { assertMermaidCodeSafe, ensureMermaid, nextMermaidId } from "./mermaidRuntime";
 import { CHART_TITLE_FALLBACK, RENDERABLE_CHART_TYPES } from "../utils/chartTypes";
 // ✅ R76（2026-10-13）：围栏判据唯一事实源（前端侧），与后端
 //   services/fence_common.py 同一语义。行锚定 + 同种字符 + 信息串必须为空 + 长度容错。
@@ -105,10 +106,15 @@ function MarkdownRenderer({ content, sectionId, onContentReplaced }: MarkdownRen
   const [errMsg, setErrMsg] = useState<string | null>(null);
   // ✅ P1-6 性能优化：内容变化 500ms 防抖后再解析渲染（编辑/切换过程不卡顿）
   const [debouncedContent, setDebouncedContent] = useState(content);
+  // ✅ 2026-11-11：拖窗口/面板尺寸变化期间暂停图表解析与 DOM 重绘，
+  //    保持上一帧 SVG 不动；停手（120ms 静默）后统一解析一次。
+  //    这样 mermaid/katex/marked 的重开销不会落在拖拽的每一帧上。
+  const resizePhase = useResizePhase();
   useEffect(() => {
+    if (resizePhase === "active") return;
     const t = window.setTimeout(() => setDebouncedContent(content), 500);
     return () => window.clearTimeout(t);
-  }, [content]);
+  }, [content, resizePhase]);
 
   // ✅ P1-6：解析结果按内容记忆化（围栏预处理 → marked → DOMPurify → 占位符提取），
   //    仅在内容真正变化时重算；mermaid 渲染（重开销）与 DOM 写入留在 effect
@@ -303,12 +309,13 @@ function MarkdownRenderer({ content, sectionId, onContentReplaced }: MarkdownRen
           const parent = target.closest<HTMLElement>(".mmd-err");
           if (parent) {
             try {
+              // ✅ R196：修复产出同样过输入侧安全闸（修复后的代码重新渲染），
+              //    防止修复轮把危险特征带回正文预览。
+              const gate = assertMermaidCodeSafe(fixed);
+              if (!gate.safe) throw new Error(gate.reason);
               const renderId = nextMermaidId("mmd-fix");
               const { svg } = await mermaid.render(renderId, fixed);
-              // ✅ R196：SVG 注入前过 DOMPurify —— securityLevel:"loose" 下
-              //    mermaid 允许标签内 HTML，而图表代码源是 LLM 产出；错误文案与
-              //    代码已 sanitize，SVG 本体（innerHTML 注入面）此前裸注入。
-              parent.innerHTML = sanitizeMermaidSvg(svg);
+              parent.innerHTML = svg;
               parent.classList.remove("mmd-err");
               parent.classList.add("mmd-rendered");
             } catch {
@@ -433,6 +440,12 @@ function MarkdownRenderer({ content, sectionId, onContentReplaced }: MarkdownRen
             // 占位 div 可能已被新一轮渲染替换/移除
             if (!div.isConnected) continue;
             try {
+              // ✅ R196：渲染前输入侧安全闸 —— loose 模式下 LLM 代码允许内嵌 HTML，
+              //    含脚本/事件特征的代码拒绝进 mermaid.render（产出 SVG 即无可执行面）。
+              //    （首轮 DOMPurify 清洗 SVG 方案经真实浏览器实测否决：foreignObject
+              //    内 htmlLabels 内容被确定性清空 → 节点文字全部消失。）
+              const gate = assertMermaidCodeSafe(ph.code);
+              if (!gate.safe) throw new Error(gate.reason);
               // ✅ P1-6：SVG 按代码内容复用——同一图表在编辑/切换中不重复渲染
               // ✅ 命中即刷新 LRU 位置（热点图表不被误淘汰）
               let svg = _svgCacheGet(ph.code) || "";
@@ -444,9 +457,7 @@ function MarkdownRenderer({ content, sectionId, onContentReplaced }: MarkdownRen
                 _svgCacheSet(ph.code, svg);
               }
               if (!div.isConnected) continue;
-              // ✅ R196：SVG 注入前过 DOMPurify（securityLevel:"loose" 下 LLM 代码
-              //    的内联事件/script 风险面，唯一出口见 mermaidRuntime.sanitizeMermaidSvg）
-              div.innerHTML = sanitizeMermaidSvg(svg);
+              div.innerHTML = svg;
               div.classList.remove("mmd-ph");
               div.classList.add("mmd-rendered");
             } catch (renderErr: unknown) {

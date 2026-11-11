@@ -71,7 +71,9 @@ def new_id(prefix: str) -> str:
     return f"{prefix}_{uuid.uuid4().hex[:12]}"
 
 
-async def create_snapshot(db, scheme_id: str, sections: list[dict], snapshot_type: str = "consistency_repair") -> str:
+async def create_snapshot(
+    db, scheme_id: str, sections: list[dict], snapshot_type: str = "consistency_repair", commit: bool = True
+) -> str:
     """为指定章节（dict 需含 id/content）保存修复前快照，返回 snapshot_id。
 
     sections: [{"section_id": ..., "content_before": ...}, ...] 或含 id/content 的字典。
@@ -92,7 +94,12 @@ async def create_snapshot(db, scheme_id: str, sections: list[dict], snapshot_typ
         (snapshot_id, scheme_id, snapshot_type, json.dumps(payload, ensure_ascii=False), _now()),
         what="repair_record.create_snapshot:INSERT",
     )
-    await db.commit()
+    # ✅ R216（2026-11-11 · P3）：commit 语义交给调用方 —— rollback_snapshot 以
+    #    commit=False 把 undo 快照并入回滚事务（中途 commit 会打断「undo 快照 +
+    #    逐章恢复」的原子性：后续 UPDATE 失败时 undo 快照已固化成孤儿，且两路
+    #    并发回滚的 undo 链可能对不上）。既有直调方（含测试）默认 True 不变。
+    if commit:
+        await db.commit()
     return snapshot_id
 
 
@@ -119,16 +126,45 @@ async def rollback_snapshot(db, snapshot_id: str, *, undo_type: str = "consisten
     undo_type：撤销快照的 type（编号版本管理传 "numbering_rollback" 以隔离场景）。
 
     ✅ R92（2026-10-17 · 正文写点同步补链）：``resync_fn`` 为可选回调
-    ``async def resync_fn(db, section_id, content) -> None``，在每章正文恢复 UPDATE
+    ``async def resync_fn(db, section_id, content) -> str | None``，在每章正文恢复 UPDATE
     之后、同事务 commit 之前调用，按恢复后正文全量重登记内联图表（消除「正文回退、
-    登记未回退」的两侧漂移）。本模块属 services 层，不得 import routers，故由调用方
+    登记未回退」的两侧漂移）。✅ R215（2026-11-11）：契约升级——回调**可返回登记管线
+    校验/修复后的正文**（resync_inline_charts 的 ``_fixed``），非空且与恢复正文不同时
+    以校正后正文二次落库（content/word_count/word_status 同事务）；返回 None 时行为与
+    R92 引入时逐字一致。本模块属 services 层，不得 import routers，故由调用方
     （routers）注入。缺省 None 时行为与引入前逐字一致。
+
+    ✅ R216（2026-11-11 · P3）：首个决策读之前 BEGIN IMMEDIATE 取 RESERVED 写锁
+    （与 outline_versions.restore_outline_snapshot / R184 _save_outline_to_db
+    同口径）—— 本引擎是「读快照 → 读当前正文 → 建 undo 快照 → 逐章 UPDATE」
+    的复合写，全仓 BEGIN IMMEDIATE 此前 5 处唯独漏接这条共享引擎
+    （rollback_numbering_version / /consistency/rollback / autofix 回滚都经它）：
+    两路并发回滚各自基于自己读到的正文建 undo 快照、逐章 UPDATE 交叉覆盖，
+    undo 链与最终状态可能对不上。调用方已开事务时沿用其事务（同口径）。
     """
+    _owns_lock = not getattr(db, "in_transaction", False)
+    if _owns_lock:
+        await db.execute("BEGIN IMMEDIATE")
+    try:
+        return await _rollback_locked(db, snapshot_id, undo_type=undo_type, resync_fn=resync_fn)
+    except Exception:
+        if _owns_lock:
+            try:
+                await db.rollback()
+            except Exception:  # noqa: BLE001 — 回滚失败不再遮蔽原异常
+                pass
+        raise
+
+
+async def _rollback_locked(db, snapshot_id: str, *, undo_type: str, resync_fn=None) -> dict:
+    """rollback_snapshot 的加锁主体（事务语义见上层函数注释）。"""
     snap = await get_snapshot(db, snapshot_id)
     if not snap:
         raise KeyError("快照不存在")
     sections = snap.get("sections") or []
     if not sections:
+        # ✅ R216：空快照无事可做，显式释放本轮取到的写锁（无写入，commit 即解锁）。
+        await db.commit()
         return {"snapshot_id": snapshot_id, "restored": 0}
 
     # 回滚前保存当前正文，便于撤销回滚
@@ -145,7 +181,8 @@ async def rollback_snapshot(db, snapshot_id: str, *, undo_type: str = "consisten
             what="repair_record.rollback_snapshot:读当前正文",
         )
         current.append({"section_id": sid, "content_before": cur_content or ""})
-    undo_id = await create_snapshot(db, snap["scheme_id"], current, snapshot_type=undo_type)
+    # ✅ R216：undo 快照并入回滚事务（commit=False），与逐章恢复同一原子提交。
+    undo_id = await create_snapshot(db, snap["scheme_id"], current, snapshot_type=undo_type, commit=False)
 
     restored = 0
     for sec in sections:
@@ -175,7 +212,29 @@ async def rollback_snapshot(db, snapshot_id: str, *, undo_type: str = "consisten
         #    与引入前逐字一致）。快照原文当初均经管线落库，重登记为幂等操作。
         if resync_fn is not None:
             try:
-                await resync_fn(db, sid, restored_content)
+                _resynced = await resync_fn(db, sid, restored_content)
+                # ✅ R215（2026-11-11 · P2）：resync_fn 契约升级为「可返回登记管线
+                #    校验/修复后的正文（str | None）」。resync_inline_charts 的语义
+                #    是「返回修正后正文，由调用方与正文 UPDATE 同事务提交」——回滚侧
+                #    此前丢弃返回值 ⇒ chart_predictions 按修正后码登记而成稿仍是旧坏码
+                #    （校验失败块「登记侧删了、正文还在」= 幽灵图形态）。consistency_repair
+                #    的 _make_chart_resync 本就返回 _fixed，此处消费后三个回滚入口
+                #    （一致性回滚 / 编号回滚）同口径；旧式返回 None 的回调行为不变。
+                if isinstance(_resynced, str) and _resynced and _resynced != restored_content:
+                    restored_content = _resynced
+                    _wc = text_word_count(restored_content)
+                    await exec_write(
+                        db,
+                        "UPDATE sections SET content=?, word_count=?, word_status=?, updated_at=? " "WHERE id=?",
+                        (
+                            restored_content,
+                            _wc,
+                            word_status_for(_wc, srow["word_budget"] or DEFAULT_WORD_BUDGET),
+                            _now(),
+                            sid,
+                        ),
+                        what="repair_record.rollback_snapshot:消费登记校正正文",
+                    )
             except Exception as _re:  # noqa: BLE001 - 登记失败不阻断回滚
                 logger.warning(
                     "repair_record.rollback_snapshot:章节 %s 图表重登记失败（保留恢复正文）: %s", str(sid)[:8], _re

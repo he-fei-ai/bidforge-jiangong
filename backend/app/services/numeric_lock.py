@@ -324,11 +324,21 @@ def _segment_spans(text: str):
         offset += len(line)
 
 
+def _in_fence(ranges: list[tuple[int, int]], pos: int) -> bool:
+    """位置是否落在代码围栏区间内（fence_common 单一事实源的行级消费）。"""
+    return any(s <= pos < e for s, e in ranges)
+
+
 def _segment_blocked(segment: str, allowed: AllowedNumbers | ScopedAllowedNumbers) -> bool:
     """仅「违规」才拦截；无法判定（未绑定条款）不删正文，只记 undetermined。"""
     if isinstance(allowed, ScopedAllowedNumbers):
-        offending, _unbound = _scoped_segment_verdict(segment, allowed)
-        return bool(offending)
+        offending, unbound = _scoped_segment_verdict(segment, allowed)
+        # ✅ R215（2026-11-11 · P2）：undetermined 句**只记账不删正文** —— 对齐
+        #    本 docstring 与 enforce_text 前置闸（check_text 的 violations 桶
+        #    不含 undetermined）的三态语义。旧实现丢弃 unbound 判据，使未绑定
+        #    条款的合法句子（如设备台数、经验值）在重建循环中被整句静默删除
+        #    （行为实证：「采用挖掘机 2 台进场。」被删，removed=2）。
+        return bool(offending) and not unbound
     return not all(allowed.contains(token) for token in extract_numbers(segment))
 
 
@@ -336,7 +346,15 @@ def _check_scoped_text(text: str, allowed: ScopedAllowedNumbers) -> NumericLockR
     checked = 0
     violations: list[dict] = []
     undetermined: list[dict] = []
+    _ranges = fence_char_ranges(text or "")
     for segment, start in _segment_spans(text or ""):
+        # ✅ R215（2026-11-11 · P2）：围栏内行不参与逐句比对 —— 作用域路径此前
+        #    对每个片段单独抽取数值，片段看不到外围围栏（全文路径的 _masked_text
+        #    掩码在这里失效），mermaid/chart-json 代码行被当散文句记入
+        #    undetermined 报告（噪音），且与 _segment_blocked 旧缺陷复合时整段
+        #    删除图内代码。模块边界（文件头）明言「代码围栏整体跳过」。
+        if _in_fence(_ranges, start):
+            continue
         tokens = extract_numbers(segment)
         checked += len(tokens)
         bad, unbound = _scoped_segment_verdict(segment, allowed)
@@ -395,7 +413,18 @@ def enforce_text(text: str, allowed: AllowedNumbers | ScopedAllowedNumbers) -> t
 
     kept_lines: list[str] = []
     removed = 0
+    # ✅ R215（2026-11-11 · P2）：行级围栏掩码 —— 重建循环逐句判定此前看不到
+    #    外围围栏（全文路径的 _masked_text 只作用于 check_text 的 violations
+    #    前置闸），同章存在真违规时 mermaid/chart-json 代码行被当散文句删除
+    #    （行为实证：gantt 围栏被掏空只剩围栏壳，scoped 与非 scoped 双中招）。
+    _fence_ranges = fence_char_ranges(text or "")
+    _offset = 0
     for line in (text or "").splitlines(keepends=True):
+        if _in_fence(_fence_ranges, _offset):
+            kept_lines.append(line)
+            _offset += len(line)
+            continue
+        _offset += len(line)
         body = line.rstrip("\r\n")
         ending = line[len(body) :]
         segments = [body] if body.lstrip().startswith("|") else _SENTENCE_RE.findall(body)

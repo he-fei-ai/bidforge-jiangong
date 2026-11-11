@@ -385,7 +385,12 @@ def check_completeness(ctx: PreflightContext) -> list:
     #    “安全保证措施”等），旧实现用 dict 按标题存正文，同名后者覆盖前者 →
     #    只要最后一个同名章节正文为空，整条规则就被误报“存在章节但正文为空”。
     #    现改为按标题聚合全部同名正文，任一非空即视为有内容。
-    contents_by_title: dict = {}
+    # ✅ R212（2026-11-10 · P2-2）：同一条数据同时留存「正文」与「章节主键」。
+    #    此前只留正文，同名章节（各章都有「施工准备」是常态）聚合后**丢失了章节 id**，
+    #    导致 finding 只能带标题 ⇒ ① 前端「问题定位跳转」对完整性维度不可达；
+    #    ② 修复侧只能按标题反查，同名章节会命中多章（张冠李戴，见 review_autofix）。
+    #    现在「正文为空」的 finding 带真实 section_id（同名时取第一个，保证确定性）。
+    section_entries_by_title: dict = {}
     # ✅ BUG 修复（2026-10-02，生产数据实证）：正文取「有效正文」（含全部子孙）
     #    而非章节自身 content —— 见 build_section_tree_index 的实证：
     #    法定章节多为 L1 父节点，正文由子节承载，只看自身会把 36/36 叶子
@@ -394,8 +399,8 @@ def check_completeness(ctx: PreflightContext) -> list:
     for s in ctx.sections:
         sid = s.get("id")
         eff = effective.get(sid) if sid else None
-        contents_by_title.setdefault(s.get("title") or "", []).append(
-            eff if eff is not None else (s.get("content") or "")
+        section_entries_by_title.setdefault(s.get("title") or "", []).append(
+            (sid or "", eff if eff is not None else (s.get("content") or ""))
         )
 
     for idx in range(1, 10):
@@ -416,11 +421,14 @@ def check_completeness(ctx: PreflightContext) -> list:
                 )
             )
             continue
-        if not any((c or "").strip() for t in hit_titles for c in contents_by_title.get(t) or []):
+        hit_entries = [e for t in hit_titles for e in (section_entries_by_title.get(t) or [])]
+        if not any((c or "").strip() for _sid, c in hit_entries):
+            empty_sid = next((sid for sid, c in hit_entries if not (c or "").strip()), "")
             findings.append(
                 _finding(
                     rule_id,
                     f"存在「{hit_titles[0]}」章节，但正文为空",
+                    section_id=empty_sid,
                     section_title=hit_titles[0],
                     suggestion="请在「正文生成」页生成该章节内容后重新预检",
                 )
@@ -1305,8 +1313,10 @@ def check_deliverability(ctx: PreflightContext) -> list:
         )
 
     # DLV-17：《L3以下“少目录、多正文”编制标准》——目录层级与节点规模。
-    # 只报「可确定的超限」：层级 >3、单节 >5、单章超过调和上限、全文 >40。
-    # level 元数据缺失时不判定（available=False），避免误报。
+    # ✅ 2026-11-05 二次口径：只有「层级 >3」是硬性缺陷（落库前应已折叠）；
+    #    「单节 >5 / 单章超调和上限 / 全文 >40」都只是标准中的**建议值**，
+    #    L3 数量不做硬性要求，这里一律按提示（severity=low）输出，不参与阻断。
+    #    level 元数据缺失时不判定（available=False），避免误报。
     if l3_standard.standard_enabled():
         _ost = _l3_outline_stats(sections)
         if _ost["available"]:
@@ -1317,14 +1327,20 @@ def check_deliverability(ctx: PreflightContext) -> list:
             if _ost["over_depth"]:
                 _o_issues.append(f"出现 {_ost['over_depth']} 个第四级及更深层级节点（标准要求 L4 及以下目录为 0）")
             if _ost["l3_total"] > _max_total:
-                _o_issues.append(f"全文三级条目 {_ost['l3_total']} 个，超过标准 {_max_total} 个")
+                _o_issues.append(
+                    f"全文三级条目 {_ost['l3_total']} 个，多于建议值 {_max_total} 个（仅提示，不作硬性要求）"
+                )
             for _item in _ost["per_section"]:
                 if _item["count"] > _max_sec:
-                    _o_issues.append(f"「{_item['title']}」下三级条目 {_item['count']} 个，超过每节 {_max_sec} 个")
+                    _o_issues.append(
+                        f"「{_item['title']}」下三级条目 {_item['count']} 个，多于建议值每节 {_max_sec} 个（仅提示）"
+                    )
             for _ch in _ost["per_chapter"]:
                 _limit = max(l3_standard.max_l3_per_chapter(), _min_sec * int(_ch.get("sections") or 0))
                 if _ch["count"] > _limit:
-                    _o_issues.append(f"「{_ch['title']}」章三级条目 {_ch['count']} 个，超过单章上限 {_limit} 个")
+                    _o_issues.append(
+                        f"「{_ch['title']}」章三级条目 {_ch['count']} 个，多于建议值 {_limit} 个（仅提示）"
+                    )
             if _o_issues:
                 findings.append(
                     _finding(
@@ -1332,8 +1348,8 @@ def check_deliverability(ctx: PreflightContext) -> list:
                         detail="；".join(_o_issues[:5])
                         + (f"；另 {len(_o_issues) - 5} 项" if len(_o_issues) > 5 else ""),
                         evidence=_o_issues[:5],
-                        suggestion="合并同类三级小节、把可合并内容并入上层正文；"
-                        "目录只保留到 L3（章—节—小节），不要设置 L4 及更深层级",
+                        suggestion="目录只保留到 L3（章—节—小节）；如需精简可合并同类三级小节、"
+                        "把可合并内容并入上层正文。三级条目数量仅为建议值，本条不阻断交付",
                         severity="low",
                     )
                 )
@@ -1355,7 +1371,8 @@ def check_deliverability(ctx: PreflightContext) -> list:
                 detail="；".join(_parts),
                 evidence=_evidence[:10],
                 suggestion="按标准补足：普通 L3 ≥1500 字、关键 L3（加固/拆除/危大/消防/调试/"
-                "质量/安全/监测/监控）≥2500 字，至少 3-5 个自然段；内容确实不足时合并相邻同类小节",
+                "质量/安全/监测/监控/起重吊装/脚手架/深基坑）≥2500 字，至少 3-5 个自然段；"
+                "内容确实不足时合并相邻同类小节",
                 severity="low",
             )
         )

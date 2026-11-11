@@ -218,12 +218,21 @@ async def _loop_lag_monitor(
 
     参数单位：秒。缺省时读 settings（非法值回落 0.5 / 1.0 / 30）。
     冷却用于「默认不刷屏」：一次长阻塞只会触发一条 WARNING。
+
+    ✅ 2026-11-11（第三轮日志驱动分析）：生产日志出现 29150ms / 16771ms /
+    15638ms / 6978ms 四次严重阻塞，但旧日志只有延迟数值、无法定位是哪段
+    同步代码占住循环。严重阻塞（lag ≥ max(5s, 5×阈值)）时追加采集当前
+    事件循环上全部任务的调用栈（跳过本监控自身；纯观测、不改任何任务，
+    采集失败静默跳过绝不影响主流程）。下次复现即可凭栈直接定位罪魁。
     """
     interval_s = interval if interval is not None else _positive(settings.loop_lag_interval_ms, 500) / 1000.0
     threshold_s = threshold if threshold is not None else _positive(settings.loop_lag_threshold_ms, 1000) / 1000.0
     cooldown_s = cooldown if cooldown is not None else _positive(settings.loop_lag_log_cooldown_s, 30.0)
+    # 栈采集阈值：严重阻塞才采（正常抖动不值得），默认 5s 与 5×阈值取大者
+    stack_threshold_s = max(5.0, threshold_s * 5)
     expected = time.monotonic() + interval_s
     last_log = 0.0
+    monitor_task = asyncio.current_task()
     while True:
         await asyncio.sleep(max(0.0, expected - time.monotonic()))
         now = time.monotonic()
@@ -240,6 +249,40 @@ async def _loop_lag_monitor(
                 threshold_s * 1000,
                 interval_s * 1000,
             )
+            if lag >= stack_threshold_s:
+                _log_blocking_task_stacks(monitor_task, lag)
+
+
+def _log_blocking_task_stacks(monitor_task: asyncio.Task | None, lag: float) -> None:
+    """严重阻塞时采集事件循环上其它任务的调用栈（尽力而为，绝不抛异常）。
+
+    只读观测：`task.get_stack()` 不会中断/暂停任务；当前协程已恢复运行，
+    「正在跑同步 CPU」的那个任务此刻处于挂起态、栈顶即阻塞点附近。
+    """
+    try:
+        lines: list[str] = []
+        for task in asyncio.all_tasks():
+            if task is monitor_task or task.done():
+                continue
+            stack = task.get_stack(limit=12)
+            if not stack:
+                continue
+            frames = " <- ".join(
+                f"{f.f_code.co_filename}:{f.f_lineno}({f.f_code.co_name})" for f in stack[:6]
+            )
+            name = task.get_name() or "unnamed"
+            lines.append(f"  task={name}: {frames}")
+        if lines:
+            _loop_lag_logger.warning(
+                "事件循环阻塞 %.0fms · 在途任务栈采样（%d 个，自顶向下，栈顶≈阻塞点附近）：\n%s",
+                lag * 1000,
+                len(lines),
+                "\n".join(lines[:8]),
+            )
+        else:
+            _loop_lag_logger.warning("事件循环阻塞 %.0fms · 未采集到在途任务栈（阻塞方可能在 HTTP 处理器同步段内）", lag * 1000)
+    except Exception as e:  # noqa: BLE001 - 栈采集是纯诊断增强，失败不影响任何业务
+        _loop_lag_logger.debug("阻塞任务栈采集失败（忽略）: %s", e)
 
 
 class LoopLagMiddleware:

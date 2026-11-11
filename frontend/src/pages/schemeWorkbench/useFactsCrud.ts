@@ -11,6 +11,7 @@ import type { MessageInstance } from "antd/es/message/interface";
 import { factsApi } from "../../api";
 import type { FactCrossConflict, FactGroupLike, FactItemLike } from "../../types/facts";
 import type { FactsSegmentStats } from "./workbenchTypes";
+import { factErrorText } from "./factsShared";
 
 /** 单条事实编辑态（页面 state 同构：条目本体 + 所属分组信息） */
 export type FactItemEditingState = FactItemLike & { groupId?: string; groupTitle?: string };
@@ -20,10 +21,13 @@ export type FactItemEditingState = FactItemLike & { groupId?: string; groupTitle
  * axios 的 `err.message` 是英文原文（"Request failed with status code 400"），
  * 后端 `response.data.detail`（唯一性闸门 / 安全拦截的具体原因）此前全部丢失，
  * 用户在「新增/编辑/删除/确认/裁决/清空」失败时只能看到笼统英文。
+ *
+ * ✅ R210：改走事实模块**单一出口** ``factErrorText`` —— 写保护 409 的
+ * ``detail`` 是对象（``{code, message}``），按字符串消费会让整条提示在 React 18
+ * 下抛 "Objects are not valid as a React child" 而**根本不出现**。
  */
 function factsRequestErrorText(err: unknown, fallback: string): string {
-  const e = err as { response?: { data?: { detail?: string; message?: string } }; message?: string };
-  return e?.response?.data?.detail || e?.response?.data?.message || e?.message || fallback;
+  return factErrorText(err, fallback);
 }
 
 export interface FactsCrudDeps {
@@ -104,7 +108,13 @@ export function useFactsCrud(deps: FactsCrudDeps): FactsCrudHandlers {
   }
 
   async function submitFact() {
-    if (!id) return;
+    if (!id) {
+      // ✅ R210（2026-11-10 · P1）：守卫不得**静默** return。
+      //   R208 FE-8 只给 useDocumentWorkflow 的三条 guard 补了 msg.info 反馈，
+      //   CRUD 侧同族漏改 ⇒ 路由切换竞态下点「保存」**零反应**（假动作）。
+      msg.info("当前方案未就绪，请稍后重试");
+      return;
+    }
     try {
       const values = await factForm.validateFields();
       setFactSubmitting(true);
@@ -123,8 +133,16 @@ export function useFactsCrud(deps: FactsCrudDeps): FactsCrudHandlers {
         );
         msg.success("事实条目已更新");
       } else {
-        await factsApi.create({ title: values.title, content: values.content, category }, id);
-        msg.success("事实条目已新增");
+        const created = await factsApi.create({ title: values.title, content: values.content, category }, id);
+        // ✅ R210：后端同名同值**幂等去重**时一条都不写（`deduplicated>0`），
+        //   此前前端无条件提示「事实条目已新增」⇒ 列表无变化却报成功（假成功，
+        //   与 R183「接口回 ok、功能静默为空」同族）。现按真实结果分文案。
+        const dedup = created?.data?.deduplicated ?? 0;
+        if (dedup > 0) {
+          msg.info("已存在同名同值的事实，本次未重复新增");
+        } else {
+          msg.success("事实条目已新增");
+        }
       }
       setFactModalOpen(false);
       setFactEditingId(null);
@@ -155,7 +173,11 @@ export function useFactsCrud(deps: FactsCrudDeps): FactsCrudHandlers {
   }
 
   async function submitFactItem() {
-    if (!factItemEditing?.fact_id) return;
+    if (!factItemEditing?.fact_id) {
+      // ✅ R210：守卫补反馈（静默 return = 用户点「保存」零反应）。
+      msg.info("事实条目缺少 fact_id，无法保存，请刷新列表后重试");
+      return;
+    }
     try {
       const values = await factItemForm.validateFields();
       setFactItemSubmitting(true);
@@ -218,7 +240,13 @@ export function useFactsCrud(deps: FactsCrudDeps): FactsCrudHandlers {
   };
 
   const handleResolveFactItem = async (item: FactItemLike) => {
-    if (!item?.fact_id) return;
+    if (!item?.fact_id) {
+      // ✅ R210：确认按钮的「可点即有反馈」纪律（R208 FE-8 同族补面）。
+      //   后端只下发 fact_id（无 id 键），历史/复制方案残留缺 fact_id 的条目时，
+      //   旧实现静默 return ⇒ 用户点「确认」**无任何反应**（假动作）。
+      msg.info("事实条目缺少 fact_id，无法确认，请刷新列表后重试");
+      return;
+    }
     try {
       await factsApi.resolve(item.fact_id, id);
       msg.success("已确认");
@@ -232,7 +260,11 @@ export function useFactsCrud(deps: FactsCrudDeps): FactsCrudHandlers {
   };
 
   const handleResolveConflictItem = async (item: FactItemLike, value: string) => {
-    if (!item?.fact_id) return;
+    if (!item?.fact_id) {
+      // ✅ R210：同上（裁决路径）。
+      msg.info("事实条目缺少 fact_id，无法裁决，请刷新列表后重试");
+      return;
+    }
     try {
       await factsApi.resolveConflict(item.fact_id, value, id);
       msg.success("矛盾已裁决");
@@ -244,7 +276,11 @@ export function useFactsCrud(deps: FactsCrudDeps): FactsCrudHandlers {
   };
 
   const handleClearAllFacts = () => {
-    if (!id) return;
+    if (!id) {
+      // ✅ R210：守卫补反馈（静默 return = 点「清空全部事实」零反应）。
+      msg.info("当前方案未就绪，请稍后重试");
+      return;
+    }
     modal.confirm({
       title: "一键清空全部事实",
       content:

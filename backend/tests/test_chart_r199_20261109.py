@@ -341,13 +341,18 @@ class TestDegradedSignal:
 
 class TestSourceLocks:
     def test_min_words_hoisted_out_of_loop(self):
-        """R199：实际字数计算外提（旧实现在图表块循环体内重复全文计数）。"""
+        """R199：实际字数计算外提（旧实现在图表块循环体内重复全文计数）。
+
+        ✅ R215 重锚（意图保留、强度不减）：R215-C4 把计算基数升级为净化后文本
+        （normalize_raw_content(content)[0]，与落库 word_count 同源）——「循环外
+        恰一次、循环内零重复」的意图不变，字面量同步升级并保留反向断言。
+        """
         src = (APP / "routers" / "_chart_pipeline.py").read_text(encoding="utf-8")
         i_loop = src.index("for ct, code, ordinal in charts:")
         body = src[:i_loop]
-        assert body.count("_actual_words = text_word_count(content)") == 1
+        assert body.count("_actual_words = text_word_count(normalize_raw_content(content)[0])") == 1
         after = src[i_loop : src.index("async def apply_inline_chart_plan(")]
-        assert "_actual_words = text_word_count(content)" not in after
+        assert "text_word_count(" not in after
 
     def test_resync_returns_inserted_count(self):
         src = (APP / "routers" / "_chart_pipeline.py").read_text(encoding="utf-8")
@@ -429,11 +434,23 @@ class TestByteIntegrity:
             ("app/config.py", "CRLF"),
             ("app/services/ai/mermaid_renderer.py", "CRLF"),
             ("app/services/ai/mermaid_service.py", "CRLF"),
-            ("../frontend/src/utils/contentEvents.ts", "CRLF"),
-            ("../frontend/src/tests/contentEvents.test.ts", "CRLF"),
+            # ✅ R196 重锚（2026-11-10）：useContentGeneration.ts / MarkdownRenderer.tsx
+            #    在 R199 建锁时为 CRLF 例外，随后的行尾 renormalize 提交按
+            #    .gitattributes（*.ts/tsx eol=lf）统一为 LF —— 期望值随最新仓库
+            #    规范演进（防漂移意图不变）。
+            # ✅ R211 重锚（2026-11-10 · 正文轮收尾）：contentEvents 两文件当时
+            #    被记为「存量 CRLF 例外」，但该状态**已不成立** —— 二者在 HEAD
+            #    里已是 LF（随 renormalize 提交落库），且 .gitattributes 明文
+            #    `*.ts text eol=lf`。若此处仍写 CRLF，则「按仓库规范应为 LF」
+            #    的文件一旦被改回 LF 反而报错 ⇒ 把**规范**锁成了**历史残留**。
+            #    本次重锚为 LF：意图（防行尾漂移 + 随仓库规范演进）保留，且
+            #    **强度不减**（期望值与 HEAD / .gitattributes 逐字一致，
+            #    不再容忍任何一方向的漂移）。
+            ("../frontend/src/utils/contentEvents.ts", "LF"),
+            ("../frontend/src/tests/contentEvents.test.ts", "LF"),
             ("../frontend/src/pages/SchemeWorkbenchPage.tsx", "LF"),
-            ("../frontend/src/hooks/useContentGeneration.ts", "CRLF"),
-            ("../frontend/src/components/MarkdownRenderer.tsx", "CRLF"),
+            ("../frontend/src/hooks/useContentGeneration.ts", "LF"),
+            ("../frontend/src/components/MarkdownRenderer.tsx", "LF"),
         ],
     )
     def test_line_endings_preserved(self, rel, expect):

@@ -1,6 +1,7 @@
-﻿import { useCallback } from "react";
+﻿import { useCallback, useEffect, useRef } from "react";
 import type { Dispatch, MutableRefObject, SetStateAction } from "react";
 import { tasksApi, bidAnalysisApi, sseGetStream } from "../../api";
+import { createSseBatcher } from "../../utils/sseBatcher";
 import { sourceNotice } from "../../utils/parseSourceNotice";
 import { isTerminalTaskStatus } from "../../utils/contentEvents";
 import {
@@ -110,6 +111,15 @@ export interface BidAnalysisDeps {
 }
 
 export function useBidAnalysis(deps: BidAnalysisDeps) {
+  // ✅ 2026-11-11：卸载守卫。页面卸载时只会 abort 各 controller，SSE 的
+  //    finally 仍会在已卸载组件上 setBaRunning(false) + loadBaResults()。
+  const mountedRef = useRef(true);
+  useEffect(() => {
+    mountedRef.current = true;
+    return () => {
+      mountedRef.current = false;
+    };
+  }, []);
   const {
     id,
     schemeProjectId,
@@ -156,6 +166,9 @@ export function useBidAnalysis(deps: BidAnalysisDeps) {
       if (!id || baSseAbortRef.current) return;
       const ac = new AbortController();
       baSseAbortRef.current = ac;
+      // ✅ 2026-11-11 性能：本链此前完全没有合帧 —— heartbeat 每条 2 次
+      //    setState、item_update 每条带 progress 又一次。统一按 rAF 合帧。
+      const batcher = createSseBatcher();
       setBaRunning(true);
       setBaProgress(0);
       setBaProgressMsg("正在连接 AI...");
@@ -181,13 +194,23 @@ export function useBidAnalysis(deps: BidAnalysisDeps) {
               }
               return [...prev, patch];
             });
-            if (typeof evt.progress === "number") setBaProgress(evt.progress);
+            if (typeof evt.progress === "number") {
+              const p = evt.progress;
+              batcher.schedule("baProgress", () => setBaProgress(p));
+            }
           } else if (t === "heartbeat") {
-            if (typeof evt.progress === "number") setBaProgress(evt.progress);
-            if (evt.message) setBaProgressMsg(evt.message);
+            if (typeof evt.progress === "number") {
+              const p = evt.progress;
+              batcher.schedule("baProgress", () => setBaProgress(p));
+            }
+            if (evt.message) {
+              const m = evt.message;
+              batcher.schedule("baProgressMsg", () => setBaProgressMsg(m));
+            }
           } else if (t === "text_stats") {
             // 提取规模（切段后立即推送）：超长文档的真实消耗对用户必须可见
-            setBaTextStats({
+            // ✅ 合帧：对象构造也延到 flush 时，一帧内多条 text_stats 只建一次
+            batcher.schedule("baTextStats", () => setBaTextStats({
               total_chars: evt.total_chars ?? 0,
               segment_count: evt.segment_count ?? 0,
               item_count: evt.item_count ?? 0,
@@ -203,7 +226,7 @@ export function useBidAnalysis(deps: BidAnalysisDeps) {
               section_title: evt.section_title ?? "",
               section_hint_applied: !!evt.section_hint_applied,
               multi_section_unselected: !!evt.multi_section_unselected,
-            });
+            }));
             // ✅ R208：多标段未选标段时后端不注入标段上下文，18 项结果可能
             //    混入其他标段内容 —— 必须在提取阶段即时告知而非事后翻日志。
             if (evt.multi_section_unselected) {
@@ -245,10 +268,16 @@ export function useBidAnalysis(deps: BidAnalysisDeps) {
           msg.error(err.message || "结构化提取连接中断");
         }
       } finally {
+        // ✅ 2026-11-11：卸载时丢弃挂起任务（否则 flushNow 会在已卸载组件上
+        //    setState）；正常收尾则先落地最终进度再停止批量器。
+        if (mountedRef.current) batcher.flushNow();
+        batcher.stop();
         if (baSseAbortRef.current === ac) baSseAbortRef.current = null;
-        setBaRunning(false);
-        // 收尾以服务端权威结果为准（item_update 只是乐观视图）
-        loadBaResults();
+        if (mountedRef.current) {
+          setBaRunning(false);
+          // 收尾以服务端权威结果为准（item_update 只是乐观视图）
+          loadBaResults();
+        }
       }
     },
     [id, schemeProjectId, loadBaResults, msg],

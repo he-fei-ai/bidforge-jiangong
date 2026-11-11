@@ -16,7 +16,9 @@ import {
   ReloadOutlined,
   SwapOutlined,
 } from "@ant-design/icons";
-import { Alert, Button, Empty, Input, Space, Tag, Tooltip, Tree } from "antd";
+import { Alert, Button, Empty, Space, Tag, Tooltip, Tree } from "antd";
+import { OutlineRenameInput } from "./OutlineRenameInput.tsx";
+import { setRenameDraft } from "../../utils/perf/renameDraftStore.ts";
 // ✅ any 清理专项（2026-11-02）：treeData 与 titleRender 节点契约复用 antd TreeDataNode
 import type { TreeDataNode } from "antd";
 import { memo } from "react";
@@ -177,25 +179,16 @@ export const SchemeTreePanel = memo(function SchemeTreePanel(p: SchemeTreePanelP
               // ✅ 编辑增强：行内重命名（与右侧编辑树共用 renamingKey 状态）
               if (renamingKey === node.key) {
                 return (
-                  <Input
-                    size="small"
-                    autoFocus
-                    value={renamingValue}
-                    style={{ width: "100%" }}
-                    onChange={(e) => setRenamingValue(e.target.value)}
-                    onClick={(e) => e.stopPropagation()}
-                    onBlur={() => {
-                      onRenameNode(node.key as string, renamingValue);
+                  <OutlineRenameInput
+                    initialValue={renamingValue}
+                    width="100%"
+                    stopClickPropagation
+                    onCommit={(value) => {
+                      setRenamingValue(value);
+                      onRenameNode(node.key as string, value);
                       setRenamingKey(null);
                     }}
-                    onPressEnter={() => {
-                      onRenameNode(node.key as string, renamingValue);
-                      setRenamingKey(null);
-                    }}
-                    onKeyDown={(e) => {
-                      if (e.key === "Escape") setRenamingKey(null);
-                      e.stopPropagation();
-                    }}
+                    onCancel={() => setRenamingKey(null)}
                   />
                 );
               }
@@ -257,7 +250,9 @@ export const SchemeTreePanel = memo(function SchemeTreePanel(p: SchemeTreePanelP
                         icon={<EditOutlined />}
                         onClick={(e) => {
                           e.stopPropagation();
-                          setRenamingValue(typeof node.title === "string" ? node.title : "");
+                          const initial = typeof node.title === "string" ? node.title : "";
+                          setRenameDraft(initial);
+                          setRenamingValue(initial);
                           setRenamingKey(node.key as string);
                         }}
                       />

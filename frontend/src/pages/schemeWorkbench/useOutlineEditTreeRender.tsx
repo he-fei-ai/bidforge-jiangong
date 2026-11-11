@@ -1,7 +1,7 @@
 import { useCallback, useMemo } from "react";
 import type { Dispatch, SetStateAction } from "react";
 import type { TreeDataNode } from "antd";
-import { Input, Tag, Tooltip, Button } from "antd";
+import { Tag, Tooltip, Button } from "antd";
 import {
   ArrowDownOutlined,
   ArrowUpOutlined,
@@ -14,6 +14,8 @@ import {
 } from "@ant-design/icons";
 import { formatOutlineTitle } from "./outlineNumbering.ts";
 import type { TreeNode } from "./outlineTreeModel.ts";
+import { OutlineRenameInput } from "./OutlineRenameInput.tsx";
+import { setRenameDraft } from "../../utils/perf/renameDraftStore.ts";
 
 /**
  * ✅ 2026-11-04 拆分（G6）：目录「编辑树」渲染派生自 SchemeWorkbenchPage 原位搬迁。
@@ -42,7 +44,6 @@ export function useOutlineEditTreeRender(deps: OutlineEditTreeRenderDeps) {
     renameNode,
     failedOutlineChapters,
     renamingKey,
-    renamingValue,
     setRenamingKey,
     setRenamingValue,
   } = deps;
@@ -126,25 +127,19 @@ export function useOutlineEditTreeRender(deps: OutlineEditTreeRenderDeps) {
               background: rowBg,
             }}
             onDoubleClick={() => {
+              setRenameDraft(node.title);
               setRenamingKey(node.key);
               setRenamingValue(node.title);
             }}
           >
             {renamingKey === node.key ? (
-              <Input
-                size="small"
-                autoFocus
-                value={renamingValue}
-                onChange={(e) => setRenamingValue(e.target.value)}
-                onBlur={() => {
-                  renameNode(node.key, renamingValue);
+              <OutlineRenameInput
+                initialValue={node.title}
+                onCommit={(value) => {
+                  setRenamingValue(value);
+                  renameNode(node.key, value);
                   setRenamingKey(null);
                 }}
-                onPressEnter={() => {
-                  renameNode(node.key, renamingValue);
-                  setRenamingKey(null);
-                }}
-                style={{ width: 220 }}
               />
             ) : (
               <>
@@ -245,7 +240,10 @@ export function useOutlineEditTreeRender(deps: OutlineEditTreeRenderDeps) {
         children: node.children?.map((c) => convertToEditTree(c)),
       };
     },
-    [moveFlags, moveNode, renameNode, failedOutlineChapters, renamingKey, renamingValue],
+    // ✅ 2026-11-11 性能：renamingValue 已移出依赖。逐字符输入只更新
+    //    renameDraftStore（订阅者仅重命名 Input），不再让 300 节点编辑树
+    //    随每次按键全量重建；renamingKey 变化（低频，切换重命名节点）仍会重建。
+    [moveFlags, moveNode, renameNode, failedOutlineChapters, renamingKey],
   );
 
   // ✅ 性能优化：编辑树数据 useMemo 化。旧实现在组件顶层无条件 `tree.map(...)` ——

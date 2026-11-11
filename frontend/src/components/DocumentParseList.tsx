@@ -199,6 +199,9 @@ export default function DocumentParseList({
     <div className="dpl-compact-list">
       <List
         size="small"
+        // ✅ 2026-11-11：不传 rowKey 时 antd 默认按 index —— 展开/收起或列表
+        //    增删会让整列 key 顺移并全量 reconcile。改用文档主键。
+        rowKey={(doc) => doc.id || doc.file_name}
         dataSource={visibleDocs}
         // 2026-09-23：compact 模式下 dataSource 已截断为 visibleDocs（默认 3 行），
         // 非 compact 时 visibleDocs === docs，行为不变。行距压缩由外层 .dpl-compact-list CSS 负责。
@@ -346,7 +349,7 @@ export default function DocumentParseList({
                           Array.isArray(doc.parse_warnings) && doc.parse_warnings.length > 0 ? (
                             <div>
                               {doc.parse_warnings.map((w: string, i: number) => (
-                                <div key={i}>· {w}</div>
+                                <div key={`${w}-${i}`}>· {w}</div>
                               ))}
                             </div>
                           ) : (
@@ -382,7 +385,7 @@ export default function DocumentParseList({
                           title={
                             <div>
                               {doc.parse_warnings.map((w: string, i: number) => (
-                                <div key={i}>· {w}</div>
+                                <div key={`${w}-${i}`}>· {w}</div>
                               ))}
                             </div>
                           }

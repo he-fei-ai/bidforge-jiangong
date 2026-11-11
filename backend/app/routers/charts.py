@@ -16,6 +16,9 @@ from app.db import get_db
 #    表现为「预览已修复、导出仍是坏图」的旧问题**始终存在**（该修复从未生效）。
 #    这里提到模块顶部，两处引用都能拿到。
 from app.routers._chart_pipeline import _rewrite_code_block  # noqa: E402
+from app.routers.review import (
+    reset_review_on_content_change,  # ✅ R215：图表修复/AI 配图改正文 → 审核退回待审核（G9 收口）
+)
 from app.services.ai.prompts._registry import render
 from app.services.ai.provider_factory import chat_with_fallback
 from app.services.chart_payload import build_chart_envelope, extract_chart_payload
@@ -634,7 +637,10 @@ async def fix_mermaid(body: dict, db=Depends(get_db)):
             #    只回写 chart_predictions 时，正文里的旧坏代码原样进入文档 ——
             #    表现为"预览已修复、导出仍是坏图"。
             if row and section_id:
-                cur = await db.execute("SELECT content, word_budget FROM sections WHERE id=?", (section_id,))
+                # ✅ R215：补 scheme_id 列 —— 审核状态回退 / 一致性缓存失效需要它
+                cur = await db.execute(
+                    "SELECT content, word_budget, scheme_id FROM sections WHERE id=?", (section_id,)
+                )
                 if cur is None:
                     raise RuntimeError("R13：db.execute 返回 None（sections 正文回写查询）")
                 srow = await cur.fetchone()
@@ -740,6 +746,22 @@ async def fix_mermaid(body: dict, db=Depends(get_db)):
                     content_updated = True
                     new_content = patched
                     section_word_count = wc
+                    # ✅ R215（2026-11-11 · P3）：正文真实变化 → ① 审核结论退回待审核
+                    #    （G9 同族第三处漏改：numbering 修复 R175-B09 / 手工保存 G9 已接，
+                    #    图表修复与 AI 配图两端点此前漏接 —— 已 approved 的正文被改写后
+                    #    仍挂审核结论，导出预检 review 判定与成稿不一致）；
+                    #    ② 一致性扫描缓存失效（R46：每个正文写点必须失效）。同事务，
+                    #    commit 在本函数尾部统一提交。
+                    try:
+                        await reset_review_on_content_change(
+                            db, str(srow["scheme_id"] or ""), section_id, actor="图表修复"
+                        )
+                    except Exception as _rr:  # noqa: BLE001 — 回退失败不阻断修复写回
+                        logger.debug("章节 %s 图表修复后审核状态回退失败: %s", section_id[:8], _rr)
+                    # ✅ R215：函数内延迟 import（sections 为大模块且存在反向依赖面）
+                    from app.routers.sections import invalidate_consistency_scan_cache
+
+                    await invalidate_consistency_scan_cache(db, str(srow["scheme_id"] or ""))
                     logger.info("章节 %s 内联图表代码已随修复同步更新", section_id[:8])
 
             await db.commit()
@@ -802,7 +824,11 @@ async def generate_ai_image(body: dict, db=Depends(get_db)):
     # ✅ R98（R90 遗留⑦收口）：本端点把 ai_image 块改写为图片链接（重写正文），
     #    生成在跑时与生成链路互相覆盖。守卫在生图成本发生之前。
     await _guard_chart_target(db, section_id, "AI 配图生成")
-    cur = await db.execute("SELECT id, content, word_budget FROM sections WHERE id=?", (section_id,))
+    cur = await db.execute(
+        # ✅ R215：补 scheme_id 列 —— 审核状态回退 / 一致性缓存失效需要它
+        "SELECT id, content, word_budget, scheme_id FROM sections WHERE id=?",
+        (section_id,),
+    )
     # ✅ R13 守卫（2026-10-04）：读路径 fail-closed 503，绝不把 DB 异常伪装成 404
     #    「章节不存在」（否则用户会去重建/找章节，排障方向被带偏）。
     if cur is None:
@@ -820,9 +846,13 @@ async def generate_ai_image(body: dict, db=Depends(get_db)):
 
     word_budget = row["word_budget"] or DEFAULT_WORD_BUDGET
 
-    from app.routers._chart_pipeline import _rewrite_code_block, extract_inline_charts
+    from app.routers._chart_pipeline import _rewrite_code_block, _scan_chart_fences_full
 
-    _blocks = [(ct, c) for ct, c in extract_inline_charts(content) if ct == "ai_image"]
+    # ✅ R215（2026-11-11 · P3）：改用全量块扫描 —— extract_inline_charts 是
+    #    「对外清单口径」（每类型只保留第一个，_chart_pipeline 同类型去重），
+    #    同章多个不同 prompt 的 ai_image 块此前只有第一个被枚举生图（其余永不
+    #    处理，且 _rewrite_code_block 会把它们改写成同一 URL）。
+    _blocks = [(ct, c) for ct, c, _ord in _scan_chart_fences_full(content) if ct == "ai_image"]
     if not _blocks:
         raise HTTPException(404, "本章节正文无 AI 配图（ai_image）块")
 
@@ -915,5 +945,14 @@ async def generate_ai_image(body: dict, db=Depends(get_db)):
     if _cur is None:
         logger.warning("AI 配图正文回写失败：db.execute 返回 None（R13，section=%s）", section_id[:8])
         raise HTTPException(503, "配图已生成但正文回写失败，请稍后重试")
+    # ✅ R215（2026-11-11 · P3）：与 fix-mermaid 同口径 —— 正文真实变化 →
+    #    审核结论退回待审核（G9 收口）+ 一致性扫描缓存失效（R46）。
+    from app.routers.sections import invalidate_consistency_scan_cache
+
+    try:
+        await reset_review_on_content_change(db, str(row["scheme_id"] or ""), section_id, actor="AI 配图")
+    except Exception as _rr:  # noqa: BLE001 — 回退失败不阻断配图写回
+        logger.debug("章节 %s AI 配图后审核状态回退失败: %s", section_id[:8], _rr)
+    await invalidate_consistency_scan_cache(db, str(row["scheme_id"] or ""))
     await db.commit()
     return {"generated": generated, "content_updated": True, "new_content": new_content}

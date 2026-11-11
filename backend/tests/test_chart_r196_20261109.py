@@ -400,12 +400,20 @@ class TestSourceLocksR196:
         assert src.count('logger.warning(\n                    "generate_illustration_image: Provider \'%s\' 失败 (%s)，尝试下一个",') <= 1
 
     def test_f4_min_words_judgement_single_source(self):
-        """min_words 判据与提示词阈值同源（_CHART_MIN_WORDS 唯一常量）。"""
+        """min_words 判据与提示词阈值同源（_CHART_MIN_WORDS 唯一常量）。
+
+        ✅ R215 重锚（意图保留、强度不减）：R215-C4 把判据基数从「净化前文本」
+        升级为「净化后文本」（与落库 word_count 同源，分页页脚等杂质行不再把
+        短章读数顶过阈值）——单一常量判据（_actual_words < _CHART_MIN_WORDS）
+        与「与落库同源」意图均保留，另加「不得回流净化前计字」反向断言。
+        """
         import app.routers._chart_pipeline as cp
 
         assert cp._CHART_MIN_WORDS == 200
         from pathlib import Path
 
         src = Path(cp.__file__).read_text(encoding="utf-8")
-        assert "_actual_words = text_word_count(content)" in src
+        assert "_actual_words = text_word_count(normalize_raw_content(content)[0])" in src
         assert "_actual_words < _CHART_MIN_WORDS" in src
+        # 旧形态（净化前计字）不得回流
+        assert "_actual_words = text_word_count(content)" not in src

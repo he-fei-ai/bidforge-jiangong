@@ -66,16 +66,75 @@ REGISTRY: dict[str, tuple[str, str]] = {
         "unified",
         "_outline_structure_report 先调 _build_tree，入参树已无自父/环，DFS 不会成环",
     ),
-    "routers/sections.py::_outline_structure_report._collect_mounted": (
+    "routers/sections.py::_collect_section_ids": (
         "guard",
-        "R188：只遍历 _build_tree 输出的可达树收集 id（树内已无环），用于与全表 id "
-        "求差得出不可达节点；不建树、不丢节点，且正是环内节点的检测出口",
+        "R218（2026-11-11）：原 _outline_structure_report/_repair_outline_structure_numbering "
+        "内的局部 _collect_mounted 与 AI 回传 id 校验共用同构递归，R216 起统一收敛为模块级 "
+        "_collect_section_ids（更健壮：跳过非 dict 节点）。只遍历 _build_tree 输出的可达树"
+        "（或 AI 回传的同构 JSON 树）收集 id，不建树、不丢节点；DB 场景用于与全表 id 求差"
+        "得出不可达节点（环/悬挂的检测出口），JSON 场景只读校验",
     ),
-    "routers/sections.py::_repair_outline_structure_numbering._collect_mounted": (
+    "routers/outline_library.py::apply_library_and_save._inject_original_ids": (
         "guard",
-        "R203：与 _outline_structure_report._collect_mounted 同口径——只遍历 "
-        "_build_tree 输出的可达树收集 id，与全表求差得出不可达节点后重挂为根；"
-        "不建树、不丢节点，且是环/悬挂节点的自动处置出口",
+        "R209：遍历的是**目录库 JSON 树**（JSON 结构不可能成环/自父），只读遍历用于"
+        "按结构匹配旧章节并注入 __original_id；不建树、不丢节点、不改 parent_id",
+    ),
+    # ---- JSON 目录树遍历（R218 扫描器扩覆盖后显式登记） ----
+    # 以下点位遍历的都是 outline JSON 树（AI 回传 / outline_json 落库解析 / 内存构造）：
+    # json.loads 产物不可能含环（JSON 无引用机制），多数自带深度上限，
+    # 不消费 sections 行集父子关系，自父只影响计数口径、不丢 DB 节点。
+    "routers/_sse_outline_build.py::_count_nodes._count": (
+        "scope",
+        "JSON 目录树节点计数（depth>12 上限），只读不建树，环不可能（JSON 无引用）",
+    ),
+    "routers/_sse_outline_build.py::_outline_skeleton._walk": (
+        "scope",
+        "按节点数预算递归裁剪 AI 回传 outline JSON 生成审核骨架，只读遍历，JSON 结构不可能成环",
+    ),
+    "routers/_sse_outline_build.py::_validate_outline._check": (
+        "scope",
+        "AI 回传 outline JSON 结构校验（strict_depth/max_nodes），只读，环不可能（JSON 无引用）",
+    ),
+    "routers/outline_library.py::_count_nodes": (
+        "scope",
+        "目录库 JSON 树节点计数（depth>12 上限），只读，历史脏 JSON 也不会 RecursionError",
+    ),
+    "routers/sections.py::_clip_outline_node_for_budget._rebuild": (
+        "scope",
+        "单条目录超预算条目内文本裁剪重建（children 结构不动），只遍历 JSON 树，不可能成环",
+    ),
+    "routers/sections.py::_iter_outline_text_fields": (
+        "scope",
+        "深度优先产出目录 JSON 可裁剪文本字段 (节点,键)，只读遍历，不可能成环",
+    ),
+    "routers/sections.py::_relink_adjusted_original_ids": (
+        "scope",
+        "把 AI 回传合法 DB id 落到 __original_id（只标注不重挂），遍历 JSON 树，不可能成环",
+    ),
+    "routers/sections.py::_slim_tree_for_adjust": (
+        "scope",
+        "DB 目录树裁剪为 AI 精简结构（只保留 id/title/description/children），只读遍历 _build_tree 产物的 JSON 化副本",
+    ),
+    "routers/sections.py::export_tree.to_outline": (
+        "guard",
+        "消费 _build_tree 输出的可达树（自父/环组件已被判不可达剔除）逐节点转 outline JSON，不会成环",
+    ),
+    "routers/upload_outline.py::_outline_has_branch": (
+        "scope",
+        "递归判断上传目录是否存在层级（depth>10 上限），只读遍历 JSON 树",
+    ),
+    "routers/upload_outline.py::_outline_node_count": (
+        "scope",
+        "上传目录节点计数（depth>10 上限），只读遍历 JSON 树",
+    ),
+    "services/numbering.py::renumber_outline_nodes": (
+        "guard",
+        "目录树编号唯一实现：显式回溯式环守卫（递归路径上按 id(node) 身份防重入，"
+        "DAG 共享子树不受影响），children 缺失/非列表一律归一为 []",
+    ),
+    "services/numbering.py::renumber_section_outline_ids._walk": (
+        "guard",
+        "遍历 _build_tree 输出的可达树重算 outline_json.id/level（自父/环组件不可达），与统一入口同源",
     ),
     # ---- 有等价守卫 ----
     "routers/sections.py::_save_outline_to_db": (
@@ -426,7 +485,12 @@ def _mentions_tree_identity(fn: ast.AST, parent_scope: bool) -> bool:
     if any(("children_map" in n or "by_parent" in n or "parent" in n) for n in names):
         return True
     # 嵌套在 parent 感知作用域内的纯 children 递归（如 _build_tree._sort_children）
-    return parent_scope and any("children" in n for n in names)
+    if parent_scope and any("children" in n for n in names):
+        return True
+    # ✅ R218（2026-11-11）：局部 children 闭包提升为模块级后（如 sections.py
+    #    _collect_section_ids），不再处于 parent 感知作用域 → 旧判据漏检，
+    #    遍历点逃逸棘轮网。自递归且提及 children 的函数无论嵌套层级一律纳入。
+    return any("children" in n for n in names)
 
 
 class _SiteVisitor(ast.NodeVisitor):

@@ -26,6 +26,9 @@ import type {
   CrSummary,
 } from "./useReviewAudit";
 import { CR_ITEM_STATUS, CR_REPAIR_STATUS, CR_STATUS_LABEL, CR_TYPE_LABEL } from "./reviewShared";
+// ✅ R212（P3-2）：severity 色板/文案单一事实源（types/audit.ts）
+//    ⚠️ 用**相对路径**：本仓 vite/vitest 未配置 "@" 别名（仅 tsconfig 有 paths）。
+import { SEVERITY_COLOR, SEVERITY_LABEL, type Severity } from "../../types/audit";
 
 const { Text } = Typography;
 
@@ -252,8 +255,10 @@ export function ComplianceRepairDrawer({
                   dataIndex: "severity",
                   width: 70,
                   render: (s: string) => (
-                    <Tag color={s === "high" ? "red" : s === "medium" ? "orange" : "blue"}>
-                      {s || "-"}
+                    // ✅ R212（P3-2）：severity 渲染收敛到 types/audit.ts 单一
+                    //    事实源（此前此处内联三元**不含 block** ⇒ 阻断级落 blue）。
+                    <Tag color={SEVERITY_COLOR[s as Severity] ?? "default"}>
+                      {(SEVERITY_LABEL[s as Severity] ?? s) || "-"}
                     </Tag>
                   ),
                 },

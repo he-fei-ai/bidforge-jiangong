@@ -2330,9 +2330,14 @@ def _split_tiff_frames(content: bytes, diag: dict | None = None) -> list[bytes]:
                 _w, _h = img.size
                 buf = io.BytesIO()
                 if _w * _h > _OCR_RENDER_MAX_PIXELS:
-                    _scale = (_OCR_RENDER_MAX_PIXELS / (_w * _h)) ** 0.5
-                    _nw, _nh = max(1, int(_w * _scale)), max(1, int(_h * _scale))
-                    img.convert("RGB").resize((_nw, _nh)).save(buf, format="PNG")
+                    # ✅ R208 修复：R203 的 convert().resize() 在 resize 之前
+                    # 就对原帧做了全尺寸解码 + 全尺寸 RGB 拷贝（峰值按原帧计，
+                    # 闸门形同虚设）。改用 draft→thumbnail→resize 三级降采样。
+                    _resized, (_nw, _nh) = _downscale_pil_image(img, _OCR_RENDER_MAX_PIXELS)
+                    if _resized is None:
+                        _resized = img
+                        _nw, _nh = _w, _h
+                    _resized.convert("RGB").save(buf, format="PNG")
                     _note_info(
                         diag,
                         f"多页 TIFF 第 {i + 1} 帧尺寸过大（{_w}×{_h}），"
@@ -2412,6 +2417,53 @@ def _mineru_image_fallback(content: bytes, ftype: str, diag: dict | None = None)
     return ""
 
 
+def _downscale_pil_image(img, max_pixels: int):
+    """把 PIL 图像按像素上限等比降采样，**优先在解码阶段缩减**。
+
+    ✅ R208 修复（R203 BE-2 未真正生效）：R203 的降采样写成
+    ``img.convert("RGB").resize(...)``——但 PIL 的 ``convert()`` 会**先对原图
+    全尺寸 load() 并产出一份全尺寸 RGB 拷贝**，resize 发生在其**之后**。
+    实测（monkeypatch ``Image.Image.load`` 记录调用时机）：
+
+        convert->resize : load() 记录 = [(4000,4000)] ×4  ← 全尺寸解码 4 次
+        draft+thumbnail: load() 记录 = [(1500,1500)] ×2  ← JPEG 先按 DCT 缩减
+
+    即：R203 的像素闸只约束了**输出**尺寸，对**峰值内存**毫无防护
+    （50000×50000 图 = 7.5GB RGB 拷贝，仍会 OOM 连带在飞请求）。
+
+    修法（按解码成本从低到高）：
+      ① ``draft()``：JPEG 等格式支持**解码前**按 DCT 缩放（不物化全尺寸
+         像素），是最省的路径；
+      ② ``thumbnail()``：PIL 内部按目标尺寸重采样并原地替换，比
+         ``convert().resize()`` 少一份全尺寸 RGB 拷贝；
+      ③ 仍超限时才退回 ``resize()``（保底，保证输出一定在闸内）。
+
+    返回 ``(image, (nw, nh))``；未超限返回 ``(None, None)`` 表示无需降采样。
+    """
+    w, h = img.size
+    if w * h <= max_pixels:
+        return None, None
+    scale = (max_pixels / (w * h)) ** 0.5
+    nw, nh = max(1, int(w * scale)), max(1, int(h * scale))
+    # ① JPEG 等：解码前 DCT 缩放（draft 不改变像素语义，只降分辨率）
+    try:
+        img.draft("RGB", (nw, nh))
+    except Exception:  # noqa: BLE001 - JPEG draft 不支持时回落 thumbnail
+        pass  # PNG/TIFF 等不支持 draft —— 走 ②
+    # ② thumbnail：原地重采样（不额外产出全尺寸 RGB 拷贝）
+    try:
+        img.thumbnail((nw, nh))
+        # thumbnail 保比例且只缩小；若源已是同尺寸仍可能 > 闸内（取整误差）
+        if img.size[0] * img.size[1] <= max_pixels:
+            return img, img.size
+    except Exception:  # noqa: BLE001 - thumbnail 失败保底走 resize
+        pass
+    # ③ 保底：显式 resize 到闸内
+    cur_w, cur_h = img.size
+    resized = img.resize((nw, nh))
+    return resized, (nw, nh)
+
+
 def _downscale_image_bytes(content: bytes, diag: dict | None = None) -> bytes:
     """单帧图片超像素闸时等比降采样（对齐 PDF 通道 ``_OCR_RENDER_MAX_PIXELS`` 口径）。
 
@@ -2419,6 +2471,12 @@ def _downscale_image_bytes(content: bytes, diag: dict | None = None) -> bytes:
     TIFF 单帧通道此前无任何尺寸判定——50000×50000 的超大图 ``convert("RGB")``
     会物化 GB 级位图（连 ParseError 都来不及抛，可能连带杀掉全部在飞请求）。
     探测/重编码失败时回落原字节（OCR 通道自行报错，不在预处理环节制造新故障）。
+
+    ✅ R208 修复（闸门实际未生效）：R203 的 ``convert().resize()`` 组合在
+    **resize 之前**就对原图做了全尺寸解码 + 全尺寸 RGB 拷贝 —— 闸门只约束
+    输出尺寸，峰值内存仍按原图计（R203 注释自述的「物化 GB 级位图」正是
+    当时未修掉的成因）。现改用 :func:`_downscale_pil_image`（draft →
+    thumbnail → resize 三级），实测 JPEG 走 draft 后解码尺寸即降到目标附近。
     """
     try:
         from PIL import Image
@@ -2429,11 +2487,11 @@ def _downscale_image_bytes(content: bytes, diag: dict | None = None) -> bytes:
             w, h = img.size
             if w * h <= _OCR_RENDER_MAX_PIXELS:
                 return content
-            scale = (_OCR_RENDER_MAX_PIXELS / (w * h)) ** 0.5
-            nw, nh = max(1, int(w * scale)), max(1, int(h * scale))
-            resized = img.convert("RGB").resize((nw, nh))
+            resized, (nw, nh) = _downscale_pil_image(img, _OCR_RENDER_MAX_PIXELS)
+            if resized is None:
+                return content
             buf = io.BytesIO()
-            resized.save(buf, format="PNG")
+            resized.convert("RGB").save(buf, format="PNG")
         _note_info(diag, f"图片尺寸过大（{w}×{h}），已降采样至 {nw}×{nh} 后识别")
         return buf.getvalue()
     except Exception as e:
@@ -2553,7 +2611,9 @@ _OUTLINE_DATE_ID_RE = re.compile(
 # ✅ R203 修复：行首「点分数值」形态判据（1.5 / 2.4 / 2024.05）——用于识别
 #    「点分 pattern 全部不命中、被单数字 pattern 撕碎」的正文行（见
 #    simple_parse_outline 内 R203 护栏注释）。
-_OUTLINE_DOT_NUM_LINE_RE = re.compile(r"^\d+\s*\.\s*\d")
+#    ✅ R208：点号同时接受全角「．」（U+FF0E）——中文 Word 自动编号大量使用
+#    全角点号，旧 pattern 只认 ASCII 点号。
+_OUTLINE_DOT_NUM_LINE_RE = re.compile(r"^\d+\s*[.．]\s*\d")
 
 _OUTLINE_PATTERNS = [
     # 中文数字章节编号（含 章/节/篇/部分，容忍 第 与 编号 之间的空格）
@@ -2570,17 +2630,40 @@ _OUTLINE_PATTERNS = [
     #    配套防误判见 simple_parse_outline 内的三道 R191 护栏（数值量词 /
     #    日期形态 / 句读）——"3.5万元包干" 这类金额行由护栏拦截，不会因本条
     #    变成伪标题。
-    (None, re.compile(r"^(\d+(?:\s*\.\s*\d+)+)(?=[\u4e00-\u9fff])(.*)")),
+    # ✅ R208：点号同时接受全角「．」（中文 Word 自动编号高频形态）。
+    (None, re.compile(r"^(\d+(?:\s*[.．]\s*\d+)+)(?=[\u4e00-\u9fff])(.*)")),
     # 点分编号（容忍编号内空格：1 . 1 / 1.1.1）
-    (None, re.compile(r"^(\d+(?:\s*\.\s*\d+)+)\s*[、.\s]\s*(.*)")),
+    # ✅ R208：点号同时接受全角「．」。
+    (None, re.compile(r"^(\d+(?:\s*[.．]\s*\d+)+)\s*[、.．\s]\s*(.*)")),
     # 单数字编号（"1 总则" / "1. 总则" / "1、总则"）
-    (1, re.compile(r"^(\d+)\s*[、.\s]\s*(.*)")),
+    # ✅ R208：分隔符同时接受全角「．」。
+    (1, re.compile(r"^(\d+)\s*[、.．\s]\s*(.*)")),
     # 中文数字顿号（"一、工程概况"，容忍前后空格）
-    (2, re.compile(rf"^([{_OUTLINE_CN_NUMS}]+)\s*[、]\s*(.*)")),
+    # ✅ R208 修复：分隔符不只认顿号——中文文档里「一.总则」（ASCII/全角点号）
+    #    与「十一 施工部署」（编号 + 空格）两种形态此前**整行漏识**（目录少一层
+    #    章节，实证：两种形态 simple_parse_outline 均返回 []）。现放宽为
+    #    「顿号 / 点号 / 空格」三选一。
+    #    ⚠️ 误伤面：中文数字 + 空格形态与正文句「三 项目部…」同形，故复用既有
+    #    句读护栏（标题以句读收尾 → 按正文行跳过）兜底。
+    (2, re.compile(rf"^([{_OUTLINE_CN_NUMS}]+)\s*[、.．\s]\s*(.*)")),
     # 中文数字括号（"（ 一 ）" / "（一）"，容忍空格）
     (None, re.compile(rf"^[（(]\s*([{_OUTLINE_CN_NUMS}]+)\s*[)）]\s*(.*)")),
     # 阿拉伯数字括号（"（ 3 ）" / "（3）"）
     (3, re.compile(r"^[（(]\s*(\d+)\s*[)）]\s*(.*)")),
+    # ✅ R209（2026-11-10 · 罗马数字编号形态）：此前**无**罗马数字分支
+    #    ⇒ "I. 总则" / "Ⅱ 施工部署" 这类行**整行漏识**（导入目录少一层章节）。
+    #    与 R208 同族（全角点号 / 中文数字分隔符），属「目录编号形态收口」的
+    #    剩余形态。
+    #    ⚠️ 排位：插在「右括号兜底」**之前** —— 兜底条必须保持末位（R171
+    #    顺序锁「末条 = 右括号兜底」）；罗马数字是字母形态，与前面各条
+    #    （数字 / 中文数字 / 括号）互斥，插入不改变任何既有匹配结果。
+    #    ⚠️ 误伤防护（ASCII 罗马数字）：
+    #      · 分隔符只认「点号 / 顿号」（I. / I、），**不认空格** —— 否则英文
+    #        句子 "I am a worker" 会被当成编号行（标题 "am a worker"）；
+    #      · Unicode 罗马数字（Ⅰ-Ⅻ）无歧义，允许空格分隔（"Ⅱ 施工部署"）；
+    #      · ASCII 分支只认全大写（i. / iv. 是英文缩写，非编号）。
+    (1, re.compile(r"^([IVXL]+)\s*[.．、]\s*(.*)")),
+    (1, re.compile(r"^([Ⅰ-Ⅻⅰ-ⅻ])\s*[.．、\s]\s*(.*)")),
     # 右括号编号（"3)"，兜底）
     (3, re.compile(r"^(\d+)\s*[)）]\s*(.*)")),
 ]
@@ -2666,6 +2749,17 @@ def simple_parse_outline(text: str) -> list:
                 continue
 
             raw_id = m.group(1)
+            # ✅ R208 修复：全角点号「．」（U+FF0E）归一为 ASCII 点号——
+            #    R208 把 pattern 的点号放宽到全角后，raw_id 可能形如
+            #    "1．1．1"，而下游三处判定都按 ASCII 点号写死：
+            #      ① ``"." in raw_id``（走点分分支还是上下文推断分支）
+            #      ② ``count(".")``（按点号数定层级）
+            #      ③ ``_unique_id(raw_id...)``（节点 id）
+            #    实测："1．1．1施工准备" 被判成 level 2（应为 3）。
+            #    归一后下游三处一并正确，且 id 与 ASCII 形态一致（前端 antd
+            #    Tree 以 id 作 React key，两种写法混用会造成同一节点两个 id）。
+            if "．" in raw_id:
+                raw_id = raw_id.replace("．", ".")
             if fixed_level is not None:
                 level = fixed_level
             elif "." in raw_id:

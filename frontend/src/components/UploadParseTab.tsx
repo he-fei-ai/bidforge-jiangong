@@ -314,11 +314,15 @@ export default function UploadParseTab({
       )}
 
       {/* ===== 解析进行中 ===== */}
-      {parsingDocs && (
+      {(parsingDocs || !!parsingDocId) && (
         <Card size="small" style={{ marginBottom: 12 }} styles={{ body: { padding: "8px 12px" } }}>
           <Space>
             <Spin size="small" />
-            <Text strong>正在解析文档，扫描件 OCR 较慢，请勿关闭页面...</Text>
+            <Text strong>
+              {parsingDocs
+                ? "正在解析文档，扫描件 OCR 较慢，请勿关闭页面..."
+                : "正在解析该文档，扫描件 OCR 较慢，请勿关闭页面..."}
+            </Text>
             {/* ✅ R203（R191 遗留承接）：parseAbortRef 取消通道早已齐备（卸载/
                   切方案 cleanup 均在 abort），唯独没有用户主动触发的入口——
                   解析请求挂上 3~20 分钟 OCR，误点长扫描件后用户只能干等。

@@ -34,8 +34,16 @@ class HeadingNumberingGenerator:
         if level not in HEADING_MANAGED_LEVELS:
             return ""
         if level == 1:
-            n = max(1, min(30, counters[0] or 1))
-            return f"第{CHINESE_NUMBERS[n]}章"
+            # ✅ R218（2026-11-11 · P3 · N1）：与 V2（heading_v2.generate_number）
+            #   同口径 —— 旧实现 硬钳在 30（第 30 章封顶） ⇒ 目录含 ≥31 个
+            #   一级章时第 31/32/… 章标题字面相同（都是「第三十章」），跨章撞号、
+            #   交付目录出现多个同名章节。现字表内用中文数字，超出回退阿拉伯
+            #   （第31章），绝不产出重复章号。⚠️ V1 生产调用点=0（仅
+            #   heading_standard 再导出 + 测试），R210 L1-9 护栏锁定导出链不得用 V1。
+            n = max(1, counters[0] or 1)
+            if 0 < n < len(CHINESE_NUMBERS):
+                return f"第{CHINESE_NUMBERS[n]}章"
+            return f"第{n}章"
         if level == 2:
             return f"{counters[1] or 1}"
         if level == 3:

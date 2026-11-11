@@ -29,6 +29,8 @@ from __future__ import annotations
 import logging
 import re
 
+from app.services.outline_utils import FOLD_GUIDANCE_MARKER
+
 #: 标准原文的关键 L3 主题（标题命中即按 2500 字下限要求）
 #: 2026-11-05 口径补充：加入「吊装/脚手架/深基坑」，覆盖「起重吊装」
 #: 「落地脚手架」「深基坑支护」等变体（按子串命中）。
@@ -208,6 +210,90 @@ def count_body_paragraphs(content: str | None) -> int:
     if current:
         blocks.append("\n".join(current))
     return len(blocks)
+
+
+# ---------------------------------------------------------------------------
+# 折叠引导的正文硬保证（2026-11-10 二次收口）
+# ---------------------------------------------------------------------------
+_FOLD_ITEM_RE = re.compile(r"^（(\d+)）\s*(.+)$")
+#: 比对时忽略的空白与中英文标点（容忍模型改写标点/加空格）
+_CMP_STRIP_RE = re.compile(r"[\s，。；：、,.;:!?！？（）()【】\[\]“”\"'《》\-—_]+")
+
+
+def fold_guidance_items(description: str | None) -> list[str]:
+    """从父级 L3 的 description 中提取折叠生成的引导条目（无标记则返回空）。
+
+    只认显式标记 ``FOLD_GUIDANCE_MARKER`` 之后的内容 —— 作者自己写的
+    「（1）（2）」编号列表不会被当作折叠清单（与 ``_strip_prev_merge`` 同口径）。
+    返回条目文本（不含「（n）」序号）。
+    """
+    text = str(description or "")
+    idx = text.rfind(FOLD_GUIDANCE_MARKER)
+    if idx < 0:
+        return []
+    tail = text[idx + len(FOLD_GUIDANCE_MARKER) :].strip()
+    items: list[str] = []
+    for part in tail.split("；"):
+        match = _FOLD_ITEM_RE.match(part.strip())
+        if match:
+            item = match.group(2).strip()
+            if item:
+                items.append(item)
+    return items
+
+
+def _cmp_norm(text: str | None) -> str:
+    """比对用归一：去空白与标点，只留文字/数字（不做同义词/改写推断）。"""
+    return _CMP_STRIP_RE.sub("", str(text or ""))
+
+
+def backfill_fold_guidance(content: str | None, description: str | None) -> tuple[str, list[str]]:
+    """正文落库前的确定性兜底：补齐折叠清单中缺失的段首引导。
+
+    折叠只把 L4+ 写进父级 L3 的 ``description``，正文是否按「（1）（2）」展开
+    此前仅靠提示词约束。本函数按显式标记提取折叠清单，逐条用**标题文本**
+    （容忍空白/标点差异）在正文中查找；缺失条目追加为段首引导，内容取折叠时
+    保留的原描述文字。
+
+    约束：
+      - 已存在（正文任意位置含该标题）不重复插入；
+      - 追加序号从正文已有最大「（n）」之后继续，避免与作者已写的编号冲突；
+      - 无显式标记的 description 不处理（历史数据保持原行为，避免误补作者列表）。
+
+    Returns:
+        ``(补齐后的正文, 实际补写的条目列表)``；无需补写时原样返回、列表为空。
+    """
+    if not standard_enabled():
+        return str(content or ""), []
+    items = fold_guidance_items(description)
+    if not items:
+        return str(content or ""), []
+    text = str(content or "")
+    norm_body = _cmp_norm(text)
+    missing: list[str] = []
+    for item in items:
+        # 标题 = 「标题：说明」的冒号前部分；标题过短时退化为整条比对
+        title = item.split("：", 1)[0].strip() or item
+        probe = _cmp_norm(title)
+        if len(probe) < 2:
+            probe = _cmp_norm(item)
+        if probe and probe in norm_body:
+            continue
+        missing.append(item)
+    if not missing:
+        return text, []
+
+    existing_nums = [int(n) for n in re.findall(r"（(\d+)）", text)]
+    start = max(existing_nums) + 1 if existing_nums else 1
+    addition = "\n\n".join(f"（{start + i}）{item}" for i, item in enumerate(missing))
+    new_text = f"{text.rstrip()}\n\n{addition}" if text.strip() else addition
+    logger.warning(
+        "折叠引导正文补齐：%d/%d 条缺失已补写（%s）",
+        len(missing),
+        len(items),
+        "；".join(missing[:5]),
+    )
+    return new_text, missing
 
 
 # ---------------------------------------------------------------------------

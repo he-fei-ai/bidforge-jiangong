@@ -141,12 +141,17 @@ describe("R191 · C-F9 上传/解析链 ref 防重入", () => {
   it("uploadInFlightRef / parseInFlightRef 声明且三条 guard 消费", () => {
     expect(WORKFLOW).toContain("const uploadInFlightRef = useRef(false);");
     expect(WORKFLOW).toContain("const parseInFlightRef = useRef(false);");
-    // 上传 guard
-    expect(WORKFLOW).toContain("if (uploadingFacts || uploadInFlightRef.current) return;");
+    // 上传 guard（R208 FE-9：guard 条件与 ref 消费关系不变，仅从单行 return
+    // 展开为「给用户可见反馈 + return」的多行块 —— 重锚到**意图**而非字面量）
+    expect(WORKFLOW).toContain("uploadingFacts || uploadInFlightRef.current");
     // 批量解析 guard
-    expect(WORKFLOW).toContain("if (parsingDocs || parsingDocId || parseInFlightRef.current) return;");
+    expect(WORKFLOW).toContain("parsingDocs || parsingDocId || parseInFlightRef.current");
     // 单份解析 guard
-    expect(WORKFLOW).toContain("if (parsingDocId || parsingDocs || parseInFlightRef.current) return;");
+    expect(WORKFLOW).toContain("parsingDocId || parsingDocs || parseInFlightRef.current");
+    // ✅ R208 FE-9 加强：三条 guard 命中时必须给出用户可见反馈（此前静默
+    //    return → 用户点击「完全没反应」= 假动作）。三条 guard 各自带
+    //    msg.info 提示，防止将来被「简化」回静默 return。
+    expect(WORKFLOW.match(/msg\.info\(/g)?.length).toBeGreaterThanOrEqual(3);
     // finally 必须解除（abort 抢占时 state 不复位但请求已结束）
     expect(WORKFLOW.match(/uploadInFlightRef\.current = false;/g)?.length).toBe(1);
     expect(WORKFLOW.match(/parseInFlightRef\.current = false;/g)?.length).toBe(2);

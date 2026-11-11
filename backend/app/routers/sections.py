@@ -26,13 +26,19 @@ from app.services.ai.json_response import (
 from app.services.ai.prompts._registry import render
 from app.services.ai.provider_factory import chat_with_fallback
 from app.services.numbering import (
-    list_numbering_versions as _list_numbering_versions,  # ✅ 编号版本管理
+    # ✅ R218（N3 · 目录树排序深度护栏）：复用编号侧的树深上限唯一事实源，
+    #    不新增第二份「树深上限」常量（本仓反复出现的同族漂移形态）。
+    _MAX_TREE_DEPTH as _TREE_SORT_MAX_DEPTH,
 )
 from app.services.numbering import (
+    content_actually_changed,  # ✅ R211：规范化「正文是否真变了」唯一判据
     normalize_section_content_subheadings,  # ✅ 正文子标题编号落库前规范化（唯一实现）
     renumber_section_outline_ids,  # ✅ 编号统一：DB 重排唯一实现
     repair_scheme_numbering_consistency,  # ✅ 编号统一：显式跨校验器（修复漂移）
     validate_scheme_content_numbering,  # ✅ 编号统一：显式跨校验器（仅正文）
+)
+from app.services.numbering import (
+    list_numbering_versions as _list_numbering_versions,  # ✅ 编号版本管理
 )
 from app.services.numbering import (
     rollback_numbering_version as _rollback_numbering_version,  # ✅ 编号版本管理
@@ -65,7 +71,10 @@ from app.services.outline_quality import (
 )
 from app.services.outline_utils import (
     MAX_OUTLINE_DEPTH,
+    OUTLINE_TITLE_MAX_LEN,
+    _sanitize_outline_titles,
     normalize_outline,
+    outline_depth_stats,
     sanitize_outline_title,
     validate_outline_numbering,
 )
@@ -209,11 +218,23 @@ async def _build_tree(db, scheme_id: str, include_content: bool = False) -> list
     def _sort_key(n: dict):
         return section_sort_order_key(n.get("sort_order"), n.get("id"))
 
-    def _sort_children(nodes_list):
+    def _sort_children(nodes_list, _depth: int = 0):
+        # ✅ R218（2026-11-11 · P3 · N3）：递归排序无深度护栏 —— 脏数据深链
+        #    （>200 层，parent_id 链式成链而非成环）会撞 Python 默认递归上限
+        #    抛 RecursionError，整棵目录树 500。编号侧（renumber 各递归点）早有
+        #    _MAX_TREE_DEPTH=200 护栏，唯独本排序递归点裸奔。现同源复用该上限，
+        #    超限告警并停止深入（已排序部分保留，fail-soft 不阻断读路径）。
+        if _depth > _TREE_SORT_MAX_DEPTH:
+            logger.warning(
+                "目录树排序：嵌套深度超过 %s，停止深入（脏数据深链，防递归溢出）: scheme=%s",
+                _TREE_SORT_MAX_DEPTH,
+                scheme_id[:8],
+            )
+            return
         nodes_list.sort(key=_sort_key)
         for n in nodes_list:
             if n["children"]:
-                _sort_children(n["children"])
+                _sort_children(n["children"], _depth + 1)
 
     _sort_children(roots)
     return roots
@@ -403,11 +424,51 @@ async def list_sections(scheme_id: str, include_content: bool = True, db=Depends
     # 「事实已变更，共 N 章正文可能过时」的方案级提示（N 由树内 facts_stale 汇总）。
     cur = await db.execute(
         "SELECT id, project_id, word_budget, word_count, status, generation_standard,"
-        " facts_updated_at FROM schemes WHERE id=?",
+        # ✅ R218（2026-11-11 · P1 · D-A）：SELECT 此前缺 `name`/`type` 两列 ⇒
+        #   `scheme` 子集缺这两个字段，前端工作台头部方案名/类型恒空白
+        #   （SchemeWorkbenchPage 只从本响应 setScheme，schemes 表确有这两列，
+        #   `SchemeRecord` 类型也声明了，唯独 SELECT 列清单漏掉）。
+        " facts_updated_at, name, type FROM schemes WHERE id=?",
         (scheme_id,),
     )
     s = await cur.fetchone()
-    return {"tree": tree, "scheme": dict(s) if s else None}
+    result = {"tree": tree, "scheme": dict(s) if s else None}
+    # ✅ R210（L1-3 · 读路径暴露不可达节点）：`_build_tree` 对 `parent_id` 成环 /
+    #   悬挂的节点**整体不可达**（既不是根也不在任何 children 下）⇒ 树里看不到它们，
+    #   但 DB 里确实有这些章节行（用户手工改库 / 旧快照回退 / 方案复制的现实来源）。
+    #   此前只有「结构自检」（_outline_structure_report）与「严格模式导出守卫」会
+    #   提示，**读路径零信号** ⇒ 用户看到的目录比库里少几章却毫无察觉。
+    #   现加法式回传 `unmounted_count`（不阻断、不改树），前端可提示。
+    try:
+        # ✅ R216：统计收口到模块级 `_unmounted_section_ids`（/reorder 与
+        #    /export-tree 同源共用），复用 `_collect_section_ids`，
+        #    不再多处各写一份等价遍历。
+        _unmounted = await _unmounted_section_ids(db, scheme_id, tree)
+        if _unmounted:
+            logger.warning(
+                "目录树存在 %d 个不可达节点（parent_id 成环/悬挂，读路径看不到，导出会缺章）: scheme=%s ids=%s",
+                len(_unmounted),
+                scheme_id[:8],
+                _unmounted[:10],
+            )
+        result["unmounted_count"] = len(_unmounted)
+    except Exception:  # noqa: BLE001 — 自检失败不得阻断章节列表
+        logger.warning("不可达节点自检失败（不影响章节列表）: scheme=%s", scheme_id, exc_info=True)
+    return result
+
+
+async def _unmounted_section_ids(db, scheme_id: str, tree) -> list[str]:
+    """「DB 有行但树不可达」的章节 id 列表（parent_id 成环/悬挂，升序）。
+
+    ✅ R216（2026-11-11 · P3）：该统计此前内联在 list_sections 单点（R210），
+    /reorder 与 /export-tree 两个读路径对同一脏数据**零信号缺章**（用户拖拽后
+    / 导出目录时，成环章节凭空消失且无任何提示）。现收口为模块级唯一实现，
+    三个读路径共用；复用 `_collect_section_ids`（不新增第二份树遍历）。
+    """
+    mounted: set[str] = _collect_section_ids(tree)
+    cur_all = await db.execute("SELECT id FROM sections WHERE scheme_id=?", (scheme_id,))
+    all_ids = {str(dict(r).get("id") or "") for r in await cur_all.fetchall()}
+    return sorted(i for i in all_ids - mounted if i)
 
 
 @router.get("/quality")
@@ -700,6 +761,23 @@ async def create_section(scheme_id: str, data: SectionCreate, db=Depends(get_db)
         data.title, _create_title_sanitized = sanitize_outline_title(data.title)
         if _create_title_sanitized:
             logger.info("新增章节：标题清洗不可见/控制字符（scheme=%s）", scheme_id[:8])
+    # ✅ R216（2026-11-11 · P2）：清洗后不得为空 —— 纯不可见字符标题（U+200B/
+    #    U+FEFF 等）`.strip()` 判真、会进入上方清洗块被洗成 ""；纯空白标题
+    #    则跳过清洗块原样入库。两条路此前都无任何拦截，与 R209 空标题闸门
+    #    （save-outline 口）口径分叉（同批实证）。
+    if not str(data.title or "").strip():
+        raise HTTPException(400, "章节标题不能为空（不可见字符清洗后不得为空）")
+    # ✅ R218（2026-11-11 · P2 · D-B）：标题长度上限此前只在 save-outline /
+    #    上传落库口判红（validate_outline_numbering），create_section 与
+    #    update_section 两条手工写路径裸奔 —— 超长标题（如从 Word 复制粘贴）
+    #    落库成功后，再点「保存目录」会被 save-outline 的 400 卡死（该 400 只
+    #    拒「本次提交的树」却不回滚已落库的坏行，用户陷入死循环：改短→保存
+    #    又被旧坏行卡住）。现与空标题闸门同口径，直接在此拒绝，绝不静默截断。
+    if len(data.title or "") > OUTLINE_TITLE_MAX_LEN:
+        raise HTTPException(
+            400,
+            f"章节标题 {len(data.title)} 字超过 {OUTLINE_TITLE_MAX_LEN} 字上限（标题过长，请精简后再保存）",
+        )
     level = data.level
     if data.parent_id:
         # ✅ BUG 修复（2026-09-29 · parent_id 零校验）：旧实现只查 level、
@@ -834,6 +912,18 @@ async def update_section(scheme_id: str, section_id: str, data: SectionUpdate, d
         if _tsan:
             fields["title"] = _cleaned
             _title_sanitized_patch = 1
+    # ✅ R216（2026-11-11 · P2）：改名清洗后不得为空（与 create_section /
+    #    save-outline 空标题闸门同口径）—— 纯不可见字符标题洗成空串后
+    #    此前会原样 UPDATE，章节名被静默清空。
+    if "title" in fields and not str(fields.get("title") or "").strip():
+        raise HTTPException(400, "章节标题不能为空（不可见字符清洗后不得为空）")
+    # ✅ R218（2026-11-11 · P2 · D-B）：与 create_section / save-outline 同口径的
+    #    标题长度上限（详见 create_section 注释）。改名路径同样裸奔。
+    if "title" in fields and len(str(fields.get("title") or "")) > OUTLINE_TITLE_MAX_LEN:
+        raise HTTPException(
+            400,
+            f"章节标题 {len(str(fields.get('title') or ''))} 字超过 {OUTLINE_TITLE_MAX_LEN} 字上限（标题过长，请精简后再保存）",
+        )
     # ✅ R190（FIX-9）：标题真的变了才记旧标题（改回原名 / 未变不制造噪音）。
     if "title" in fields and _existing_title and str(fields["title"]) != _existing_title:
         _legacy_titles = [_existing_title]
@@ -1079,7 +1169,7 @@ async def update_section(scheme_id: str, section_id: str, data: SectionUpdate, d
         #    即落库。⚠️ 不改 changed 的返回语义本身 —— validate/repair 一致性
         #    判定与导出 strict 守卫依赖现行语义（仅杂质章若判漂移会让 strict
         #    导出对新 400）。
-        if _changed or _new_content != _renorm_src:
+        if content_actually_changed(_renorm_src, _new_content, _changed):
             _wb = fields.get("word_budget")
             if not _wb:
                 _c = await db.execute("SELECT word_budget FROM sections WHERE id=?", (section_id,))
@@ -1104,10 +1194,14 @@ async def update_section(scheme_id: str, section_id: str, data: SectionUpdate, d
             )
             _cr = await _cc.fetchone()
             if _cr is not None:
+                _src2 = str(_cr["content"] or "")
                 _nc2, _ch2 = await normalize_section_content_subheadings(
-                    db, scheme_id, section_id, str(_cr["content"] or ""), legacy_titles=_legacy_titles
+                    db, scheme_id, section_id, _src2, legacy_titles=_legacy_titles
                 )
-                if _ch2:
+                # ✅ R211（2026-11-10 · P1）：与其它三处同口径（唯一判据出口）。
+                #    旧门控只看 `_ch2`（只统计子标题改写）⇒ **净化型改写被整段丢弃**
+                #    （旧正文连同分页杂质一起留在库里，且 word_count 不同步）。
+                if content_actually_changed(_src2, _nc2, _ch2):
                     _wc2 = text_word_count(_nc2)
                     await db.execute(
                         "UPDATE sections SET content=?, word_count=?, word_status=?, updated_at=? WHERE id=?",
@@ -1311,6 +1405,7 @@ async def _save_outline_to_db(
     allow_empty_chapters: bool = False,
     snapshot_before: str | None = None,
     preserve_node_meta: bool = False,
+    skip_fallback_match: bool = False,
 ) -> dict:
     """核心保存逻辑：将目录树写入 sections 表（智能保留已有正文）。
 
@@ -1358,7 +1453,29 @@ async def _save_outline_to_db(
     from app.services.outline_utils import normalize_outline
 
     raw_count = len(outline)
+    # ✅ R209（2026-11-10 · 裁剪可观测性）：在**裁剪前**取样实际深度与超限节点数 ——
+    #    `normalize_outline` 会把超过 MAX_OUTLINE_DEPTH 的深层节点静默折叠进父节点
+    #    description（层级消失、内容不丢）。前端保存前有二次确认，但直连 API /
+    #    脚本 / AI 兜底链看不到任何后端信号 ⇒ 落库后无法得知目录已被降级。
+    #    现加法式回传 `clamped_depth` / `clamped_nodes`（仅确有折叠时出现），
+    #    **不阻断保存**（折叠是有损但保内容的既有行为，改为 400 会打断前端
+    #    「仍然保存」的确认流程）。
+    _submitted_depth, _clamped_nodes = outline_depth_stats(outline)
     outline = normalize_outline(outline)
+    # ✅ R216（2026-11-11 · P2）：标题清洗**前移到落库闸门之前** —— 与目录库口
+    #    normalize_outline_for_library（清洗 → 裁剪重排 → 校验）同序。旧顺序
+    #    validate 在前、清洗在 _process_nodes 内（validate 之后），而
+    #    validate_outline_numbering 的「标题为空」判据用 `title.strip()` 判
+    #    raw 标题 —— U+200B/U+FEFF/U+00AD/U+2060/C0 在 Python 里非空白 ⇒
+    #    纯不可见字符标题穿过闸门，随后才被清洗成 "" 落库（R209 空标题闸门
+    #    被绕过；同批实证 validate("\u200b\u200b")=[] 而 sanitize→""）。
+    #    清洗前移后闸门看到的是清洗后标题，与目录库口同口径
+    #    （标题超长同样按清洗后计数，两条入口的两套口径收敛为一）。
+    _sanitized_titles = _sanitize_outline_titles(outline)
+    if _sanitized_titles:
+        logger.info(
+            "目录保存：清洗 %d 处标题不可见/控制字符（scheme=%s）", _sanitized_titles, scheme_id[:8]
+        )
     # ✅ R187（2026-11-08 · 编号命名空间 fail-closed）：normalize 内部若
     #    renumber_outline 抛异常会被吞掉（仅留 ERROR 日志），此时返回的是「已裁剪
     #    但未编号」的树 —— _process_nodes 会把脏/重复 id 原样写进 outline_json，
@@ -1531,6 +1648,18 @@ async def _save_outline_to_db(
     #      1. 必须在全函数**所有 AI 调用之后**（上方占位标题自动重写可能要数十秒，
     #         持锁期间不得发起 AI 调用，见其注释「AI 调用期间不得持有写事务」）；
     #      2. 必须在下方 `SELECT existing_rows` 及其它决策读之前（这正是修复点）。
+    # ✅ R216（2026-11-11 · P3）：取锁前**复检**双 409 守卫 —— 路由入口的守卫
+    #    （save-outline / apply-and-save / instantiate 各自入口）与本函数写锁之间
+    #    隔着占位标题 AI 自动重写（可达数十秒），期间新启动的生成任务不会被
+    #    既有守卫拦下 ⇒ 整表重建与 _persist_section 的竞态窗口重开（生成启动
+    #    端点不反向查「是否有保存正在进行」）。与入口守卫同文案、同口径
+    #    （只拦 running/paused）。
+    if content_generation_in_progress(scheme_id):
+        raise HTTPException(
+            409, "本方案正文正在后台生成中，请等待生成完成（或先停止任务）后再保存目录——" "整表重建会与生成结果互相覆盖"
+        )
+    if outline_generation_in_progress(scheme_id):
+        raise HTTPException(409, "本方案目录正在后台生成中，请等待生成完成（或先停止任务）后再保存目录")
     _lock_t0 = time.monotonic()
     if getattr(db, "in_transaction", False):
         # 例外路径：调用方已开启未提交事务（如 schemes.create_scheme 先
@@ -1566,6 +1695,23 @@ async def _save_outline_to_db(
     )
     existing_rows = [dict(r) for r in await cur.fetchall()]
     existing_by_id = {r["id"]: r for r in existing_rows}
+    # ✅ R209（2026-11-10 · 跨入口正文丢失收口）：**标题路径兜底匹配**。
+    # 背景：本函数此前只认 `__original_id`（DB 主键）匹配旧章节，而三条写入口
+    # 送进来的节点**根本没有 DB 主键**：
+    #   · 前端「导入目录（智能识别）」→ key 是 `upload_<位置路径>` 临时键；
+    #   · 前端「AI 调整目录」→ 同上（`outlineToTreeNode` 无 __original_id 时
+    #     一律造 upload_ 键）；
+    #   · 模板实例化（schemes.instantiate_scheme_outline）→ 模板节点无 id。
+    # 这三类节点全部落进 `is_new` ⇒ 旧章节进 to_delete ⇒ **已生成正文被整批
+    # 级联删除**（用户表现为「导入一次目录，之前写的正文全没了」）。
+    # 现对「**不带 local_ 前缀**（即非用户手工新增意图）且未携带 __original_id」
+    # 的节点，按结构感知匹配器（标题路径 → 同父同层 → 同层 → 同名，消费式）
+    # 认领旧章节，从而保留 content / word_count / status。
+    # ⚠️ `local_` 前缀节点**不参与**兜底：那是用户手工新增章节的明确意图，
+    #    标题相同也应新建（否则「新增同名章节」会被合并成旧章节）。
+    from app.services.outline_matcher import build_outline_matcher
+
+    _outline_matcher = build_outline_matcher(existing_rows)
     # ✅ 正文可丢性台账（2026-09-26）：整表重建前记录「哪些章节已有正文」。
     #    旧实现保存后只回 {ok,count,tree}，用户点「确认并保存目录」把 AI 新目录
     #    落库时，未匹配上的旧章节被级联 DELETE → 正文静默消失、无任何提示
@@ -1605,7 +1751,7 @@ async def _save_outline_to_db(
     # ✅ R187：写路径标题清洗计数（加法式回传，仅确有清洗时出现该键）。
     _title_sanitized = {"n": 0}
 
-    async def _process_nodes(nodes: list, parent_db_id: str):
+    async def _process_nodes(nodes: list, parent_db_id: str, path_titles: tuple = ()):
         for sort_order, node in enumerate(nodes):
             if not isinstance(node, dict):
                 continue
@@ -1637,11 +1783,46 @@ async def _save_outline_to_db(
                         _payload[_k] = node[_k]
             outline_json = json.dumps(_payload, ensure_ascii=False)
             is_new = not original_id or original_id.startswith("local_") or original_id not in existing_by_id
+            # ✅ R209（2026-11-10 · 标题路径兜底匹配）：见上方匹配器构建处的说明。
+            # 仅对「非 local_ 前缀」的节点生效（导入识别 / AI 调整 / 模板实例化
+            # 三类来源都没有 DB 主键），消费式认领 ⇒ 同一旧章节不会被两个节点
+            # 同时认领（否则会撞重复主键闸门 400）。
+            _fallback_matched = None
+            # ✅ R216（2026-11-11 · P1）：兜底匹配条件去掉对 original_id 的**真值要求**。
+            #    旧条件 `is_new and original_id and not local_` 会把 __original_id 为
+            #    **空串**的节点短路 —— 而模板实例化（schemes.instantiate → C()/S()
+            #    构造的节点没有 id 键，上方 _preserve_original_ids 兜底写
+            #    `__original_id = node.get("id", "")` = ""）正是本处注释明列的
+            #    三类兜底来源之一。后果：实例化节点全部落进 new_inserts，
+            #    to_delete = 全部旧行 ⇒ dry_run=false 实例化一次，已有章节连同
+            #    已生成正文被整批级联删除（数据丢失）。空串同样「非 local_ 前缀」，
+            #    应与 upload_* / AI 调整回传一致进入结构感知匹配器。
+            # ✅ R216 收口（2026-11-11 · P1 二次认领防护）：调用方若已用
+            #    消费式 matcher 认领过（outline_library.apply_library_and_save），
+            #    未认领节点不得再走本侧兜底匹配 —— 否则同名但已被「放弃认领」
+            #    的节点会二次匹配回同一个旧主键，触发「重复章节主键」400，
+            #    整条「套用目录库」链失败（test_outline_r209 实证）。
+            #    模板实例化（schemes.instantiate）不带此标记，R216 P1 数据丢失
+            #    修复的空 __original_id 兜底路径保持不变。
+            if (
+                is_new
+                and not skip_fallback_match
+                and not (original_id or "").startswith("local_")
+            ):
+                _fallback_matched = _outline_matcher.take(
+                    title=title,
+                    level=level,
+                    parent_id=parent_db_id,
+                    path_titles=path_titles,
+                )
+                if _fallback_matched is not None:
+                    original_id = str(_fallback_matched.get("id") or "")
+                    is_new = False
             # ✅ BUG 修复：请求未携带 word_budget 时保留库中已有预算。
             #    旧实现无条件回落 1500——"只改标题/结构调整"的保存会把用户
             #    已设置的字数预算全部重置（AI/上传来源的节点本就不含该字段）。
             raw_budget = node.get("word_budget")
-            existing = None if is_new else existing_by_id.get(original_id)
+            existing = None if is_new else (_fallback_matched or existing_by_id.get(original_id))
             if not is_new and not preserve_node_meta and existing:
                 # ✅ BUG 修复（2026-11-07 · 跨模块元数据丢失）：普通目录保存此前对已有
                 #    章节也只写 id/level/confidence 三键，把模板/占位章节已落库的
@@ -1694,7 +1875,7 @@ async def _save_outline_to_db(
             node_counter["n"] += 1
             children = node.get("children")
             if isinstance(children, list) and children:
-                await _process_nodes(children, db_id)
+                await _process_nodes(children, db_id, path_titles + ((str(title or "").strip(),) if title else ()))
 
     await _process_nodes(outline, "")
 
@@ -1852,6 +2033,17 @@ async def _save_outline_to_db(
         logger.info(
             "方案 %s 目录保存：清洗 %d 个标题中的不可见/控制字符", scheme_id[:8], _title_sanitized["n"]
         )
+    # ✅ R209：深度裁剪信号（加法式；未发生折叠时不出现该键，既有响应逐字节不变）。
+    if _clamped_nodes:
+        result["clamped_depth"] = _submitted_depth
+        result["clamped_nodes"] = _clamped_nodes
+        logger.warning(
+            "方案 %s 目录保存：提交目录深度 %d 级，超出 %d 级上限，%d 个深层节点被折叠进父章节说明",
+            scheme_id[:8],
+            _submitted_depth,
+            MAX_OUTLINE_DEPTH,
+            _clamped_nodes,
+        )
     return result
 
 
@@ -1968,7 +2160,12 @@ async def restore_outline_snapshot(scheme_id: str, snapshot_id: str, db=Depends(
 
     # ---- 重挂图表（不自动重跑一致性扫描）----
     charts = 0
-    cur = await db.execute("SELECT id, content FROM sections WHERE scheme_id=?", (scheme_id,))
+    # ✅ R216（2026-11-11 · P2）：SELECT 补取 word_budget —— 下方 R215 段的
+    #    word_status 此前按 DEFAULT_WORD_BUDGET（1200）计算，不用章节自身预算
+    #    （预算 3000、正文 2000 字应判 normal，落库成 over ⇒ 误触发压缩建议/
+    #    自动压缩判定）。同族路径全部用章节自身预算（repair_record.rollback_snapshot
+    #    的 srow["word_budget"]、shrink、update_section），唯独本路径分叉。
+    cur = await db.execute("SELECT id, content, word_budget FROM sections WHERE scheme_id=?", (scheme_id,))
     rows = await cur.fetchall()
     await cur.close()
     for r in rows:
@@ -1978,6 +2175,17 @@ async def restore_outline_snapshot(scheme_id: str, snapshot_id: str, db=Depends(
         try:
             _n, _fixed = await resync_inline_charts(db, scheme_id, sid, content)
             charts += int(_n or 0)
+            # ✅ R215（2026-11-11 · P2）：消费登记管线校正后正文（与 consistency_repair
+            #    / 压缩路径同口径）——resync 契约是「修正后正文由调用方落库」，此前
+            #    解包后丢弃 ⇒ 校验失败块「登记侧删了、正文还在」= 幽灵图形态。
+            #    ✅ R216：word_status 改按章节自身预算计算（R215 在 repair_record.py
+            #    同批已用 srow["word_budget"]，此处为同族口径收口）。
+            if isinstance(_fixed, str) and _fixed and _fixed != content:
+                _wc = text_word_count(_fixed)
+                await db.execute(
+                    "UPDATE sections SET content=?, word_count=?, word_status=? WHERE id=?",
+                    (_fixed, _wc, word_status_for(_wc, r["word_budget"] or DEFAULT_WORD_BUDGET), sid),
+                )
         except Exception as e:  # noqa: BLE001 — 单章重挂失败不得阻断回退
             logger.warning("N1 回退：章节 %s 图表重挂失败（忽略）: %s", sid, e)
     await db.commit()
@@ -2125,6 +2333,11 @@ def _relink_adjusted_original_ids(nodes: list, valid_ids: set) -> None:
     for n in nodes or []:
         if not isinstance(n, dict):
             continue
+        # ✅ R213（FIX-3）：AI 回传可能自带 __original_id（原树回显 / 幻觉）。
+        #    旧实现只在合法 id 分支**覆盖**该键，伪造/缺失 id 分支不清 ⇒
+        #    _save_outline_to_db 信任它并跳过标题兜底 ⇒ 正文被挂到任意旧章节
+        #    （张冠李戴）。先无条件剔除，只由本函数的合法 id 分支写入。
+        n.pop("__original_id", None)
         raw_id = str(n.get("id") or "").strip()
         if raw_id and raw_id in valid_ids:
             n["__original_id"] = raw_id
@@ -2259,6 +2472,8 @@ SAVE_OUTLINE_ADDITIVE_KEYS: tuple[str, ...] = (
     "roots_locked",  # 一级章节是否已锁定
     "snapshot_id",  # 变更前快照 id（R179 N1，供一键回退）
     "title_sanitized",  # 写路径清洗掉不可见/控制字符的标题数（R187，加法式）
+    "clamped_depth",  # 超三级目录被折叠时的实际深度（R209，加法式）
+    "clamped_nodes",  # 超三级目录被折叠的节点数（R209，加法式）
 )
 
 
@@ -2349,16 +2564,10 @@ async def _outline_structure_report(db, scheme_id: str) -> dict:
     #    这里用「全表 id − 树内可达 id」得出不可达节点，加法式回传 + WARNING。
     #    ⚠️ 刻意不改 consistent 语义（保既有数值断言与历史方案可导出），
     #    由严格模式守卫单独据 unmounted_count 判红。
-    _mounted: set[str] = set()
-
-    def _collect_mounted(ns: list) -> None:
-        for n in ns:
-            _sid = str(n.get("id") or "")
-            if _sid:
-                _mounted.add(_sid)
-            _collect_mounted(n.get("children") or [])
-
-    _collect_mounted(tree)
+    # ✅ R218（2026-11-11 · P3 · N2）：局部 `_collect_mounted` 是模块级
+    #    `_collect_section_ids` 的同构重复（R216 收口漏结构自检路径）。
+    #    模块级版更健壮（跳过非 dict 节点），直接复用，不新增第二份树遍历。
+    _mounted: set[str] = _collect_section_ids(tree)
     _all_cur = await db.execute("SELECT id FROM sections WHERE scheme_id=?", (scheme_id,))
     _all_ids = {str(dict(r).get("id") or "") for r in await _all_cur.fetchall()}
     unmounted = sorted(i for i in _all_ids - _mounted if i)
@@ -2440,16 +2649,9 @@ async def _repair_outline_structure_numbering(db, scheme_id: str) -> int:
     """
     # —— 第一步：检测不可达节点（环/悬挂），重挂为根 ——
     _tree_probe = await _build_tree(db, scheme_id)
-    _mounted: set[str] = set()
-
-    def _collect_mounted(ns: list) -> None:
-        for n in ns:
-            _sid = str(n.get("id") or "")
-            if _sid:
-                _mounted.add(_sid)
-            _collect_mounted(n.get("children") or [])
-
-    _collect_mounted(_tree_probe)
+    # ✅ R218（N2）：同构重复的局部 `_collect_mounted` 统一复用模块级
+    #    `_collect_section_ids`（与 _outline_structure_report 同口径，不新增遍历）。
+    _mounted: set[str] = _collect_section_ids(_tree_probe)
     _all_cur = await db.execute("SELECT id FROM sections WHERE scheme_id=?", (scheme_id,))
     _all_ids = {str(dict(r).get("id") or "") for r in await _all_cur.fetchall()}
     unmounted = sorted(i for i in _all_ids - _mounted if i)
@@ -2565,7 +2767,9 @@ async def _renormalize_all_section_contents(db, scheme_id: str) -> None:
         # ✅ R194（FIX-11 · 与 update_section 手工保存门控同口径）：净化-only
         #    （无子标题改写、仅分页杂质清洗）时 changed=False 会把净化文本丢弃
         #    —— 结构重排恰好是「落库正文应与导出同源」的收口时机，改文本比较。
-        if changed or new_content != content_by_id.get(sec_id, ""):
+        # ✅ R211：改走唯一判据出口（content_actually_changed），与手工保存 /
+        #    改名残留 / 压缩路径 / 正文生成路径**逐字同口径**。
+        if content_actually_changed(content_by_id.get(sec_id, ""), new_content, changed):
             # ✅ R190（FIX-12）：正文被改写 → word_count 变化必须同步重算
             #    word_status（旧实现只写 content/word_count，word_status 停留旧值）。
             _wc = text_word_count(new_content)
@@ -2581,7 +2785,9 @@ async def _renormalize_all_section_contents(db, scheme_id: str) -> None:
                 db, scheme_id, sec_id, content, index=index
             )
             # ✅ R194（FIX-11）：同批量路径 —— 净化-only 章节不再被 changed 丢弃。
-            if changed or new_content != content:
+            # ✅ R211：改走唯一判据出口（content_actually_changed），与手工保存 /
+            #    改名残留 / 压缩路径四处**逐字同口径**，杜绝第 5 处再漂移。
+            if content_actually_changed(content, new_content, changed):
                 # ✅ R190（FIX-12）：同批量路径，补 word_status 重算
                 _wc = text_word_count(new_content)
                 updates.append(
@@ -2678,7 +2884,11 @@ async def rollback_numbering_version(scheme_id: str, snapshot_id: str, db=Depend
     async def _resync_rollback_charts(db_, sid, content):
         from app.routers._chart_pipeline import resync_inline_charts
 
-        await resync_inline_charts(db_, scheme_id, sid, content)
+        # ✅ R215（2026-11-11 · P2）：契约升级为返回登记管线校正后正文 ——
+        #    rollback_snapshot（R215 起）消费返回值二次落库；此前丢弃返回值，
+        #    chart_predictions 与恢复正文两侧漂移（幽灵图形态）。
+        _n, _fixed = await resync_inline_charts(db_, scheme_id, sid, content)
+        return _fixed
 
     try:
         return await _rollback_numbering_version(
@@ -2754,7 +2964,24 @@ async def reorder_sections(scheme_id: str, body: dict, db=Depends(get_db)):
         local_i = local_counters.get(pid, 0)
         local_counters[pid] = local_i + 1
         order_rows.append((local_i, sid, scheme_id))
-    await db.executemany("UPDATE sections SET sort_order=? WHERE id=? AND scheme_id=?", order_rows)
+    _cur_reorder = await db.executemany(
+        "UPDATE sections SET sort_order=? WHERE id=? AND scheme_id=?", order_rows
+    )
+    # ✅ R209（2026-11-10 · 少行校验）：本 UPDATE 是裸 executemany，无行数校验
+    #    （同文件 renumber_sections_after_reorder / _repair_outline_structure_numbering
+    #    均已走 safe_rowcount 单一出口）。完备性校验只保证「集合相等」，不保证
+    #    「期间没被并发删改」：SELECT 与 UPDATE 之间章节被并发删除时，命中行数
+    #    少于预期 ⇒ 排序**只应用了一部分**却仍返回 {"ok": true}（静默错误）。
+    #    现按行数不符即 409 中止（事务随连接归还回滚，不留半套顺序）。
+    _reorder_written = safe_rowcount(_cur_reorder, what=f"拖拽重排回写 scheme={scheme_id[:8]}")
+    if _reorder_written != len(order_rows):
+        logger.warning(
+            "方案 %s 拖拽重排：期望 %d 行，实际 %d 行（并发修改），已中止",
+            scheme_id[:8],
+            len(order_rows),
+            _reorder_written,
+        )
+        raise HTTPException(409, "目录在保存期间被并发修改（部分章节已不存在），请刷新目录后重试")
 
     # ✅ BUG 修复：旧实现只更新 sort_order，未重算 outline_json.id（章节编号）。
     #    前端树按 sort_order 重新计算编号展示，但后端 sections.outline_json.id
@@ -2780,7 +3007,22 @@ async def reorder_sections(scheme_id: str, body: dict, db=Depends(get_db)):
     except Exception as _e:  # noqa: BLE001
         logger.warning("拖拽重排：导出缓存失效失败（不影响重排结果）: %s", _e)
     tree = await _build_tree(db, scheme_id)
-    return {"ok": True, "tree": tree}
+    # ✅ R216（2026-11-11 · P3）：重排不重建整表，历史脏数据（parent_id 成环/悬挂）
+    #    原样保留 ⇒ 响应树对成环章节**静默缺章**。加法式回传 `unmounted_count`
+    #    （与 list_sections R210 同键同口径），前端可提示。
+    _reorder_unmounted: list[str] = []
+    try:
+        _reorder_unmounted = await _unmounted_section_ids(db, scheme_id, tree)
+        if _reorder_unmounted:
+            logger.warning(
+                "拖拽重排后目录树存在 %d 个不可达节点（导出会缺章）: scheme=%s ids=%s",
+                len(_reorder_unmounted),
+                scheme_id[:8],
+                _reorder_unmounted[:10],
+            )
+    except Exception:  # noqa: BLE001 — 自检失败不得阻断重排结果
+        logger.warning("重排后不可达节点自检失败（不影响重排结果）: scheme=%s", scheme_id, exc_info=True)
+    return {"ok": True, "tree": tree, "unmounted_count": len(_reorder_unmounted)}
 
 
 @router.get("/export-tree")
@@ -2805,7 +3047,25 @@ async def export_tree(scheme_id: str, db=Depends(get_db)):
             )
         return out
 
-    return {"outline": renumber_outline(to_outline(tree))}
+    # ✅ R216（2026-11-11 · P3）：与 list_sections / reorder 同口径加法式回传
+    #    `unmounted_count` —— 导出目录树 JSON 对成环/悬挂章节此前静默缺章
+    #    （程序按导出结果重排编号时丢章零感知）。
+    _export_unmounted: list[str] = []
+    try:
+        _export_unmounted = await _unmounted_section_ids(db, scheme_id, tree)
+        if _export_unmounted:
+            logger.warning(
+                "导出目录树存在 %d 个不可达节点（导出会缺章）: scheme=%s ids=%s",
+                len(_export_unmounted),
+                scheme_id[:8],
+                _export_unmounted[:10],
+            )
+    except Exception:  # noqa: BLE001 — 自检失败不得阻断导出
+        logger.warning("导出树不可达节点自检失败（不影响导出结果）: scheme=%s", scheme_id, exc_info=True)
+    return {
+        "outline": renumber_outline(to_outline(tree)),
+        "unmounted_count": len(_export_unmounted),
+    }
 
 
 # ---------- 字数压缩（对齐 OpenBidKit buildWordAdjustmentMessages） ----------
@@ -2918,8 +3178,15 @@ async def shrink_section(scheme_id: str, section_id: str, db=Depends(get_db)):
     #    之后的预检/复核都会把它判成「与目录不一致」。此处补一次同口径规范化
     #    （幂等、受 content_subheading_renumber 开关控制；失败 fail-soft 保留压缩结果）。
     try:
+        _pre_norm_content = current
         current, _num_changed = await normalize_section_content_subheadings(db, scheme_id, section_id, current)
-        if _num_changed:
+        # ✅ R211（2026-11-10 · P1）：与手工保存（R194 FIX-11）、批量重规范化
+        #    **同口径** —— 用「正文是否真的变了」而非规范化函数返回的 `changed`
+        #    布尔做门控。`changed` 只统计子标题改写，而返回值恒是**净化后**
+        #    文本（字面 \n 还原 / 分页页脚整行删除 / 表题粘连拆分）⇒ 仅净化时
+        #    `changed=False` 而正文已变 ⇒ 旧门控把**净化前的旧字数**落进库
+        #    （DB word_count ≠ 实际字数），字数档位 / 续写触发随之判错。
+        if content_actually_changed(_pre_norm_content, current, _num_changed):
             final_wc = text_word_count(current)
     except Exception as _ne:  # noqa: BLE001 - 编号规范化失败不得阻断压缩结果
         logger.warning("章节 %s 压缩后编号规范化失败（保留压缩正文）: %s", section_id[:8], _ne)

@@ -141,7 +141,15 @@ export function useExportCheck(deps: ExportCheckDeps) {
           msg.success(`预检通过：${data.section_count} 个章节均无异常`);
         }
       } else {
-        msg.warning(`发现 ${data.issues.length} 个问题，建议处理后再导出`);
+        // ✅ R212（2026-11-10 · P3-1）：问题数按**涉及处数**汇总。聚合类问题
+        //    （20 章待审核 = 1 条 issue + count=20）此前按数组长度显示「1 个
+        //    问题」，与同项目「共 151 处」量级差 20 倍 ⇒ 用户严重低估问题规模。
+        const _hits = (data.issues || []).reduce(
+          (sum: number, it: { count?: number }) =>
+            sum + (typeof it.count === "number" && it.count > 0 ? it.count : 1),
+          0,
+        );
+        msg.warning(`发现 ${data.issues.length} 个问题（共 ${_hits} 处），建议处理后再导出`);
       }
     } catch (e: unknown) {
       const err = e as {

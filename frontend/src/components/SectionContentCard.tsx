@@ -208,7 +208,22 @@ function SectionContentCard({
         okText: "放弃",
         okType: "danger",
         cancelText: "继续编辑",
-        onOk: onCancel,
+        onOk: () => {
+          // ✅ R211（2026-11-10 · P2）：用户明确「放弃」时必须**清除草稿**。
+          // 旧实现只调 onCancel（丢弃内存中的编辑），localStorage 里的草稿仍在
+          // ⇒ 下次点「手动编辑」又弹「发现未保存的草稿」，用户被迫反复处理
+          // 同一份**已放弃**的草稿；次生场景：保存后服务端归一化正文（去空白 /
+          // 补围栏）导致 draft ≠ currentContent ⇒ **保存成功也再弹**。
+          // 与「放弃草稿」分支（handleEditClick 的 onCancel）同口径清理。
+          if (draftKey) {
+            try {
+              localStorage.removeItem(draftKey);
+            } catch {
+              /* ignore */
+            }
+          }
+          onCancel();
+        },
       });
     } else {
       onCancel();

@@ -19,15 +19,15 @@ from app.services.numbering import ALPHABET as _NUMBERING_ALPHABET
 
 
 def _alpha_label(n: int) -> str:
-    """Excel 风格字母编号：1→a, 2→b, …, 26→z, 27→aa, 28→ab, …（R203）。"""
-    letters = "abcdefghijklmnopqrstuvwxyz"
-    x = max(1, int(n))
-    out = ""
-    while x > 0:
-        x -= 1
-        out = letters[x % 26] + out
-        x //= 26
-    return out
+    """Excel 风格字母编号：1→a, 2→b, …, 26→z, 27→aa, 28→ab, …（R203）。
+
+    ✅ R209（2026-11-10）：实现下沉到 ``services.numbering.alpha_label``
+    （唯一事实源），本函数保留为薄包装 —— 与 heading_templates._alpha_label /
+    content_blocks 的 L7 字母共用同一实现。
+    """
+    from app.services.numbering import alpha_label
+
+    return alpha_label(n)
 from app.services.numbering import CHINESE_NUMBERS as _NUMBERING_CHINESE_NUMBERS
 
 
@@ -73,8 +73,17 @@ class HeadingNumberingGeneratorV2:
         """
         c = self.counters
         if level == 1:
-            n = max(1, min(30, c[0]))
-            return f"第{self.CHINESE_NUMBERS[n]}章"
+            # ✅ R209（2026-11-10 · L1 章号超 30 回退）：旧实现把 L1 章号**硬钳在
+            #    30**（`min(30, c[0])`）⇒ 目录含 ≥31 个一级章时，第 31/32/… 章的
+            #    标题**字面完全相同**（都是"第三十章"），且三章的正文子标题前缀
+            #    全部塌缩为 "30" → 跨章撞号、交付文档目录页出现多个同名章节。
+            #    现与 numbering.stored_id_to_display（:470）与前端
+            #    outlineNumbering.formatOutlineTitle 同口径：字表内用中文数字，
+            #    超出字表回退阿拉伯数字（第31章），**绝不产出重复章号**。
+            n = max(1, c[0])
+            if 0 < n < len(self.CHINESE_NUMBERS):
+                return f"第{self.CHINESE_NUMBERS[n]}章"
+            return f"第{n}章"
         elif level == 2:
             return f"{c[1] or 1}"
         elif level == 3:

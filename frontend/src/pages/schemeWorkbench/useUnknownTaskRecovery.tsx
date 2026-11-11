@@ -33,6 +33,10 @@ export interface UnknownTaskRecoveryDeps {
   // ✅ R194（FIX-16）：content 任务终态消费 content_result（失败明细合并进日志区
   //    属页面作用域，经回调注入；缺省不消费，行为与引入前一致）
   onContentResult?: (fin: TaskTerminalInfo) => void;
+  // ✅ R216（2026-11-11 · P2 · D-1）：outline 任务终态消费 outline_result —— 目录
+  //    生成不写 sections（必须经一级闸门确认才入库），completed 只 load() 刷不出
+  //    任何东西 ⇒ checkpoint 里的目录成果凭空丢失。镜像 onContentResult 注入。
+  onOutlineResult?: (fin: TaskTerminalInfo) => void;
   unknownTaskTypeLabel: Record<string, string>;
 }
 
@@ -52,6 +56,7 @@ export function useUnknownTaskRecovery(deps: UnknownTaskRecoveryDeps) {
     load,
     pollTaskUntilTerminal,
     onContentResult,
+    onOutlineResult,
     unknownTaskTypeLabel,
   } = deps;
 
@@ -138,6 +143,10 @@ export function useUnknownTaskRecovery(deps: UnknownTaskRecoveryDeps) {
       //    进度摘要），与断线重挂路径同口径；mergeFailedSections 属页面作用域，
       //    经 onContentResult 回调注入（hook 不持有日志区状态）。
       if (ut.genType === "content") onContentResult?.(fin);
+      // ✅ R216（2026-11-11 · P2 · D-1）：outline 任务终态消费 outline_result
+      //    （树恢复 / 截断与复用信号 / 闸门）—— 此前 completed 走
+      //    「已完成，正在刷新」+ load()，目录生成不写 sections ⇒ 成果丢失。
+      if (ut.genType === "outline") onOutlineResult?.(fin);
       if (fin.status === "completed" || fin.status === "degraded") {
         msg.success("后台任务已完成，正在刷新");
         load();

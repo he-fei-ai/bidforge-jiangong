@@ -178,6 +178,17 @@ async def _restore_locked(db, scheme_id: str, snapshot_id: str) -> dict[str, Any
     await create_outline_snapshot(db, scheme_id, snapshot_type="outline_rollback_undo", commit=False)
 
     await db.execute("DELETE FROM sections WHERE scheme_id=?", (scheme_id,))
+    # ✅ R209（2026-11-10 · 孤儿图表登记）：回退是整表重建 —— 快照里没有的章节
+    #    其 chart_predictions 行会变成孤儿（section_id 指向已不存在的行）。
+    #    同族三条路径都显式清理（sections.py 删除单章 / save-outline 整表重建 /
+    #    upload_outline 整表重建），唯独本路径漏接 ⇒ 图表面板出现幽灵条目、
+    #    导出指纹被污染（无谓缓存失效）。
+    #    按 scheme_id 整清（与 sections.py 清空目录分支同口径）。
+    #    ⚠️ 表缺失（老库 / 精简测试库）时跳过而非报错（与 db._migrate 同纪律）。
+    try:
+        await db.execute("DELETE FROM chart_predictions WHERE scheme_id=?", (scheme_id,))
+    except Exception as e:  # noqa: BLE001 — 表缺失/锁冲突不得阻断回退
+        logger.warning("目录快照回退：清理图表登记失败（不影响回退结果）: %s", e)
     restored = 0
     for item in sections:
         if not isinstance(item, dict) or not item.get("id"):
@@ -196,12 +207,32 @@ async def _restore_locked(db, scheme_id: str, snapshot_id: str) -> dict[str, Any
     # ✅ R190（FIX-11）：快照恢复是整表重建，schemes.word_count 必须按恢复后的
     #    章节正文重算 —— 旧实现只更新 review_status，回退到「正文为空」快照后
     #    方案列表/头部仍显示回退前的总字数，直到下一次正文写路径才自愈。
-    await db.execute(
-        "UPDATE schemes SET review_status=?,"
-        " word_count=(SELECT COALESCE(SUM(word_count),0) FROM sections WHERE scheme_id=?),"
-        " updated_at=? WHERE id=?",
-        (review_status, scheme_id, _now(), scheme_id),
-    )
+    # ✅ R216（2026-11-11 · P2）：快照回退**不回写 schemes.status / outline_source**
+    #    的口径分叉 —— 回退到空快照（undo 空快照 / 旧空目录）后 sections 全删，
+    #    status 仍停留「目录已确认」；反向「目录待生成」方案回退出非空目录后
+    #    停留「目录待生成」。该值被前端头部 Tag 与 review 端点 scheme_status
+    #    消费（save-outline 清空分支注释明言此语义，其非空分支置「目录已确认」、
+    #    清空分支回退「目录待生成」并清空来源）。现按 restore 结果同步：
+    #    0 章 → 「目录待生成」+ 清空来源（与清空分支同不变式；来源所指向的
+    #    目录已不存在，保留即溯源失真）；>0 章 → 仅从「目录待生成」升级为
+    #    「目录已确认」（CASE 条件更新，不降级任何更高状态）。
+    #    ⚠️ services 不得 import routers：字面量与 sections.OUTLINE_EMPTY_STATUS /
+    #    OUTLINE_SAVED_STATUS 的一致性由护栏测试锁定（test_outline_r216）。
+    if restored == 0:
+        await db.execute(
+            "UPDATE schemes SET review_status=?,"
+            " word_count=(SELECT COALESCE(SUM(word_count),0) FROM sections WHERE scheme_id=?),"
+            " status='目录待生成', outline_source='', updated_at=? WHERE id=?",
+            (review_status, scheme_id, _now(), scheme_id),
+        )
+    else:
+        await db.execute(
+            "UPDATE schemes SET review_status=?,"
+            " word_count=(SELECT COALESCE(SUM(word_count),0) FROM sections WHERE scheme_id=?),"
+            " status=CASE WHEN status='目录待生成' THEN '目录已确认' ELSE status END,"
+            " updated_at=? WHERE id=?",
+            (review_status, scheme_id, _now(), scheme_id),
+        )
     await db.commit()
     # 缓存失效与图表重挂由路由层统一编排（services 不得依赖 routers）。
     return {

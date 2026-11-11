@@ -447,6 +447,22 @@ export function ReviewTab({
             </Text>
           </div>
         )}
+        {/* ✅ R212（2026-11-10 · P1-3）：覆盖度可见化 —— 后端 /latest 与 POST
+            都回传覆盖度（counts.sections / batches / checked_chars / total_chars），
+            此前 hook 存了却**零渲染** ⇒ 用户把「只查了 3 批 / 6000 字」的分数
+            当成全书结论（R207 只加了一次性 toast，卡片本身仍无条件绿）。
+            现补一行覆盖度，让结论可信度可见（R207 教训：验收锚必须是可观测产物）。 */}
+        {consistencyResult?.counts && (
+          <div>
+            <Text type="secondary" style={{ fontSize: 12 }} data-testid="consistency-coverage">
+              {`覆盖 ${consistencyResult.counts.sections ?? "—"} 章 · 检查 ${
+                consistencyResult.checked_chars ?? consistencyResult.counts.checked_chars ?? 0
+              }/${consistencyResult.total_chars ?? consistencyResult.counts.total_chars ?? 0} 字 · ${
+                consistencyResult.counts.batches ?? 0
+              } 批`}
+            </Text>
+          </div>
+        )}
         {auditRunning && (
           <div style={{ marginTop: 8 }}>
             <Progress percent={70} status="active" showInfo={false} size="small" />
@@ -459,7 +475,16 @@ export function ReviewTab({
           !auditRunning &&
           (consistencyResult.issues.length === 0 ? (
             <div style={{ marginTop: 8 }}>
-              <Tag color="green">未发现不一致项</Tag>
+              {/* ✅ R212（P1-3）：覆盖不完整时**不得**再显示绿色「未发现不一致项」
+                  （R207 只把告警放进一次性 toast，卡片本身仍无条件绿 ⇒ 用户仍
+                  会把「只查了部分正文」读成「全书一致」）。 */}
+              {consistencyResult.partial ? (
+                <Tag color="orange" data-testid="consistency-partial-tag">
+                  覆盖不完整，未发现不一致项（不代表全书一致）
+                </Tag>
+              ) : (
+                <Tag color="green">未发现不一致项</Tag>
+              )}
             </div>
           ) : (
             <Table
@@ -474,8 +499,8 @@ export function ReviewTab({
                   dataIndex: "severity",
                   width: 80,
                   render: (s: string) => (
-                    <Tag color={s === "high" ? "red" : s === "medium" ? "orange" : "blue"}>
-                      {s || "-"}
+                    <Tag color={SEVERITY_COLOR[s as Severity] ?? "default"}>
+                      {(SEVERITY_LABEL[s as Severity] ?? s) || "-"}
                     </Tag>
                   ),
                 },

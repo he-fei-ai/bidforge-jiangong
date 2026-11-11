@@ -80,10 +80,19 @@ class TestStopIsNotFailure:
         i = src.index("async def gen_one(")
         j1 = src.index("except asyncio.CancelledError:", i)
         j = src.index("except asyncio.CancelledError:", j1 + 1)
-        tail = src[j : j + 1200]
-        assert "if not db_written and not is_stopped(task_id):" in tail, (
+        tail = src[j : j + 1400]
+        # ✅ R215 重锚（意图保留、强度不减）：R215-B3 在闸门中补入
+        # `leaf_id not in done_ids` —— 取消恰落在「commit 成功（done_ids 已
+        # add）→ db_written 置位」窗口时，旧双判据会把已成功落库的空章打成
+        # status='failed'（content 非空 + failed → 任何模式都选不中）。
+        # 意图「停止/取消 ≠ 失败」保留，判据由两枚升级为三枚，另加反向断言。
+        assert "if not db_written and leaf_id not in done_ids and not is_stopped(task_id):" in tail, (
             "停止时不得发 section_error、不得标记章节 failed（会污染质量统计，"
-            "并使 missing 模式误选这些章节重新生成）"
+            "并使 missing 模式误选这些章节重新生成）；已成功落库（done_ids）的章"
+            "节同样不得因取消窗口被打成 failed"
+        )
+        assert "if not db_written and not is_stopped(task_id):" not in src, (
+            "R215-B3 三判据形态不得回流为旧双判据（done_ids 去重被摘除）"
         )
 
     def test_guarded_gen_stop_uses_same_semantics(self):

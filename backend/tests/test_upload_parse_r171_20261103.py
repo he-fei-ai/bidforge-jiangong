@@ -152,16 +152,21 @@ class TestOutlinePatternsOrder:
     """_OUTLINE_PATTERNS 顺序锁 + OCR 容错注释存在性。"""
 
     def test_patterns_order_fixed(self):
-        """pattern 列表顺序固定：中文数字章 → 阿拉伯数字章 → 点分（无分隔符·R191）→ 点分 → 单数字 → 中文顿号 → 中文括号 → 阿拉伯括号 → 右括号。
+        """pattern 列表顺序固定：中文数字章 → 阿拉伯数字章 → 点分（无分隔符·R191）→ 点分 → 单数字 → 中文顿号 → 中文括号 → 阿拉伯括号 → **罗马数字（R209）** → 右括号兜底。
 
         R191 重锚（意图不放宽）：新增「点分无分隔符直接跟汉字」条目（8→9 条），
         修复 "1.1工程概况" 被（有分隔符）点分条回溯命中错撕为 "1工程概况"。
         ⚠️ 新条必须排在「点分（要求分隔符）」之前：后者对 "1.1.1施工准备"
         会回溯命中（raw_id="1.1"+吃掉分隔点），更具体的无分隔符形态永远轮不到。
+
+        ✅ R209 重锚（意图不放宽·仅因新增形态而顺延）：新增「罗马数字」两条
+        （9→11 条），插在「阿拉伯数字括号」之后、**兜底条之前** ——
+        既有 9 条的相对顺序逐字不变，兜底条仍是**末位**（本文件
+        `test_pattern_sequence_cannot_beordered` 锁的就是「末条 = 右括号兜底」）。
         """
         patterns = fp._OUTLINE_PATTERNS
-        # 共 9 条
-        assert len(patterns) == 9
+        # 共 11 条（R209 新增罗马数字 2 条）
+        assert len(patterns) == 11
         # 第 0 条：中文数字章（level=1，含 章/节/篇）
         assert patterns[0][0] == 1
         assert "部分|章|节|篇" in patterns[0][1].pattern
@@ -188,9 +193,14 @@ class TestOutlinePatternsOrder:
         # 第 7 条：阿拉伯数字括号
         assert patterns[7][0] == 3
         assert r"\d+" in patterns[7][1].pattern
-        # 第 8 条：右括号编号（兜底）
-        assert patterns[8][0] == 3
-        assert ")" in patterns[8][1].pattern or "）" in patterns[8][1].pattern
+        # 第 8/9 条（R209 新增）：罗马数字（ASCII 大写 / Unicode 罗马数字）
+        assert patterns[8][0] == 1
+        assert "IVXL" in patterns[8][1].pattern, patterns[8][1].pattern
+        assert patterns[9][0] == 1
+        assert "Ⅰ" in patterns[9][1].pattern, patterns[9][1].pattern
+        # 第 10 条：右括号编号（兜底，**必须仍是末位**）
+        assert patterns[10][0] == 3
+        assert ")" in patterns[10][1].pattern or "）" in patterns[10][1].pattern
 
     def test_ocr_robustness_comment_present(self):
         """OCR 容错注释必须存在（说明「编号与分隔符之间允许 \\s*」的设计意图）。"""

@@ -55,6 +55,8 @@ import type {
   FactDocDeleteResponse,
   FactDocPreviewResponse,
   FactDocsListResponse,
+  FactCreateResponse,
+  FactDeleteResponse,
   FactListResponse,
   FactParseAllResponse,
   FactParseDocResponse,
@@ -513,7 +515,9 @@ export const factsApi = {
       signal: options?.signal,
     }),
   create: (data: FactGroupUpsertPayload, schemeId: string) =>
-    api.post("/global-facts", data, { params: { scheme_id: schemeId } }),
+    // ✅ R210：补返回泛型 —— 后端同名同值幂等去重时**不写行**并回传
+    //   `deduplicated`，前端据此区分「已新增」与「已存在，未重复新增」。
+    api.post<FactCreateResponse>("/global-facts", data, { params: { scheme_id: schemeId } }),
   update: (id: string, data: FactGroupUpsertPayload, schemeId?: string) =>
     api.patch<FactResolveResponse>(`/global-facts/${id}`, data, {
       params: { scheme_id: schemeId || "" },
@@ -569,7 +573,8 @@ export const factsApi = {
       { signal: options?.signal },
     ),
   delete: (id: string, schemeId?: string) =>
-    api.delete(`/global-facts/${id}`, { params: { scheme_id: schemeId || "" } }),
+    // ✅ R210：补返回泛型（后端 delete_fact 回 `{ok: true}`）
+    api.delete<FactDeleteResponse>(`/global-facts/${id}`, { params: { scheme_id: schemeId || "" } }),
   // ✅ 一键清除全部已提取的项目信息（含增量提取进度重置，2026-09-17）
   clearAll: (schemeId: string) =>
     api.post<FactResolveResponse>(

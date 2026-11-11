@@ -867,6 +867,27 @@ pre,
   contain: layout style;
 }
 
+/* ✅ 2026-11-11 长列表渲染隔离。
+   content-visibility:auto 让浏览器跳过视口外行的 layout/paint（等价于行级
+   「按需渲染」），contain-intrinsic-size 提供占位高度以保持滚动条与定位稳定；
+   不删 DOM、不改 key、不影响 antd Tree/List 的展开与拖拽。
+   只对 .scroll-area 内的行生效，避免影响页面其它浮层。 */
+.scroll-area .ant-tree-treenode,
+.scroll-area .ant-list-item {
+  content-visibility: auto;
+  contain-intrinsic-size: auto 32px;
+}
+
+/* ✅ 严格重绘边界：contain: strict = size + layout + style + paint。
+   ⚠️ 仅可用于 **尺寸由 CSS 明确给定、内容自带滚动** 的容器：
+   size containment 会让元素尺寸不再由内容撑开，套在 flex/百分比高度的
+   .scroll-area 上会把容器压成 0（这正是 .scroll-area 只用 layout style 的原因）。
+   当前使用点：目录库弹窗的 320px 虚拟树视口（内部 Tree 自己滚动）。 */
+.perf-strict-viewport {
+  contain: strict;
+  contain-intrinsic-size: 320px 320px;
+}
+
 /* Webkit (Chrome / Edge / Safari) */
 .scroll-area::-webkit-scrollbar {
   width: 10px;

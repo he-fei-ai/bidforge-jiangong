@@ -94,8 +94,17 @@ export function OutlineVersionsPanel({ schemeId, msg, onRestored }: OutlineVersi
     async (snapshotId: string) => {
       setRestoring(snapshotId);
       try {
-        await sectionsApi.restoreOutlineVersion(schemeId, snapshotId);
-        msg.success("已回退到所选目录版本");
+        const { data } = await sectionsApi.restoreOutlineVersion(schemeId, snapshotId);
+        // ✅ R218（2026-11-11 · P3 · D-E）：快照回退响应含 `empty_top_chapters`
+        //    （空壳一级章 = 只有标题无子目录），前端此前零消费 ⇒ 回退后目录里
+        //    出现空壳章却无提示（用户误以为目录完整）。以 WARNING 如实告知
+        //    （不阻断回退，回退本身成功）。
+        const _emptyTop = Number((data as { empty_top_chapters?: unknown })?.empty_top_chapters ?? 0);
+        if (_emptyTop > 0) {
+          msg.warning(`已回退到所选目录版本，但检出 ${_emptyTop} 个空壳一级章（只有标题、无子目录），请检查并补充`);
+        } else {
+          msg.success("已回退到所选目录版本");
+        }
         await load();
         await onRestored?.();
       } catch (e: unknown) {

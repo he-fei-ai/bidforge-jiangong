@@ -186,6 +186,7 @@ import { useAntdMessageHub } from "../utils/activityCenter";
 // ✅ 2026-09-25：SSE 批量器抽到 utils/sseBatcher.ts（TaskStatusBar 也要复用，
 //  工具函数不再寄生在 9000+ 行的页面文件里）
 import { createSseBatcher } from "../utils/sseBatcher";
+import { appendBoundedLog } from "../utils/perf/logBuffer";
 import SectionContentCard, { countPlainTextWords } from "../components/SectionContentCard";
 import type { AuditRule, Severity } from "../types/audit";
 import { SEVERITY_COLOR, SEVERITY_LABEL } from "../types/audit";
@@ -304,6 +305,7 @@ import {
   flattenTreeKeys,
   hasAnyContent,
   hasUnsavedLocalNodes,
+  mergeTreeContents,
   moveSiblingInTree,
   scrollToNodeInContainer,
   treeFingerprint,
@@ -482,6 +484,7 @@ export {
   treeNodesWithContent,
   treeToOutline,
   updateNodeFields,
+  mergeTreeContents,
   type PartialOutlineHint,
   type TreeNode,
   type UploadOutlineSummary,
@@ -593,6 +596,7 @@ export { FactsGroupList };
 // ✅ 2026-11-04 拆分（G4d）：全文一致性修复工作台抽屉抽到独立面板组件。
 import { ComplianceRepairDrawer } from "./schemeWorkbench/ComplianceRepairDrawer";
 // ✅ 2026-11-04 拆分（G4a-c）：工作台弹窗集合（事实/目录库/预览/提取配置）抽到独立面板组件。
+import { outlineTruncationNotice, outlineUnmountedNotice } from "./schemeWorkbench/outlineNotices";
 import { WorkbenchModals } from "./schemeWorkbench/WorkbenchModals";
 
 export default function SchemeWorkbenchPage() {
@@ -1121,6 +1125,10 @@ export default function SchemeWorkbenchPage() {
     try {
       const { data } = await sectionsApi.list(requestedSchemeId);
       if (requestedSchemeId !== currentSchemeIdRef.current) return;
+      // ✅ R213（FIX-12）：后端 list_sections 回传 unmounted_count（R210），
+      //    前端此前零类型零消费 ⇒ 目录比库里少几章却毫无提示（只有后端 WARNING）。
+      const _unmounted = outlineUnmountedNotice(data);
+      if (_unmounted) msg.warning(_unmounted);
       setScheme(data.scheme);
       const newTree = buildTree(data.tree || []);
       setTree(newTree);
@@ -1192,16 +1200,14 @@ export default function SchemeWorkbenchPage() {
     try {
       const { data } = await sectionsApi.list(id, { include_content: false });
       const newTree = buildTree(data.tree || []);
-      // ✅ 性能优化：3s 轮询即使数据未变也会产生全新树对象，新引用触发
-      // treeData / outlineEditTreeData / countGeneratedLeaves / collectAllKeys
-      // 全量重算 + 整页重渲。加指纹守卫（对齐 setGenStats 的 statsEqual），
-      // 无变化时保留旧引用，React 直接跳过本次渲染。
-      // ✅ R203（P1 · 未落库节点保护）：有 local_/upload_ 临时节点时跳过覆盖。
-      //    旧实现无条件 setTree(newTree)——生成期间字数变化导致指纹必不同，
-      //    整树替换把用户尚未保存的新增章节静默丢弃（B11 同族缺陷的轮询路径）。
+      // ✅ R215（2026-11-11 · P2）：轻量轮询整树替换丢 content —— 轻量接口不返回
+      //    content，字数/状态变化后指纹必不同 → 整树替换为无 content 节点，用户点
+      //    其他章节时正文卡「已生成 N 字」与「（章节尚未生成…）」占位同卡矛盾。
+      //    按旧树 key 回填 content（纯函数 mergeTreeContents，新树有值以新树为准）。
       setTree((prev) => {
         if (hasUnsavedLocalNodes(prev)) return prev;
-        return treeFingerprint(prev) === treeFingerprint(newTree) ? prev : newTree;
+        const merged = mergeTreeContents(prev, newTree);
+        return treeFingerprint(prev) === treeFingerprint(merged) ? prev : merged;
       });
       const allKeys = collectAllKeys(newTree);
       setExpandedKeys((prev) => (prev.length === 0 ? allKeys : prev));
@@ -1400,13 +1406,26 @@ export default function SchemeWorkbenchPage() {
     setFactsCrossConflicts,
   });
 
+  // ✅ 2026-11-11：expertItems 回包的卸载守卫用独立 ref/effect 维护，
+  //    刻意不改动下方 factsListAbortRef 的 cleanup 字面量 —— R193 D-01
+  //    源码棘轮锁的就是那段 cleanup 的逐字形态（锁接线，不是锁注释）。
+  const expertItemsAliveRef = useRef(true);
+  useEffect(() => {
+    expertItemsAliveRef.current = true;
+    return () => {
+      expertItemsAliveRef.current = false;
+    };
+  }, []);
+
   useEffect(() => {
     load();
     loadFacts();
     loadComplianceHistory();
     complianceApi
       .expertItems()
-      .then(({ data }) => setExpertItems(data.items || []))
+      .then(({ data }) => {
+        if (expertItemsAliveRef.current) setExpertItems(data.items || []);
+      })
       .catch(() => {});
     // ✅ R193 修复（D-01 · 与 R191 factsDocsListAbortRef 同构漏面）：事实列表
     //    在飞请求的中止必须收进本 effect 的 cleanup（React 保证 cleanup 先于
@@ -1633,6 +1652,17 @@ export default function SchemeWorkbenchPage() {
       setTaskPaused(false);
       setTaskStopping(false);
       activeTaskIdRef.current = "";
+      // ✅ R215（2026-11-11 · P1）：正文选中章与生成摘要跨方案复位 —— 旧实现在
+      //    D-02 复位块漏掉 selectedSection / crSummary，而 load() 只在旧 section
+      //    key 于新树中找得到时才刷新（找不到时什么都不做）⇒ 方案 A 的章节对象
+      //    原样残留：正文卡显示 A 方案正文与字数、章节级生成标准 Select 以新
+      //    方案 id + 旧 section key 调 update（404）、「重写/续写本章」把 A 的
+      //    section_id 发给 B 的 SSE 链（select_target_leaves 查无此章 → 假成功
+      //    completed）、最重者在残留内容点「AI 自动修复」会以 A 的 section_id
+      //    触发跨方案写库（fix-mermaid 按全局 section_id 定位）。切换是同步点，
+      //    这里显式清空是唯一权威时机；selectedSectionRef 渲染时自动跟随。
+      setSelectedSection(null);
+      setCrSummary(null);
     }
     initialTabDecidedRef.current = false;
     // ✅ R191 修复（切方案列表残留）：新方案列表请求是异步的，成功回写前
@@ -1649,6 +1679,12 @@ export default function SchemeWorkbenchPage() {
     setFactsCrossConflicts([]);
     setFactsChapterReport(null);
     setFactsDangerReport(null);
+    // ✅ R216（2026-11-11 · P3 · D-5）：切方案复位清单补 failedOutlineChapters ——
+    //    消费点（useOutlineEditTreeRender / useOutlineViewTree）用标题子串互相
+    //    匹配上橙色（node.title.includes(t) || t.includes(node.title)），
+    //    「施工准备」这类通用章名跨方案必然撞车 ⇒ 旧方案的失败章标题
+    //    在新方案树上误高亮。同块内 factsLogs 等态都已清，此态独漏。
+    setFailedOutlineChapters([]);
     // ✅ R189（2026-11-08 · 切方案态残留三件套）：
     //    ① factsPagination 不清 → 新方案首屏可能短暂沿用旧方案的 total/pageSize；
     //    ② factsPageSchemeRef 不清 → resolveFactsLoadPage 在「切走再切回」时
@@ -1782,6 +1818,11 @@ export default function SchemeWorkbenchPage() {
   };
 
   // ✅ G10：未知态状态机迁至 useUnknownTaskRecovery.tsx；hasUnknownTask() 替代原 ref 直读。
+  // ✅ R216（2026-11-11 · P2 · D-1）：未知态手动接管 outline 终态的恢复回调 ——
+  //    经 ref 间接引用：handleOutlineReady / openOutlineGate 在 :2170+ 才由
+  //    hook 解构（R194 FIX-16 同款考量：用「声明在前且稳定」的通道，避免
+  //    TDZ 与陈旧闭包）；真实实现见 :2277 后的 ref 赋值处。
+  const outlineRestoreFnRef = useRef<(fin: TaskTerminalInfo) => void>(() => {});
   const {
     unknownTask,
     setUnknownTask,
@@ -1821,6 +1862,11 @@ export default function SchemeWorkbenchPage() {
         msg.info(`后台正文生成：已完成 ${_sum.done}/${_sum.total} 章，共 ${_sum.words} 字${_overMsg}${_chartMsg}`);
       }
     },
+    // ✅ R216（2026-11-11 · P2 · D-1）：outline 任务手动接管终态消费 outline_result
+    //    —— 目录生成不写 sections（必须经一级闸门确认才入库），completed 只
+    //    msg.success+load() 刷不出任何东西 ⇒ checkpoint 里的目录成果凭空丢失，
+    //    用户只能重新生成（重复计费）。镜像 onContentResult 注入。
+    onOutlineResult: (fin) => outlineRestoreFnRef.current(fin),
     unknownTaskTypeLabel: UNKNOWN_TASK_TYPE_LABEL,
   });
 
@@ -1929,6 +1975,19 @@ export default function SchemeWorkbenchPage() {
               ) {
                 // ✅ 刷新页面后恢复后台跑完的目录成果（与在线 completed 走同一闸门）
                 setTree(buildTree(ckpt.outline));
+                // ✅ R216（2026-11-11 · P2 · D-3）：刷新接管补消费截断/复用信号 ——
+                //    R213 FIX-14 收口了 completed/stopped/断线重挂三条路径，
+                //    刷新接管是漏网的第 4 条（checkpoint 白名单带 level1_* /
+                //    resumed_chapters，此前此处零感知）。
+                const _takeoverTruncation = outlineTruncationNotice(ckpt);
+                if (_takeoverTruncation) {
+                  msg.warning(_takeoverTruncation);
+                  pushOutlineLog(1, `⚠️ 一级目录超上限（接管）：${_takeoverTruncation}`);
+                }
+                if (typeof ckpt.resumed_chapters === "number" && ckpt.resumed_chapters > 0) {
+                  msg.info(`已复用上次中断生成的 ${ckpt.resumed_chapters} 章（跳过对应 AI 调用）`);
+                  pushOutlineLog(1, `♻️ 复用上次成果 ${ckpt.resumed_chapters} 章`);
+                }
                 if (Array.isArray(ckpt.failed_chapters) && ckpt.failed_chapters.length) {
                   setFailedOutlineChapters(ckpt.failed_chapters);
                   msg.warning(
@@ -2027,6 +2086,19 @@ export default function SchemeWorkbenchPage() {
         okType: "danger",
         cancelText: "继续编辑",
         onOk: () => {
+          // ✅ R217（2026-11-11 · P2）：页面级「切换章节 → 放弃更改」是
+          //    **第二个**放弃入口，R211 FIX-3 只接了卡片内的「取消/放弃」按钮。
+          //    旧实现仅清内存态，localStorage 草稿仍在 ⇒ 点回原章「手动编辑」
+          //    又弹「发现未保存的草稿」（R211 症状在另一路径复活）。
+          //    注意此刻 selectedSection 已指向新章，草稿 key 必须按 prevKey
+          //    （旧章）构造；格式与 :1040 的 draftKey 逐字同源（护栏锁同源）。
+          if (id && prevKey) {
+            try {
+              localStorage.removeItem(`scheme_draft_${id}_${prevKey}`);
+            } catch {
+              /* ignore */
+            }
+          }
           setIsEditingSection(false);
           setEditContent("");
           setEditDirty(false);
@@ -2137,16 +2209,15 @@ export default function SchemeWorkbenchPage() {
     //    无章节维度），原样写入会渲染出无意义的「0/0 章」。仅长方案分步链路
     //    （total>0）才记录章节计数。
     const hasChapterDim = typeof total === "number" && total > 0;
-    outlineLogsRef.current = [
-      ...list,
-      {
-        progress: p,
-        message: m,
-        done: hasChapterDim ? done : undefined,
-        total: hasChapterDim ? total : undefined,
-        time: Date.now(),
-      },
-    ];
+    // ✅ 2026-11-11 性能：写入端有界（渲染层的 OUTLINE_LOG_RENDER_MAX 只截断 DOM，
+    //    旧实现数据源仍无限追加并每次 O(n) 复制）。语义保持不变：新数组引用 + 最近 N 条。
+    outlineLogsRef.current = appendBoundedLog(list, {
+      progress: p,
+      message: m,
+      done: hasChapterDim ? done : undefined,
+      total: hasChapterDim ? total : undefined,
+      time: Date.now(),
+    });
     setOutlineLogs(outlineLogsRef.current);
   };
 
@@ -2262,6 +2333,56 @@ export default function SchemeWorkbenchPage() {
     hasUnknownTask,
     pollTaskUntilTerminal,
   });
+
+  // ✅ R216（2026-11-11 · P2 · D-1）：未知态手动接管 outline 终态恢复（真实实现，
+  //    经 outlineRestoreFnRef 间接注入 useUnknownTaskRecovery）。与刷新接管路径
+  //    （:1939 outline 分支）和断线重挂路径（useOutlineGeneration reattach 分支）
+  //    消费同一组信号：树恢复 + 截断/复用信号 + 失败章高亮 + 审核依据 +
+  //    一级目录闸门/自动确认。⚠️ 三处消费矩阵此前不对齐（未知态接管完全不消费
+  //    outline_result ⇒ completed 只弹「已完成」而目录丢失，用户被迫重新生成
+  //    重复计费），前端护栏成对锁定（outlineR216.test.ts）。
+  outlineRestoreFnRef.current = (fin) => {
+    const ckpt = fin.outline_result;
+    if (ckpt?.outline && Array.isArray(ckpt.outline) && ckpt.outline.length) {
+      // checkpoint 回传的 outline 即目录树节点（后端 SSE 契约），收窄一次供闭包复用
+      const restoredOutline = ckpt.outline as OutlineNodeInput[];
+      // ✅ 刷新页面后恢复后台跑完的目录成果（与在线 completed 走同一闸门）
+      setTree(buildTree(restoredOutline));
+      const _takeoverTruncation = outlineTruncationNotice(ckpt);
+      if (_takeoverTruncation) {
+        msg.warning(_takeoverTruncation);
+        pushOutlineLog(1, `⚠️ 一级目录超上限（接管）：${_takeoverTruncation}`);
+      }
+      if (typeof ckpt.resumed_chapters === "number" && ckpt.resumed_chapters > 0) {
+        msg.info(`已复用上次中断生成的 ${ckpt.resumed_chapters} 章（跳过对应 AI 调用）`);
+        pushOutlineLog(1, `♻️ 复用上次成果 ${ckpt.resumed_chapters} 章`);
+      }
+      if (Array.isArray(ckpt.failed_chapters) && ckpt.failed_chapters.length) {
+        setFailedOutlineChapters(ckpt.failed_chapters);
+        msg.warning(
+          `后台目录生成完成，但 ${ckpt.failed_count || ckpt.failed_chapters.length} 章子目录失败，请确认后保存`,
+        );
+      } else {
+        msg.success("后台目录生成已完成，请确认保存");
+      }
+      summarizeOutlineReviewBasis(ckpt.review).logs.forEach((line) => pushOutlineLog(1, line));
+      if (outlineAutoConfirmEnabled) {
+        handleOutlineReady(restoredOutline, ckpt.auto_confirm);
+      } else {
+        openOutlineGate(restoredOutline);
+      }
+    } else if (fin.status === "failed") {
+      // 无可恢复成果的失败：与刷新接管 failed 分支同文案口径
+      msg.error(fin.message || "后台任务失败");
+    } else if (fin.status === "stopped") {
+      msg.info(`后台任务已停止${fin.message ? `：${fin.message}` : ""}`);
+      load();
+    } else if (fin.status === "completed" || fin.status === "degraded") {
+      // 无 checkpoint 成果（旧后端 / 检查点写失败）：与刷新接管 else 分支同口径
+      msg.success("后台任务已完成，正在刷新");
+      load();
+    }
+  };
 
   /**
    * ✅ R66（2026-10-11）四档字数控制：档位数值表（与后端真源
@@ -2431,7 +2552,9 @@ export default function SchemeWorkbenchPage() {
           } else {
             waMsg = `字数调整完成（计划 ${Number(wa.planned) || 0} 章，已调整 ${Number(wa.adjusted) || 0} 章）`;
           }
-          setProgressMsg(waMsg);
+          // ✅ 2026-11-11 性能：逐批事件改为 rAF 合帧。终态分支（:2727）会先
+          //    flushNow 再写最终文案，故不会把旧批次文案回写覆盖终态。
+          batcher.schedule("progressMsg", () => setProgressMsg(waMsg));
           // 批次事件只更新文案，避免逐批刷屏日志（首/末事件写日志留痕）
           if (evt.event === "word_adjust_start" || evt.event === "word_adjust_done") {
             pushOutlineLog(typeof evt.progress === "number" ? evt.progress : 0, waMsg);
@@ -2504,11 +2627,20 @@ export default function SchemeWorkbenchPage() {
           //    同时改用 selectedSectionRef 读取最新选中项（SSE 循环闭包里的
           //    selectedSection 是启动时的旧值，用户中途切换章节会更新错对象）。
           if (selectedSectionRef.current?.key === evt.section_id) {
+            // ✅ R215（2026-11-11 · P2）：体积闸门降级握手（R181）—— 后端超限时
+            //    只截 content 并附 truncated 系列键（注释明言「前端可据 truncated=true
+            //    提示并重新拉取」），前端此前照单全收 ⇒ 预览显示被砍尾的正文而字数
+            //    Tag 仍是全量值，且截断态驻留到终态 load()。现在不落截断内容（保留
+            //    prev，完整内容以终态 load() 回读为准）并提示一次。
+            const _degraded = evt.truncated === true;
+            if (_degraded) {
+              msg.warning(`「${evt.title || evt.section_id}」正文超长，预览已截断显示（完整内容生成结束后自动刷新）`);
+            }
             setSelectedSection((prev) =>
               prev
                 ? {
                     ...prev,
-                    content: typeof evt.content === "string" ? evt.content : prev.content,
+                    content: !_degraded && typeof evt.content === "string" ? evt.content : prev.content,
                     word_count: evt.word_count || prev.word_count,
                     word_budget: evt.word_budget || prev.word_budget,
                     status: "generated",
@@ -2595,8 +2727,13 @@ export default function SchemeWorkbenchPage() {
             setProgressMsg(evt.message || "正在定向修复冲突..."),
           );
         } else if (evt.event === "consistency_repair_done") {
+          // ✅ R217（2026-11-11 · P2）：此处写死 1.0 是「阶段性事件提前封顶」——
+          //    后端在这个事件之后还有跨章节字数批调度（word_adjust_*）才发
+          //    completed，进度模型是 0.98 → 1.0。旧实现让用户看到进度条 100%
+          //    却还有数分钟的「字数调整 1/3 批进行中」。改走单调护栏并保持
+          //    阶段值 0.98，终态 completed 分支仍是唯一封顶点。
           batcher.schedule("progress", () => {
-            setProgress(1);
+            setProgress((prev) => nextProgress(prev, 0.98));
             setProgressMsg(
               `一致性修复完成：已修复 ${evt.repaired ?? 0} 处（待你确认），跳过 ${evt.skipped ?? 0} 处（待人工），失败 ${evt.failed ?? 0} 处`,
             );
@@ -2604,8 +2741,10 @@ export default function SchemeWorkbenchPage() {
           // ✅ G11：生成链路里的自动一致性修复改写了正文 → 审核 / 总检结论失效
           if ((evt.repaired ?? 0) > 0) setReviewTick((t) => t + 1);
         } else if (evt.event === "consistency_skipped") {
+          // ✅ R217：与 consistency_repair_done 同族 —— 跳过一致性检查后
+          //    仍可能进入字数批调度，不得提前封顶（唯一封顶点是 completed）。
           batcher.schedule("progress", () => {
-            setProgress(1);
+            setProgress((prev) => nextProgress(prev, 0.98));
             setProgressMsg(evt.reason || "方案尚无正文，已跳过一致性检查");
           });
         } else if (evt.event === "consistency_failed") {
@@ -2650,6 +2789,13 @@ export default function SchemeWorkbenchPage() {
           if (_stdHint) {
             msg.warning(_stdHint);
             setProgressMsg(`${doneMsg} | ${_stdHint}`);
+          }
+          // ✅ R215（2026-11-11 · P3）：顺序校验失守提示 —— 后端把「实际派发序 vs
+          //    目录 DFS 序逐位比对」（R105 G1 的核心留痕信号）随 completed 下发，
+          //    ok=false 时只打后端 WARNING，前端零消费 ⇒ 「章节推进序错乱」类
+          //    反馈无从在界面取证。失守才说话（与 _stdHint 同纪律）。
+          if (evt.order_check && evt.order_check.ok === false) {
+            msg.warning("本次生成的章节完成顺序与目录顺序不一致（并发派发所致），章节内容不受影响");
           }
           // ✅ R77b（2026-10-15）：事实冲突定点修复汇总提示（与标准校验提示
           //    独立成条；无冲突返回空串 → 不追加，不制造噪音）
@@ -2764,25 +2910,34 @@ export default function SchemeWorkbenchPage() {
             },
           );
         } finally {
-          setSseReconnecting(false);
+          // ✅ R217（2026-11-11 · P1）：旧协程不得清掉新方案的重连态
+          if (genSeqRef.current === mySeq) setSseReconnecting(false);
         }
+        // ✅ R217（2026-11-11 · P1）：重挂轮询 Promise **不受** abortController
+        //    控制（pollTaskUntilTerminalImpl 无 signal 参数，最长 200×3s）。
+        //    切方案复位块只 abort SSE controller，已进入轮询的旧协程仍会带着
+        //    A 方案结果回来写当前页面的 msg / 失败日志 / load() ⇒ 跨方案串台。
+        //    目录链 useOutlineGeneration 已有 `hit && genSeqRef.current === mySeq`
+        //    同款世代守卫，正文链同构漏改；此处统一按世代判定是否消费结果。
+        //    （数据层不串库：load() 内已有 requestedSchemeId 守卫，本项只管 UI。）
+        const reattachStillCurrent = genSeqRef.current === mySeq;
         // ✅ R174 F2 / 本轮加固：轮询耗尽/连续网络失败（final=null）→ 未知态；
         //    连「可接管任务」都没检索到时同样无法确认后台是否仍在跑（AI 可能照常计费），
         //    一并进入持久可见的未知态，绝不静默回空闲。
-        if (!hit) {
+        if (!hit && reattachStillCurrent) {
           markUnknownTask({
             taskId,
             genType: "content",
             reason: "SSE 连接中断后未能检索到可接管的正文生成任务，无法确认后台是否仍在运行",
           });
-        } else if (!hit.final) {
+        } else if (hit && !hit.final && reattachStillCurrent) {
           markUnknownTask({
             taskId: hit.taskId,
             genType: "content",
             reason: "重挂轮询超限（200×3s）或连续网络失败，未获得任务终态",
           });
         }
-        if (hit) {
+        if (hit && reattachStillCurrent) {
           taskId = hit.taskId;
           // ✅ R194（FIX-13 · C-4 控制按钮可达性）：重挂期间回填 activeTaskIdRef。
           //    旧实现 taskId 只赋局部变量 —— 重挂轮询窗口（200×3s ≈ 10 分钟）内
@@ -3330,6 +3485,15 @@ export default function SchemeWorkbenchPage() {
           // ✅ R181（遗留问题 6）：沿用后端评分口径说明
           score_rule: data.score_rule,
           score_note: data.score_note,
+          // ✅ R212（2026-11-10 · P1-3）：**补搬覆盖度字段**。后端 /latest 的
+          //    ``counts_json`` 里本就带 sections / batches / checked_chars /
+          //    total_chars（覆盖度），但此前只搬 score/issues ⇒ 「载入上次结果」
+          //    后卡片**没有任何覆盖度提示**，用户把「只查了 3 批 / 6000 字」的
+          //    分数当成全书结论（POST 路径存了 counts 却零渲染，同型）。
+          //    现与 POST 路径**逐字同字段**，前端渲染一处即可。
+          counts: data.counts,
+          checked_chars: data.checked_chars ?? data.counts?.checked_chars,
+          total_chars: data.total_chars ?? data.counts?.total_chars,
         });
       }
     } catch {

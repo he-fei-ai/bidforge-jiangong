@@ -160,6 +160,25 @@ async def _facts_write_guard_dependency(request: Request, db=Depends(get_db)):
         # 危大工程判定只读（不改事实），不占用写锁
         yield
         return
+    if path.endswith("/adjust"):
+        # ✅ R210（2026-11-10 · P1）：AI 调整端点**豁免前置写锁**。
+        #
+        # 旧行为：本依赖对一切非 GET 请求抢**项目级独占写锁 + DB 租约**，而
+        # ``POST /global-facts/adjust`` 在 ``apply=False``（预览）时**零写库**
+        # （见 adjust_facts：``if do_apply and ops:`` 才是落库分支）—— 却在
+        # 整段 AI 调用（``settings.ai_adjust_timeout`` 默认 120s）期间一直持锁。
+        # 后果是同项目**所有**事实写链路被连带阻塞：
+        #   ① 手工新增/编辑/确认/裁决/清空 → 等待 20s 后转 409；
+        #   ② SSE 事实提取落库（同一把锁，``sse_handlers`` ai_extraction）
+        #      → 抛 FactsWriteConflict ⇒ **整轮提取任务被判 failed**（配额白烧）；
+        #   ③ 文档重解析的 ``_mark_project_facts_stale``（同 inproc 锁）
+        #      → 超时 fail-soft ⇒ **该标 stale 的事实没被标 stale**，正文继续用过时数据。
+        #
+        # 改法：**读路径（预览）不加锁，写路径（apply）在端点内真正落库前加锁**。
+        # 端点内加锁不是「少一道闸」而是「闸门挪到正确的位置」—— 落库阶段仍与
+        # 提取落库互斥，且不再让只读预览占着锁不放。
+        yield
+        return
     project_id = ""
     lease = ""
     try:
@@ -2466,10 +2485,14 @@ async def update_fact(
     scheme_scope = scheme_id.strip() if isinstance(scheme_id, str) else ""
 
     # ---- 模式 0：条目级更新（可独立使用，也可与分组字段同时提交）----
-    if scheme_scope:
-        for u in item_updates:
-            await _assert_fact_in_scheme_scope(db, str(u.get("fact_id") or ""), scheme_scope)
-        await _assert_fact_in_scheme_scope(db, fact_id, scheme_scope)
+    # ✅ R210：改走 ``_guard_fact_write_scope`` 单一出口（旧实现内联
+    #   ``if scheme_scope:``，与同族四端点（确认/解除过期/裁决/删除）的口径
+    #   **不一致**：那四处空 scheme_id 时会记一条 WARNING 留痕，本处**完全静默**
+    #   ⇒ 越域写入与正常写入在日志里长得一模一样，事后无从区分）。
+    #   语义不变（空 scheme_id 仍放行，只是不再静默），断言行为逐字一致。
+    for u in item_updates:
+        await _guard_fact_write_scope(db, str(u.get("fact_id") or ""), scheme_scope)
+    await _guard_fact_write_scope(db, fact_id, scheme_scope)
     if item_updates:
         # ✅ R183（2026-11-07）：条目级更新与随后的分组/行级字段更新是同一请求，
         #    旧实现先 commit 条目更新再继续；若后段触发唯一性闸门 409 或作用域
@@ -3950,6 +3973,22 @@ async def adjust_facts(data: AdjustRequest, db=Depends(get_db)):
         #    （「把年份统一改成 2026」改了一半），且没有任何一处说明改到哪条断了。
         #    现给 _apply_item_updates 加 `commit=False`（默认 True，既有独立调用方
         #    行为逐字不变），本批全部写完再统一 commit，异常统一 rollback。
+        #
+        # ✅ R210（2026-11-10 · P1）：写锁挪到**真正落库阶段**。
+        #    前置依赖已对 ``/adjust`` 豁免（预览零写库却曾独占项目锁最长 120s，
+        #    连带阻塞同项目手工写 / SSE 提取落库 / 文档 stale 标记）。
+        #    此处重新加锁：作用域仍是**项目级**（与 SSE 提取落库同一把），
+        #    冲突时给出与 ``_facts_write_guard_dependency`` **逐字同构**的 409
+        #    detail（``{"code": "facts_write_conflict", "message": ...}``），
+        #    前端错误文案出口据此统一渲染（不再出现 [object Object]）。
+        _adjust_lease = ""
+        try:
+            _adjust_lease = await acquire_project_facts_write(db, str(real_pid), holder="POST /adjust")
+        except FactsWriteConflict as e:
+            raise HTTPException(
+                status_code=409,
+                detail={"code": "facts_write_conflict", "message": redact_sensitive_text(str(e))},
+            )
         try:
             for op in ops:
                 if op["op"] == "update":
@@ -4030,6 +4069,11 @@ async def adjust_facts(data: AdjustRequest, db=Depends(get_db)):
         except Exception:
             await db.rollback()
             raise
+        finally:
+            # ✅ R210：无论成败都必须释放项目级写权（DB 租约 + 进程内锁），
+            #    否则一次失败的 AI 调整会把同项目后续全部事实写入锁死 20s/5min。
+            if _adjust_lease:
+                await release_project_facts_write(db, str(real_pid), _adjust_lease)
         # ✅ 2026-09-29：项目级（scheme_scope 为空）调整此前不失效任何缓存，
         #    与 create_fact / update_fact / delete_fact 口径对齐。
         await _invalidate_fact_scope_cache(db, scheme_scope, str(real_pid))

@@ -174,8 +174,14 @@ class TestClampOutlineDepth:
         ]
         result = clamp_outline_depth(outline)
         lv3 = result[0]["children"][0]["children"][0]
-        assert lv3["description"] == "原描述；（1）新标题"
+        # ✅ R214 重锚（意图保留、强度不减）：并发会话加入「【按以下引导展开】」
+        #    折叠引导标记后，整句逐字断言锁的是**产品文案实现**而非行为。
+        #    本用例真正要锁的是「旧后缀被剥离 + 新引导只出现一次 + 原描述保留」，
+        #    故改为片段断言；引导前缀演进不再假红。
+        assert lv3["description"].startswith("原描述")
+        assert lv3["description"].count("（1）新标题") == 1
         assert "旧标题" not in lv3["description"]
+        assert "（含：" not in lv3["description"]
         assert "（含：" not in lv3["description"], "旧合并写法不得残留"
         assert lv3["description"].count("（1）") == 1, "重复裁剪不得叠加引导后缀"
 
@@ -200,7 +206,11 @@ class TestClampOutlineDepth:
             }
         ]
         result = clamp_outline_depth(outline)
-        assert result[0]["children"][0]["children"][0]["description"] == "（1）新标题"
+        # ✅ R214 重锚：bare 旧后缀必须被替换（不得残留），折叠内容必须进引导。
+        desc = result[0]["children"][0]["children"][0]["description"]
+        assert "（1）新标题" in desc
+        assert "旧标题" not in desc
+        assert "含：" not in desc
 
     def test_non_dict_nodes_are_dropped(self):
         from app.services.outline_utils import clamp_outline_depth

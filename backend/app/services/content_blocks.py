@@ -138,7 +138,19 @@ _ORDERED_MARKER_RES: tuple = (
     # 1. / 1) —— ASCII 且必须跟空格，避免 "3.14 是圆周率" 被误切成列表项
     (re.compile(r"^(\d+)\s*[.)]\s+(.+)$"), "ascii"),
 )
-_TABLE_CAPTION_RE = re.compile(r"^表\s*(?:[:：]\s*" r"|[0-9一二三四五六七八九十][0-9.\-–—]*[\s、.：:]+)" r"(\S.*)$")
+#: 表题开头「表 X-Y」编号前缀（正文规范化侧；捕获剥离后的标题正文）。
+#: ✅ R218（2026-11-11 · P3 · C-4）：与 `_export_docx_parts._LEADING_TABLE_NUM_RE`
+#:   对齐 —— 旧 pattern 只认半角空格/半角数字/无「格」字/无零宽 ⇒
+#:   「表６-１ 配置计划」「表格 6-1 配置计划」在正文预览不剥、成稿剥（同段
+#:   正文两套表号叠写 / 预览与成稿不一致）。现补全角数字０-９、「格」字、
+#:   零宽（Cf 格式字符 \u200b-\u2060\ufeff），与导出侧行为逐字一致。
+_TABLE_CAPTION_RE = re.compile(
+    r"^表[\s\u200b\u200c\u200d\u2060\ufeff]*格?[\s\u200b\u200c\u200d\u2060\ufeff]*"
+    r"(?:[:：][\s\u200b\u200c\u200d\u2060\ufeff]*"
+    r"|[0-9０-９一二三四五六七八九十][0-9０-９.\-–—]*[\s\u200b\u200c\u200d\u2060\ufeff]*"
+    r"[、.：:\s\u200b\u200c\u200d\u2060\ufeff]+)"
+    r"(\S.*)$"
+)
 # ✅ 2026-10-10（文档质量报告 修复6 · 格式问题7）：AI 常返回 HTML `<table>` 而非
 #    GFM 表格，旧实现无法识别，整张表以裸文本（含 <table>/<tr>/<td> 标签）印进交付
 #    DOCX。现把 HTML 表格解析为 GFM 行、复用既有 `type: table` 块与
@@ -284,7 +296,13 @@ def _detect_plain_heading(line: str) -> tuple[int, str] | None:
 
 
 #: 数量词/计量单位首字（`N 台挖掘机进场` 这类正文不得当标题）。
-_UNIT_TAIL_CHARS = "台人天米个套吨层根处项次月年周日时分号元组张栋座榀块份册页批车辆樘扇倍"
+#: ✅ R218（2026-11-11 · P2 · C-1）：补齐「条/口/道/节/排/列/面/孔/眼/遍/趟」11 量词 ——
+#:   此前 `3 条施工便道` 的正文首字「条」不在表内 ⇒ 整行被判成标题、数字 3 被
+#:   静默丢弃（成稿标题「条施工便道」）；实测 `'3 条施工便道'` → `(2,'条施工便道')`。
+#:   新增量词按「宁误判为正文不误判为标题」原则配豁免（见 `_UNIT_TAIL_EXEMPT_NEXT`）：
+#:   正文误判为标题 = 数字丢 + 后续编号错乱（危害大）；标题误判为正文 = 内容保留
+#:   （仅丢标题地位，可接受）。
+_UNIT_TAIL_CHARS = "台人天米个套吨层根处项次月年周日时分号元组张栋座榀块份册页批车辆樘扇倍条口道节排列面孔眼遍趟"
 #: 紧跟单位首字、能把该字组成普通词（而非量词）的下一字 —— 命中则**不**按数量词排除。
 #: 例：`3 人力资源配置`（人力）、`3 项目划分`（项目）、`7.2.3 次生灾害…`（次生）
 #: 都是正常标题，不能被误降级为正文。
@@ -309,6 +327,12 @@ _UNIT_TAIL_EXEMPT_NEXT = {
     "平": "面衡台均",
     "立": "面方杆",
     "根": "据",
+    # ✅ R218（C-1）：新增量词的精准豁免 —— 只豁免「编号 + 明确普通名词」形态
+    #    （`3 条件`/`3 节点` 是编号+名词标题，不得被误降级为正文）；「量词+实物名词」
+    #    （`3 条施工便道`/`3 节电池`）的后续字不在豁免集 ⇒ 仍判正文（数字保留）。
+    #    其余新量词（口/道/排/列/面/孔/眼/遍/趟）保守不豁免（宁正文不标题）。
+    "条": "件款目文例",
+    "节": "点能日气奏拍",
 }
 #: ASCII / 符号计量单位（`3 mm 厚`、`3 m 高`、`5 % 掺量`、`30 ℃`）。
 _UNIT_TAIL_ASCII_RE = re.compile(
@@ -501,7 +525,13 @@ def _attach_trailing_figure_captions(blocks: list[dict]) -> list[dict]:
     while i < len(blocks):
         blk = blocks[i]
         out.append(blk)
-        if blk.get("type") == "chart" and i + 1 < len(blocks):
+        # ✅ R215（2026-11-11 · P3）：白名单扩 image —— AI 配图块（``![题](url)``）
+        #   **下方**的「图 X-Y 题名」段此前流到 _drop_dangling_figure_captions 被
+        #   按「有题无图」整段删除（上方题注由 _extract_figure_caption 吸收，
+        #   下方只有 chart 块有吸收通道）。GB/T 规范图题在图**下方**（R179 G-08
+        #   对 chart 块已修，image 块同族漏改），命中时覆盖 alt（与 chart 块
+        #   「显式图题优先于引导语推导」同口径）。
+        if blk.get("type") in ("chart", "image") and i + 1 < len(blocks):
             nxt = blocks[i + 1]
             if nxt.get("type") == "paragraph":
                 text = _RE_BOLD_WRAP.sub(r"\1", str(nxt.get("text") or "").strip()).strip()
@@ -509,7 +539,10 @@ def _attach_trailing_figure_captions(blocks: list[dict]) -> list[dict]:
                 if m:
                     title = m.group(1).strip()
                     if _looks_like_figure_title(title):
-                        blk["title"] = title
+                        if blk.get("type") == "image":
+                            blk["alt"] = title  # image 块消费 alt（chart 块消费 title）
+                        else:
+                            blk["title"] = title
                         i += 2  # 题注已升格，正文中不再重复输出
                         continue
         i += 1
@@ -1593,7 +1626,13 @@ def _compute_subheading(
 
     # ✅ E3：has_children=True → 降级为节内 body 命名空间
     if has_children:
-        from app.services.numbering import ALPHABET
+        # ✅ R209（2026-11-10 · L7 字母塌缩）：旧实现用 52 项 ``ALPHABET`` 钳制
+        #    （``min(l7 - 1, len(ALPHABET) - 1)``）⇒ 正文子标题的 L7 字母自
+        #    **第 53 项起永久塌缩为 "az"**（成稿出现多个同号子标题、交叉引用失效）。
+        #    R203b #18 统一了目录侧三处 L7 实现，**漏了正文侧这一处**（同族漏改）。
+        #    现改用 services.numbering.alpha_label（Excel 续编，唯一实现）：
+        #    1..52 与旧输出逐字相同，53 起为 ba、bb、…（数学上不重复）。
+        from app.services.numbering import alpha_label
 
         if rel == 0:
             # 第一层：数字+）（1）/ 2）/ …），Heading L6。
@@ -1611,8 +1650,8 @@ def _compute_subheading(
             l7 = sub_counters.setdefault("l7_count", 0)
             l7 += 1
             sub_counters["l7_count"] = l7
-            idx = min(l7 - 1, len(ALPHABET) - 1)
-            letter = ALPHABET[max(idx, 0)]
+            # ✅ R209：Excel 续编（alpha_label），不再用 52 项 ALPHABET 钳制
+            letter = alpha_label(l7)
             # ✅ 编号统一（2026-09-26）：分隔符与 HEADING_STYLE_CONFIG[7] 一致（顿号、无空格），
             #    产出 "a、标题"，与导出行级 L7 标题同口径，修复「L7 多空格」偏差。
             text = f"{letter}{_heading_punct(7)}{pure}"

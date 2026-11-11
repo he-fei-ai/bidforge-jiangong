@@ -461,5 +461,18 @@ def delete_project_docs_root(project_id: str) -> bool:
         return False
     import shutil
 
-    shutil.rmtree(target, ignore_errors=True)
+    # ✅ R208 修复（假成功 · R203 BE-13 同族）：本函数与同文件里 R203 已修好的
+    #    ``delete_doc_tree``（:415）是**同一对孪生实现**——R203 只修了单文档
+    #    那一侧，本函数仍保留 ``ignore_errors=True`` + 无条件 ``return True``。
+    #    Windows 下文件被占用（杀软扫描 / 预览进程持句柄）时目录树残留，
+    #    而调用方（``projects.py`` 项目删除）据此回 ``doc_trees_removed=True``，
+    #    归档层磁盘泄漏无痕。现与 ``delete_doc_tree`` 同口径：失败记 WARNING
+    #    并返回 False（调用方据此如实回报未清理）。
+    try:
+        shutil.rmtree(target)
+    except OSError as e:
+        logger.warning(
+            "项目文档目录树删除失败（可能被占用，可稍后重试）: %s: %s", target, e
+        )
+        return False
     return True

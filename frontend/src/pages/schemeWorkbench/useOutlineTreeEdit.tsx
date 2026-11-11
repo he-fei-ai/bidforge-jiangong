@@ -13,6 +13,8 @@ import {
   hasUnsavedLocalNodes,
   type TreeNode,
 } from "./outlineTreeModel.ts";
+// ✅ R218（D-D）：/reorder 回传 `unmounted_count` 的消费出口（与 list_sections 同口径）。
+import { outlineUnmountedNotice } from "./outlineNotices";
 // ✅ any 清理专项（2026-11-02）：选中章节形状与 useReviewAudit 共用同一契约（仅类型引用，运行期零依赖）
 import type { SelectedSectionLike } from "./useReviewAudit";
 
@@ -313,7 +315,14 @@ export function useOutlineTreeEdit(deps: OutlineTreeEditDeps) {
         flashReorderHint("章节已上/下移，编号已实时更新（已同步到服务端）");
         sectionsApi
           .reorder(id, { order })
-          .then(() => load().then(() => setTimeout(scrollToTarget, 60)))
+          .then(({ data: _reorderData }) => {
+            // ✅ R218（2026-11-11 · P3 · D-D）：/reorder 回传 `unmounted_count`
+            //    （R216），前端此前零消费 ⇒ 拖拽/移动后成环章节从树上消失却无提示。
+            //    与 list_sections（R213 FIX-12）同口径消费（不阻断重排）。
+            const _unmounted = outlineUnmountedNotice(_reorderData);
+            if (_unmounted) msg.warning(_unmounted);
+            return load().then(() => setTimeout(scrollToTarget, 60));
+          })
           .catch(() => {
             // ✅ 后端 /reorder 失败降级为"仅本地调整"：当前章节顺序只在前端可见，
             // 刷新后会回到 DB 原有顺序；明确告知用户需要手动点「保存目录」才能持久化。

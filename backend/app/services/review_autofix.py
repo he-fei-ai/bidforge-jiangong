@@ -331,6 +331,12 @@ _FALLBACK_REASON = {
     "CON": "一致性问题请先在「一致性修复」工作台查看冲突明细与权威值来源。",
     "TRC": "可追溯性问题需补齐计算书或附图，请人工补充。",
     "DLV": "可交付性问题请按整改建议人工处理。",
+    # ✅ R212：评分项覆盖族（CMP-SC → 基规则 SCP-01）登记后，兜底文案按**解析后
+    #    的基规则前缀**取；此前该规则未登记、rid 保持 "CMP-SC-1" → 前缀 "CMP"
+    #    → 命中上方 CMP 文案。登记后 rid 变为 "SCP-01" → 前缀 "SCP"，若不补这条
+    #    会退化成「该问题暂不支持自动修复」这种**无下一步指引**的通用文案
+    #    （用户可见文案回退）。此处按语义补齐：评分项覆盖同样属「内容缺失」。
+    "SCP": "内容缺失需补充整节内容，请到「正文生成」页生成或扩写对应章节。",
 }
 
 
@@ -669,9 +675,17 @@ def _locate_whole_section(finding: dict, sections: list[dict]) -> list[dict]:
     if sid:
         cands = [x for x in sections if x.get("id") == sid]
     if not cands and title:
-        cands = [x for x in sections if (x.get("title") or "") == title]
+        # ✅ R212（2026-11-10 · P2-2）：标题分支**必须限一片**。此前不限片，
+        #    而下方 keywords 分支显式 ``[:1]`` —— 两分支强度不一致：同名章节
+        #    （各章都有「施工准备」是常态）会让本分支命中**全部**同名章节，
+        #    于是「一条问题」被定位到多章：``fix_all`` 的按章归组（by_section）
+        #    会把同一条问题挂到多章 ⇒ 一次「一键修复」把 AI 改写内容写进
+        #    多个**无关**章节（张冠李戴，与 R209「同名节点撞同一 id」同族）。
+        #    现与 keywords 分支同口径：取第一个命中（同标题按目录顺序），
+        #    确定性且不扩散。
+        cands = [x for x in sections if (x.get("title") or "") == title][:1]
         if not cands:
-            cands = [x for x in sections if title in (x.get("title") or "")]
+            cands = [x for x in sections if title in (x.get("title") or "")][:1]
     if not cands:
         kws = tuple(_SECTION_TARGET_KEYWORDS.get(rid, ()))
         if not kws:

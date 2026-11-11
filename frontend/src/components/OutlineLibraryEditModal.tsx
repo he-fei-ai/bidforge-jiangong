@@ -35,8 +35,10 @@ import { outlineLibraryApi, uploadOutlineApi } from "../api";
 //    会无条件 setTree([]) 覆盖用户当前目录树并谎报「识别完成：0 个章节」，
 //    与工作台 summarizeUploadOutlineResult 早已确立的「空结果不替换树 + 如实
 //    回传原因」口径割裂。现两处共用同一折算，不再各写一份。
-//    （SchemeWorkbenchPage 不 import 本弹窗 → 无循环依赖；测试也从同一页面取该函数）
-import { summarizeUploadOutlineResult } from "../pages/SchemeWorkbenchPage";
+// ✅ 2026-11-11 打包：改从纯函数模块直接引入。旧实现经 SchemeWorkbenchPage
+//    的再导出取该函数，使「目录库」lazy 路由反向静态依赖 200 KB / 4000+ 行的
+//    工作台模块（含其 40+ 静态子模块），路由级代码分割被抵消。
+import { summarizeUploadOutlineResult } from "../pages/schemeWorkbench/outlineTreeModel";
 import { useAntdMessageHub } from "../utils/activityCenter";
 import {
   UPLOAD_FILE_ACCEPT,
@@ -265,10 +267,14 @@ export default function OutlineLibraryEditModal({
   }
 
   function insertIntoNode(node: OutlineNode, parentId: string, newNode: OutlineNode): OutlineNode {
+    // ✅ R216（2026-11-11 · P3 · D-11）：children 判空 —— 存量库行
+    //    （R209 normalize 补全 children 之前入库的历史数据）可缺 children 键，
+    //    点「新增子章节」在此处抛 TypeError、插入静默失败。同文件其余遍历
+    //    （countNodes / removeNode / convertToEditTree）均有守卫，唯独此函数漏。
     if (node.id === parentId) {
-      return { ...node, children: [...node.children, newNode] };
+      return { ...node, children: [...(node.children || []), newNode] };
     }
-    if (node.children.length) {
+    if (node.children?.length) {
       return {
         ...node,
         children: node.children.map((c) => insertIntoNode(c, parentId, newNode)),
@@ -850,10 +856,15 @@ export default function OutlineLibraryEditModal({
             {tree.length === 0 ? (
               <Empty description="暂无目录，请点击新增章节、导入目录或套用标准模板" />
             ) : (
-              <div style={{ maxHeight: 340, overflow: "auto" }}>
+              <div className="perf-strict-viewport" style={{ height: 320 }}>
+                {/* ✅ 2026-11-11：antd 5 Tree 的 virtual 与项目已用的 Table virtual
+                    同源（rc-virtual-list），无需引入第二套 react-window 依赖。
+                    弹窗高度固定 320px，可安全交给虚拟列表；展开全树也只渲染视口内行。 */}
                 <Tree
                   treeData={editTreeData}
                   draggable
+                  height={320}
+                  virtual
                   expandedKeys={expandedKeys}
                   onExpand={(keys) => setExpandedKeys(keys as React.Key[])}
                   selectedKeys={selectedKey ? [selectedKey] : []}

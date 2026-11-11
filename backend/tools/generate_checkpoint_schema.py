@@ -20,5 +20,9 @@ OUT = Path(__file__).resolve().parents[2] / "frontend" / "src" / "types" / "chec
 OUT.parent.mkdir(parents=True, exist_ok=True)
 
 ts = generate_typescript_schema()
-OUT.write_text(ts, encoding="utf-8")
+# ✅ R217（2026-11-11 · P2）：Windows 上 Path.write_text 的 newline=None 会把
+#    \n 统一转成 \r\n，而 .gitattributes 规定 *.ts eol=lf ⇒ 每次「改白名单 →
+#    重新生成契约」都会把本文件写成纯 CRLF，触发前端字节体检红，且与 parity
+#    护栏按 LF 的比较分叉。改为显式以 LF 字节写出（生成器是真正常驻的写入口）。
+OUT.write_bytes(ts.replace("\r\n", "\n").encode("utf-8"))
 print(f"Wrote {OUT} ({len(ts)} chars)")

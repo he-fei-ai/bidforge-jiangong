@@ -31,6 +31,13 @@ export type PreviewDataLike = {
   /** 预览级截断：只是本弹窗没显示全，完整内容仍在库里 */
   preview_truncated?: boolean;
   parse_warnings?: string[];
+  /**
+   * ✅ R208：解析状态（后端 preview 两分支均回传）。
+   * 'failed' = 上次解析失败但库里仍保留着**更早一次**的成功正文 ——
+   * force 重解析失败不清旧正文（后端 _mark_parse_failed 语义），
+   * 于是预览弹窗展示的是完好旧正文，用户若不警觉会当成最新结果用。
+   */
+  parse_status?: string;
   message?: string;
 };
 
@@ -114,6 +121,19 @@ export function previewNotices(data: PreviewDataLike | null | undefined): ParseN
       kind: "info",
       title: `解析过程提示 ${warnings.length} 条`,
       detail: warnings.join("；"),
+    });
+  }
+
+  // ✅ R208 修复（失败警示链不可达）：后端 R203 BE-12 已在 preview 两条返回
+  //    路径都补了 parse_status，前端 types 与 previewNotices 却零消费 ——
+  //    「曾成功 → 重解析失败」的文档，预览弹窗展示完好旧正文且**无任何失败
+  //    警示**，用户无从判断那是最新结果（失败原因只在列表 tooltip 里）。
+  //    现补 warning 级提示，与后端 note 文案（「请使用『强制重新解析』重试」）同口径。
+  if (data.parse_status === "failed") {
+    out.push({
+      kind: "warning",
+      title: "该文档上次解析失败",
+      detail: "以下为上次成功解析的结果（内容可能已过期），请使用「强制重新解析」重试",
     });
   }
   return out;

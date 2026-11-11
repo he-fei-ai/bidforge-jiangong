@@ -136,7 +136,11 @@ class TestRestoreWordCount:
         db = await aiosqlite.connect(":memory:")
         db.row_factory = sqlite3.Row
         await db.execute(
-            "CREATE TABLE schemes (id TEXT PRIMARY KEY, review_status TEXT, word_count INTEGER, updated_at TEXT)"
+            # ✅ R216 重锚：_restore_locked 的 status/outline_source 口径修正后，
+            #    真实 schemes 表（schema_sql.py）含 status / outline_source 两列，
+            #    桩表须与真实 schema 对齐；INSERT 改显式列名，避免列数不匹配。
+            "CREATE TABLE schemes (id TEXT PRIMARY KEY, review_status TEXT, word_count INTEGER,"
+            " updated_at TEXT, status TEXT DEFAULT '草稿', outline_source TEXT DEFAULT '')"
         )
         await db.execute(
             "CREATE TABLE sections (id TEXT PRIMARY KEY, scheme_id TEXT, parent_id TEXT,"
@@ -146,7 +150,10 @@ class TestRestoreWordCount:
             "CREATE TABLE scheme_snapshots (id TEXT PRIMARY KEY, scheme_id TEXT, type TEXT,"
             " sections TEXT, created_at TEXT)"
         )
-        await db.execute("INSERT INTO schemes VALUES ('S', '待审核', 99999, 'old')")
+        await db.execute(
+            "INSERT INTO schemes (id, review_status, word_count, updated_at)"
+            " VALUES ('S', '待审核', 99999, 'old')"
+        )
         # 回退目标：两个空正文章节（word_count=0）
         await db.execute(
             "INSERT INTO sections VALUES ('a','S','', '甲', 1, 0, '', 0, '{}'),"

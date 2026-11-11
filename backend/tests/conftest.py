@@ -16,6 +16,27 @@ import pytest
 import pytest_asyncio
 from app.schema_sql import SCHEMA_SQL
 
+
+@pytest.fixture(autouse=True)
+def _reset_outline_quota_breaker():
+    """R213 FIX-11 的进程级熔断表会在用例间残留（桩测试普遍复用 task_id='t'）。
+
+    R216 把熔断检查扩展到 _fetch_unit_children 后，残留标记会让后续用例
+    在**尚未发起 AI 调用**时直接判 failed。生产侧由 sse_handlers 入口/终态
+    调 _clear_quota_blocked 清理，桩测试没有该编排 ⇒ 在此按用例隔离。
+    纯测试隔离，不改生产语义；模块未导入时无需处理（首次导入即空表）。
+    """
+    import sys
+
+    _key = "app.routers._sse_outline_review"
+    _m = sys.modules.get(_key)
+    if _m is not None:
+        _m._QUOTA_BLOCKED_TASKS.clear()
+    yield
+    _m = sys.modules.get(_key)
+    if _m is not None:
+        _m._QUOTA_BLOCKED_TASKS.clear()
+
 # ✅ 图表缓存目录隔离（2026-10-09 · NTFS 共享冲突根治）：
 #    默认图表渲染缓存位于 `data/_exports/charts`，与常驻后端服务(uvicorn)共享。
 #    同一目录下 PNG 缓存文件被并发读写/替换时，Windows 会报共享冲突，被 Python

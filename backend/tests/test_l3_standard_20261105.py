@@ -2,10 +2,11 @@
 """《L3 以下“少目录、多正文”编制标准》落地回归（2026-11-05）。
 
 覆盖：
-A 目录规模统计 / 确定性收敛（单节、单章、全文软目标/硬开关、占位保护、编号连续）；
+A 目录结构归一（L4+ 折叠、L3 默认不合并/开关开启才合并、占位保护、编号连续）；
 B 正文标准下限（普通 1500 / 关键 2500）、自然段计数、提示词注入；
-C 校验侧 DLV-17（目录过深/节点过多）、DLV-18（正文单薄）命中与不命中；
-D 配置开关关闭后逐字回退（不收敛、不注入、不报规则）。
+C 校验侧 DLV-17（目录过深/节点过多，仅提示）、DLV-18（正文单薄）；
+D 配置开关关闭后逐字回退（不折叠/不收敛、不注入、不报规则）；
+E 导出 TOC 深度固定 3、折叠引导按正文渲染。
 """
 
 from __future__ import annotations
@@ -15,6 +16,7 @@ from app.config import settings
 from app.services import l3_standard
 from app.services.audit_rules import _PROGRAM_EMITTED_RULE_IDS, RULE_VERSION, get_rule
 from app.services.content_checkpoint import build_content_system_checkpoint_block
+from app.services.outline_utils import FOLD_GUIDANCE_MARKER, clamp_outline_depth
 from app.services.preflight_engine import PreflightContext, check_deliverability
 
 
@@ -158,14 +160,12 @@ class TestConverge:
         assert leaf["children"] == []
         assert res["folded"] == 3
         assert l3_standard.tree_stats(outline)["max_depth"] == 3
-        # 所有被折叠的文字都在父级 description 中保留
-        assert "1.1.1.1 四级甲" in leaf["description"]
+        # 所有被折叠的文字都在父级 description 中保留（标题内嵌编号已剥离）
+        assert "（1）四级甲" in leaf["description"]
         assert "四级甲说明" in leaf["description"]
-        assert "1.1.1.1.1 五级甲" in leaf["description"]
-        assert "1.1.1.2 四级乙" in leaf["description"]
+        assert "（2）五级甲" in leaf["description"]
+        assert "（3）四级乙" in leaf["description"]
         assert leaf["description"].startswith("三级主说明；")
-        # 段首引导格式
-        assert "（1）" in leaf["description"] and "（2）" in leaf["description"]
 
     def test_fold_keeps_numbering_continuous(self):
         outline = [
@@ -177,6 +177,149 @@ class TestConverge:
         assert outline[0]["children"][0]["id"] == "1.1"
         assert outline[0]["children"][0]["children"][0]["id"] == "1.1.1"
         assert outline[1]["children"][0]["children"][0]["id"] == "2.1.1"
+
+    def test_author_numbered_list_not_stripped_by_fold(self):
+        """作者原有「（1）（2）」描述不得被当作旧折叠后缀剥离。"""
+        outline = [
+            _node(
+                "第1章",
+                [
+                    _node(
+                        "1.1 节",
+                        [
+                            _node(
+                                "1.1.1 三级",
+                                [_node("1.1.1.1 四级甲", desc="四级说明")],
+                                desc="主体说明；（1）作者清单甲；（2）作者清单乙",
+                            )
+                        ],
+                    )
+                ],
+            )
+        ]
+        l3_standard.converge_tree(outline)
+        leaf = outline[0]["children"][0]["children"][0]
+        assert "（1）作者清单甲" in leaf["description"]
+        assert "（2）作者清单乙" in leaf["description"]
+        assert leaf["description"].startswith("主体说明；（1）作者清单甲；（2）作者清单乙；")
+        assert f"{FOLD_GUIDANCE_MARKER}（1）四级甲：四级说明" in leaf["description"]
+
+    def test_repeated_fold_is_idempotent(self):
+        """同一棵树重复折叠：description 逐字不变、标记只出现一次。"""
+        outline = [
+            _node(
+                "第1章",
+                [
+                    _node(
+                        "1.1 节",
+                        [_node("1.1.1 三级", [_node("1.1.1.1 四级甲", desc="四级说明")], desc="主体说明")],
+                    )
+                ],
+            )
+        ]
+        leaf = outline[0]["children"][0]["children"][0]
+        kids = leaf["children"]
+        clamp_outline_depth(outline)
+        first = leaf["description"]
+        # 模拟再次裁剪：子节点仍在（如 normalize_outline 被重复调用）
+        leaf["children"] = kids
+        clamp_outline_depth(outline)
+        assert leaf["description"] == first
+        assert first.count(FOLD_GUIDANCE_MARKER) == 1
+        assert first.count("（1）四级甲") == 1
+
+    def test_legacy_unmarked_fold_tail_replaced_not_duplicated(self):
+        """历史无标记数据：尾部与本次引导逐字一致才视为旧折叠产出并替换。"""
+        outline = [
+            _node(
+                "第1章",
+                [
+                    _node(
+                        "1.1 节",
+                        [
+                            _node(
+                                "1.1.1 三级",
+                                [_node("1.1.1.1 四级甲", desc="四级说明")],
+                                desc="主体说明；（1）四级甲：四级说明",
+                            )
+                        ],
+                    )
+                ],
+            )
+        ]
+        l3_standard.converge_tree(outline)
+        leaf = outline[0]["children"][0]["children"][0]
+        assert leaf["description"] == f"主体说明；{FOLD_GUIDANCE_MARKER}（1）四级甲：四级说明"
+        assert leaf["description"].count("（1）四级甲") == 1
+
+    def test_legacy_author_list_preserved_when_lead_differs(self):
+        """历史无标记、尾部与本次引导不一致 → 视为作者原文，不剥不叠。"""
+        outline = [
+            _node(
+                "第1章",
+                [
+                    _node(
+                        "1.1 节",
+                        [
+                            _node(
+                                "1.1.1 三级",
+                                [_node("1.1.1.1 四级甲", desc="四级说明")],
+                                desc="主体说明；（1）作者清单甲",
+                            )
+                        ],
+                    )
+                ],
+            )
+        ]
+        l3_standard.converge_tree(outline)
+        leaf = outline[0]["children"][0]["children"][0]
+        assert "（1）作者清单甲" in leaf["description"]
+        assert "（1）四级甲：四级说明" in leaf["description"]
+
+
+# ===========================================================================
+# A2 折叠引导的正文硬保证（落库前确定性补齐）
+# ===========================================================================
+class TestFoldBackfill:
+    DESC = f"主说明；{FOLD_GUIDANCE_MARKER}（1）建筑面积：地上 12 层；（2）结构形式：框架-剪力墙"
+
+    def test_missing_items_appended_with_continued_numbering(self):
+        content = "正文第一段。\n\n（1）其他编号内容"
+        new, filled = l3_standard.backfill_fold_guidance(content, self.DESC)
+        assert filled == ["建筑面积：地上 12 层", "结构形式：框架-剪力墙"]
+        # 避开已有编号：从（2）继续
+        assert "（2）建筑面积：地上 12 层" in new
+        assert "（3）结构形式：框架-剪力墙" in new
+        assert new.startswith(content)
+
+    def test_existing_items_not_duplicated(self):
+        content = "正文已写建筑面积与结构形式，内容完整。"
+        new, filled = l3_standard.backfill_fold_guidance(content, self.DESC)
+        assert filled == []
+        assert new == content
+
+    def test_match_tolerates_space_and_punctuation(self):
+        content = "正文提到建筑 面积、结构 形式。"
+        _, filled = l3_standard.backfill_fold_guidance(content, self.DESC)
+        assert filled == []
+
+    def test_no_marker_means_no_backfill(self):
+        """作者原有「（1）」描述（无折叠标记）不触发补齐。"""
+        new, filled = l3_standard.backfill_fold_guidance("正文", "（1）作者甲；（2）作者乙")
+        assert filled == []
+        assert new == "正文"
+
+    def test_empty_content_gets_items(self):
+        new, filled = l3_standard.backfill_fold_guidance("", self.DESC)
+        assert len(filled) == 2
+        assert new.startswith("（1）建筑面积：地上 12 层")
+        assert "（2）结构形式：框架-剪力墙" in new
+
+    def test_switch_off_disables_backfill(self, monkeypatch):
+        monkeypatch.setattr(settings, "l3_standard_enabled", False)
+        new, filled = l3_standard.backfill_fold_guidance("正文", self.DESC)
+        assert filled == []
+        assert new == "正文"
 
 
 # ===========================================================================
@@ -280,7 +423,9 @@ class TestDLV17:
         finds = _deliverability(sections)
         assert "DLV-17" in _ids(finds)
         f = next(x for x in finds if x["rule_id"] == "DLV-17")
-        assert "超过每节" in f["detail"]
+        # 2026-11-05 二次口径：L3 规模只提示、不阻断，措辞为“多于建议值”
+        assert "多于建议值每节 5 个" in f["detail"]
+        assert f["severity"] == "low"
 
     def test_compliant_outline_not_flagged(self):
         sections = [_sec("c1", "第1章", 1), _sec("s1", "1.1 节", 2, "c1")]
@@ -396,3 +541,36 @@ class TestRegistry:
         finds = _deliverability(sections)
         assert "DLV-17" not in _ids(finds)
         assert "DLV-18" not in _ids(finds)
+
+
+# ===========================================================================
+# E 导出：TOC 深度固定 3，折叠后的段首引导不进目录
+# ===========================================================================
+class TestExportToc:
+    def test_toc_depth_default_is_three(self):
+        import inspect
+
+        from app.routers.export import _add_toc_field
+
+        assert inspect.signature(_add_toc_field).parameters["depth"].default == 3
+
+    def test_folded_tree_has_no_heading_beyond_l3(self):
+        """折叠后目录最大层级恒为 3，因此 TOC（1-3）不可能包含 L4 条目。"""
+        outline = [
+            _node(
+                "第1章",
+                [_node("1.1 节", [_node("1.1.1 三级", [_node("1.1.1.1 四级", [_node("1.1.1.1.1 五级")])])])],
+            )
+        ]
+        l3_standard.converge_tree(outline)
+        assert l3_standard.tree_stats(outline)["max_depth"] == 3
+        assert outline[0]["children"][0]["children"][0]["children"] == []
+
+    def test_folded_guidance_stays_as_body_text(self):
+        """折叠产生的是父级 description 里的正文引导，不是标题节点。"""
+        outline = [_node("第1章", [_node("1.1 节", [_node("1.1.1 三级", [_node("1.1.1.1 四级甲")])])])]
+        l3_standard.converge_tree(outline)
+        leaf = outline[0]["children"][0]["children"][0]
+        assert leaf["title"] == "1.1.1 三级"
+        assert "（1）四级甲" in leaf["description"]
+

@@ -23,6 +23,22 @@ import {
 
 const { Text } = Typography;
 
+/**
+ * ✅ R210（2026-11-10）：事实值是否**可渲染且非空**（用于「保留当前值」门禁）。
+ *
+ * `safeFactText` 对 undefined / null / 空串 / 空对象都回落为 ""；裁决接口按
+ * **回传值**写库 ⇒ 把 "" 当裁决值回传等于「把事实值清空」。因此裁决类入口
+ * 必须先判值是否真的存在。
+ */
+function _hasRenderableValue(value: unknown): boolean {
+  if (value === null || value === undefined) return false;
+  if (typeof value === "string") return value.trim() !== "";
+  if (typeof value === "number" || typeof value === "boolean") return true;
+  if (Array.isArray(value)) return value.length > 0;
+  if (typeof value === "object") return Object.keys(value as object).length > 0;
+  return false;
+}
+
 export const FactsGroupList = memo(function FactsGroupList({
   groups,
   filter,
@@ -61,7 +77,7 @@ export const FactsGroupList = memo(function FactsGroupList({
   const visible = useMemo(() => applyFactsFilter(groups, filter), [groups, filter]);
   return (
     <Collapse
-      items={visible.map((g) => {
+      items={visible.map((g, gi) => {
         const allItems: FactItemLike[] = g.items || [];
         const items: FactItemLike[] = g.filteredItems || allItems;
         // ✅ 性能优化：单次遍历同时统计三项计数（原实现 3 次独立 filter，
@@ -76,7 +92,8 @@ export const FactsGroupList = memo(function FactsGroupList({
         }
 
         return {
-          key: g.id || g.title,
+          // ✅ 2026-11-11：title 可能重名，补序号保证 Collapse 面板 key 唯一稳定
+          key: g.id || `group-${gi}-${g.title}`,
           label: (
             <Space>
               <span>{g.title}</span>
@@ -357,6 +374,18 @@ export const FactsGroupList = memo(function FactsGroupList({
                                     size="small"
                                     type="link"
                                     style={{ padding: 0, height: "auto" }}
+                                    // ✅ R210（2026-11-10 · P2）：「保留当前值」不得把事实值
+                                    //   **清空**。``safeFactText`` 对 undefined/null/对象回落为
+                                    //   ""，而旧实现把它当裁决值回传 ⇒ 后端按回传值写库 ⇒
+                                    //   用户点「保留当前值」实际把事实值改成空串（旧数据 /
+                                    //   对象型 value 高发）。现改为：值为空时**禁用**该入口
+                                    //   并提示改选候选值（与候选值路径口径对称）。
+                                    disabled={!_hasRenderableValue(it.value)}
+                                    title={
+                                      _hasRenderableValue(it.value)
+                                        ? undefined
+                                        : "当前事实值为空，无法保留，请改选候选值"
+                                    }
                                     onClick={() => onResolveConflict(it, safeFactText(it.value))}
                                   >
                                     保留当前值

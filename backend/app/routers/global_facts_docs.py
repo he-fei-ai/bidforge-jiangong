@@ -698,7 +698,9 @@ async def upload_documents(
             # 后旧记录和旧文件仍可用。档案行的替换不再走「先 DELETE 再 INSERT」，
             # 而由下方单条 upsert 完成（R175 · BUG-1，见落库处注释）。
             cur = await db.execute(
-                "SELECT id, file_path FROM project_documents " "WHERE project_id=? AND file_name=?", (real_pid, fname)
+                "SELECT id, file_path, doc_category FROM project_documents "
+                "WHERE project_id=? AND file_name=?",
+                (real_pid, fname),
             )
             # ✅ P1（R13 漏改 · 2026-10-05）：返回 None 时下方 `cur.fetchall()`
             #    抛 AttributeError，被外层 except 接住 → rollback + 原样上抛 →
@@ -708,7 +710,8 @@ async def upload_documents(
             if cur is None:
                 logger.warning("同名文档查询失败（db.execute 返回 None），project=%s", real_pid)
                 raise HTTPException(503, "文档服务暂时不可用，请稍后重试")
-            for old in await cur.fetchall():
+            _old_rows = await cur.fetchall()
+            for old in _old_rows:
                 old_path = old["file_path"] if "file_path" in old.keys() else ""
                 safe_old = _managed_upload_path(old_path)
                 if safe_old and safe_old != fpath:
@@ -733,6 +736,21 @@ async def upload_documents(
             #    最终只剩一行且内容为最后一次上传。DO UPDATE 的重置清单与旧
             #    「DELETE + INSERT」的默认值逐列等价（旧行 id 换新、解析派生列清零）。
             doc_category = _auto_classify_document(fname, ftype)
+            # ✅ R208 修复（人工分类被静默还原）：同名重传时**保留既有分类**。
+            #    旧实现恒写自动分类值（doc_category=excluded.doc_category），
+            #    于是用户在「文件导入」里手动改过的分类会被下一次同名重传悄悄
+            #    改回 —— 「XX投标报价表.xlsx」手动改为「报价清单」后重传，
+            #    自动分类因文件名含「投标」给出「招标文件」，人工值被抹掉。
+            #    分类参与 bid_analysis._combine_doc_texts 的
+            #    extract_priority 读取序 —— 人工纠正被抹 = 提取侧静默换料。
+            #    口径：既有分类非空且已登记 → 保留（人工优先）；否则自动值兜底。
+            #    （上方同名旧行查询已补 doc_category 列，此处零额外查询。）
+            _valid_cats = _valid_doc_categories()
+            for _old in _old_rows:
+                _pc = _old["doc_category"] if "doc_category" in _old.keys() else ""
+                if _pc and str(_pc) in _valid_cats:
+                    doc_category = str(_pc)
+                    break
             ins_cur = await db.execute(
                 "INSERT INTO project_documents "
                 "(id, project_id, file_name, file_type, doc_type, parsed_markdown, file_path, "
@@ -948,6 +966,20 @@ async def _ingest_parsed_doc(
     """
     try:
         cur = await db.execute("SELECT parsed_markdown, parse_version FROM project_documents" " WHERE id=?", (doc_id,))
+        # ✅ R208 修复（R13 家族漏改）：本模块路由层 5 处「按 id 读文档」均已
+        #    补 ``cur is None`` 判空（:1304 / :1333 / :1528 / :1813 / :1912），
+        #    唯独本函数漏改 —— 而它是「解析 → 四层产物落盘」的**唯一入口**
+        #    （global_facts.parse_document → _ingest_parsed_doc →
+        #    ingest_parse_result）。cur 为 None 时 ``cur.fetchone()`` 抛
+        #    AttributeError，被本函数下方的 ``except Exception: return {}``
+        #    整段吞掉：**解析正文已落库（成功）但四层产物（parsed.md / pages /
+        #    tables / images / doc_chunks / 索引）全部未生成**，且响应里
+        #    ``layers`` 键消失 —— 用户与日志都只看到「解析成功」。
+        #    处置：与 doc_pipeline.ingest_parse_result 同口径（读路径降级为
+        #    「无历史块」），并留 WARNING 点名 doc_id。
+        if cur is None:
+            logger.warning("查询文档解析结果失败（db.execute 返回 None），四层产物无法生成：%s", doc_id)
+            return {}
         r = dict(await cur.fetchone() or {})
         # 首次解析 prev='' → v1；重解析（源文档此前已成功解析过）→ 代次递增。
         # ✅ BUG 修复：旧版文档的 parse_version 列可能为空（四层存储上线前解析的），
@@ -1169,6 +1201,18 @@ async def _mark_parse_failed(db, doc_id: str, reason: str) -> None:
             return
         await db.commit()
     except Exception:
+        # ✅ R208 修复（commit 裸奔 · R203 BE-17 同族）：R203 给同模块的
+        #    _reconcile_parse_status / _reconcile_parse_status_all /
+        #    ingest_parse_result / build_completeness_report / run_cross_check
+        #    五处补了「异常 → rollback + WARNING」，唯独漏了本函数。
+        #    本函数的 UPDATE 已发出，commit 抛异常时悬空写会随连接池下一个
+        #    请求固化（幽灵提交）——**批量解析路径**尤其明显：下一份文档的
+        #    _persist_parse_result 的 commit 会把这条失败标记一并提交，
+        #    而本次失败在日志里只呈现为一条 exception。
+        try:
+            await db.rollback()
+        except Exception as rb_err:
+            logger.debug("解析失败标记路径 rollback 失败（连接损坏时忽略）: %s", rb_err)
         logger.exception("标记文档 %s 解析失败状态失败（可忽略）", doc_id)
 
 
@@ -1583,6 +1627,20 @@ async def parse_all_documents(
                     "SELECT parsed_markdown, parse_status FROM project_documents WHERE id=?",
                     (doc["id"],),
                 )
+                # ✅ R208 修复（R13 家族漏改）：本模块路由层其余读路径均已补
+                #    ``cur is None`` 判空，此处漏改。cur 为 None 时
+                #    ``cur.fetchone()`` 抛 AttributeError，被下方
+                #    ``except Exception`` 捕获 → 只记一条 WARNING
+                #    「按未解析继续，可能重复解析」→ **对该文档发起真实 OCR**
+                #    （已解析文档被重复 OCR：分钟级 + 厂商成本，且日志只有
+                #    一条 warning，无从归因）。现补判空 → 该文档计入 failed
+                #    并跳过，不重复解析。
+                if cur is None:
+                    _reason = "读取文档解析状态失败（数据库暂时不可用）"
+                    logger.warning("复核文档 %s 解析状态失败（db.execute 返回 None），跳过避免重复解析", doc.get("file_name", ""))
+                    await _mark_parse_failed(db, doc["id"], _reason)
+                    failed.append({"file_name": doc["file_name"], "reason": _reason})
+                    continue
                 _c = await cur.fetchone()
                 if (
                     _c
@@ -1594,7 +1652,14 @@ async def parse_all_documents(
                     #    陈旧的 parse_status —— 否则「解析全部」对存量文档回
                     #    「所有文档均已解析」却不改状态，前端列表恒显「待解析」。
                     if await _reconcile_parse_status(db, doc["id"]):
-                        reconciled.append(doc["file_name"])
+                        # ✅ R208 修复（契约倒挂）：后端此前 append 的是**文件名
+                        #    字符串**，而前端 types/facts.ts 声明为
+                        #    ``Array<{doc_id?, file_name?}>`` —— 任何按声明取
+                        #    ``r.file_name`` 的消费方恒得 undefined（当前前端
+                        #    只消费 reconciled_count，属「侥幸未踩」）。
+                        #    现统一为**对象数组**，与同响应的 failed[] /
+                        #    truncated[] 口径一致（前端声明本就按对象数组写）。
+                        reconciled.append({"doc_id": doc["id"], "file_name": doc["file_name"]})
                     continue
             except Exception as e:
                 # ✅ A-4（2026-10-01）：原为 `except Exception: pass`，完全静默。
@@ -1781,6 +1846,17 @@ async def parse_all_documents(
 _DOC_CATEGORY_KEYWORDS = tuple(AUTO_CLASSIFY_RULES)
 
 
+def _valid_doc_categories() -> set[str]:
+    """已登记的合法分类集合（与 PATCH /documents/{id}/category 的校验口径同源）。
+
+    ✅ R208：分类唯一事实源是 ``doc_categories.AUTO_CLASSIFY_RULES``，
+    「其他」为兜底分类（ALL_DOC_CATEGORIES 已含）。此前
+    ``update_document_category`` 内联了同一集合的字面构造，本函数抽为
+    单一出口供上传路径复用（避免两处漂移）。
+    """
+    return {cat for cat, _ in AUTO_CLASSIFY_RULES} | {"其他"}
+
+
 def _auto_classify_document(file_name: str, file_type: str = "") -> str:
     """根据文件名自动判断文档分类（用于「文件导入」Tab 展示）。
 
@@ -1903,7 +1979,7 @@ async def update_document_category(doc_id: str, body: dict, db=Depends(get_db)):
     category = str(body.get("doc_category") or "").strip()
     if not category:
         raise HTTPException(400, "doc_category 不能为空")
-    valid_categories = {cat for cat, _ in _DOC_CATEGORY_KEYWORDS} | {"其他"}
+    valid_categories = _valid_doc_categories()
     if category not in valid_categories:
         raise HTTPException(400, f"未知分类（{category}），可选：" f"{', '.join(sorted(valid_categories))}")
     cur = await db.execute("SELECT id FROM project_documents WHERE id=?", (doc_id,))

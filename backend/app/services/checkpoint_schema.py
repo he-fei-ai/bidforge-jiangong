@@ -55,6 +55,14 @@ CHECKPOINT_KINDS: dict[str, tuple[str, tuple[str, ...]]] = {
             # ✅ R179 N1（2026-11-05）：自动确认前置判定（{ready, blockers}），
             #    断线重挂/刷新接管与在线 completed 同构；旧数据缺此键不受影响。
             "auto_confirm",
+            # ✅ R210（L1-8）：断点续跑**复用章数** —— 后端日志早有这条信息，
+            #    但断线重挂后前端零信号（用户不知道「这次省了多少配额」）。
+            "resumed_chapters",
+            # ✅ R213（FIX-6）：R210 的「一级章截断」信号此前只进 SSE 终态，
+            #    断线重挂经本白名单过滤后确定性丢失 ⇒ 用户把被截断目录当完整
+            #    成果保存。两键与 workbenchTypes.ts 的 SSE 契约逐字对齐。
+            "level1_truncated",
+            "level1_total",
         ),
     ),
     "content_generation": (
@@ -89,6 +97,13 @@ CHECKPOINT_KINDS: dict[str, tuple[str, tuple[str, ...]]] = {
             "processed",
             "charts",
             "fact_mapping",
+            # ✅ R217（2026-11-11 · P2）：R208 在生产侧新增的三个「统计失败」
+            #    留痕键（不得把计算失败伪装成 0 项）此前只落在在线终态，
+            #    断线重挂经本白名单过滤后整条丢失 ⇒ 刷新后运维无从区分
+            #    「统计失败」与「无问题」。加法式登记，未触发时键不出现。
+            "word_audit_error",
+            "order_check_error",
+            "fact_injection_summary_error",
         ),
     ),
     # ✅ R89（2026-10-17）：facts 归入单一事实源（此前只存在于 routers 侧手写副本，
@@ -111,6 +126,12 @@ CHECKPOINT_FIELD_TYPES: dict[str, dict[str, str]] = {
         "failed_count": "int",
         # ✅ R179 N1：{ready: bool, blockers: list[dict], counts: dict}
         "auto_confirm": "dict",
+        # ✅ R210（L1-8）：复用章数（int）。
+        "resumed_chapters": "int",
+        # ✅ R213（FIX-6）：与 workbenchTypes.ts 的 SSE 契约同为 number；不登记
+        #    类型时生成器会退化成 unknown，前端重挂读该键需强转（TS2339）。
+        "level1_truncated": "int",
+        "level1_total": "int",
     },
     "content_result": {
         "event": "str",

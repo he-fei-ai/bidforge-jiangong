@@ -300,6 +300,43 @@ describe("FactsTab · Tab 级交互（R189 补齐零覆盖）", () => {
     expect(document.body.textContent).toContain("30");
   });
 
+  it("8b. R214：同 rule_id 的多处跨段矛盾用组合键渲染，不触发 React duplicate key 警告", () => {
+    // ✅ R214（2026-11-10 · R210 D-6）：后端 rule_id **不唯一**（XV-MAT-DESIGN /
+    //    XV-MACH-SCHED 各 4 个独立产出点、DB 唯一键含 conflict_type）⇒ 旧 key
+    //    ``cf.rule_id || idx`` 让同 rule_id 的多处冲突 key 相同，React 报
+    //    「Encountered two children with the same key」并复用节点（渲染错乱）。
+    //    现按 rule_id + 双侧名称/值 + idx 组合。本测试用两条**同 rule_id** 冲突，
+    //    捕获 console.error：出现 duplicate key 警告即判红。
+    const errSpy = vi.spyOn(console, "error").mockImplementation(() => {});
+    const cfBase: FactCrossConflict = {
+      rule_id: "XV-MAT-DESIGN",
+      severity: "high",
+      conflict_type: "material_design",
+      side_a: { name: "钢筋等级", value: "HRB400" },
+      side_b: { name: "设计说明", value: "HRB400E" },
+      auto_resolvable: false,
+    };
+    const cf2: FactCrossConflict = {
+      rule_id: "XV-MAT-DESIGN",
+      severity: "high",
+      conflict_type: "material_design",
+      side_a: { name: "混凝土强度", value: "C30" },
+      side_b: { name: "设计说明", value: "C35" },
+      auto_resolvable: false,
+    };
+    render(<FactsTab {...makeProps({ factsCrossConflicts: [cfBase, cf2] })} />);
+    const dup = errSpy.mock.calls.filter((c) => {
+      const s = String(c[0] ?? "");
+      return s.includes("same key") || s.includes("Encountered two children");
+    });
+    errSpy.mockRestore();
+    expect(dup).toEqual([]);
+    // 两条冲突都渲染出来（组合键不会互相覆盖）
+    expect(screen.getByText(/检测到 2 处跨段矛盾/)).toBeTruthy();
+    expect(document.body.textContent).toContain("钢筋等级");
+    expect(document.body.textContent).toContain("混凝土强度");
+  });
+
   it("9. generating 时主操作按钮禁用", () => {
     render(<FactsTab {...makeProps({ generating: true, genType: "facts" })} />);
     const btn = screen.getByRole("button", { name: /③ AI 提取事实/ }) as HTMLButtonElement;

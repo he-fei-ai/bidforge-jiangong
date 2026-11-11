@@ -1633,6 +1633,30 @@ async def _review_state_hash(db, scheme_id: str) -> str:
     return await _rs(db, scheme_id)
 
 
+def _section_id_by_title(sections: list | None, title: str) -> str:
+    """按章节标题反查章节 id（**唯一命中才返回**，歧义不猜）。
+
+    ✅ R212（2026-11-10 · P2-3）：AI 一致性审计的提示词契约只让模型返回
+    ``section_title``（见 ``prompts/analysis.py::consistency_audit_system`` 的
+    JSON 形态），**没有 section_id** ⇒ 聚合层此前写死 ``"section_id": ""``
+    ⇒ 前端「问题定位跳转」对一致性维度不可用（用户只看到章节标题，点不进去）。
+
+    此处用当前目录做**唯一命中**的精确标题反查：命中唯一时补上 id；
+    同名多章（各章都有「施工准备」是常态）时**不猜**（返回空串）——
+    宁可让用户自己选，也不能把用户带到错误章节（与 R209「同名节点撞同一 id」
+    同族教训：宁可空缺、不可错配）。
+    """
+    t = (title or "").strip()
+    if not t:
+        return ""
+    hits = [
+        str(s.get("id") or "")
+        for s in (sections or [])
+        if (s.get("title") or "").strip() == t and str(s.get("id") or "").strip()
+    ]
+    return hits[0] if len(hits) == 1 else ""
+
+
 async def _run_is_stale(
     db,
     scheme_id: str,
@@ -2117,7 +2141,11 @@ async def _readiness_overview_compute(
                         "title": f"一致性审计：{it.get('dimension') or '不一致项'}",
                         "detail": it.get("content_quote") or it.get("fact") or "",
                         "evidence": [it.get("fact") or "", it.get("content_quote") or ""],
-                        "section_id": "",
+                        # ✅ R212（P2-3）：AI 侧只给标题，用当前目录做**唯一命中**
+                        #    的精确反查补 id（同名多章不猜，见 _section_id_by_title）。
+                        "section_id": _section_id_by_title(
+                            getattr(ctx, "sections", None), it.get("section_title") or ""
+                        ),
                         "section_title": it.get("section_title") or "",
                         "suggestion": it.get("suggestion") or "",
                         "basis": "全文一致性审计（AI）",
@@ -2211,6 +2239,18 @@ async def _readiness_overview_compute(
                 if auth:
                     detail_parts.append(f"权威值：{auth}（{auth_src}）" if auth_src else f"权威值：{auth}")
                 detail = "；".join(detail_parts) or topic
+                # ✅ R212（2026-11-10 · P2-3）：扫描冲突的 ``occurrences`` 里**本来就
+                #    带着 section_id / section_title**（consistency_scanner 建冲突时
+                #    就写进去了，见 consistency_scanner.py 的 section_occurrences），
+                #    但聚合层此前一律写死 ``"section_id": ""`` ⇒ ① 前端「问题定位
+                #    跳转」对一致性维度不可用；② ``_target_signature`` 退化为
+                #    evidence 文本拼接，跨来源比对更脆。现直接取首个带 id 的出现点，
+                #    **零契约变更**（数据本来就在库里，只是不消费）。
+                _scan_sid = ""
+                for _o in occ:
+                    if isinstance(_o, dict) and str(_o.get("section_id") or "").strip():
+                        _scan_sid = str(_o.get("section_id") or "").strip()
+                        break
                 ai_findings.append(
                     {
                         "rule_id": f"CON-SCAN-{idx + 1}",
@@ -2219,7 +2259,7 @@ async def _readiness_overview_compute(
                         "title": f"一致性扫描：{c.get('conflict_type') or '数值冲突'}",
                         "detail": detail,
                         "evidence": [str(o) for o in occ],
-                        "section_id": "",
+                        "section_id": _scan_sid,
                         "section_title": topic,
                         # 权威值单独成字段（/report 与前端可各自消费）。刻意不塞进
                         # suggestion —— suggestion 是「怎么改」的指令（repair_instruction），

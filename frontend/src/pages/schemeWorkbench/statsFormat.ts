@@ -64,8 +64,17 @@ export function statsEqual(a: GenStats | undefined, b: GenStats): boolean {
     a.progress === b.progress &&
     a.stepwise === b.stepwise &&
     a.nodes === b.nodes &&
-    a.running === b.running
+    runningEqual(a.running, b.running)
   );
+}
+
+/** ✅ R217（2026-11-11 · P2）：running 是数组，JSON 反序列化后每次都是新
+ *  引用 —— 旧实现按引用比较恒 false，心跳去重（本节注释声称消除的
+ *  「高频 ping 抖动」）从未生效。按内容比较，元素为扁平统计对象。 */
+function runningEqual(a: unknown, b: unknown): boolean {
+  if (a === b) return true;
+  if (!Array.isArray(a) || !Array.isArray(b) || a.length !== b.length) return false;
+  return a.every((v, i) => JSON.stringify(v) === JSON.stringify(b[i]));
 }
 
 // ✅ P0-5 组件拆分：目录树辅助纯函数（原组件内定义，无闭包依赖，移模块级供 SchemeTreePanel 复用）

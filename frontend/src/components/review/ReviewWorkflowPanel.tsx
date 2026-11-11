@@ -461,14 +461,25 @@ function ReviewWorkflowPanel({ schemeId, refreshKey = 0, onChanged }: ReviewWork
         onOk: async () => {
           setSubmitting(true);
           try {
-            await reviewApi.submit(schemeId, {
+            const resp = await reviewApi.submit(schemeId, {
               to_status: to,
               reviewer,
               comment: commentRef.current.trim(),
               // ✅ G6：开启时后端会硬校验「所有章节已纳入审核」，不满足则 422
               require_all_sections_reviewed: requireAllRef.current,
             });
+            // ✅ R214（2026-11-10 · R212 D-1）：后端加法式回传 review_state_stale
+            //    —— 最近一次总检的章节审核结论已过期（正文/审核状态在总检后又
+            //    变）。旧前端不消费 ⇒ 用户按过期结论提交而零提示。此处**只提示、
+            //    不阻断**（require_all_sections_reviewed=false 是文档化的强制提交
+            //    逃生门，硬拦需产品裁决）。
+            const stale = Boolean(
+              (resp as { data?: { review_state_stale?: boolean } })?.data?.review_state_stale,
+            );
             msg.success(`方案已标记为「${label}」`);
+            if (stale) {
+              msg.warning("最近一次总检的章节审核结论已过期，建议重新总检后再交付");
+            }
             await load();
             onChanged?.();
           } catch (e: unknown) {

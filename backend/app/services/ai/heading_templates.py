@@ -246,16 +246,13 @@ def _replace_tail_n(m: re.Match, parts: list[int]) -> str:
 def _alpha_label(n: int) -> str:
     """Excel 风格字母编号：1→a, 2→b, …, 26→z, 27→aa, 28→ab, …（R203）。
 
-    与 heading_v2._alpha_label / 前端 outlineNumbering.alphaLabel 同口径。
+    ✅ R209（2026-11-10）：实现下沉到 ``services.numbering.alpha_label``
+    （唯一事实源），本函数保留为薄包装 —— R203b #18 统一了三处 L7 实现却漏了
+    正文侧（content_blocks），本轮收口为「一处实现 + 三处引用」，避免再次同族漏改。
     """
-    letters = "abcdefghijklmnopqrstuvwxyz"
-    x = max(1, int(n))
-    out = ""
-    while x > 0:
-        x -= 1
-        out = letters[x % 26] + out
-        x //= 26
-    return out
+    from app.services.numbering import alpha_label
+
+    return alpha_label(n)
 
 
 def format_outline_number_by_template(id_str: str, template: str) -> str:

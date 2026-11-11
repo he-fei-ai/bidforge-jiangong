@@ -10,6 +10,9 @@ export interface outline_result {
   failed_chapters?: string[];
   failed_count?: number;
   auto_confirm?: Record<string, unknown>;
+  resumed_chapters?: number;
+  level1_truncated?: number;
+  level1_total?: number;
 }
 
 export interface content_result {
@@ -30,6 +33,9 @@ export interface content_result {
   processed?: number;
   charts?: number;
   fact_mapping?: unknown[];
+  word_audit_error?: unknown;
+  order_check_error?: unknown;
+  fact_injection_summary_error?: unknown;
 }
 
 export interface facts_result {

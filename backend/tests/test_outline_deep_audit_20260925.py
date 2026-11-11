@@ -284,8 +284,13 @@ class TestE2PartialPreviewMatchesFinal:
         node = (c1.get("children") or [])[0]
         node = (node.get("children") or [])[0]
         desc = str(node.get("description") or "")
-        # 2026-11-05 折叠口径：深层标题并入「（1）A；（2）B」段首引导（不再用「含：」）。
-        assert desc == "（1）C1.1.1.1；（2）C1.1.1.1.1：L5", f"第四级/五级标题未完整并入三级节点 description：{desc}"
+        # ✅ R214 重锚（意图保留、强度不减）：本用例锁的是「第四/五级标题的
+        #    内容线索不丢」，不是引导前缀的逐字文案（并发会话新增
+        #    FOLD_GUIDANCE_MARKER 后旧断言锁实现导致假红）。仍逐项断言两条
+        #    深层标题都在，且旧「含：」口径不得回流。
+        assert "（1）C1.1.1.1" in desc, f"第四级标题未并入 description：{desc}"
+        assert "（2）C1.1.1.1.1：L5" in desc, f"第五级标题未并入 description：{desc}"
+        assert "含：" not in desc
 
     def test_preview_does_not_mutate_source(self):
         """预览构造必须深拷贝（不得就地裁剪污染 full_outline 主数据）。"""

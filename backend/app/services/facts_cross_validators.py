@@ -107,6 +107,12 @@ def _side(item, value: str | None = None) -> dict:
         "value": value if value is not None else item.value,
         "source": item.source,
         "confidence": item.confidence,
+        # ✅ R210（2026-11-10）：加法式补 ``fact_key``（条目身份）。
+        #    旧实现只有 name/value/source/confidence，回写侧只能按**显示名**定位
+        #    条目 ⇒ 同名不同 key 的无关事实被连坐打上矛盾标记（见
+        #    ``_mark_cross_conflicts_on_items``）。既有消费方只读前四个键，
+        #    逐字兼容；冲突记录落库后也可据此追溯具体条目。
+        "fact_key": str(getattr(item, "key", "") or ""),
     }
 
 
@@ -916,14 +922,35 @@ def run_cross_validations(merged) -> list[dict]:
 
 
 def _mark_cross_conflicts_on_items(merged, conflicts: list[CrossConflict]) -> None:
-    """把跨条目冲突回写到涉及事实（MAT/FLOW 的源事实在合并阶段已带标记）"""
+    """把跨条目冲突回写到涉及事实（MAT/FLOW 的源事实在合并阶段已带标记）
+
+    ✅ R210（2026-11-10 · P1）：回写定位由「显示名」改为「条目身份」。
+
+    旧实现按 ``it.name`` 分组后，逐条比对 ``value`` 相同即打标 —— 只要**同名**
+    就会连坐，不管两条事实是不是同一条。典型事故：AI 抽取名与人工录入名同名但
+    ``fact_key`` 不同源（历史行是 ``fact_<len(name)>`` 旧口径、新行走别名表/哈希
+    口径），机械↔工期类冲突一旦命中其中一条，**另一条无关事实**也被置
+    ``has_conflict=1`` ⇒ 它命中注入门控的排除条件
+    （``has_conflict=0 AND is_resolved=1 AND is_simulated=0 AND is_stale=0``）
+    ⇒ **事实从正文/目录/导出里凭空消失**，且用户被迫裁决一个不存在的矛盾。
+
+    这与同文件「范围值兼容撤销」那处的加固理由**完全同构**（那里已改为按条目
+    身份撤销），本处属**同族漏改**。现两侧都携带 ``fact_key``，回写时按
+    （name + value + fact_key）定位；``fact_key`` 缺失（历史记录/外部构造）时
+    退回旧的 name+value 口径，保证向后兼容。
+    """
     by_name: dict = {}
     for it in merged:
         by_name.setdefault(it.name, []).append(it)
 
     def _mark(side_self: dict, side_other: dict) -> None:
+        self_key = str(side_self.get("fact_key") or "")
         for it in by_name.get(side_self.get("name", ""), []):
             if it.value != side_self.get("value"):
+                continue
+            it_key = str(getattr(it, "key", "") or "")
+            if self_key and it_key and it_key != self_key:
+                # 同名不同 key ⇒ 不是同一条事实，不得连坐打标
                 continue
             it.has_conflict = True
             if not any(c.get("value") == side_other.get("value") for c in it.conflict_values):

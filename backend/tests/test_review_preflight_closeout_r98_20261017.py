@@ -429,9 +429,15 @@ class TestExportSharedCoverage:
     def test_status_and_wordcount_judges_untouched(self):
         # 刻意不动的两条判据（status_inconsistent 用 truthy、low_word_count 用 wc）
         # —— 它们不是覆盖口径，不许被顺手「统一」掉
+        # ✅ R212 重锚（意图保留、强度不减）：low_word_count 判据的**阈值**由内联
+        #    字面量 100 改为共享常量 LOW_WORD_THRESHOLD（当前同值 = 100 ⇒ 行为逐字
+        #    不变），但**判据形态**（叶子章节 + wc 区间）必须仍在；且阈值必须与
+        #    预检侧**同源**，否则两侧会分叉成「导出页说 3 章字数不足、总检说 5 章」。
         src = _src(export_mod.collect_export_issues)
         assert 'if s.get("status") == "empty" and (s.get("content") or wc > 0):' in src
-        assert "if not has_children and 0 < wc < 100:" in src
+        assert "not has_children and 0 < wc <" in src
+        assert "LOW_WORD_THRESHOLD" in src
+        assert "0 < wc < 100" not in src, "低字数阈值不得回退为内联字面量（须与预检侧同源）"
 
 
 # ---------------------------------------------------------------------------

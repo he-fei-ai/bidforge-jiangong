@@ -1,4 +1,4 @@
-﻿import { useEffect, useState, useRef, useMemo, useCallback } from "react";
+﻿import { useEffect, useState, useRef, useMemo, useCallback, memo } from "react";
 import {
   App,
   Button,
@@ -29,8 +29,14 @@ import type { PromptSyncResult } from "../api";
 import { useAntdMessageHub } from "../utils/activityCenter";
 
 import { PageHero, PageSkeleton, StatCards, StatItem } from "../utils/ui";
-import type { PromptAuditLog, PromptItem } from "../types/prompt";
-import { diffPromptVariables, extractPromptVariables } from "../utils/promptVariables";
+import type { PromptAuditLog, PromptItem, PromptVariableDiff } from "../types/prompt";
+import { extractPromptVariables } from "../utils/promptVariables";
+import { useDebouncedValue } from "../utils/perf/debounce.ts";
+import {
+  computePromptVariables,
+  computePromptVariablesFallback,
+  type PromptVariablesResult,
+} from "../utils/perf/computeWorker.ts";
 
 // ✅ 修复：后端 category 实际值域为 outline/content/charts/analysis/配图/共享规则，
 // 旧实现键是中文（目录/正文/...）→ 全部 miss 落入 extra 显示 cyan
@@ -80,6 +86,80 @@ function promptErrorText(err: unknown, fallback: string): string {
 // 前端提前拦一道，避免用户粘贴几十万字后才收到 400（整包上传白跑）。
 const PROMPT_MAX_CHARS = 200000;
 
+/**
+ * ✅ 2026-11-11 性能：变量分析结果区与输入区隔离。
+ *
+ * 旧实现把 `extractPromptVariables(editContent)` 与
+ * `diffPromptVariables(editContent, baseline)` 直接放在页面 useMemo 里 ——
+ * 20 行（可达 20 万字符）模板每敲一键就跑两次全量正则 + sort + Set/filter，
+ * 并且结果区 JSX 与 tabItems 一起重建。现在：
+ *   ① 输入值经 300ms 防抖才进入本组件（父组件用 useDebouncedValue）；
+ *   ② 正则扫描放进 Web Worker（不支持时自动降级主线程）；
+ *   ③ 本组件 memo，输入区重渲不会带动结果区重算。
+ * effect cleanup 用 alive 丢弃过期/卸载后的 Worker 回包，杜绝乱序与卸载后 setState。
+ */
+const PromptVariableAnalysis = memo(function PromptVariableAnalysis({
+  content,
+  baseline,
+}: {
+  content: string;
+  baseline: string;
+}) {
+  // 仅 mount 时同步算一次避免首帧空白；后续每次防抖后的计算都走 Worker
+  const [result, setResult] = useState<PromptVariablesResult>(() =>
+    computePromptVariablesFallback({ current: content, baseline }),
+  );
+
+  useEffect(() => {
+    let alive = true;
+    void computePromptVariables({ current: content, baseline }).then((next) => {
+      if (alive) setResult(next);
+    });
+    return () => {
+      alive = false;
+    };
+  }, [content, baseline]);
+
+  return (
+    <>
+      {result.variables.length > 0 && (
+        <Space wrap style={{ display: "flex", marginBottom: 10 }}>
+          <Typography.Text type="secondary" style={{ fontSize: 13 }}>
+            占位符变量（{result.variables.length}，实时提取）：
+          </Typography.Text>
+          {result.variables.map((v) => (
+            <Tag key={v.name} color="blue" style={{ fontFamily: "monospace" }}>
+              {v.dunder ? `__${v.name}__` : `{${v.name}}`}
+            </Tag>
+          ))}
+        </Space>
+      )}
+      {(result.diff.added.length > 0 || result.diff.removed.length > 0) && (
+        <Alert
+          type={result.diff.removed.length > 0 ? "warning" : "info"}
+          showIcon
+          style={{ marginBottom: 10 }}
+          message={
+            <Space wrap>
+              <span>相对默认模板的变量变化：</span>
+              {result.diff.added.map((name) => (
+                <Tag key={`add-${name}`} color="green">
+                  +{name}
+                </Tag>
+              ))}
+              {result.diff.removed.map((name) => (
+                <Tag key={`del-${name}`} color="red">
+                  -{name}
+                </Tag>
+              ))}
+            </Space>
+          }
+        />
+      )}
+    </>
+  );
+});
+
 export default function PromptEditorPage() {
   const { message: _antdMsg, modal } = App.useApp();
   const msg = useAntdMessageHub(_antdMsg, "提示词管理");
@@ -100,12 +180,10 @@ export default function PromptEditorPage() {
   const isMountedRef = useRef(true);
   const promptsRef = useRef(prompts);
 
-  const liveEditVariables = useMemo(() => extractPromptVariables(editContent), [editContent]);
+  // ✅ 2026-11-11 性能：输入区用即时值，变量分析（昂贵结果区）用 300ms 防抖值。
+  //    逐字符输入不再触发两次全量正则扫描，结果区组件 memo 后也不随输入重渲。
+  const debouncedEditContent = useDebouncedValue(editContent);
   const currentPrompt = prompts.find((p) => p.key === editingKey);
-  const liveVariableDiff = useMemo(
-    () => diffPromptVariables(editContent, currentPrompt?.default_content || ""),
-    [editContent, currentPrompt?.default_content],
-  );
 
   const categories = useMemo(() => {
     const known = Object.keys(CATEGORY_COLORS);
@@ -488,40 +566,10 @@ export default function PromptEditorPage() {
         }
         styles={{ body: { maxHeight: "65vh", overflow: "auto" } }}
       >
-        {liveEditVariables.length > 0 && (
-          <Space wrap style={{ display: "flex", marginBottom: 10 }}>
-            <Typography.Text type="secondary" style={{ fontSize: 13 }}>
-              占位符变量（{liveEditVariables.length}，实时提取）：
-            </Typography.Text>
-            {liveEditVariables.map((v) => (
-              <Tag key={v.name} color="blue" style={{ fontFamily: "monospace" }}>
-                {v.dunder ? `__${v.name}__` : `{${v.name}}`}
-              </Tag>
-            ))}
-          </Space>
-        )}
-        {(liveVariableDiff.added.length > 0 || liveVariableDiff.removed.length > 0) && (
-          <Alert
-            type={liveVariableDiff.removed.length > 0 ? "warning" : "info"}
-            showIcon
-            style={{ marginBottom: 10 }}
-            message={
-              <Space wrap>
-                <span>相对默认模板的变量变化：</span>
-                {liveVariableDiff.added.map((name) => (
-                  <Tag key={`add-${name}`} color="green">
-                    +{name}
-                  </Tag>
-                ))}
-                {liveVariableDiff.removed.map((name) => (
-                  <Tag key={`del-${name}`} color="red">
-                    -{name}
-                  </Tag>
-                ))}
-              </Space>
-            }
-          />
-        )}
+        <PromptVariableAnalysis
+          content={debouncedEditContent}
+          baseline={currentPrompt?.default_content || ""}
+        />
         <Typography.Text type="secondary" style={{ display: "block", marginBottom: 8 }}>
           提示词中可使用 <Tag>{"{变量名}"}</Tag> 格式的占位符，运行时会自动替换为实际内容。
         </Typography.Text>

@@ -1255,7 +1255,21 @@ async def purge_document(db, *, doc_id: str, project_id: str) -> None:
         _cur = await db.execute(sql, (doc_id,))
         if _cur is None:
             logger.warning("文档清理 DELETE#%d 未生效（db.execute 返回 None，R13）：%s", idx, doc_id)
-    await db.commit()
+    # ✅ R208 修复（commit 裸奔 · R203 BE-17 同族）：R203 给 ingest_parse_result /
+    #    build_completeness_report / run_cross_check / _reconcile_parse_status
+    #    四处补了「commit 失败 → rollback + WARNING」，唯独漏了本函数。
+    #    commit 抛异常时，悬空写会随连接池下一个请求固化（幽灵提交），且下方
+    #    两行磁盘树清理与索引移除**不执行**——DB 行已删而四层目录树 + 索引
+    #    条目成孤儿（占空间且与「删除文档即 purge_document」口径不一致）。
+    try:
+        await db.commit()
+    except Exception:
+        try:
+            await db.rollback()
+        except Exception as rb_err:
+            logger.debug("文档清理提交失败路径 rollback 失败（连接损坏时忽略）: %s", rb_err)
+        logger.exception("文档 %s 清理提交失败（四层产物可能残留，需重试删除）", doc_id)
+        raise
     await _safe_io(store.remove_from_index, project_id, doc_id)
     await _safe_io(store.delete_doc_tree, project_id, doc_id)
 

@@ -276,7 +276,33 @@ _RULE_FAMILY: dict[str, str] = {
 
 
 def _base_rule_key(rule_id: str) -> str:
-    """取规则基号（去掉 ``-1`` 这类实例后缀），用于族判定与去重键。"""
+    """取规则基号（去掉 ``-1`` 这类实例后缀），用于族判定与去重键。
+
+    ✅ R212（2026-11-10 · P1）：**收敛到注册表单一事实源**。
+
+    旧实现是**第二份**基号解析：只看「第二段是否数字」，因此
+    ``CON-SCAN-1``（一致性扫描的派生编号）解析出 ``CON-SCAN-1`` ⇒ 查
+    ``_RULE_FAMILY`` 落空 ⇒ **不与 ``CON-01`` 同族** ⇒ 同一处数值冲突被
+    预检（CON-01）与一致性扫描（CON-SCAN-N）各计一次 ⇒ consistency 维度
+    **双扣分**、用户看到两条几乎相同的问题。
+
+    而注册表侧早已有正确实现：``audit_rules._resolve_base_rule`` 带别名表
+    （``_RULE_ID_ALIASES = {"CON-SCAN": "CON-07"}``）与「逐级剥离 -<数字>」
+    回落，能把 ``CON-SCAN-1`` 解析为基规则 ``CON-07``。两处同族实现强度
+    漂移（本仓反复登记的病根），本轮把本函数改为**委托注册表**：
+
+      ① 注册表能解析 ⇒ 用注册表给出的基号（含别名回落）；
+      ② 注册表解析不出（未登记的规则 id）⇒ 退回本地「剥离 -<数字>」逻辑，
+         保持既有行为逐字不变（不改变未登记规则的族判定）。
+    """
+    try:
+        from app.services.audit_rules import _resolve_base_rule
+
+        resolved = _resolve_base_rule(rule_id)
+        if resolved is not None:
+            return resolved.rule_id
+    except Exception:  # noqa: BLE001 - 注册表异常时退回本地解析，不影响去重
+        pass
     parts = (rule_id or "").split("-")
     if len(parts) >= 2 and parts[1].isdigit():
         return f"{parts[0]}-{parts[1]}"
@@ -310,6 +336,17 @@ def _dedup_key(finding: dict) -> str:
         # 非登记族：保持旧契约 —— 同 rule_id 即一条，证据由 merge 阶段并入。
         return rid
     target = _target_signature(finding)
+    if not target:
+        # ✅ R212（2026-11-10）：无目标定位（既无 section_id 也无 evidence）时
+        #    **不得**塌缩成一条 —— 同族的多个实例（CON-SCAN-1 / CON-SCAN-2 …）
+        #    本就是**不同冲突**，塌缩会把「多处数值冲突」压成一条 ⇒ 用户只看到
+        #    一处、总检少扣分（实测：既有护栏
+        #    test_readiness_overview_six_sources::test_consistency_scan_only_
+        #    counts_pending_failed 当场抓红）。
+        #    旧实现之所以不塌缩，是因为 ``CON-SCAN-N`` 的基号解析失败（族查表
+        #    落空）；R212 把基号解析收敛到注册表后族判定生效 ⇒ 必须在此补回退，
+        #    否则同族多实例会被**新引入**的塌缩吞掉。
+        return rid
     return f"{family}::{target}" if target else family
 
 

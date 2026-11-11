@@ -782,15 +782,26 @@ class TestSaveOutlineNumberingParity:
 class TestClearedContentReporting:
     @pytest.mark.asyncio
     async def test_rebuild_reports_cleared_content(self, db_conn):
-        """AI 生成结果（id 为展示编号）整表重建 → 明确回报清除了几章正文。"""
+        """AI 生成结果（id 为展示编号）整表重建 → 明确回报清除了几章正文。
+
+        ✅ R209 重锚（意图不放宽·仅换夹具）：本用例锁的是「**确实丢了正文**时
+        必须如实计数回报」。旧夹具的新目录标题与旧章标题**完全相同**
+        （工程概况/施工工艺），R209 起这类节点会按标题路径兜底匹配旧章节 →
+        正文被保留 → 无正文可清 ⇒ 计数断言失去被测对象。
+        现把新目录标题换成**与旧章不同**的两章（真实场景：AI 重新生成了另一套
+        目录），正文确实被清除 ⇒ 计数断言与「清空后库里无正文」断言逐字不变。
+        「标题一致 ⇒ 保留正文」的新意图由
+        ``tests/test_outline_r209_20261110.py::test_save_outline_import_keys_preserve_content``
+        与 ``..._same_title_ai_tree_preserves_content`` 锁定。
+        """
         await _seed_scheme(db_conn)
         await _seed_sections(db_conn, "sc1", with_content=True)
         res = await sec.save_outline(
             "sc1",
             {
                 "outline": [
-                    {"id": "1", "title": "工程概况", "children": []},
-                    {"id": "2", "title": "施工工艺", "children": []},
+                    {"id": "1", "title": "编制依据", "children": []},
+                    {"id": "2", "title": "技术措施", "children": []},
                 ],
                 "source": "ai",
             },

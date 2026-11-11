@@ -1,3 +1,4 @@
+import { useRef } from "react";
 import type { Dispatch, MutableRefObject, SetStateAction } from "react";
 import type { ModalFuncProps } from "antd";
 import type { MessageInstance } from "antd/es/message/interface";
@@ -13,6 +14,7 @@ import {
   type TreeNode,
 } from "./outlineTreeModel";
 import type { OutlineLogItem } from "./logTypes";
+import { outlineTruncationNotice } from "./outlineNotices";
 import { reattachTaskImpl, type TaskTerminalInfo, type UnknownTaskInfo } from "./taskPolling";
 import type { OutlineGenEvent, OutlineNodeInput, SseBaseEvent } from "./workbenchTypes";
 import type { GenStats } from "../../utils/contentEvents";
@@ -105,8 +107,18 @@ export function useOutlineGeneration(deps: OutlineGenerationDeps) {
     pollTaskUntilTerminal,
   } = deps;
 
+  // ✅ R216（2026-11-11 · P3 · D-7）：同步在飞锁（ref 判据，非异步 state）——
+  //    生成按钮 disabled={generating} 是异步 state，同帧双击可双发 SSE
+  //    （第二代会 abort 第一代，但两个后端任务都可能已注册并开始装配计费）。
+  //    与 R212 专家论证/一致性审计同帧双击修法同型。
+  const genInFlightRef = useRef(false);
   const doGenerateOutline = async () => {
     if (!id) return;
+    if (genInFlightRef.current) {
+      msg.info("目录生成已在进行中，请等待完成或先停止当前任务");
+      return;
+    }
+    genInFlightRef.current = true;
     // ✅ 世代校验：标记本代生成，收尾时仅当仍是最新一代才复位全局状态
     const mySeq = ++genSeqRef.current;
     // ✅ R106 FIX-8：立刻清空上一代 task_id。本代任务的 task_id 由 SSE
@@ -139,6 +151,9 @@ export function useOutlineGeneration(deps: OutlineGenerationDeps) {
     setGenStats({});
     let lastP = 0;
     let taskId = "";
+    // ✅ R216（P2 · D-2）：断线重挂回填 activeTaskIdRef 的跟踪（退出只清自己写的值）
+    let _reattachBackfilled = false;
+    let _reattachTaskId = "";
     try {
       for await (const raw of sseFetch(`/sse/generate-outline/${id}`, undefined, {
         signal: ac.signal,
@@ -148,6 +163,13 @@ export function useOutlineGeneration(deps: OutlineGenerationDeps) {
         if (!taskId && evt.task_id) taskId = evt.task_id;
         if (evt.event === "error") {
           onSseEvent(evt);
+          // ✅ R216（2026-11-11 · P3 · D-10）：error 事件消费 failed_chapters ——
+          //    后端 error 载荷携带该键（sse_handlers 异常/全章失败出口），
+          //    R192 FIX-R13 只对齐了 stopped 两条路径 ⇒ 全章失败时目录树
+          //    无橙色高亮。与在线 completed 分支的 failed_chapters 消费同口径。
+          if (Array.isArray(evt.failed_chapters) && evt.failed_chapters.length) {
+            setFailedOutlineChapters(evt.failed_chapters);
+          }
           // ✅ 遗留修复：全部章节子目录失败时，后端在 error 事件中携带已生成的
           //    一级章标题（outline + partial）。询问用户是否保存这部分成果，
           //    与 stopped 分支同策略（save-outline 智能保留已有正文）。
@@ -199,6 +221,20 @@ export function useOutlineGeneration(deps: OutlineGenerationDeps) {
         //    现与 completed 共用同一收尾路径，仅文案区分降级语义。
         const _isDegradedOutline = evt.event === "degraded";
         if (evt.event === "completed" || _isDegradedOutline) {
+          // ✅ R210（L1-8）：断点续跑可见信号 —— 后端日志早有「复用 N 章」，
+          //    但界面零信号（用户不知道这次省了多少配额、也看不出目录是接着上次跑的）。
+          if (typeof evt.resumed_chapters === "number" && evt.resumed_chapters > 0) {
+            msg.info(`已复用上次中断生成的 ${evt.resumed_chapters} 章（跳过对应 AI 调用），其余章节本次重新生成`);
+            pushOutlineLog(1, `♻️ 复用上次成果 ${evt.resumed_chapters} 章`);
+          }
+          // ✅ R210（L1-2）：一级目录被上限截断时如实告知（绝不静默丢弃）。
+          // ✅ R213（FIX-14）：截断文案收口到唯一纯函数（completed / stopped /
+          //    断线重挂三条路径同口径），不再各写一份内联模板串。
+          const _truncation = outlineTruncationNotice(evt);
+          if (_truncation) {
+            msg.warning(_truncation);
+            pushOutlineLog(1, `⚠️ 一级目录超上限：${_truncation}`);
+          }
           // ✅ 性能优化：终态事件立即 flush，确保 UI 与后续操作一致
           batcher.flushNow();
           setProgress(1);
@@ -270,6 +306,18 @@ export function useOutlineGeneration(deps: OutlineGenerationDeps) {
           if (evt.checkpoint_failed) {
             msg.warning("检查点写入失败：刷新或断线后无法恢复，请立即保存已生成目录");
             pushOutlineLog(lastP, "⚠️ 检查点写入失败，请立即手动保存");
+          }
+          // ✅ R210（L1-8）：停止态同样回传复用章数（用户据此知道这次接着上次跑）。
+          if (typeof evt.resumed_chapters === "number" && evt.resumed_chapters > 0) {
+            msg.info(`已复用上次中断生成的 ${evt.resumed_chapters} 章（跳过对应 AI 调用）`);
+            pushOutlineLog(lastP, `♻️ 复用上次成果 ${evt.resumed_chapters} 章`);
+          }
+          // ✅ R213（FIX-14）：停止态同样回传截断信号（后端 _finish_stopped_with_partial
+          //    已补），旧实现只有在线 completed 会提示 ⇒ 停止并保存半份成果时零感知。
+          const _stoppedTruncation = outlineTruncationNotice(evt);
+          if (_stoppedTruncation) {
+            msg.warning(_stoppedTruncation);
+            pushOutlineLog(lastP, `⚠️ 一级目录超上限：${_stoppedTruncation}`);
           }
           // ✅ R192（FIX-R13）：后端停止态明确携带失败章清单（_finish_stopped_with_partial
           //    的 failed_chapters/failed_count），旧实现在线/重挂两条 stopped 路径都只读
@@ -389,6 +437,16 @@ export function useOutlineGeneration(deps: OutlineGenerationDeps) {
             onReattach: () => setProgressMsg("连接中断，正在重新挂接后台任务..."),
           },
         );
+        // ✅ R216（2026-11-11 · P2 · D-2）：重挂拿到同一任务 id 后回填
+        //    activeTaskIdRef —— R194 FIX-13 已在正文链与未知态手动接管修过同款，
+        //    本链漏改（同族漏改第三次实证）。R106 FIX-8 已清空 ref，SSE 首事件
+        //    未到即断 ⇒ taskId=""，重挂窗口（最长 200×3s≈10 分钟）内停止按钮
+        //    handleControl 读空 id 永远提示「请稍等」，无法停止正在计费的任务。
+        if (hit?.taskId && !activeTaskIdRef.current) {
+          activeTaskIdRef.current = hit.taskId;
+          _reattachBackfilled = true;
+          _reattachTaskId = hit.taskId;
+        }
         // ✅ R174 F2：轮询耗尽/连续网络失败（final=null）→ 显式进入可恢复未知态。
         if (hit && !hit.final) {
           markUnknownTask({
@@ -397,8 +455,23 @@ export function useOutlineGeneration(deps: OutlineGenerationDeps) {
             reason: "重挂轮询超限（200×3s）或连续网络失败，未获得任务终态",
           });
         }
-        if (hit) {
+        // ✅ R216（2026-11-11 · P2 · D-4）：重挂终态应用加世代守卫 —— finally 的
+        //    状态复位有世代校验（:586），但 restored 分支（setTree / 一级目录闸门 /
+        //    部分成果确认弹窗）没有：切方案后 D-02 复位块只 abort SSE controller，
+        //    拦不住已在飞的重挂轮询 ⇒ 旧方案的目录被恢复到新方案页面、闸门弹窗
+        //    指向旧方案 id（数据不写错方案，但 UI 全错位）。与刷新接管循环的
+        //    cancelled 标志同口径；不用提前 return —— post-finally 的批处理器
+        //    清理与世代复位必须继续执行。
+        if (hit && genSeqRef.current === mySeq) {
           const fin = hit.final;
+          // ✅ R213（FIX-14）：checkpoint 白名单已登记 level1_*（后端 FIX-6），
+          //    断线重挂（completed / failed / stopped 全终态）统一提示一次，
+          //    与在线两条路径共用同一文案出口。
+          const _reattachTruncation = outlineTruncationNotice(fin?.outline_result);
+          if (_reattachTruncation) {
+            msg.warning(_reattachTruncation);
+            pushOutlineLog(1, `⚠️ 一级目录超上限（重挂）：${_reattachTruncation}`);
+          }
           if (fin?.status === "completed") {
             // ✅ 成果恢复：后台完成的目录只存在于任务 checkpoint 中，
             // 仅 load() 刷不到任何东西（目录需用户闸门确认才入库）。
@@ -407,6 +480,11 @@ export function useOutlineGeneration(deps: OutlineGenerationDeps) {
               // checkpoint 回传的 outline 即目录树节点（后端 SSE 契约），经 Array.isArray 判别后收窄
               const restoredOutline = ckpt.outline as OutlineNodeInput[];
               setTree(buildTree(restoredOutline));
+              // ✅ R210（L1-8）：断线重挂路径同样回传复用章数（checkpoint 白名单已登记）。
+              if (typeof ckpt.resumed_chapters === "number" && ckpt.resumed_chapters > 0) {
+                msg.info(`已复用上次中断生成的 ${ckpt.resumed_chapters} 章（跳过对应 AI 调用）`);
+                pushOutlineLog(1, `♻️ 复用上次成果 ${ckpt.resumed_chapters} 章`);
+              }
               if (Array.isArray(ckpt.failed_chapters) && ckpt.failed_chapters.length) {
                 setFailedOutlineChapters(ckpt.failed_chapters);
                 msg.warning(
@@ -437,6 +515,12 @@ export function useOutlineGeneration(deps: OutlineGenerationDeps) {
               // checkpoint 回传的 outline 即目录树节点（后端 SSE 契约），收窄一次供闭包复用
               const partialOutline = failCkpt.outline as OutlineNodeInput[];
               setTree(buildTree(partialOutline));
+              // ✅ R216（2026-11-11 · P3 · D-9）：failed 分支补消费 resumed_chapters
+              //    （此前只覆盖 completed 分支；后端 failed checkpoint 同样携带该键，
+              //    信息级提示「已复用 N 章」不应只出现一条路径）。
+              if (typeof failCkpt.resumed_chapters === "number" && failCkpt.resumed_chapters > 0) {
+                pushOutlineLog(1, `♻️ 复用上次成果 ${failCkpt.resumed_chapters} 章`);
+              }
               const partialCount = countOutline(partialOutline);
               // ✅ 文案收口到 buildPartialOutlineHint（旧实现两处各写一份，且不说中断原因）
               const hint = buildPartialOutlineHint({
@@ -473,6 +557,11 @@ export function useOutlineGeneration(deps: OutlineGenerationDeps) {
               // checkpoint 回传的 outline 即目录树节点（后端 SSE 契约），收窄一次供闭包复用
               const stoppedOutline = ckpt.outline as OutlineNodeInput[];
               setTree(buildTree(stoppedOutline));
+              // ✅ R216（2026-11-11 · P3 · D-9）：stopped 分支补消费 resumed_chapters
+              //    （同 failed 分支口径；后端 stopped checkpoint 携带该键）。
+              if (typeof ckpt.resumed_chapters === "number" && ckpt.resumed_chapters > 0) {
+                pushOutlineLog(1, `♻️ 复用上次成果 ${ckpt.resumed_chapters} 章`);
+              }
               // ✅ R192（FIX-R13）：重挂 stopped 同样消费失败章清单（与在线分支同口径）
               if (Array.isArray(ckpt.failed_chapters) && ckpt.failed_chapters.length) {
                 setFailedOutlineChapters(ckpt.failed_chapters);
@@ -541,6 +630,15 @@ export function useOutlineGeneration(deps: OutlineGenerationDeps) {
       if (abortControllerRef.current === ac) {
         abortControllerRef.current = null;
       }
+      // ✅ R216（P2 · D-2）：只清本协程回填的值（与 R194 FIX-13 同纪律），
+      //    且仅当仍是最新一代（被重入时不越位清理新任务的 id）。
+      if (
+        _reattachBackfilled &&
+        genSeqRef.current === mySeq &&
+        activeTaskIdRef.current === _reattachTaskId
+      ) {
+        activeTaskIdRef.current = "";
+      }
     }
     // ✅ 世代校验：被重入（abort）的旧协程不得复位新任务的状态
     if (genSeqRef.current === mySeq) {
@@ -551,6 +649,9 @@ export function useOutlineGeneration(deps: OutlineGenerationDeps) {
     batcher.flushNow();
     batcher.stop();
     if (sseBatcherRef.current === batcher) sseBatcherRef.current = null;
+    // ✅ R216（P3 · D-7）：在飞锁释放（所有出口——正常完成 / break / catch /
+    //    finally——都会流经此处的 post-finally 清理段）。
+    genInFlightRef.current = false;
   };
 
   /**

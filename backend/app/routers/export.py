@@ -59,6 +59,12 @@ from app.services.placeholder_inventory import (
 )
 from app.services.placeholder_sections import is_placeholder_section
 
+# ✅ R212（2026-11-10 · P3-1）：低字数叶子章节阈值改用**预检侧同一常量**
+#    （preflight_engine.LOW_WORD_THRESHOLD）。此前导出侧把 100 写成字面量、
+#    预检侧用常量 —— 同一判据两份实现。当前取值一致（=100）故**行为零变化**，
+#    但一旦常量调整，两侧就会分叉成「导出页说 3 章字数不足、总检说 5 章」。
+from app.services.preflight_engine import LOW_WORD_THRESHOLD
+
 logger = logging.getLogger("export")
 router = APIRouter(prefix="/api/v1/schemes/{scheme_id}/export", tags=["export"])
 
@@ -694,8 +700,8 @@ async def collect_export_issues(
                     "detail": "status=empty 但有内容",
                 }
             )
-        # 低字数叶子章节（可能生成不完整）
-        if not has_children and 0 < wc < 100:
+        # 低字数叶子章节（可能生成不完整）——阈值与预检侧同一常量（R212）
+        if not has_children and 0 < wc < LOW_WORD_THRESHOLD:
             issues.append({"type": "low_word_count", "section_id": s["id"], "title": s["title"], "word_count": wc})
     # 图表未生成检查
     # ✅ R198：补 section_id（聚合 issue 的 section_ids 定位链需要）
@@ -1031,6 +1037,24 @@ async def collect_export_issues(
         }
     except Exception:  # 清单属旁路审计：失败不阻断预检主流程
         placeholder_report = build_placeholder_report([])
+    # ✅ R212（2026-11-10 · P1-1）：聚合类 issue（review_pending / review_rejected /
+    #    review_missing / chart_failed / chart_ungenerated）**没有 title**（本模块
+    #    title 的语义是「章节标题」），但带 section_ids ⇒ 映射成 finding 时
+    #    ``section_title`` 恒空 ⇒ 前端「章节」列落到「（章节已删除）」**假标签**
+    #    （章节其实都还在：20 章待审核被显示成「章节已删除」且点击跳到真实章节）。
+    #    现按 ``sections`` 回查标题，并以**加法式新键** ``section_titles`` 携带
+    #    （**不改**既有 ``title`` 语义 ⇒ 导出页 issue 标题逐字不变）。
+    _title_by_id: dict[str, str] = {
+        str(s.get("id") or ""): str(s.get("title") or "") for s in sections if s.get("id")
+    }
+    for _iss in issues:
+        if _iss.get("title") or _iss.get("section_titles"):
+            continue
+        _ids = [str(x) for x in (_iss.get("section_ids") or []) if x]
+        _titles = [_title_by_id.get(_i, "") for _i in _ids]
+        _titles = [t for t in _titles if t][:3]
+        if _titles:
+            _iss["section_titles"] = _titles
     return {
         "issues": issues,
         "section_count": len(sections),
@@ -1149,7 +1173,10 @@ def _export_high_issue_blockers(issues: list) -> list[dict]:
     for entry in result:
         sub = _EXPORT_ISSUE_SUBTYPE_LABEL.get(entry["type"])
         if sub and _per_rule.get(entry["rule_id"], 0) > 1:
-            entry["display_title"] = f"{entry['title']}·{sub}"
+            # ✅ R214（2026-11-10 · R212 D-5）：``title`` 恒为规则标题（非空），
+            #    但防御空值 —— 空 title 时直接取子类标签，避免「·章节待审核」
+            #    前导点号。子类标签已是中文，不再拼接裸英文 type 键。
+            entry["display_title"] = f"{entry['title']}·{sub}" if entry["title"] else sub
     return result
 
 
@@ -1185,7 +1212,14 @@ def _export_blocked_response(blockers: list[dict]) -> JSONResponse:
     """409 + 可执行 detail：明确告诉用户拦了什么、怎么继续。"""
     total = sum(int(b["count"]) for b in blockers)
     names = "、".join(
-        f"{b.get('display_title') or b['title'] or b['type']}（{b['rule_id']}）{b['count']} 处" for b in blockers
+        # ✅ R214（2026-11-10 · R212 D-5）：回退链补中文子类标签兜底 ——
+        #    旧实现 ``or b['type']`` 在 rule 未登记（title 空且未设 display_title）
+        #    时把**裸英文 type 键**拼进 409 detail，用户看到
+        #    「review_pending（DLV-09）20 处」而非「章节待审核」。现按
+        #    display_title → title → 子类中文标签 → type 四级回退，任何情况下
+        #    不出现裸英文键。display_title/title 的既有值逐字不变。
+        f"{b.get('display_title') or b['title'] or _EXPORT_ISSUE_SUBTYPE_LABEL.get(str(b.get('type') or '')) or b['type']}（{b['rule_id']}）{b['count']} 处"
+        for b in blockers
     )
     detail = (
         f"导出已被阻断：存在 {len(blockers)} 类高风险问题（共 {total} 处）——{names}。"
@@ -1280,6 +1314,17 @@ def export_issues_to_findings(issues: list) -> list:
                 if _sid and _sid not in sections_hit:
                     sections_hit.append(_sid)
         sample_titles = [str(i.get("title") or "") for i in items if i.get("title")][:3]
+        # ✅ R212（P1-1）：聚合类 issue 无 ``title``（title 语义是章节标题），
+        #    只有 section_ids ⇒ 旧实现的 ``section_title`` 恒空 ⇒ 前端「章节」列
+        #    显示「（章节已删除）」假标签。现用 collect_export_issues 回查并加法式
+        #    补上的 ``section_titles`` 兜底（逐条 issue 的 title 路径逐字不变）。
+        sec_titles: list[str] = []
+        for i in items:
+            for t in list(i.get("section_titles") or [])[:3]:
+                t = str(t or "").strip()
+                if t and t not in sec_titles:
+                    sec_titles.append(t)
+        sec_titles = sec_titles[:3]
         counts: dict[str, int] = {}
         # ✅ R207：聚合类 issue 自带 count（20 章待审核 = 1 条 issue + count=20），
         #    而 ``count=len(items)`` 是「聚合条数」。旧实现让 stats 显示「1 项」，
@@ -1310,7 +1355,7 @@ def export_issues_to_findings(issues: list) -> list:
                 "basis": (rule.basis if rule else ""),
                 "section_id": sections_hit[0] if sections_hit else "",
                 "section_ids": sections_hit[:_EXPORT_FINDING_SECTION_CAP],
-                "section_title": "、".join(sample_titles),
+                "section_title": "、".join(sample_titles) or "、".join(sec_titles),
                 "mode": "program",
                 "source": "export_check",
                 "count": len(items),

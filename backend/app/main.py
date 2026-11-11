@@ -587,7 +587,12 @@ app.include_router(prompts.admin_prompts_router)
 
 
 @app.get("/api/v1/health")
+@app.get("/health")
 async def health():
+    # ✅ 2026-11-11（第三轮日志驱动分析）：生产 backend.log 中 `GET /health -> 404`
+    #    累计 34 条（外部探针每 30s 一发）——middleware.py 注释本就声明
+    #    「/health 供探活使用」，顶层别名在此补齐（同一 handler，返回体逐字一致，
+    #    纯加法式，既有 `/api/v1/health` 探活零影响）。
     # ✅ B1-4（R176 · 2026-11-04）：`_migrate` 的非致命失败不再只停留在日志里 ——
     #    迁移降级状态在此显式暴露（status=degraded + 明细）。无失败时返回体
     #    与引入前**逐字一致**（status=ok），既有探活/网关零影响。

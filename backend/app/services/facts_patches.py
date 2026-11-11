@@ -523,6 +523,14 @@ def apply_patches_to_fact_items(items: Sequence, patches: Iterable[FactPatch]) -
             #    混合体，前端与正文注入全部读到垃圾。value_to_markdown 是本模块
             #    序列→文本的单一出口（:224），此处是唯一漏用点。
             target.value = apply_patch_mode(value_to_markdown(getattr(target, "value", "") or ""), patch.content, patch.mode)
+            # ✅ R214（2026-11-10 · R210 D-2）：改值后**强制重派生**四维。
+            #    ``_rederive_dimension_columns``（DB 写路径单一出口）只覆盖 global_facts
+            #    的三条路由写路径；知识库补充链（本函数，facts_enrich 中间对象）此前
+            #    是**同族漏改** —— value 变了但 chapter/fact_attr/source_kind/is_shared
+            #    停在提取期旧值，落库后九大章节视图 / 按章精选 / 属性统计错配。
+            #    与新建项 make_fact_item_from_patch 同用 facts_classification 出口
+            #    （本处强制覆盖：中间对象无人工归类，保留旧值只会错配）。
+            _rederive_patched_dimensions(target)
             # replace 之后旧的候选值已不存在，继续保留会让前端把它们当成备选值渲染
             if getattr(target, "has_conflict", False) and patch.mode == "replace":
                 target.has_conflict = False
@@ -572,6 +580,21 @@ def make_fact_item_from_patch(patch: FactPatch, index: int = 0):
     except Exception:  # noqa: BLE001 - 维度标注失败可由读路径惰性派生兜底
         logger.debug("补丁事实项四维标注失败（读路径将惰性派生兜底）", exc_info=True)
     return item
+
+
+def _rederive_patched_dimensions(item) -> None:
+    """补丁改值后强制重派生 FactItem 四维（惰性导入避免模块级循环依赖）。
+
+    与 make_fact_item_from_patch 的新建项共用 facts_classification 的单一出口
+    （``force_rederive_fact_dimensions``），保证「改值 ⇒ 四维与值一致」在
+    知识库补充链不再分叉。
+    """
+    try:
+        from app.services.facts_classification import force_rederive_fact_dimensions
+
+        force_rederive_fact_dimensions(item)
+    except Exception:  # noqa: BLE001 - 读路径惰性派生兜底，不中断补丁合并
+        logger.debug("补丁改值后四维重派生失败（读路径将惰性派生兜底）", exc_info=True)
 
 
 #: 标题长度上限。列表行与章节侧的展示宽度约 20 个汉字，超出部分由正文承担；

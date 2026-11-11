@@ -14,6 +14,11 @@
  */
 export type StandardReportIssue = {
   type?: string; // 英文问题码（如 fuzzy_expression / value_conflict）
+  /**
+   * ✅ R211：后端围栏吞正文告警用的是 `code` 键（`content_standard.FENCE_SWALLOWED_CODE`），
+   * 与既有 `type` 键并存 —— 声明补齐，否则前端按 type 读会拿到 undefined 并渲染空标签。
+   */
+  code?: string;
   severity?: "error" | "warning";
   message?: string;
   excerpt?: string;

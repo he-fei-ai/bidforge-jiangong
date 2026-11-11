@@ -437,6 +437,33 @@ describe("ReviewWorkflowPanel · 章节审核工作流", () => {
     expect(body.reviewer).toBe("王五");
   });
 
+  it("R214：submit 回传 review_state_stale=true → 提示总检结论已过期（只提示不阻断）", async () => {
+    // ✅ R214（2026-11-10 · R212 D-1）：后端加法式回传 review_state_stale ——
+    //    最近一次总检的章节审核结论已过期（正文/审核状态在总检后又变）。旧前端
+    //    不消费 ⇒ 用户按过期结论提交而零提示。现**只提示、不阻断**（硬拦属产品
+    //    裁决），成功提示仍要出现。
+    (reviewApi.submit as any).mockResolvedValueOnce({
+      data: { ok: true, review_state_stale: true },
+    });
+    const { container } = render(
+      <App>
+        <ReviewWorkflowPanel schemeId={SCHEME} />
+      </App>,
+    );
+    await waitFor(() => expect(container.textContent || "").toContain("第3章 基坑支护"));
+    setReviewer(container, "王五");
+    fireEvent.click(btnByText(container, "提交审核通过")!);
+    await waitFor(() => expect(confirmOk()).toBeTruthy());
+    await act(async () => {
+      fireEvent.click(confirmOk()!);
+    });
+    await waitFor(() => expect(reviewApi.submit).toHaveBeenCalled());
+    // 成功提示仍出现（提交成功，不被过期提示顶掉）
+    expectMsg(msgSpy.success, "已标记为");
+    // 过期提示必须出现（只提示、不阻断）
+    expectMsg(msgSpy.warning, "总检的章节审核结论已过期");
+  });
+
   it("方案级提交未填评审人 → 被前置拦截，弹窗不打开", async () => {
     const { container } = render(
       <App>

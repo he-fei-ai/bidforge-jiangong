@@ -45,7 +45,7 @@ import type {
   FactPagination,
   FactsSummary,
 } from "../../../types/facts";
-import { FACTS_PAGE_SIZE, buildFactsPagination, safeFactText } from "../factsShared";
+import { FACTS_PAGE_SIZE, buildFactsPagination, factErrorText, safeFactText } from "../factsShared";
 import type { FactsCategoryEntry } from "../factsShared";
 import type { FactsLogItem } from "../logTypes";
 import type { FactsSegmentStats } from "../workbenchTypes";
@@ -56,6 +56,10 @@ import { FactsExtractProgressCard } from "../FactsExtractProgressCard";
 import { FactsGroupList } from "../FactsGroupList";
 import { FactsSegmentFailuresAlert } from "../FactsSegmentFailuresAlert";
 import { TaskControlButtons } from "../TaskControlButtons";
+// ✅ R212（P3-2）：severity 色板单一事实源（types/audit.ts）
+//    ⚠️ 用**相对路径**：本仓 vite/vitest 未配置 "@" 别名（仅 tsconfig 有 paths），
+//    用 "@/types/audit" 会让 vitest 在导入期直接报「Failed to resolve import」。
+import { SEVERITY_COLOR, type Severity } from "../../../types/audit";
 
 const { Text } = Typography;
 
@@ -189,6 +193,19 @@ export function FactsTab({
   loadFacts,
   loadDocuments,
 }: FactsTabProps) {
+  // ✅ R208 修复（门禁口径分裂）：本 Tab 内联的文档行列表是
+  //    ``DocumentParseList``（解析提取 Tab）那份列表的**副本**，但两者的
+  //    按钮门禁口径不同——DocumentParseList 用三维
+  //    ``parsingDocs || !!parsingDocId || uploadingFacts``（:188），
+  //    本 Tab 此前只判 ``parsingDocs``。后果有二：
+  //      ① 上传中点行内「解析」：同名 upsert 会换新主键，在飞解析持旧
+  //         doc_id 写不回 → 解析结果丢失（R203 FE-5 只在 DocumentParseList
+  //         一侧落地，本副本漏改）；
+  //      ② 单份解析中点行内「解析」：handler 被防重入静默吞掉 → 点击
+  //         无任何反应（假动作）。
+  //    这已是 AGENTS.md 教训「教训只在同类一侧落实会复发」的第三次实证
+  //    （R191 C-F3 → R203 FE-5 → 本轮），故两侧口径必须一致。
+  const docParseDisabled = parsingDocs || !!parsingDocId || uploadingFacts;
   return (
     // ✅ 修复：全局事实内容可能很长（资料列表 + 分组事实 Collapse），
     //    容器必须可滚动，否则超出视口的内容被外层 overflow:hidden 裁剪，无法查看/点击
@@ -313,10 +330,24 @@ export function FactsTab({
               description={
                 <div style={{ display: "flex", flexDirection: "column", gap: 4 }}>
                   {factsCrossConflicts.slice(0, 8).map((cf, idx: number) => {
-                    const sevColor =
-                      cf.severity === "high" ? "red" : cf.severity === "medium" ? "orange" : "blue";
+                    // ✅ R212（P3-2）：severity 色板收敛到 types/audit.ts 单一事实源
+                    //    （此前内联三元**不含 block** ⇒ 阻断级落 blue）。
+                    const sevColor = SEVERITY_COLOR[(cf.severity || "low") as Severity] ?? "default";
+                    // ✅ R214（2026-11-10 · R210 D-6）：React key 用**组合键**。
+                    //    旧实现 ``cf.rule_id || idx`` —— 后端 ``rule_id`` **不唯一**
+                    //    （XV-MAT-DESIGN / XV-MACH-SCHED 各 4 个独立产出点、DB 唯一键
+                    //    含 conflict_type）⇒ 同 rule_id 的多处冲突 key 相同，React 报
+                    //    duplicate key 警告并复用节点（渲染错乱）。现按
+                    //    rule_id + 双侧名称/值 + idx 组合，保证同屏唯一。
+                    const conflictKey = [
+                      cf.rule_id || "",
+                      safeFactText(cf.side_a?.name),
+                      safeFactText(cf.side_a?.value),
+                      safeFactText(cf.side_b?.value),
+                      idx,
+                    ].join("|");
                     return (
-                      <span key={cf.rule_id || idx} style={{ fontSize: 12 }}>
+                      <span key={conflictKey} style={{ fontSize: 12 }}>
                         <Tag color={sevColor}>{cf.severity || "low"}</Tag>
                         {/* R189：`value` 运行时可能是对象/数字（旧数据或 AI 输出），
                             `as string` 只是编译期收窄，作 React child 会整块崩。 */}
@@ -401,7 +432,7 @@ export function FactsTab({
           type="primary"
           icon={<GlobalOutlined />}
           onClick={handleGenerateFacts}
-          disabled={generating || uploadingFacts || parsingDocs}
+          disabled={generating || uploadingFacts || parsingDocs || !!parsingDocId}
           loading={generating && genType === "facts"}
         >
           ③ AI 提取事实
@@ -412,7 +443,7 @@ export function FactsTab({
             onChange={(e) => setMissingValueMode(e.target.value)}
             size="small"
             buttonStyle="solid"
-            disabled={generating || uploadingFacts || parsingDocs}
+            disabled={generating || uploadingFacts || parsingDocs || !!parsingDocId}
           >
             <Radio.Button value="fabricate">🧩 智能补全</Radio.Button>
             <Radio.Button value="omit">🚫 不杜撰</Radio.Button>
@@ -462,15 +493,16 @@ export function FactsTab({
             return { ignored: data?.ignored };
           }}
           onError={(fallback, e) => {
-            // 结构化窄断言：axios 错误体上的 response.data.detail / message
-            const err = e as { response?: { data?: { detail?: string } }; message?: string };
-            msg.error(err?.response?.data?.detail || err?.message || fallback);
+            // ✅ R210：走事实模块统一错误出口 —— 写保护 409 的 detail 是
+            // **对象**（{code, message}），按字符串消费会让整条提示在 React 18
+            // 下抛 "Objects are not valid as a React child" 而根本不出现。
+            msg.error(factErrorText(e, fallback));
           }}
         />
         <Button
           icon={<CaretRightOutlined />}
           onClick={openFactCreate}
-          disabled={generating || uploadingFacts || parsingDocs}
+          disabled={generating || uploadingFacts || parsingDocs || !!parsingDocId}
         >
           手动新增
         </Button>
@@ -480,7 +512,7 @@ export function FactsTab({
             danger
             icon={<DeleteOutlined />}
             onClick={handleClearAllFacts}
-            disabled={generating || uploadingFacts || parsingDocs}
+            disabled={generating || uploadingFacts || parsingDocs || !!parsingDocId}
           >
             清空全部事实
           </Button>
@@ -606,7 +638,7 @@ export function FactsTab({
                 <Button
                   size="small"
                   type="link"
-                  disabled={generating || parsingDocs}
+                  disabled={docParseDisabled}
                   onClick={() => {
                     modal.confirm({
                       title: "重新解析全部文档",
@@ -670,8 +702,10 @@ export function FactsTab({
                             size="small"
                             type="link"
                             icon={<FileTextOutlined />}
-                            disabled={parsingDocs}
-                            onClick={() => handleParseDocument(doc.id, doc.file_name as string)}
+                            disabled={docParseDisabled}
+                            onClick={() =>
+                              handleParseDocument(doc.id, doc.file_name as string, isFailed)
+                            }
                           >
                             {isFailed ? "重试解析" : "解析"}
                           </Button>,
@@ -687,7 +721,7 @@ export function FactsTab({
                               size="small"
                               type="link"
                               icon={<ReloadOutlined />}
-                              disabled={parsingDocs}
+                              disabled={docParseDisabled}
                               onClick={() =>
                                 handleParseDocument(doc.id, doc.file_name as string, true)
                               }
@@ -703,6 +737,13 @@ export function FactsTab({
                       danger
                       type="link"
                       icon={<CloseCircleOutlined />}
+                      // ✅ R210（2026-11-10 · P2）：门禁与 DocumentParseList 副本**逐字一致**
+                      //   （``parsingDocs || uploadingFacts || parsingDocId === doc.id``）。
+                      //   旧实现只判 uploadingFacts ⇒ 解析进行中可删文档：删除链会
+                      //   purge 掉该文档的四层产物并标 stale，而**在飞解析**随后仍为
+                      //   已删除的 doc_id 写产物（孤儿）并再标一次 stale ⇒ 事实列表
+                      //   出现指向不存在文档的过期条目。
+                      disabled={parsingDocs || uploadingFacts || parsingDocId === doc.id}
                       onClick={() => handleDeleteDocument(doc.id, doc.file_name as string)}
                     >
                       删除

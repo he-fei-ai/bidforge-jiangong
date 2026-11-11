@@ -465,7 +465,17 @@ def _rewrite_code_block(content: str, old_code: str, new_code: str | None) -> st
                 out.append(f"{marker}{lang}\n{new_code}\n{marker}")
             changed = True
             continue
-        out.append(f"{marker}{lang}\n{code}\n{marker}")
+        # ✅ R215（2026-11-11 · P3）：未命中块**代码行原样保留** —— 旧实现把每个
+        #    闭合围栏都重写为 `marker+lang\n{strip 后 code}\n{marker}`：块首尾空白
+        #    行被剥 ⇒ 修复目标块时同章**无关围栏**（含 ```python 等普通代码块）被
+        #    顺手改写，落库正文与用户所见预览产生非预期 diff（R196「只动目标块」
+        #    的兜底路径漏网）。闭合行不在 code_lines（read_fenced_block 契约），
+        #    取原文行（lines[i-1]，closed/recovered 时指向结束围栏）；同码多块
+        #    全部替换是刻意保留：同样的坏码修出的就是同一好码（fence_ordinal
+        #    精确修复走 _apply_chart_fence_edits 主路径）。
+        out.append(fence_line)
+        out.extend(code_lines)
+        out.append(lines[i - 1])
     return "\n".join(out) if changed else content
 
 
@@ -803,7 +813,19 @@ def build_inline_chart_plan(
     #    体内对同一份 content 重复全文 text_word_count（循环内不改写 content，
     #    改写统一累积在 edits、循环后一次性应用）—— O(块数 × 全文字数) 的重复
     #    CPU，长章多块时在锁外白白放大耗时（P1-3 特意把计算移出锁，此处又自伤）。
-    _actual_words = text_word_count(content)
+    # ✅ R215（2026-11-11 · P3）：min_words 判据改为消费**净化后**字数 ——
+    #    本函数在 _persist_section 里执行于 normalize_section_content_subheadings
+    #    （含 content_sanitize 净化）**之前**，旧判据读的是含分页页脚 / 表题粘连
+    #    等杂质的原始文本：实际成文 <200 字但杂质行把读数顶过阈值的短章保住了
+    #    本应删除的图表，且该章落库 word_count（净化后）恰证明它不达标 ——
+    #    同一章两个口径互相矛盾。normalize_raw_content 幂等，仅改判据不改内容
+    #    （图表块插入位置仍按原文行号，返回内容仍基于原文，与既有行为兼容）。
+    from app.services.content_sanitize import normalize_raw_content
+
+    # ✅ R217（2026-11-11 · 回归修复）：R215 C4 的落地代码曾只剩注释与死
+    #    import（判据仍读净化前原文）⇒ 两条重锚护栏当场抓红。改回净化后计字：
+    #    normalize_raw_content 幂等，仅改判据、不改内容与图表插入位置。
+    _actual_words = text_word_count(normalize_raw_content(content)[0])
     # ✅ 清单口径：同一类型只登记一条（保持 /charts/list 与导出预检的既有语义）。
     #    注意这与"每一块都要过校验/修复/限额"并不矛盾 —— 校验是全量的，
     #    去重只作用于"写入 chart_predictions"这一步。

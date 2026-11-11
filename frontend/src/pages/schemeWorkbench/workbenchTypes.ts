@@ -28,6 +28,12 @@ export interface OutlineNodeInput {
   /** 落库章节为 JSON 字符串或对象（读取侧两种形态都兼容） */
   outline_json?: string | { id?: string | number } | null;
   facts_stale?: boolean;
+  // ✅ R218（2026-11-11 · P2 · D-C）：后端 `_build_tree` `dict(r)` 原样保留
+  //    章节级生成标准覆盖与最近一次生成标准、字数档位 —— 前端类型此前未声明，
+  //    buildTree 未映射 ⇒ 刷新后章节级生成标准覆盖回显丢失。
+  generation_standard?: string;
+  last_generation_standard?: string;
+  word_status?: string;
   children?: OutlineNodeInput[];
 }
 
@@ -88,6 +94,13 @@ export interface OutlineGenEvent extends SseBaseEvent, SseStatsFields {
   /** ✅ R188（L9）：检查点写失败（R187 FIX-2 短方案 / R188 L8 停止态）。
    *  后端 payload 自带 outline，成果不丢，但刷新/断线后无法从检查点恢复。 */
   checkpoint_failed?: boolean;
+  /** ✅ R210（L1-8）：断点续跑**复用章数**（后端日志早有，前端此前零信号）。
+   *  缺省 = 0（未复用）；>0 表示本次复用了上次被中断任务的若干章，跳过了 AI 调用。 */
+  resumed_chapters?: number;
+  /** ✅ R210（L1-2）：一级目录被上限截断时回传（丢弃章数 / 原始总章数）。
+   *  仅在发生截断时出现（加法式），前端据此提示「目录被截断」。 */
+  level1_truncated?: number;
+  level1_total?: number;
   elapsed_ms?: number;
   eta_ms?: number | null;
 }
@@ -114,6 +127,10 @@ export interface ContentGenEvent extends SseBaseEvent, SseStatsFields {
   charts_dropped_count?: number;
   charts_dropped?: ChartDropItem[];
   content?: string;
+  /** ✅ R215：体积闸门降级握手（R181）—— section_done 超限被截断时后端置 true */
+  truncated?: boolean;
+  /** ✅ R215：顺序校验（R105 G1）随 completed 下发；ok=false 时前端提示一次 */
+  order_check?: { ok?: boolean; [k: string]: unknown };
   reason?: string;
   standard_report?: StandardReport | null;
   elapsed_ms?: number;

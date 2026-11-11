@@ -212,7 +212,13 @@ _WINDOW_SRC_RE = {
     "window_derived": re.compile(r"_window\s*=\s*max\(1,\s*_u5_outline_conc\)"),
     "step_is_window_times_merge_k": re.compile(r"_round_step\s*=\s*max\(1,\s*_window\)\s*\*\s*_merge_k"),
     "loop_steps_by_round": re.compile(r"for\s+batch_start\s+in\s+range\(0,\s*_total,\s*_round_step\)"),
-    "window_bounded_fill": re.compile(r"while\s+_u\s*<\s*_total\s+and\s+len\(_window_units\)\s*<\s*_window"),
+    # ✅ R209（P1-2）重锚：意图是「窗口填充**有界**」，原正则锁的是**实现**
+    #    （`_u < _total` = 无界）。R209 发现无界 + 「首单元全已续跑即 continue」
+    #    的短路组合会让本轮后半程的章永不被调度（长方案漏章）。现实现改为
+    #    `_u < _round_end`（_round_end = min(batch_start+_round_step, _total)）
+    #    —— 有界且更强：相邻两轮不会重复调度同一章。意图保留，强度不减。
+    "window_bounded_fill": re.compile(r"while\s+_u\s*<\s*_round_end\s+and\s+len\(_window_units\)\s*<\s*_window"),
+    "round_end_derived_from_round_step": re.compile(r"_round_end\s*=\s*min\(batch_start\s*\+\s*_round_step,\s*_total\)"),
     "order_preserving_gather": re.compile(r"results\s*=\s*await\s+asyncio\.gather\(\s*\*\["),
     "semaphore_licensed_by_concurrency": re.compile(r"asyncio\.Semaphore\(_u5_outline_conc\)"),
 }
@@ -225,6 +231,21 @@ class TestConcurrencyWindowInvariant:
         src = inspect.getsource(sh.generate_outline)
         for name, pat in _WINDOW_SRC_RE.items():
             assert pat.search(src), f"并发窗口不变式缺失: {name}"
+
+    def test_window_fill_is_bounded_by_round_not_total(self):
+        """R209（P1-2）加强：窗口扩张**不得**再以 ``_total`` 为界。
+
+        无界 + 「本轮首单元全已续跑即 ``continue`` 短路窗口扩张」的组合，会让
+        本轮后半程的章永不被调度（长方案漏章）；即便不短路，无界也可能让
+        相邻两轮重复调度同一章（重复章）。现实现以轮次边界 ``_round_end`` 为界。
+        """
+        src = inspect.getsource(sh.generate_outline)
+        assert not re.search(r"while\s+_u\s*<\s*_total\b", src), (
+            "窗口扩张仍以 _total 为界（R209 已改为轮次边界 _round_end）"
+        )
+        assert re.search(r"_round_end\s*=\s*min\(batch_start\s*\+\s*_round_step,\s*_total\)", src), (
+            "本轮边界 _round_end 必须由 _round_step 派生"
+        )
 
     def test_no_window_resizing_between_derivation_and_fill(self):
         """_window 从派生到窗口填充之间不得被重新赋值（改了宽度但没改步进取整

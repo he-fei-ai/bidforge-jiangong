@@ -587,23 +587,78 @@ def _as_text(v: Any) -> str:
     return str(v)
 
 
+#: 来源引用中的**来源标识**字段名（只这些字段参与来源类别判定）
+_SOURCE_IDENTITY_KEYS = (
+    "file",
+    "file_name",
+    "filename",
+    "source",
+    "source_name",
+    "doc_name",
+    "name",
+    "文档",
+    "文件名",
+    "文档名",
+    "来源",
+    "来源文件",
+)
+
+
+def _source_identity_text(ref: Any) -> str:
+    """从结构化来源引用中抽取**来源标识**文本（不含引句原文）。
+
+    ✅ R210：来源类别只应由「来源标识」决定（文件名/来源名），
+    引句（quote/原文/摘录）描述的是「该文件里说了什么」，与来源类别正交。
+    非 dict 的列表元素（字符串）视为来源标识本身（历史数据里就是文件名数组）。
+    """
+    parts: list[str] = []
+    if isinstance(ref, str):
+        # 裸字符串来源引用按历史口径视为来源标识本身
+        return ref.strip()
+    if isinstance(ref, dict):
+        for k in _SOURCE_IDENTITY_KEYS:
+            v = ref.get(k)
+            if isinstance(v, (str, int, float)) and str(v).strip():
+                parts.append(str(v).strip())
+        return " ".join(parts)
+    if isinstance(ref, (list, tuple)):
+        for item in ref:
+            if isinstance(item, dict):
+                parts.append(_source_identity_text(item))
+            elif isinstance(item, (str, int, float)) and str(item).strip():
+                parts.append(str(item).strip())
+    return " ".join(p for p in parts if p)
+
+
 def classify_source_kind(source: str = "", source_ref: str = "") -> str:
     """判定事实的数据来源类别（确定性规则，返回 source_kind）。
 
     接受两种来源形态：
     - ``source``：简单文件名/章节名；
     - ``source_ref``：可能是 JSON（list/dict/str）形态的引用，需先解析再匹配。
+
+    ✅ R210（2026-11-10 · P2）：JSON 形态的 ``source_ref`` **只取来源标识字段**
+    （``file`` / ``source`` / ``doc_name`` / ``name`` / ``文档`` / ``来源``），
+    不再把**引句原文**（``quote``）拼进关键词匹配串。
+
+    旧实现把整个 JSON 序列化后拼进 blob ⇒ 招标文件正文里出现「施工图」「地勘」
+    等词就被判成 ``drawing`` / ``survey``。而来源类别只应由**来源标识**决定
+    （「这条事实来自哪类文件」），引句内容（该文件里说了什么）与它正交 ——
+    污染后连优先级都会反转（招标文件 = 项目文件，优先级最低，却因引句被判成
+    施工图 = 第二权威），影响冲突裁决时「以哪份文件为准」的判断。
     """
     blob = _as_text(source)
     ref = source_ref
     if isinstance(ref, (dict, list, tuple)):
-        blob += " " + _as_text(ref)
+        blob += " " + _source_identity_text(ref)
     elif isinstance(ref, str) and ref:
-        blob += " " + ref
         try:
-            blob += " " + _as_text(json.loads(ref))
+            parsed = json.loads(ref)
         except (json.JSONDecodeError, TypeError, ValueError):
-            pass  # 非 JSON 字符串按原文匹配
+            blob += " " + ref  # 非 JSON 字符串按原文匹配（保持既有行为逐字不变）
+        else:
+            # ✅ R210：JSON 形态只取来源标识字段，**不再把引句原文拼进匹配串**
+            blob += " " + _source_identity_text(parsed)
     for keywords, kind in SOURCE_KIND_RULES:
         for kw in keywords:
             if kw and kw in blob:
@@ -711,6 +766,66 @@ def _extract_number_with_unit(text: str):
     return num, (m.group(2) or "").strip()
 
 
+def _all_numbers_with_unit(text: str) -> list[tuple[float, str]]:
+    """提取文本中**全部**「数值 + 单位」对（顺序保持）。"""
+    out: list[tuple[float, str]] = []
+    for m in _NUM_RE.finditer(text or ""):
+        try:
+            out.append((float(m.group(1)), (m.group(2) or "").strip()))
+        except ValueError:
+            continue
+    return out
+
+
+#: 句子分隔符（用于「关键词同句取数」的子句切分）
+_CLAUSE_SEPS = ("，", ",", "；", ";", "。", "、", "\n", "：")
+
+
+def _pick_param_number(value: str, unit: str, keywords: tuple[str, ...]):
+    """从一条事实的 value 中挑出**与参数名对应**的数值。
+
+    ✅ R210（2026-11-10 · P2）：旧实现一律取 value 里的**第一个**数字
+    （``_extract_number_with_unit`` 的 ``search`` 语义），而同一函数的文档
+    明确承诺「同一参数出现多个候选时取**最大值**（保守判定，避免低估危大级别）」——
+    **跨事实**保守、**跨子句**不保守，两个尺度强度漂移。
+
+    真实后果（安全红线方向）：AI 抽出的 value 常是整句，
+    「本工程共 3 层，基坑深度 12.5m」→ depth 取到 **3.0**（层的数量），
+    「支撑高度 24m，分 2 层开挖」→ height 取到 **2.0**（层数）⇒ 危大阈值判定
+    **低估** ⇒ 该判超危大/超规模的方案被判为不超 ⇒ 漏判。
+
+    现按两级取数（保守优先，精确优先）：
+      ① **关键词同句优先**：value 里出现参数关键词（如「基坑深度」）时，取该
+         关键词之后、同一子句内的第一个数字 —— 这是语义上真正对应参数的值；
+      ② **兜底取最大**：value 里没有关键词时，取该条事实内**最大**的数值
+         （与跨事实口径一致，宁可高估不低估）。
+    """
+    text = value or ""
+    pairs = _all_numbers_with_unit(text)
+    if not pairs:
+        # value 内无数值 → 退回「value + 单位列」的旧口径
+        return _extract_number_with_unit(f"{text} {unit}")
+    for kw in keywords or ():
+        if not kw or kw not in text:
+            continue
+        tail = text[text.find(kw) + len(kw) :]
+        cut = len(tail)
+        for sep in _CLAUSE_SEPS:
+            pos = tail.find(sep)
+            if pos >= 0:
+                cut = min(cut, pos)
+        clause = tail[:cut]
+        m = _NUM_RE.search(clause)
+        if m:
+            try:
+                return float(m.group(1)), (m.group(2) or "").strip()
+            except ValueError:
+                continue
+    # 兜底：同条事实内取最大值（与跨事实保守口径一致）
+    num, u = max(pairs, key=lambda p: p[0])
+    return num, u
+
+
 def _to_meter(num: float, unit: str):
     """把长度类单位换算为米；无法识别单位时返回 None（调用方按原值处理）。
 
@@ -781,16 +896,20 @@ def extract_danger_params(facts) -> dict:
         value = _fact_field(f, "value")
         unit = _fact_field(f, "value_unit") or ""
         matched = None
+        matched_keywords: tuple[str, ...] = ()
         for keywords, param in DANGER_PARAM_RULES:
             for kw in keywords:
                 if kw and kw in name:
                     matched = param
+                    matched_keywords = keywords
                     break
             if matched:
                 break
         if not matched:
             continue
-        pair = _extract_number_with_unit(value) or _extract_number_with_unit(f"{value} {unit}")
+        # ✅ R210：按「关键词同句优先 / 兜底取最大」取数（旧实现取第一个数字，
+        #   整句 value 里的层数、页码等数字会顶掉真正的参数值 ⇒ 危大判定低估）。
+        pair = _pick_param_number(value, unit, matched_keywords)
         if not pair:
             continue
         num, got_unit = pair
@@ -985,6 +1104,38 @@ def apply_fact_dimensions(items: list) -> list:
         if not getattr(it, "is_shared", False):
             it.is_shared = dims["is_shared"]
     return items
+
+
+def force_rederive_fact_dimensions(item) -> None:
+    """✅ R214（2026-11-10 · R210 D-2）：改值后**强制**重派生一条 FactItem 的四维。
+
+    与 :func:`apply_fact_dimensions` 的差别：后者「已有值不覆盖」（保人工归类、
+    保幂等），适用于提取管线补标注；本函数**无条件覆盖**，适用于「值已被改写」
+    的中间对象 —— 派生输入（name/value/category）变了，旧四维是提取期的旧值，
+    保留它会让``chapter`` / ``fact_attr`` / ``source_kind`` / ``is_shared`` 与
+    新值错配（九大章节视图 / 按章精选 / 属性统计失真）。
+
+    安全前提：本函数只用于**尚未落库、无人工归类**的中间 ``FactItem``
+    （``facts_patches.apply_patches_to_fact_items`` 的知识库补充链）。已落库行
+    的人工归类由 ``_rederive_dimension_columns``（DB 写路径单一出口）尊重 ——
+    两处不得混用。维度派生失败时静默（读路径惰性派生兜底），绝不中断补丁合并。
+    """
+    try:
+        dims = classify_fact_dimensions(
+            getattr(item, "name", "") or "",
+            _as_text(getattr(item, "value", "")),
+            getattr(item, "category", "") or "",
+            getattr(item, "fact_type", "") or "",
+            getattr(item, "fact_key", "") or getattr(item, "key", "") or "",
+            getattr(item, "source", "") or "",
+            getattr(item, "source_ref", "") or "",
+        )
+    except Exception:  # noqa: BLE001 - 读路径惰性派生兜底，不中断补丁合并
+        return
+    item.chapter = dims["chapter"]
+    item.fact_attr = dims["fact_attr"]
+    item.source_kind = dims["source_kind"]
+    item.is_shared = dims["is_shared"]
 
 
 def dimensions_for_row(row: dict) -> dict:

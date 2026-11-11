@@ -642,6 +642,32 @@ async def save_as_outline(upload_id: str, body: dict, db=Depends(get_db)):
     # 现：按归一化标题匹配已有 section，匹配成功则保留 content/word_count/status，
     # 仅更新结构字段；不匹配的旧章节被删除，新章节插入空记录。
     # 注：`_norm_title` 与 `pre_nt_index` 已上提至自动改写之前（见上方说明）。
+    # ✅ R209（2026-11-10 · 写锁前移）：本路径是「读旧快照 → 标题匹配 → 整表写」
+    #    的复合写操作，但**全程没有写锁**（全仓 BEGIN IMMEDIATE 仅 4 处，
+    #    唯独缺这一条整表重建路径）。autocommit 下 SELECT 不开事务 ⇒ 两路并发
+    #    保存各自基于同一旧快照组装，写锁只在各自第一条 DML 时串行；
+    #    行数校验（_r13_write）能挡住「少行」，但挡不住「两路都只 INSERT 新
+    #    节点、to_delete 为空」⇒ 同一方案出现两套重复章节。
+    #    现于**首个决策读之前**显式 BEGIN IMMEDIATE（立即取得 RESERVED 写锁，
+    #    跨连接/跨进程有效），锁在函数末尾唯一一次 commit 处释放；
+    #    调用方已开事务时沿用其事务（与 sections._save_outline_to_db 同口径）。
+    #    ⚠️ 位置：必须在 AI 调用（占位标题自动重写）之后 —— AI 调用期间不得持锁。
+    # ✅ R216（2026-11-11 · P3）：取锁前**复检**双 409 守卫（与
+    #    sections._save_outline_to_db 同口径、同文案）—— 入口守卫与本写锁之间
+    #    隔着上方占位标题 AI 自动重写（可达数十秒），期间新启动的生成任务
+    #    不会被既有守卫拦下 ⇒ 整表重建与 _persist_section 的竞态窗口重开。
+    if content_generation_in_progress(scheme_id):
+        raise HTTPException(
+            409, "本方案正文正在后台生成中，请等待生成完成（或先停止任务）后再保存目录——" "整表重建会与生成结果互相覆盖"
+        )
+    if outline_generation_in_progress(scheme_id):
+        raise HTTPException(409, "本方案目录正在后台生成中，请等待生成完成（或先停止任务）后再保存目录")
+    if getattr(db, "in_transaction", False):
+        _lock_mode = "inherited"
+    else:
+        await db.execute("BEGIN IMMEDIATE")
+        _lock_mode = "immediate"
+
     cur = await _r13(
         await db.execute(
             # ✅ BUG 修复（字段错位，2026-10-08）：SELECT 此前漏取 level ——
@@ -1047,10 +1073,14 @@ async def save_as_library(upload_id: str, body: dict, db=Depends(get_db)):
     name = body.get("name", "上传识别目录")
     # ✅ BUG 修复：入库前统一规范化（三级裁剪 + 编号重排），
     #    与「保存为方案目录」路径保持一致，避免目录库存入 4+ 级/内嵌编号的脏数据。
-    from app.services.outline_utils import normalize_outline_json
+    # ✅ R209（2026-11-10 · 目录库入库闸门）：改用 `normalize_outline_for_library`
+    #    单一入口 —— 追加**标题不可见字符清洗**与**落库闸门校验**，与
+    #    outline_library.create_library / update_library 逐字同口径
+    #    （否则「库里能存、套用时被拒」且错误归因误导）。
+    from app.services.outline_utils import normalize_outline_for_library
 
     raw_outline = body.get("outline", [])
-    outline_json = normalize_outline_json(raw_outline)
+    outline_json, _lib_problems = normalize_outline_for_library(raw_outline)
     # ✅ PRD 9.2：保存前必须通过层级校验；空目录 / 全是非法节点时明确拒绝，
     #    避免在目录库里沉淀空库（旧实现会静默写入空目录库）。
     try:
@@ -1059,6 +1089,12 @@ async def save_as_library(upload_id: str, body: dict, db=Depends(get_db)):
         normalized_nodes = []
     if not isinstance(normalized_nodes, list) or not normalized_nodes:
         raise HTTPException(400, "识别结果为空或节点格式非法，无法存入目录库")
+    if _lib_problems:
+        raise HTTPException(
+            400,
+            "识别结果校验未通过（标题需非空且不超过 200 字，章节编号须合法）："
+            + "；".join(_lib_problems[:3]),
+        )
     # ✅ BUG 修复（2026-10-03 · 跨模块契约一致性）：旧实现从不校验 upload_id 是否
     #    存在，伪造/过期的 id 会静默命中 `UPDATE ... WHERE id=?`（0 行受影响）并
     #    返回 {"ok": True} —— 调用方误以为保存成功，实则未关联任何上传记录。

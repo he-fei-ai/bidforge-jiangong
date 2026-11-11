@@ -412,6 +412,25 @@ export interface FactSkippedSafety {
   duplicate_fact_ids?: string[];
 }
 
+/**
+ * ✅ R210（2026-11-10）：`POST /global-facts` 响应（后端 `create_fact`）。
+ *
+ * `deduplicated` 是**幂等去重计数**：同名同值且既有行可注入时后端**一条都不写**
+ * （R179 的同名守卫），只把计数回传。此前前端 `factsApi.create` 无返回泛型、
+ * 响应整体被丢弃 ⇒ 无条件提示「事实条目已新增」⇒ **假成功**（列表无变化）。
+ */
+export interface FactCreateResponse {
+  id: string;
+  ok: boolean;
+  /** 同名同值被幂等去重的条数（>0 ⇒ 本次未新增任何行） */
+  deduplicated: number;
+}
+
+/** ✅ R210：`DELETE /global-facts/{id}` 响应（后端 `delete_fact`）。 */
+export interface FactDeleteResponse {
+  ok: boolean;
+}
+
 export interface FactResolveResponse {
   ok: boolean;
   /**
@@ -504,13 +523,16 @@ export interface FactParseDocResponse {
   /** R193：failed 短路时附「请使用强制重新解析重试」指引 */
   note?: string;
   truncated?: boolean;
-  parse_truncated?: boolean;
   parse_warnings?: string[];
   warnings?: string[];
-  parse_duration_ms?: number;
-  parse_engine?: string;
   /** R203 补录（后端 :1436/:1457 实测回传）：本轮解析把旧事实置 stale 的条数 */
   stale_facts?: number;
+  // ✅ R208 清理幽灵键：``parse_truncated`` / ``parse_duration_ms`` /
+  //    ``parse_engine`` 三个键后端**从不回传**（成功主分支只回
+  //    {ok, parse_status, text_len, truncated, layers?, warnings?, warning?,
+  //    stale_facts?, note?}），声明它们会诱导后续消费方取到 undefined 而
+  //    误判（如把 ``parse_truncated`` 恒 undefined 读成「未截断」）。
+  //    与 R203 FE-7「删幽灵键」同口径。``truncated`` 才是解析级截断的真实键。
 }
 
 /** POST /global-facts/documents/parse-all（R193 起早退分支带 note/stale_facts） */
@@ -522,6 +544,11 @@ export interface FactParseAllResponse {
   truncated_count: number;
   truncated: Array<{ file_name?: string; doc_id?: string; reason?: string }>;
   reconciled_count?: number;
+  /**
+   * ✅ R208：后端已由「文件名字符串数组」改为**对象数组**（与 failed[] /
+   *    truncated[] 口径统一），此前后端返 str[]、前端声明 obj[] 属契约倒挂
+   *    —— 任何按声明取 r.file_name 的消费方恒得 undefined。
+   */
   reconciled?: Array<{ doc_id?: string; file_name?: string }>;
   force?: boolean;
   note?: string;
@@ -566,10 +593,15 @@ export interface FactDocPreviewResponse {
   file_size?: number;
   parse_time?: number;
   parse_warnings?: string[];
-  parse_truncated?: boolean;
-  max_chars?: number;
   truncated?: boolean;
   created_at?: string;
+  /**
+   * ✅ R208 补：解析状态（后端 preview 两条返回路径均回传）。
+   * 'failed' 表示上次解析失败、库里保留的是更早一次的成功正文。
+   */
+  parse_status?: string;
+  // ✅ R208 清理幽灵键：``parse_truncated`` / ``max_chars`` 后端从不回传。
+  //    解析级截断的真实键是 ``truncated``（与 /documents 列表口径一致）。
 }
 
 /** DELETE /global-facts/documents/{id}（:314） */
