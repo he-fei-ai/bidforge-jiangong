@@ -654,6 +654,10 @@ export default function SchemeWorkbenchPage() {
   //    要等在飞 AI 调用被 cancel / 段边界检查点命中），按钮保持置灰直至任务落
   //    终态。旧实现发完指令立刻乐观报「已停止」，用户以为还能接着点。
   const [taskStopping, setTaskStopping] = useState(false);
+  // ✅ R227（修复10）：任务终态信号（completed/degraded/stopped/failed）—— 正文
+  //    生成 stopped 终态 progress 保留真实值（<1），GenerationProgressCard 的
+  //    `hasFailed` 需区分「终态但 progress<1」与「仍在跑」，故显式记录终态。
+  const [taskTerminal, setTaskTerminal] = useState(false);
   // ✅ R174 F2（2026-11-03）：未知任务状态机（state + ref + 处理器）已收口到
   //    schemeWorkbench/useUnknownTaskRecovery.tsx（G10 拆分，见其注释）。
   //    ref 仍是守卫唯一事实源，页面通过 hasUnknownTask() 只读判定。
@@ -1140,6 +1144,12 @@ export default function SchemeWorkbenchPage() {
       if (currentSelected) {
         const fresh = findSectionById(newTree, currentSelected.key!);
         if (fresh) setSelectedSection(fresh);
+        // ✅ R223（2026-11-12 · P3 · FE-9）：树里找不到时必须清空选中 —— 旧实现
+        //    落空时什么都不做 ⇒ 新增章节（key=local_ 前缀）保存后重建的树里该
+        //    key 不存在（落库换成 DB 主键），selectedSection 残留旧 local_ 对象：
+        //    预算面板继续显示幽灵节点，预算编辑回调 findSectionById 落空后静默
+        //    return（点击零反馈）。
+        else setSelectedSection(null);
       }
       // ✅ R179 M1：新增建议章节后定位到新节点（只定位，不生成正文）
       if (pendingLocateSectionIdRef.current) {
@@ -1663,6 +1673,17 @@ export default function SchemeWorkbenchPage() {
       //    这里显式清空是唯一权威时机；selectedSectionRef 渲染时自动跟随。
       setSelectedSection(null);
       setCrSummary(null);
+      // ✅ R223（2026-11-12 · P2 · FE-3/FE-4）：目录树与未知态跨方案复位 ——
+      //    ① setTree([])：切到 B 后、load() 返回前左侧树仍是 A 的目录；若 B 的
+      //      load 失败（catch 仅 toast），A 的树**永久残留**在 B 页面，此时
+      //      「保存目录」会把 A 的整棵树写进 B（跨方案整表重建）——与 R215
+      //      selectedSection 跨方案写库同族，树是最后一块漏清的页面态。
+      //    ② clearUnknownTask()：未知态是页面级状态且含任务归属，A 的未知任务
+      //      横幅残留到 B 页会被「重新接管」触发跨方案接管（FE-3 接管入口已有
+      //      归属校验兜底，此处是显示层复位——横幅不该出现在异方案页面）。
+      //    切换是同步点：这里显式清空是唯一权威时机（R193 D-02 同判据）。
+      setTree([]);
+      clearUnknownTask();
     }
     initialTabDecidedRef.current = false;
     // ✅ R191 修复（切方案列表残留）：新方案列表请求是异步的，成功回写前
@@ -1823,10 +1844,15 @@ export default function SchemeWorkbenchPage() {
   //    hook 解构（R194 FIX-16 同款考量：用「声明在前且稳定」的通道，避免
   //    TDZ 与陈旧闭包）；真实实现见 :2277 后的 ref 赋值处。
   const outlineRestoreFnRef = useRef<(fin: TaskTerminalInfo) => void>(() => {});
+  // ✅ R224（F17）：facts 终态消费函数（真实实现在 useFactsGeneration 内，
+  //    声明在本 ref 之后 —— 经 ref 间接注入，规避 TDZ；与 outlineRestoreFnRef
+  //    同模式）。
+  const factsTerminalFnRef = useRef<((fin: TaskTerminalInfo) => void) | null>(null);
   const {
     unknownTask,
     setUnknownTask,
     markUnknownTask,
+    clearUnknownTask,
     handleReattachUnknownTask,
     guardUnknownTaskGeneration,
     hasUnknownTask,
@@ -1867,6 +1893,10 @@ export default function SchemeWorkbenchPage() {
     //    msg.success+load() 刷不出任何东西 ⇒ checkpoint 里的目录成果凭空丢失，
     //    用户只能重新生成（重复计费）。镜像 onContentResult 注入。
     onOutlineResult: (fin) => outlineRestoreFnRef.current(fin),
+    // ✅ R224（F17）：facts 任务手动接管终态消费 facts_result —— segment_stats /
+    //    cross_conflicts 此前只在断线重挂（useFactsGeneration reattach 分支）恢复，
+    //    手动接管与刷新接管两路缺口（content=R194 FE-16 / outline=R216 D-1 同族）。
+    onFactsResult: (fin) => factsTerminalFnRef.current?.(fin),
     unknownTaskTypeLabel: UNKNOWN_TASK_TYPE_LABEL,
   });
 
@@ -1880,16 +1910,21 @@ export default function SchemeWorkbenchPage() {
         const allRunning = (data.tasks || []).filter(
           (t: TaskListItem) => t.status === "running" || t.status === "paused",
         );
-        // ✅ 跳过 progress 已满的僵尸（后端没来得及标 completed），直接 load 刷新
-        const stuckFull = allRunning.find((t: TaskListItem) => (t.progress || 0) >= 0.95);
-        if (stuckFull) {
-          console.warn("resume: 发现 progress≥95% 但 status 仍 running 的僵尸任务，直接 load 刷新");
+        // ✅ R224（F3）：僵尸判定移到 active 选取**之后**且阈值 0.95 → 0.99 ——
+        //   一致性/字数批调度阶段在 0.95~0.98 属合法长时间运行（R217 FIX-10/11
+        //   确立；后端 R224 起 DB progress 运行期封顶 0.98），0.95 会把刷新期间
+        //   的合法阶段误判成「已完成」且**不接管**（停止/暂停按钮消失、真终态后
+        //   无人刷新）；且旧实现先于 active 选取 return，一条高进度行会挡住同
+        //   方案真正在跑任务的接管。0.99 与 taskPolling.stuckAtFull 兜底同阈值，
+        //   且只对「将要接管的 active」判僵尸。
+        const active = allRunning.find(Boolean);
+        if (!active || cancelled) return;
+        if ((active.progress || 0) >= 0.99) {
+          console.warn("resume: 发现 progress≥99% 但 status 仍 running 的僵尸任务，直接 load 刷新");
           msg.success("检测到后台任务已完成，正在刷新");
           load();
           return;
         }
-        const active = allRunning.find(Boolean);
-        if (!active || cancelled) return;
         msg.info(
           `检测到后台「${TASK_TYPE_LABEL[active.task_type] || active.task_type}」任务仍在进行（${Math.round((active.progress || 0) * 100)}%），完成后自动刷新`,
           6,
@@ -1966,6 +2001,12 @@ export default function SchemeWorkbenchPage() {
                   );
                 }
               }
+              // ✅ R224（F17b）：facts 任务的刷新接管终态消费 facts_result ——
+              //    segment_stats / cross_conflicts 此前只在断线重挂恢复；与
+              //    content（R194 FE-16）/ outline（R216 D-3）同批补齐三路矩阵。
+              if (active.task_type === "facts_generation") {
+                factsTerminalFnRef.current?.(st);
+              }
               const ckpt = st.outline_result;
               if (
                 active.task_type === "outline_generation" &&
@@ -2006,10 +2047,13 @@ export default function SchemeWorkbenchPage() {
                 } else {
                   openOutlineGate(ckpt.outline);
                 }
-              } else if (st.status === "completed") {
+              } else if (st.status === "completed" && active.task_type !== "facts_generation") {
+                // facts_generation 的 completed/degraded 已由 factsTerminalFnRef
+                // 消费（统计恢复 + loadFacts，R224 F17b），不走通用分支防双提示。
                 msg.success("后台任务已完成，正在刷新");
                 load();
-              } else if (st.status === "degraded") {
+              } else if (st.status === "degraded" && active.task_type !== "facts_generation") {
+                // facts_generation 的 degraded 已由 factsTerminalFnRef 消费（R224 F17b）
                 // ✅ 2026-10-10：降级完成同样要刷新（正文已落库），但必须告警
                 // ✅ R89 S2：目录检查点写失败也会降级 —— 成果只经 SSE 送出一次，
                 //    刷新后 checkpoint_json 为空、无法恢复，因此文案同时覆盖两种成因。
@@ -2023,6 +2067,13 @@ export default function SchemeWorkbenchPage() {
                 // ✅ R89 S4：接管路径此前对 stopped 无分支 —— 用户主动停止后台
                 // 目录生成后刷新页面，这里静默 return，进度条与状态停在接管前。
                 msg.info(`后台任务已停止${st.message ? `：${st.message}` : ""}`);
+                // ✅ R224（F17）：stopped 前已逐章落库的正文不 load() 永不显示
+                //   （断线重挂 :3016 与手动接管 :178 都 load）—— 三路恢复矩阵补
+                //   齐最后一条。outline 例外：checkpoint 成果恢复不落 sections，
+                //   load() 会把刚恢复的树预览冲掉（R223 FE-1 同纪律）。
+                if (active.task_type !== "outline_generation") {
+                  load();
+                }
               }
               return;
             }
@@ -2045,11 +2096,16 @@ export default function SchemeWorkbenchPage() {
             pollFailStreak++;
             if (pollFailStreak >= 5) {
               resetTakeover();
-              markUnknownTask({
-                taskId: active.id,
-                genType: gt || genTypeMap[active.task_type] || "content",
-                reason: "接管轮询连续网络失败（5 次），任务状态未知",
-              });
+              // ✅ R223（FE-2）：标记前校验世代与取消 —— 切方案后（cancelled 由
+              //    effect cleanup 置位 / genSeq 被 bump）旧方案任务不得被标到新页面。
+              if (!cancelled && genSeqRef.current === takeoverSeq) {
+                markUnknownTask({
+                  taskId: active.id,
+                  genType: gt || genTypeMap[active.task_type] || "content",
+                  schemeId: id,
+                  reason: "接管轮询连续网络失败（5 次），任务状态未知",
+                });
+              }
               return;
             }
             // 单次/少量失败：继续轮询（后端重启、网络抖动均可自愈）
@@ -2058,12 +2114,16 @@ export default function SchemeWorkbenchPage() {
         // ✅ R194（FIX-12）：循环耗尽（400×3s ≈ 20 分钟无终态）—— 旧实现直接
         //    落出 for 循环无任何收尾，同样把 generating 永久卡死。长正文任务
         //    （30+ 章轻松超过 20 分钟）每次都必然触发。现按未知态收尾。
+        // ✅ R223（FE-2）：同上，标记前校验世代与取消。
         resetTakeover();
-        markUnknownTask({
-          taskId: active.id,
-          genType: gt || genTypeMap[active.task_type] || "content",
-          reason: "接管轮询超限（400×3s）未获得任务终态",
-        });
+        if (!cancelled && genSeqRef.current === takeoverSeq) {
+          markUnknownTask({
+            taskId: active.id,
+            genType: gt || genTypeMap[active.task_type] || "content",
+            schemeId: id,
+            reason: "接管轮询超限（400×3s）未获得任务终态",
+          });
+        }
       } catch {
         /* 接口异常静默 */
       }
@@ -2472,6 +2532,8 @@ export default function SchemeWorkbenchPage() {
     const batcher = createSseBatcher();
     sseBatcherRef.current = batcher;
     setGenerating(true);
+    // ✅ R227（修复10）：新一轮生成开始时复位终态信号（上一任务可能 stopped）。
+    setTaskTerminal(false);
     setSseReconnecting(false);
     setGenType("content");
     setTaskPaused(false);
@@ -2641,8 +2703,11 @@ export default function SchemeWorkbenchPage() {
                 ? {
                     ...prev,
                     content: !_degraded && typeof evt.content === "string" ? evt.content : prev.content,
-                    word_count: evt.word_count || prev.word_count,
-                    word_budget: evt.word_budget || prev.word_budget,
+                    // ✅ R227（修复9）：`||` 把合法的 0 当假值 —— 空章节（word_count=0 /
+                    //    word_budget=0）会被 prev 覆盖成旧值。改用 `??`（仅 null/undefined
+                    //    回退），0 字空章不再被上一事件覆盖。
+                    word_count: evt.word_count ?? prev.word_count,
+                    word_budget: evt.word_budget ?? prev.word_budget,
                     status: "generated",
                   }
                 : prev,
@@ -2758,6 +2823,8 @@ export default function SchemeWorkbenchPage() {
         //   ⇒ 降级完成时不 break / 不 load() / 不给任何提示，正文停留在旧内容，
         //   且成稿含未修复缺陷而用户完全无感（P0-3 的下半截没接到前端）。
         if (isTerminalContentEvent(evt)) {
+          // ✅ R227（修复10）：终态信号（completed/degraded）置位。
+          setTaskTerminal(true);
           // ✅ 性能优化：终态事件立即 flush，确保 UI 与后续 load() 前的最后一次渲染一致
           batcher.flushNow();
           setProgress(1);
@@ -2785,6 +2852,13 @@ export default function SchemeWorkbenchPage() {
           }
           // ✅ F-CONTENT-STANDARD(2026-09-26 · F4)：生成标准校验汇总提示
           //    （仅在「有问题章数 > 0」时追加，无问题不制造噪音）
+          // ✅ R224（F23）：在线 completed 消费 run_words / over_count —— 后端
+          //    R-1 口径键（本次落库字数/超字章数）此前只有类型声明零读取点，
+          //    「在线横幅 vs 重挂摘要」口径在线侧实际仍无消费（键产出了但前端没有）。
+          if (typeof evt.run_words === "number" && evt.run_words > 0) {
+            const _runOver = typeof evt.over_count === "number" ? evt.over_count : 0;
+            msg.info(`本次落库 ${evt.run_words} 字${_runOver > 0 ? `（${_runOver} 章超字数）` : ""}`);
+          }
           const _stdHint = standardSummaryHint(evt.standard_summary);
           if (_stdHint) {
             msg.warning(_stdHint);
@@ -2819,6 +2893,9 @@ export default function SchemeWorkbenchPage() {
           load();
           break;
         } else if (evt.event === "stopped") {
+          // ✅ R227（修复10）：终态信号（stopped）置位 —— progress 保留真实值（<1），
+          //    有失败时进度条仍需显示 exception（对齐 completed 分支）。
+          setTaskTerminal(true);
           // ✅ 性能优化：终态事件立即 flush，确保停止时的最终进度立即展示
           batcher.flushNow();
           // ✅ 二次增强：停止时把未完成章节收尾为"已停止"（不再转圈），
@@ -2928,12 +3005,14 @@ export default function SchemeWorkbenchPage() {
           markUnknownTask({
             taskId,
             genType: "content",
+            schemeId: id,
             reason: "SSE 连接中断后未能检索到可接管的正文生成任务，无法确认后台是否仍在运行",
           });
         } else if (hit && !hit.final && reattachStillCurrent) {
           markUnknownTask({
             taskId: hit.taskId,
             genType: "content",
+            schemeId: id,
             reason: "重挂轮询超限（200×3s）或连续网络失败，未获得任务终态",
           });
         }
@@ -2951,6 +3030,10 @@ export default function SchemeWorkbenchPage() {
             _reattachBackfilled = true;
           }
           const fin = hit.final;
+          // ✅ R227（修复10）：断线重挂命中已终态任务（hit.final 仅终态才存在），
+          //    显式置位终态信号 —— 重挂 stopped 任务的进度条 progress<1，须同样
+          //    在「有失败」时显示 exception（对齐在线 stopped/completed 分支）。
+          setTaskTerminal(true);
           // 后端早已把「失败哪几章、为什么失败」落进 checkpoint（_CHECKPOINT_KINDS
           // 的 content_generation 白名单 + task_status 的 _attach_checkpoint_result），
           // 但前端此前从未读取 fin.content_result —— 断线/刷新后用户只看到
@@ -3086,7 +3169,7 @@ export default function SchemeWorkbenchPage() {
 
   // ✅ 2026-11-04 拆分（G11）：全局事实提取主链迁至
   //    schemeWorkbench/useFactsGeneration.ts（函数体逐字搬运）。
-  const { handleGenerateFacts, handleRetryFailedSegments } = useFactsGeneration({
+  const { handleGenerateFacts, handleRetryFailedSegments, consumeFactsTerminal } = useFactsGeneration({
     id,
     msg,
     modal,
@@ -3114,6 +3197,9 @@ export default function SchemeWorkbenchPage() {
     docList,
     factsSummary,
   });
+  // ✅ R224（F17）：facts 终态消费注入 ref（真实实现在上方 hook 内，经 ref
+  //    间接引用规避 TDZ —— 与 outlineRestoreFnRef.current 同模式）。
+  factsTerminalFnRef.current = consumeFactsTerminal;
 
   // R-P1 拆分：上传/解析/预览/四层管线/分类/批量确认/过期解除/删除文档域处理器
   // 迁至 useDocumentWorkflow（调用点保持在原位；批确认/过期解除/删除段原在
@@ -4147,6 +4233,7 @@ export default function SchemeWorkbenchPage() {
           outlineLogs={outlineLogs}
           stats={genStats}
           reconnecting={sseReconnecting}
+          terminal={taskTerminal}
         />
       )}
 

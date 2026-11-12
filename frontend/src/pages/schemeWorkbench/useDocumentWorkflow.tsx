@@ -374,6 +374,11 @@ export function useDocumentWorkflow(deps: DocumentWorkflowDeps) {
       if (notice.tone === "error") msg.error(notice.text + uploadNote);
       else msg.success(notice.text + uploadNote);
       loadDocuments();
+      // ✅ R225（2026-11-12 · D2）：同名替换已把项目事实批量置 stale
+      //    （后端回传 stale_facts）—— 事实列表/概览不回读则「来源过期」
+      //    徽标与「全部就绪」入口继续显示旧态，正文生成的注入门控实际
+      //    已把这些事实排除（用户零感知的静默缺料）。
+      void loadFacts();
     } catch (e: unknown) {
       // 结构化窄断言：仅读取 axios 错误对象上真实存在的 name / message
       const err = e as { name?: string; message?: string };
@@ -490,6 +495,9 @@ export function useDocumentWorkflow(deps: DocumentWorkflowDeps) {
       if (isWarning) msg.warning(detail);
       else msg.success(detail);
       loadDocuments();
+      // ✅ R225（D2）：parse-all 完成后旧事实全体 stale —— 同步回读事实
+      //    列表/概览，消除「徽标仍旧态 vs 注入门控已排除」的口径分叉。
+      void loadFacts();
     } catch (e: unknown) {
       const err = e as { name?: string; message?: string };
       if (err?.name === "AbortError" || ac.signal.aborted) return;
@@ -500,6 +508,8 @@ export function useDocumentWorkflow(deps: DocumentWorkflowDeps) {
       //    否则列表仍显「待解析」，用户改点「全部重解析」会让已解析文档重复
       //    OCR（分钟级空转）。
       loadDocuments();
+      // ✅ R225（D2）：失败补偿同理覆盖已落库份的 stale 回读。
+      void loadFacts();
     } finally {
       if (parseAbortRef.current === ac) {
         parseAbortRef.current = null;
@@ -561,6 +571,9 @@ export function useDocumentWorkflow(deps: DocumentWorkflowDeps) {
         );
       }
       loadDocuments();
+      // ✅ R225（D2）：单份解析完成同样把旧事实置 stale —— 回读事实列表/
+      //    概览（R191 C-F2 只消费了 note 文案，列表回读一直缺位）。
+      void loadFacts();
     } catch (e: unknown) {
       const err = e as { name?: string; message?: string };
       if (err?.name === "AbortError" || ac.signal.aborted) return;
@@ -881,7 +894,14 @@ export function useDocumentWorkflow(deps: DocumentWorkflowDeps) {
    * （只清 stale、不置已确认），返回的 blocked_reason 原样提示。
    */
   const handleAckStaleOne = async (factId: string, title?: string) => {
-    if (!id || !factId) return;
+    // ✅ R225（2026-11-12 · D6）：补用户反馈 —— R210 已给同形态的
+    //    resolve/resolveConflict 守卫补 msg.info（历史/复制方案残留缺 fact_id
+    //    的条目是真实形态），stale 解除路径漏改：脏行上点「来源已变化 ✓」
+    //    Tag 零反应（假动作家族）。
+    if (!id || !factId) {
+      msg.info("该条目缺少事实标识（历史/复制方案残留），请重新提取事实后再试");
+      return;
+    }
     const sid = id;
     // 复用列表加载的中止控制器：切方案时一并取消「补丁请求」和随后的「列表刷新」，
     // 避免旧方案的 stale 回执在切走后触发对已离开方案的刷新。
@@ -931,6 +951,9 @@ export function useDocumentWorkflow(deps: DocumentWorkflowDeps) {
           await factsApi.deleteDocument(docId);
           msg.success("文件已删除");
           loadDocuments();
+          // ✅ R225（D2）：删除文档后端已把关联事实置 stale（回传 stale_facts）
+          //    —— 回读事实列表/概览让「来源过期」徽标即时可见。
+          void loadFacts();
         } catch (e: unknown) {
           msg.error(
             requestErrorText(

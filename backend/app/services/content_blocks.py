@@ -181,6 +181,32 @@ _RE_HEADING_NN = re.compile(r"^(\d+\.\d+)\s+([\u4e00-\u9fa5A-Za-z].*)$")
 _RE_HEADING_N = re.compile(r"^(\d+)\s+([\u4e00-\u9fa5A-Za-z].*)$")
 _RE_MD_HEADING = re.compile(r"^(#{1,6})\s+(.*)")
 _RE_TABLE_SEP = re.compile(r"^\|?\s*:?-+:?\s*(\|\s*:?-+:?\s*)*\|?$")
+# ✅ R220（2026-11-12 · 导出 DOCX 图表渲染错误收口）：两类 AI 畸形围栏形态的唯一
+#    修复出口（``normalize_chart_fence_shapes``）。生产库实证：
+#      · 形态 A（3c150ba0）—— 图表被包进单列「图题假表格」：
+#        ``| 图 9-1 井道垂直度检测示意图 |`` / ``| :---: |`` / ``| ```mermaid `` …
+#        `` ``` |``。后果：围栏行以 ``|`` 开头 → ``parse_fence_line`` 判非围栏 →
+#        图表**从不渲染**、源码行以表格单元格/裸段落形态泄漏进成稿；
+#        闭合行 `` ``` |`` 信息串非空（R76 判据）→ 被当成 lang="|" 的代码围栏
+#        开启，把图注段吞进代码块。
+#      · 形态 B（a0b4093e）—— `` ```markdown `` 文档围栏包住**整段正文**并内嵌
+#        `` ```chart-json `` 图表：外层围栏吞掉正文（成稿整段退化为 run-on 纯文本、
+#        ``###`` 标记原样印刷），内嵌图表被外层围栏遮蔽 → 解析/登记两侧全部丢图。
+#    修复原则：**行数不变**（只抹标记 / 原地重写）—— 保住 numbering 侧
+#    ``src_line`` 行号契约（R192 FIX-R1 家族），且幂等。
+#: 文档型围栏语言：内容是正文而非代码（仅在「内嵌图表围栏」时解包，见形态 B）。
+_DOC_FENCE_LANGS = frozenset({"markdown", "md", "text", "txt", "plain"})
+#: 图表家族围栏的**开启行**（行首即围栏 + 图表语言标签；用于形态 B 的嵌套探测）。
+#:    ✅ R227：补 `~{3,}`（波浪线围栏）—— AI 可能输出 `~~~mermaid` 而非 ````` ```mermaid ````，
+#:    markdown 两者都是合法围栏（fence_common.FENCE_LINE_RE 支持 `~{3,}`），
+#:    旧版只认反引号，「波浪线图题假表格」形态（`| ~~~mermaid ~~~ |`）不被识别。
+_RE_CHART_FENCE_OPEN_LINE = re.compile(r"^\s*(?:`{3,}|~{3,})\s*(?:mermaid|chart-json|ai_image)\b")
+#: 形态 A 开启行：整行就是「管道 + 围栏 + 图表语言标签（+ 可选尾管道）」。
+#:    ✅ R227：围栏标记组（group 1）扩为反引号或波浪线，且**保持捕获**（调用点
+#:    用它原样重写开启/闭合行，非捕获组会错位到语言标签）。
+_RE_FIG_TABLE_CHART_OPEN = re.compile(r"^\s*\|\s*(`{3,}|~{3,})\s*(mermaid|chart-json|ai_image)\s*\|?\s*$")
+#: 形态 A 闭合行：整行只有围栏标记（允许杂散的前导/尾随管道，无语言标签）。
+_RE_FIG_TABLE_FENCE_CLOSE = re.compile(r"^\s*\|?\s*(`{3,}|~{3,})\s*\|?\s*$")
 # ✅ R99（2026-10-17 · 机器标记不得泄漏进交付文档）：
 #    历史图表标记块 ``[CHART_TYPE: xxx]`` 的唯一判据。旧正则只认**半角方括号 +
 #    半角冒号**，而中文语境里模型/用户极可能写成全角 ``【CHART_TYPE: xxx】`` 或
@@ -212,6 +238,11 @@ def chart_type_tags(text: str) -> set[str]:
 _RE_QUOTE_PREFIX = re.compile(r"^\s*>\s?")
 _RE_HR_LINE = re.compile(r"^([-*_])(\s*\1){2,}$")
 _RE_UL_BULLET = re.compile(r"^[-*•·]\s+(.*)")
+# ✅ R227（修复8）：无序列表「无空格变体」（`-材料进场`）被拍平 —— 旧正则要求
+#    `\s+`，无空格形式落入普通段落。保守放宽：只对 **`-`/`•`/`·`** 三种（`*`
+#    有 markdown 强调歧义，保持 `\s+` 不变），且**拒绝数字/空格/连字符后继**
+#    （`-5℃` 是负温/数值、`--x` 是残破分隔线/连字符前缀，都不是列表项）。
+_RE_UL_BULLET_TIGHT = re.compile(r"^[-•·](?=[^\s0-9\-])(.*)")
 _RE_WS_RUN = re.compile(r"\s+")
 _RE_INLINE_MD_NOISE = re.compile(r"[*_`#]")
 _RE_TITLE_TAIL_PUNCT = re.compile(r"[\s、.。：:；;，,]+$")
@@ -531,7 +562,11 @@ def _attach_trailing_figure_captions(blocks: list[dict]) -> list[dict]:
         #   下方只有 chart 块有吸收通道）。GB/T 规范图题在图**下方**（R179 G-08
         #   对 chart 块已修，image 块同族漏改），命中时覆盖 alt（与 chart 块
         #   「显式图题优先于引导语推导」同口径）。
-        if blk.get("type") in ("chart", "image") and i + 1 < len(blocks):
+        #   ✅ R224（F12a · 同族第 3 处）：白名单补 ``ai_image`` —— AI 配图块
+        #   （:1385 产出 type="ai_image"，title 消费链与 chart 块同为
+        #   「源文题注 > 载荷 title > 引导语」R196 链）**下方**的「图 X-Y 题名」
+        #   段此前流到 _drop_dangling_figure_captions 被整段删除。
+        if blk.get("type") in ("chart", "image", "ai_image") and i + 1 < len(blocks):
             nxt = blocks[i + 1]
             if nxt.get("type") == "paragraph":
                 text = _RE_BOLD_WRAP.sub(r"\1", str(nxt.get("text") or "").strip()).strip()
@@ -540,7 +575,7 @@ def _attach_trailing_figure_captions(blocks: list[dict]) -> list[dict]:
                     title = m.group(1).strip()
                     if _looks_like_figure_title(title):
                         if blk.get("type") == "image":
-                            blk["alt"] = title  # image 块消费 alt（chart 块消费 title）
+                            blk["alt"] = title  # image 块消费 alt（chart/ai_image 块消费 title）
                         else:
                             blk["title"] = title
                         i += 2  # 题注已升格，正文中不再重复输出
@@ -917,6 +952,147 @@ def _drop_leadin_without_visual(blocks: list[dict]) -> list[dict]:
     return out
 
 
+# ---------------------------------------------------------------------------
+# ✅ R220（2026-11-12）：AI 畸形图表围栏形态修复（唯一出口，幂等，行数不变）
+# ---------------------------------------------------------------------------
+def _unwrap_figure_table_chart(lines: list[str]) -> None:
+    """（原地）形态 A：图表被包进单列「图题假表格」→ 解包为正常图表围栏。
+
+    生产形态（sections 3c150ba0 实证）::
+
+        | 图 9-1 井道垂直度检测示意图 |      ← 图题行（单格）
+        | :---: |                            ← 分隔行
+        | ```mermaid                         ← 开启行（管道前缀 → 判非围栏）
+        flowchart TD
+         A[...] --> B[...]
+        ``` |                               ← 闭合行（信息串「|」非空 → lang="|" 围栏）
+
+    处理：① 开启行剥前导管道 → 正常 ```` ```mermaid ````；② 闭合行归一为裸围栏；
+    ③ 图题行去管道还原为普通段落（导出侧 ``_extract_figure_caption`` 会把它
+    吸收为该图图题，避免源文自写图号与导出图号重号）；④ 分隔行置空。
+    **只重写、不增删行**（保住 src_line 行号契约）；找不到闭合行（形态不完整）
+    一律保持原样 —— 不冒险重写半个形态。
+    """
+    n = len(lines)
+    i = 0
+    while i < n:
+        m = _RE_FIG_TABLE_CHART_OPEN.match(lines[i])
+        if m is None:
+            i += 1
+            continue
+        marker, lang = m.group(1), (m.group(2) or "").strip().lower()
+        j = i + 1
+        while j < n and not _RE_FIG_TABLE_FENCE_CLOSE.match(lines[j]):
+            j += 1
+        if j >= n:
+            i += 1
+            continue
+        lines[i] = f"{marker}{lang}" if lang else marker
+        lines[j] = marker
+        # ③ 向上回收图题行 + 分隔行（可选；两者形态齐备才动，避免误吞真实表格行）
+        k = i - 1
+        if k >= 0 and _RE_TABLE_SEP.match(lines[k].strip()):
+            cand = lines[k - 1].strip() if k - 1 >= 0 else ""
+            if cand.startswith("|") and cand.endswith("|") and "`" not in cand:
+                inner = cand.strip("|").strip()
+                if 0 < len(inner) <= 60:
+                    lines[k - 1] = inner
+                    lines[k] = ""
+        elif k >= 0:
+            cand = lines[k].strip()
+            if cand.startswith("|") and cand.endswith("|") and "`" not in cand:
+                inner = cand.strip("|").strip()
+                if 0 < len(inner) <= 60:
+                    lines[k] = inner
+        logger.warning(
+            "R220 图表被包进单列假表格（第 %d 行），已解包为正常图表围栏", i + 1
+        )
+        i = j + 1
+
+
+def _unwrap_doc_fence_wrapping_chart(lines: list[str]) -> None:
+    """（原地）形态 B：文档型围栏（```` ```markdown ```` 等）包住正文并内嵌图表 → 解包。
+
+    生产形态（sections a0b4093e 实证）：AI 把整段正文包进 ```` ```markdown ````，
+    段中还有 ```` ```chart-json ```` 图表 —— 外层围栏让全部正文退化为一个代码块
+    （成稿 run-on 纯文本、``###`` 标记原样印刷），内嵌图表被外层围栏遮蔽而丢失。
+
+    判据（**刻意收窄**）：仅当文档型围栏的围栏体内**确实嵌有图表家族开启行**
+    才解包 —— 纯 ```` ```markdown ```` 代码样例（无图表）保持既有「按代码块
+    渲染」行为（numbering 侧「围栏内标题不参与重编号」契约不受影响）。
+
+    解包实现：只把外层开/闭围栏行**置空**（行数不变 → src_line 对齐；空行在
+    解析中被跳过）。外层闭合行的定位带**嵌套穿透**：体内带语言标签的围栏行
+    使深度 +1、裸围栏行在嵌套层使深度 -1，深度归零的裸围栏才是外层闭合 ——
+    这样内嵌图表自己的闭合行不会被误认成外层闭合而抹掉（否则图表反而变成
+    未闭合残片）。外层真未闭合（EOF）时只抹开启行：内嵌图表的闭合行自然
+    成为图表自身的闭合。
+    """
+    n = len(lines)
+    i = 0
+    while i < n:
+        pf = parse_fence_line(lines[i])
+        if pf is None or pf[2].strip().lower() not in _DOC_FENCE_LANGS:
+            i += 1
+            continue
+        open_char, open_len, lang = pf
+        # 找外层闭合（嵌套穿透）
+        j = i + 1
+        depth = 0
+        outer_close = None
+        while j < n:
+            if depth == 0 and _fence_is_close(lines[j], open_char, open_len, tolerant_length=True):
+                outer_close = j
+                break
+            pf_j = parse_fence_line(lines[j])
+            if pf_j is not None:
+                if pf_j[2].strip():
+                    depth += 1
+                elif depth > 0:
+                    depth -= 1
+            j += 1
+        body = lines[i + 1 : outer_close if outer_close is not None else n]
+        if not any(_RE_CHART_FENCE_OPEN_LINE.match(ln) for ln in body):
+            # 非图表场景：保持原样（文档围栏照旧按代码块渲染），整块跳过
+            i = (outer_close + 1) if outer_close is not None else n
+            continue
+        lines[i] = ""
+        if outer_close is not None:
+            lines[outer_close] = ""
+        logger.warning(
+            "R220 文档型围栏（lang=%s）内嵌图表围栏，已解包为正文渲染（原第 %d 行）",
+            lang,
+            i + 1,
+        )
+        i += 1
+
+
+def normalize_chart_fence_shapes(content: str) -> str:
+    """R220：修复两类 AI 畸形图表围栏形态的**唯一出口**（幂等，行数不变）。
+
+    - 形态 A（图题假表格包裹图表）→ :func:`_unwrap_figure_table_chart`
+    - 形态 B（文档围栏包裹正文+内嵌图表）→ :func:`_unwrap_doc_fence_wrapping_chart`
+
+    消费方（三类一致，杜绝「登记侧修了、导出侧没修」的口径分叉）：
+      - 导出/预览解析：``_parse_content_blocks``（本模块，在 normalize_raw_content
+        之后调用）；
+      - 登记侧扫描：``_chart_pipeline.iter_inline_chart_fences``（图表清单 /
+        chart_predictions / 配图上限 / 导出预检的唯一扫描器）；
+      - 围栏改写定位：``_chart_pipeline._apply_chart_fence_edits`` /
+        ``_rewrite_code_block``（ordinal 锚点与扫描侧同源的前提）。
+
+    行数不变是**硬约束**：``renumber_section_body_subheadings`` 以
+    ``_parse_content_blocks`` 产出的 ``src_line`` 回写源行（R192 FIX-R1），
+    任何增删行都会让重写落到错误的行上。
+    """
+    if not content or ("`" not in content and "~" not in content):
+        return content
+    lines = content.split("\n")
+    _unwrap_figure_table_chart(lines)
+    _unwrap_doc_fence_wrapping_chart(lines)
+    return "\n".join(lines)
+
+
 def _parse_content_blocks(content: str, diagnostics: dict | None = None) -> list[dict]:
     """解析正文内容为 block 列表。
 
@@ -949,6 +1125,10 @@ def _parse_content_blocks(content: str, diagnostics: dict | None = None) -> list
     #    之前执行：任何被转义的换行都会让多行正文以「一整行」形态绕过
     #    下方全部结构识别，原样印进交付 DOCX。
     content, _sanitize_stats = normalize_raw_content(content)
+    # ✅ R220（2026-11-12）：AI 畸形图表围栏形态修复（图题假表格包裹 / 文档围栏
+    #    包裹正文+内嵌图表）。行数不变 → src_line 行号契约（R192 FIX-R1）不受影响；
+    #    幂等 → 二次解析零改动。
+    content = normalize_chart_fence_shapes(content)
     blocks = []
     lines = content.split("\n")
     i = 0
@@ -1320,11 +1500,15 @@ def _parse_content_blocks(content: str, diagnostics: dict | None = None) -> list
         if m_img:
             # ✅ 2026-10-17（文档质量报告 图号问题）：吸收图**上方**的「图 X-Y 题名」行
             #    作为该图图题（alt 缺失时兜底），避免源文自写图题与导出图号重号。
+            #    ✅ R224（F12b）：显式图题行**优先于** Markdown alt —— 旧实现
+            #    alt 非空时把已 pop 的题注行静默丢弃（用户图题不可恢复丢失），
+            #    而下方题注通道是「题注覆盖 alt」（显式图题优先）——同族两条
+            #    通道优先级相反。与 R196 ai_image 题注兜底链「源文题注第一」同口径。
             _img_cap = _extract_figure_caption(blocks)
             blocks.append(
                 {
                     "type": "image",
-                    "alt": (m_img.group("alt") or "").strip() or _img_cap,
+                    "alt": _img_cap or (m_img.group("alt") or "").strip(),
                     "url": m_img.group("url").strip(),
                 }
             )
@@ -1363,7 +1547,7 @@ def _parse_content_blocks(content: str, diagnostics: dict | None = None) -> list
             continue
         # 列表项
         # 无序列表: - * • ·
-        m_ul = _RE_UL_BULLET.match(stripped)
+        m_ul = _RE_UL_BULLET.match(stripped) or _RE_UL_BULLET_TIGHT.match(stripped)
         if m_ul:
             blocks.append(
                 {
@@ -1446,6 +1630,11 @@ def _norm_heading_text(text: str) -> str:
 # ✅ R181（2026-11-06）：正则由单字母放宽到 1~2 个字母，并循环剥离重复前缀，
 #    与导出侧原有循环行为对齐后**下沉为唯一实现**（导出不再保留第二套正则）。
 _RE_SUBITEM_ORD_PREFIX = re.compile(r"^\s*[a-zA-Z]{1,2}\s*[、.．)）]\s*")
+# ✅ R226（2026-11-12 · B3）：剥后剩余若以「字母+分隔符」形态之外的字母开头
+#    （"A、B 两案对比" → "B 两案对比" / "a. Basic" → "Basic"），视为正文并列
+#    枚举/英文实词，停止剥离。预编译为模块级常量（R227 修复：原内联
+#    re.match 破坏 test_no_inline_re_calls_in_module，且每次调用重复编译）。
+_RE_STOP_ORD_STRIP_TAIL = re.compile(r"^[A-Za-z](?![a-zA-Z]?\s*[、.．)）])")
 
 
 def strip_subitem_ordinal_prefix(text: str) -> str:
@@ -1462,6 +1651,13 @@ def strip_subitem_ordinal_prefix(text: str) -> str:
     while _RE_SUBITEM_ORD_PREFIX.match(stripped):
         rest = _RE_SUBITEM_ORD_PREFIX.sub("", stripped, count=1).strip()
         if not rest:
+            break
+        # ✅ R226（2026-11-12 · B3）：剥后剩余若以「字母+分隔符」形态之外的
+        #    字母开头（"A、B 两案对比" → "B 两案对比" / "a. Basic" → "Basic"），
+        #    视为正文并列枚举/英文实词，**停止剥离** —— 旧实现无条件循环剥离，
+        #    把枚举首字母当残留编号静默删掉（内容篡改）。而「字母+分隔符」
+        #    形态（"a、a、吊顶"）仍是连续残留前缀，继续循环剥离（R181 语义不变）。
+        if _RE_STOP_ORD_STRIP_TAIL.match(rest):
             break
         stripped = rest
     return stripped

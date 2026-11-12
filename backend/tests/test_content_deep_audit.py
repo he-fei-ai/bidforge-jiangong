@@ -310,8 +310,11 @@ class TestProgressWriteLock:
         """源码级护栏：正文生成链路的进度写入不得绕过写锁。"""
         src = inspect.getsource(sh.generate_content)
         assert "_update_progress_safe = _locked_progress_updater(_db_write_lock, task_id)" in src
-        # 章节阶段（_db_write_lock 之后）不得再直接调用 update_progress
-        phase_src = src[src.index("_db_write_lock = asyncio.Lock()") :]
+        # 章节阶段（_db_write_lock 绑定之后）不得再直接调用 update_progress
+        # ✅ R224 重锚：锁由每实例创建改为模块级单锁转发
+        # （``_db_write_lock = _DB_WRITE_LOCK``，跨方案并发任务互斥），
+        # 切片锚随实现迁移，意图不变（进度写入不绕锁）。
+        phase_src = src[src.index("_db_write_lock = _DB_WRITE_LOCK") :]
         assert "await update_progress(task_id" not in phase_src
 
 

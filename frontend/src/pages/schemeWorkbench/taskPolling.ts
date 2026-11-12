@@ -199,6 +199,15 @@ export type UnknownTaskInfo = {
   genType: string;
   /** 进入未知态的原因（展示给用户） */
   reason: string;
+  /**
+   * ✅ R223（2026-11-12 · P2 · FE-3）：任务所属方案 id —— 手动接管的归属校验。
+   * 未知态是页面级状态，切方案后若横幅残留（或标记晚于切换到达），在 B 方案页
+   * 接管 A 方案任务会把恢复回调闭包里的**当前方案 id** 传给 saveOutline ——
+   * 整表重建 B 的章节结构（跨方案写库）。有 schemeId 时接管入口必须拒绝
+   * 异方案任务；历史会话内存态无该字段则放行（标记与消费同处一个页面生命周期，
+   * 不存在跨升级持久化问题）。
+   */
+  schemeId?: string;
 };
 
 export function resolveUnknownTaskNext(

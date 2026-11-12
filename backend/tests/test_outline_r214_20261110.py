@@ -107,9 +107,16 @@ class TestPromptNumberingUnified:
         assert "3.2.1" not in rule
 
     def test_router_wires_both_values(self):
+        # ✅ R223 重锚（锁实现 → 锁意图，强度不减）：R214 首版把「抢救回退」的
+        #    `or _sec_stored` 实现形态逐字锁死；R223 NUM-1 判定该抢救形态对
+        #    0 号段脏编号（display/prefix 判空）会把非法值注入提示词，与 R218
+        #    C-3「非法统一注入缺失占位」契约矛盾 ⇒ 已移除，改为「display/prefix
+        #    任一为空即按编号缺失口径」。意图不变且加强：展示态/前缀仍同源接线、
+        #    5 处 {section_number} 仍复用同一变量、非法值不再流入提示词。
         src = _src("routers/sse_handlers.py")
-        assert "_sec_no = stored_id_to_display(_sec_stored) or _sec_stored" in src
-        assert "_sec_prefix = stored_id_to_prefix(_sec_stored) or _sec_stored" in src
+        assert "_sec_no = stored_id_to_display(_sec_stored)" in src
+        assert "_sec_prefix = stored_id_to_prefix(_sec_stored)" in src
+        assert "or _sec_stored" not in src, "抢救回退必须退役（0 号段脏编号会被原样注入提示词）"
         assert "section_prefix=_sec_prefix" in src
         assert "section_prefix=_sec_no" not in src
         # 5 处 {section_number} 注入仍复用同一个展示态变量

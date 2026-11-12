@@ -21,6 +21,7 @@ from app.services.ai.image_engine import repair_mermaid, validate_mermaid
 from app.services.chart_payload import build_chart_envelope
 from app.services.chart_validators import (
     MERMAID_KEYWORD_TO_CHART_TYPE,
+    detect_chart_with_metadata,
     detect_mermaid_chart_type,
     infer_chart_type_from_payload,
     normalize_architecture_tree,
@@ -230,9 +231,20 @@ def iter_inline_chart_fences(content: str) -> list[tuple[str, str, str, int]]:
     ✅ 唯一事实来源（2026-09-24）：登记侧 ``_scan_inline_charts``、导出侧
     ``export._parse_content_blocks``、判定侧 ``has_inline_charts`` 一律经由本函数，
     避免"什么算图表围栏"在三侧各自实现而再次分叉（幽灵图的历史根因）。
+
+    ✅ R220（2026-11-12）：扫描前先做畸形围栏形态修复
+    （``normalize_chart_fence_shapes``）—— 图题假表格包裹（``| ```mermaid``）与
+    文档围栏包裹（`` ```markdown `` 内嵌 ```` ```chart-json ````）的图表此前在本
+    扫描器里**整体不可见**（开启行以管道开头判非围栏 / 被外层文档围栏整块遮蔽），
+    登记侧与导出侧一起丢图。修复后三侧（登记/改写/导出解析）同口径恢复图表。
     """
     if not content:
         return []
+    # ✅ R220：畸形围栏形态修复（幂等、行数不变；ordinal 在修复后的文本上计数，
+    #    与 _apply_chart_fence_edits 入口的同一修复保持同源 → 锚点不漂移）。
+    from app.services.content_blocks import normalize_chart_fence_shapes
+
+    content = normalize_chart_fence_shapes(content)
     lines = content.split("\n")
     items: list[tuple[str, str, str, int]] = []
     i = 0
@@ -427,6 +439,10 @@ def _rewrite_code_block(content: str, old_code: str, new_code: str | None) -> st
     """
     if not content:
         return content
+    # ✅ R220：畸形围栏形态修复（与登记/改写锚点侧同源；幂等、行数不变）。
+    from app.services.content_blocks import normalize_chart_fence_shapes
+
+    content = normalize_chart_fence_shapes(content)
     out: list[str] = []
     lines = content.split("\n")
     i = 0
@@ -563,8 +579,18 @@ def _apply_chart_fence_edits(content: str, edits: dict[int, str | None]) -> str:
       · 未被改写的围栏**逐行原样回写**（连原始开/闭围栏行一起保留），
         不做任何归一化，避免无关内容被顺手改写；
       · 被改写的块保留原开围栏的字符与长度（4 反引号不会被降级成 3 个）。
+
+    ✅ R220（2026-11-12）：入口先做畸形围栏形态修复（``normalize_chart_fence_shapes``，
+    与 iter_inline_chart_fences 同源）—— ordinal 必须在**同一份修复后文本**上计数，
+    否则「图题假表格 / 文档围栏包裹」形态下扫描侧可见、改写侧按原文走查不到目标块
+    （锚点漂移）。修复产生的形态行重写随结果一并回写（幂等）。
     """
-    if not content or not edits:
+    if not content:
+        return content
+    from app.services.content_blocks import normalize_chart_fence_shapes
+
+    content = normalize_chart_fence_shapes(content)
+    if not edits:
         return content
     lines = content.split("\n")
     out: list[str] = []
@@ -744,6 +770,49 @@ def chart_drop_label(drop: dict | None) -> str:
     return f"{ct}/{rs}"
 
 
+def _chart_semantic_context(content: str, ordinal: int, max_paras: int = 3) -> str:
+    """提取第 ``ordinal`` 个图表围栏**之前**的正文段落作为语义上下文。
+
+    仅用于生成后语义交叉校验（观测）：检测「图表块附近正文语义」，判断 AI 选型
+    是否与章节内容匹配。纯读、零正文改写；返回拼接的非空段落文本。
+
+    ``ordinal`` 与 :func:`iter_inline_chart_fences` 的计数口径一致（图表家族围栏
+    出现序号，含未闭合/空块/未知类型，从 0 递增），且本函数在**同一份规范化后**
+    文本上遍历（``normalize_chart_fence_shapes`` 幂等、行数不变 → 锚点不漂移）。
+    """
+    if not content or ordinal < 0:
+        return ""
+    from app.services.content_blocks import normalize_chart_fence_shapes
+
+    lines = normalize_chart_fence_shapes(content).split("\n")
+    idx = 0
+    chart_ord = 0
+    while idx < len(lines):
+        pf = parse_fence_line(lines[idx])
+        if pf is None:
+            idx += 1
+            continue
+        open_char, open_len, lang = pf
+        lang = lang.strip().lower()
+        start_idx = idx
+        idx += 1
+        code_lines, _state, idx = read_fenced_block(lines, idx, open_char=open_char, open_len=open_len)
+        if not is_chart_fence_lang(lang):
+            continue
+        if chart_ord == ordinal:
+            collected: list[str] = []
+            j = start_idx - 1
+            while j >= 0 and len(collected) < max_paras:
+                seg = lines[j].strip()
+                if seg:
+                    collected.append(seg)
+                j -= 1
+            collected.reverse()
+            return "\n".join(collected)
+        chart_ord += 1
+    return ""
+
+
 def build_inline_chart_plan(
     scheme_id: str,
     section_id: str,
@@ -752,6 +821,7 @@ def build_inline_chart_plan(
     enforce_limits: bool = False,
     scheme_type_counts: dict[str, int] | None = None,
     dropped_out: list | None = None,
+    semantic_notes_out: list | None = None,
 ) -> tuple[str, list[tuple]]:
     """**纯计算**：扫描 → 校验/修复 → 限额裁剪，产出修正后的正文与待写入行。
 
@@ -763,6 +833,11 @@ def build_inline_chart_plan(
     - 校验失败走修复（mermaid 正则修复）；修复成功用修复后代码替换正文并登记；
     - 修复失败则从正文删除该代码块（宁缺勿滥，避免导出坏图）；
     - enforce_limits=True 时启用程序级配图上限（每个 section_id ≤1、同类型全方案限额）。
+
+    ✅ R228（2026-11-12）：新增 ``semantic_notes_out``（可选、缺省 None = 零行为变化）。
+    生成后语义交叉校验（观测）：对每个通过校验的图表块，检测其附近正文语义，
+    若检测器给出**明确正分匹配**且 ≠ AI 选型，记一条观测（不删块、不改类型、
+    不改正文）—— 为「AI 选型质量」增加程序侧可观测维度（增强智能编排）。
 
     Returns:
         ``(修正后的正文, rows)``；rows 每项为 ``INSERT INTO chart_predictions``
@@ -915,6 +990,34 @@ def build_inline_chart_plan(
         if fixed != code:
             edits[ordinal] = fixed
             code = fixed
+        # ✅ R228（2026-11-12）· 生成后语义交叉校验（观测，不干预）：
+        #    检测「图表块附近正文语义」，检测器给出明确正分匹配且 ≠ AI 选型时
+        #    记观测。纯观测：不删块、不改类型、不改正文（宁缺毋滥，但观测不干预）。
+        #    semantic_notes_out 缺省 None = 零行为变化（加法式）。
+        if semantic_notes_out is not None:
+            _ctx = _chart_semantic_context(content, ordinal)
+            if _ctx:
+                _meta = detect_chart_with_metadata(_ctx)
+                _det = _meta.get("top_chart")
+                _score = _meta.get("top_score") or 0
+                if _det and _det != ct:
+                    semantic_notes_out.append(
+                        {
+                            "type": ct,
+                            "detected": _det,
+                            "score": _score,
+                            "context": _ctx[:60],
+                        }
+                    )
+                    logger.info(
+                        "章节 %s 图表 [%s] 语义交叉校验：附近正文判 %s(score=%s)，"
+                        "与 AI 选型 %s 不一致（观测，不干预）",
+                        section_id[:8],
+                        ct,
+                        _det,
+                        _score,
+                        ct,
+                    )
         # ✅ 修复：JSON 数据型图表必须走规范信封的 data 分支。
         #    build_chart_envelope 是写入侧唯一构造器，旧实现一律写
         #    {"mermaid_code": <JSON 文本>}，把结构化数据塞进"代码"键 ——

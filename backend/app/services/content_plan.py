@@ -307,8 +307,9 @@ async def plan_section_content(
         leaf: 叶子章节 dict（需含 title/description 等）。
         knowledge_names / fact_titles: 候选池（决定模型可挑选的范围）。
     """
+    # ✅ R218（C-2）：编号形态统一；✅ R223（NUM-4）：取值链对齐正文主链
     from app.services.ai.prompts._registry import render
-    from app.services.numbering import stored_id_to_display  # ✅ R218（C-2）：编号形态统一
+    from app.services.numbering import stored_id_to_display, stored_outline_id
 
     sys_prompt = render("content_plan_system")
     knowledge_names_text = "\n".join(f"- {n}" for n in knowledge_names) or "（无）"
@@ -318,9 +319,20 @@ async def plan_section_content(
     #    （"2.4"），唯独编排提示词仍直传存储态 ⇒ 同一章节编号在两个提示词里形态
     #    分叉（模型看到「3.2.4」与「2.4」两个版本，易把前者当正文子标题号写进
     #    内容）。现统一转展示态；空/非法编号回退存储态（fail-safe，不注入空号）。
-    _sec_stored = str(
-        leaf.get("_prompt_number") or leaf.get("outline_number") or leaf.get("number") or ""
-    )
+    # ✅ R223（2026-11-12 · P3 · NUM-4）：取值链与正文主链（_preferred_section_number）
+    #    同口径。旧实现的两个次级回退键在 sections 行上**不存在**
+    #    （select_target_leaves 只写 _prompt_number），是死回退——上面注释宣称的
+    #    「空/非法编号回退存储态」从未发生（注释承诺≠代码事实）；且无校验无存储
+    #    回退：环内/不可达节点（recompute 不发号）_prompt_number 为空 ⇒
+    #    section_number 注入空串，而正文主链同章注入存储编号展示态——同一章两个
+    #    提示词一有一无。现对齐：_prompt_number 有展示态合法性则优先（R182 真实
+    #    树重算语义），否则回退 stored_outline_id（唯一事实源，含非法判空）。
+    #    不跨层 import routers 侧实现（循环导入）。
+    _recomputed = str(leaf.get("_prompt_number") or "").strip()
+    if _recomputed and stored_id_to_display(_recomputed):
+        _sec_stored = _recomputed
+    else:
+        _sec_stored = stored_outline_id(leaf)
     _sec_display = str(stored_id_to_display(_sec_stored) or _sec_stored)
 
     try:
@@ -357,6 +369,8 @@ async def plan_section_content(
             scene="content_plan",
             max_tokens=CONTENT_PLAN_MAX_TOKENS,
             json_mode=False,
+            # ✅ R226（R-5）：补显式 timeout（主调用原可跑满 provider 900s）。
+            timeout=300,
         )
         return ContentPlanData.validate(obj, knowledge_pool=knowledge_names, fact_pool=fact_titles)
     except Exception:  # noqa: BLE001 - 编排失败绝不阻断正文生成

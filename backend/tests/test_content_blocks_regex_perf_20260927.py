@@ -93,6 +93,11 @@ _REVERSE_MAP = [
     ('_RE_QUOTE_PREFIX.sub("", lines[i]).rstrip()', 're.sub(r"^\\s*>\\s?", "", lines[i]).rstrip()'),
     ("_RE_HR_LINE.match(stripped)", 're.match(r"^([-*_])(\\s*\\1){2,}$", stripped)'),
     ("_RE_UL_BULLET.match(stripped)", 're.match(r"^[-*•·]\\s+(.*)", stripped)'),
+    # ✅ 2026-11-12（R227）：补登「无空格列表变体」新增预编译常量。
+    (
+        "_RE_UL_BULLET_TIGHT.match(stripped)",
+        're.match(r"^[-•·](?=[^\\s0-9\\-])(.*)", stripped)',
+    ),
     ('s = _RE_INLINE_MD_NOISE.sub("", s)', 's = re.sub(r"[*_`#]", "", s)'),
     ('s = _RE_TITLE_TAIL_PUNCT.sub("", s)', 's = re.sub(r"[\\s、.。：:；;，,]+$", "", s)'),
     ('return _RE_WS_RUN.sub("", s)', 'return re.sub(r"\\s+", "", s)'),
@@ -106,12 +111,30 @@ _REVERSE_MAP = [
         '_RE_SUBITEM_ORD_PREFIX.sub("", s, count=1)',
         're.sub(r"^\\s*[a-zA-Z]\\s*[、.．)）]\\s*", "", s, count=1)',
     ),
+    # ✅ 2026-11-12（R227）：补登「剥后停止判据」新增预编译常量（R226 B3）。
+    (
+        "_RE_STOP_ORD_STRIP_TAIL.match(rest)",
+        're.match(r"^[A-Za-z](?![a-zA-Z]?\\s*[、.．)）])", rest)',
+    ),
     # ✅ 2026-11-07（R183）：补登「图题自带图号前缀剥离」新增预编译常量。
     (
         '_RE_FIGURE_NUMBER_PREFIX.sub("", str(raw or ""), count=1)',
         're.sub(r"^\\s*(?:图|Figure|Fig\\.?)\\s*([0-9一二三四五六七八九十Xx]+'
         '(?:[.\\-–—][0-9一二三四五六七八九十Xx]+)?)\\s*(?:[、.：:\\-–—]\\s*|\\s+)", '
         '"", str(raw or ""), count=1, flags=re.I)',
+    ),
+    # ✅ 2026-11-12（R220）：补登「畸形图表围栏形态修复」三个新增预编译常量。
+    (
+        "_RE_CHART_FENCE_OPEN_LINE.match(ln)",
+        're.match(r"^\\s*(?:`{3,}|~{3,})\\s*(?:mermaid|chart-json|ai_image)\\b", ln)',
+    ),
+    (
+        "_RE_FIG_TABLE_CHART_OPEN.match(lines[i])",
+        're.match(r"^\\s*\\|\\s*(`{3,}|~{3,})\\s*(mermaid|chart-json|ai_image)\\s*\\|?\\s*$", lines[i])',
+    ),
+    (
+        "_RE_FIG_TABLE_FENCE_CLOSE.match(lines[j])",
+        're.match(r"^\\s*\\|?\\s*(`{3,}|~{3,})\\s*\\|?\\s*$", lines[j])',
     ),
 ]
 

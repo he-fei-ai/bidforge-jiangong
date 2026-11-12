@@ -635,6 +635,72 @@ def check_safety(ctx: PreflightContext) -> list:
     return findings
 
 
+def _hazard_keyword_hints(facts) -> str:
+    """从事实全量条目提取已命中的危大类目关键词（去重、长者优先、短串）。
+
+    ✅ R219（2026-11-11 · P1 安全方向）：``extra_text`` 在下流被
+    ``clip_text_logged`` **头部截断**到 2000 字，而 ``classify_scheme`` 只靠
+    这段文本做 ``match_category_keywords`` 子类命中；子类不命中时
+    ``evaluate_hazard_level`` 连阈值规则都不会评估 ⇒ 即便结构化 ``params``
+    里已有 ``depth=16``，SAF-08 也会静默放行（生产日志实证 3725→2000 字，
+    丢弃 46%）。把命中关键词前置可保证「类目匹配信息」不因截断丢失。
+
+    关键词表直接读 ``scheme_classification.HAZARD_CATEGORIES`` 单一事实源，
+    不复制第二份；读取失败返回空串（fail-soft），绝不阻断预检主流程。
+
+    ✅ R220（2026-11-11 · 深度探索增强）两处收敛：
+    - 匹配文本 = name + fact_key + **value**：「16m」类纯数值事实的类目
+      证据常以「基坑开挖深度 16m」整句形态藏在 value 里（R193 已让 value
+      走 value_to_markdown 归一），旧版只拼 name+fact_key，这类事实的
+      关键词照样落不进提示串，截断漏判复发；
+    - 长关键词优先：``match_category_keywords`` 对同一子类关键词命中任意
+      一个即归子类。短关键词（如「开挖」「支护」）被高频普通词（「挖孔桩」
+      「支撑」）淹没时会让长关键词（「基坑开挖」「支护与降水」）排到 2000
+      字保留区之外，匹配仍漏。按长度降序摆放后，任何关键词只要能在原文
+      命中，它就同时落在提示串里 —— 命中关键词进串的概率单调不减，
+      且提示串是**新增**文本、绝不替代原有拼串，不可能比旧口径多漏判。
+    """
+    try:
+        from app.services.scheme_classification import HAZARD_CATEGORIES
+    except Exception:  # noqa: BLE001 - 分类表不可用时退回原有截断行为
+        return ""
+    hits: dict[str, int] = {}
+    for f in facts or []:
+        if not isinstance(f, dict):
+            continue
+        # ✅ R220：value 一并参与匹配（见 docstring 第 1 条收敛）。
+        text = f"{f.get('name') or ''} {f.get('fact_key') or ''} {f.get('value') or ''}".lower()
+        for cat in HAZARD_CATEGORIES:
+            for sub in cat.get("subs", []) or []:
+                for kw in sub.get("keywords", ()) or ():
+                    if kw and kw.lower() in text:
+                        hits.setdefault(kw, len(kw))
+    # ✅ R220：长关键词在前（见 docstring 第 2 条收敛；去重靠 hits 键）。
+    return " ".join(kw for kw, _ in sorted(hits.items(), key=lambda kv: -kv[1]))
+
+
+def build_fact_coverage(facts) -> dict:
+    """SAF-08 事实覆盖度（唯一出口 · 商业化「未检查 / 已检查」二态口径）。
+
+    「未检查」与「检查通过」在 findings 上表现完全一致（都是零条 finding），
+    用户会把「全局事实未装配 / 注入门控排除了全部事实」误读成「已核对、
+    无危大超阈值」。必须显式回传覆盖态，供前端区分：
+
+    - ``unchecked``：无有效事实参与 ⇒ 危大参数反哺**未执行**，结论不得据此放行；
+    - ``checked``  ：有事实参与 ⇒ 规则已执行（无论最终是否报出 finding）。
+
+    刻意不提供 ``partial``：路由层只装配「门控后可注入」的事实，无法从
+    ``ctx`` 反推被排除的总量，臆造分母会制造第二种假绿。
+    """
+    participating = sum(1 for f in (facts or []) if isinstance(f, dict))
+    return {
+        "state": "checked" if participating else "unchecked",
+        "participating": participating,
+        "rules": ["SAF-08"],
+        "reason": "" if participating else "全局事实未装配或注入门控排除了全部事实，危大参数反哺未执行",
+    }
+
+
 def check_hazard_params(ctx: PreflightContext) -> list:
     """事实反哺危大判定（SAF-08）：已确认事实参数达危大阈值而关键词口径漏判。
 
@@ -660,8 +726,17 @@ def check_hazard_params(ctx: PreflightContext) -> list:
     # 名称信息不足时由事实内容兜底命中子类，如「基坑开挖深度 16m」命中基坑类）。
     # ✅ R181（2026-11-07）：此文本只用于危大分类关键词/正则匹配，
     #    截断只记日志、不插标记 —— 插说明会改变匹配结果（换一种静默错误）。
+    # ✅ R219：把全量事实里已命中的类目关键词前置，使其落在 2000 字保留区内。
+    #    总预算仍是 2000 字（source_text 不膨胀），未命中关键词时逐字回退旧行为。
+    # ✅ R220（2026-11-11）：关键词匹配文本扩到 value 整句、命中词按长度降序
+    #    摆放（见 `_hazard_keyword_hints` docstring 第 2 段），保证「命中即
+    #    进提示串」的概率单调不减，且提示串是新增文本、绝不替代原有拼串。
+    _hints = _hazard_keyword_hints(ctx.facts)
+    _joined = " ".join(
+        f"{f.get('name') or ''} {f.get('value') or ''}" for f in ctx.facts if isinstance(f, dict)
+    )
     extra_text = clip_text_logged(
-        " ".join(f"{f.get('name') or ''} {f.get('value') or ''}" for f in ctx.facts if isinstance(f, dict)),
+        f"{_hints} {_joined}" if _hints else _joined,
         2000,
         "危大判定匹配文本",
     )
@@ -682,16 +757,21 @@ def check_hazard_params(ctx: PreflightContext) -> list:
     reasons = "; ".join(r for h in hits for r in (h.get("hazard_reasons") or []))
     params = out.get("threshold_params") or {}
     evidence = [f"{k}={v}" for k, v in sorted(params.items())]
-    return [
-        _finding(
-            "SAF-08",
-            f"已确认事实参数达到危大阈值（{'；'.join(reasons) or subs}），"
-            f"但方案名称与类型未体现危大工程特征" + (f"（命中子类：{subs}）" if subs else ""),
-            evidence=evidence,
-            suggestion="核对方案定位与名称表述；若确属危大工程，"
-            "应按危大工程要求编制（含安全验算、监测监控与应急预案）",
-        )
-    ]
+    # ✅ R220：逐条 finding 加法式带上「参与判定的事实条数 + 覆盖态」，
+    #    便于审计追溯「这条结论到底看过几条事实」。主链上 finding 整条 dict
+    #    透传（audit_scoring / _persist_run 均无键过滤），不会中途丢失。
+    _coverage = build_fact_coverage(ctx.facts)
+    _item = _finding(
+        "SAF-08",
+        f"已确认事实参数达到危大阈值（{'；'.join(reasons) or subs}），"
+        f"但方案名称与类型未体现危大工程特征" + (f"（命中子类：{subs}）" if subs else ""),
+        evidence=evidence,
+        suggestion="核对方案定位与名称表述；若确属危大工程，"
+        "应按危大工程要求编制（含安全验算、监测监控与应急预案）",
+    )
+    _item["facts_participating"] = _coverage["participating"]
+    _item["facts_coverage_state"] = _coverage["state"]
+    return [_item]
 
 
 # ---------------------------------------------------------------------------

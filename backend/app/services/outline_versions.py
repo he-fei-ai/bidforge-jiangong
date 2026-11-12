@@ -50,12 +50,18 @@ async def create_outline_snapshot(
     cur = await db.execute("SELECT * FROM sections WHERE scheme_id=? ORDER BY sort_order, id", (scheme_id,))
     rows = [dict(r) for r in await cur.fetchall()]
     await cur.close()
-    cur = await db.execute("SELECT review_status FROM schemes WHERE id=?", (scheme_id,))
+    cur = await db.execute("SELECT review_status, outline_source FROM schemes WHERE id=?", (scheme_id,))
     scheme_row = await cur.fetchone()
     await cur.close()
     payload = {
         "sections": rows,
         "review_status": str((scheme_row["review_status"] if scheme_row else "") or ""),
+        # ✅ R223（2026-11-12 · P3 · DAT-1）：目录来源随快照留存 —— 旧 payload 不含
+        #    outline_source，非空回退也不校正 ⇒ 回退后 schemes.outline_source 停留在
+        #    「回退动作发生时」的来源而非快照目录的真实来源（如：上传识别 → 模板
+        #    实例化 → 回退到实例化前快照，来源仍显示 template_instance，溯源失真）。
+        #    restore 侧仅当快照携带该键时还原（旧快照无键 → 维持现状，向后兼容）。
+        "outline_source": str((scheme_row["outline_source"] if scheme_row else "") or ""),
     }
     snapshot_id = f"ver_{uuid.uuid4().hex[:12]}"
     await db.execute(
@@ -226,13 +232,26 @@ async def _restore_locked(db, scheme_id: str, snapshot_id: str) -> dict[str, Any
             (review_status, scheme_id, _now(), scheme_id),
         )
     else:
-        await db.execute(
-            "UPDATE schemes SET review_status=?,"
-            " word_count=(SELECT COALESCE(SUM(word_count),0) FROM sections WHERE scheme_id=?),"
-            " status=CASE WHEN status='目录待生成' THEN '目录已确认' ELSE status END,"
-            " updated_at=? WHERE id=?",
-            (review_status, scheme_id, _now(), scheme_id),
-        )
+        # ✅ R223（DAT-1）：非空回退把 outline_source 还原为快照留存值 —— 仅当快照
+        #    携带该键（旧快照无键 → 不触碰来源，向后兼容）；空串快照来源也如实
+        #    还原（回退到「来源未知」的历史目录时清空本地来源即真值）。
+        _snap_source = str(payload.get("outline_source") or "")
+        if _snap_source or "outline_source" in payload:
+            await db.execute(
+                "UPDATE schemes SET review_status=?,"
+                " word_count=(SELECT COALESCE(SUM(word_count),0) FROM sections WHERE scheme_id=?),"
+                " status=CASE WHEN status='目录待生成' THEN '目录已确认' ELSE status END,"
+                " outline_source=?, updated_at=? WHERE id=?",
+                (review_status, scheme_id, _snap_source, _now(), scheme_id),
+            )
+        else:
+            await db.execute(
+                "UPDATE schemes SET review_status=?,"
+                " word_count=(SELECT COALESCE(SUM(word_count),0) FROM sections WHERE scheme_id=?),"
+                " status=CASE WHEN status='目录待生成' THEN '目录已确认' ELSE status END,"
+                " updated_at=? WHERE id=?",
+                (review_status, scheme_id, _now(), scheme_id),
+            )
     await db.commit()
     # 缓存失效与图表重挂由路由层统一编排（services 不得依赖 routers）。
     return {

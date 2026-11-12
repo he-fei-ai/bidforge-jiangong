@@ -379,6 +379,20 @@ async def duplicate_scheme(project_id: str, scheme_id: str, db=Depends(get_db)):
             "VALUES (?,?,?,?,?,?,?,?,?,?,?,?)",
             inserts,
         )
+        # ✅ R223（2026-11-12 · P2 · DAT-3）：副本状态对齐「非空目录 ⇒ 目录已确认」
+        #    全仓不变式。旧实现无条件硬编码 status='草稿'，而副本逐字复制了完整
+        #    sections 树（含 outline_json/locked/sort_order）——其余全部非空目录写
+        #    路径（save-outline 非空分支 / restore / upload / instantiate）都收敛到
+        #    「目录已确认」（sections.OUTLINE_SAVED_STATUS），唯独复制链漏改 ⇒ 副本
+        #    头部 Tag 与 review 端点 scheme_status 显示「草稿」，与实际「已有完整
+        #    目录」矛盾（OUTLINE_EMPTY_STATUS 的语义 = 没有任何目录章节）。
+        #    局部导入规避循环引用（同 :482 renumber 先例）。
+        from app.routers.sections import OUTLINE_SAVED_STATUS
+
+        await db.execute(
+            "UPDATE schemes SET status=?, updated_at=? WHERE id=?",
+            (OUTLINE_SAVED_STATUS, datetime.now().isoformat(), new_id),
+        )
 
     cur = await db.execute("SELECT * FROM global_facts WHERE scheme_id=?", (scheme_id,))
     fact_group_map: dict[str, str] = {}

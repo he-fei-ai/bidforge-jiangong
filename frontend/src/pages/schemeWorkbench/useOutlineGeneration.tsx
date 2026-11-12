@@ -170,6 +170,19 @@ export function useOutlineGeneration(deps: OutlineGenerationDeps) {
           if (Array.isArray(evt.failed_chapters) && evt.failed_chapters.length) {
             setFailedOutlineChapters(evt.failed_chapters);
           }
+          // ✅ R223（2026-11-12 · P2 · FE-5）：error 分支补截断/复用信号 —— 后端
+          //    error 事件已携带该键（R216 SSE-5 从 holder 补齐），其余终态路径
+          //    （completed/degraded/stopped/断线重挂/刷新接管）都消费，全章失败
+          //    路径独漏 ⇒ 用户把被截断/复用过的目录当完整成果。
+          const _errTruncation = outlineTruncationNotice(evt);
+          if (_errTruncation) {
+            msg.warning(_errTruncation);
+            pushOutlineLog(1, `⚠️ 一级目录超上限：${_errTruncation}`);
+          }
+          if (typeof evt.resumed_chapters === "number" && evt.resumed_chapters > 0) {
+            msg.info(`已复用上次中断生成的 ${evt.resumed_chapters} 章（跳过对应 AI 调用）`);
+            pushOutlineLog(1, `♻️ 复用上次成果 ${evt.resumed_chapters} 章`);
+          }
           // ✅ 遗留修复：全部章节子目录失败时，后端在 error 事件中携带已生成的
           //    一级章标题（outline + partial）。询问用户是否保存这部分成果，
           //    与 stopped 分支同策略（save-outline 智能保留已有正文）。
@@ -448,10 +461,18 @@ export function useOutlineGeneration(deps: OutlineGenerationDeps) {
           _reattachTaskId = hit.taskId;
         }
         // ✅ R174 F2：轮询耗尽/连续网络失败（final=null）→ 显式进入可恢复未知态。
-        if (hit && !hit.final) {
+        // ✅ R223（2026-11-12 · P2 · FE-2）：markUnknownTask 补世代守卫 + 归属 ——
+        //    D-4 只护住了 restored 分支（下方 genSeq 校验处）；本分支漏守卫 ⇒
+        //    重挂轮询在飞时切方案，耗尽后把**旧方案**任务标成未知态：横幅/toast
+        //    落在新方案页，且 hasUnknownTask 拦截新方案的正常生成。与 restored
+        //    分支同口径（不提前 return —— post-finally 的批处理器清理与世代复位
+        //    必须继续执行）；schemeId 供手动接管校验任务归属（跨方案接管会把
+        //    旧方案目录写进新方案，见 UnknownTaskInfo.schemeId 注释）。
+        if (hit && !hit.final && genSeqRef.current === mySeq) {
           markUnknownTask({
             taskId: hit.taskId,
             genType: "outline",
+            schemeId: id,
             reason: "重挂轮询超限（200×3s）或连续网络失败，未获得任务终态",
           });
         }

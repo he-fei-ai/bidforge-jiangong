@@ -101,6 +101,7 @@ from app.services.content_utils import (
     DEFAULT_WORD_BUDGET,
     WORD_OVER_RATIO,
     auto_fix_unclosed_fences,
+    max_tokens_for_budget,
     section_sort_order_key,
     text_word_count,
     word_status_for,
@@ -822,10 +823,12 @@ async def create_section(scheme_id: str, data: SectionCreate, db=Depends(get_db)
     #    模型照抄进正文子标题或整体层级编号规则错乱。
     #    （/reorder、save-outline、上传落库均写编号，唯独此路径漏写；
     #    统一复用 renumber_sections_after_reorder 回写，位置即编号唯一事实源。）
-    await renumber_sections_after_reorder(db, scheme_id)
-    # ✅ 编号统一（2026-09-26 · D4）：新增章节使后续章节编号顺移，按新编号统一
-    #    重规范化所有含正文章节的子标题（落库正文与导出成稿同源，避免旧号滞留）。
-    await _renormalize_all_section_contents(db, scheme_id)
+    # ✅ R223（DAT-6）：重排回写少行耗尽重试（False）时跳过重规范化，防止把
+    #    陈旧编号固化进正文（函数内已 WARNING）。
+    if await renumber_sections_after_reorder(db, scheme_id):
+        # ✅ 编号统一（2026-09-26 · D4）：新增章节使后续章节编号顺移，按新编号统一
+        #    重规范化所有含正文章节的子标题（落库正文与导出成稿同源，避免旧号滞留）。
+        await _renormalize_all_section_contents(db, scheme_id)
     # ✅ 新增章节同样是结构变更（后续章节编号顺移）→ 作废扫描缓存
     await invalidate_consistency_scan_cache(db, scheme_id)
     await db.commit()
@@ -1078,22 +1081,22 @@ async def update_section(scheme_id: str, section_id: str, data: SectionUpdate, d
         # ✅ G9（2026-09-21）：手动改写正文 → 原审核结论已失效，退回「待审核」并留痕。
         # 此前全库只有 review 路由写 review_status：用户重写完已通过的章节后
         # 状态仍挂着 approved，导出预检的 review 类问题也全部漏报。
+        # ✅ R224（F9）：失效判据移到图表登记**之后** —— register_inline_charts
+        # 的校验/修复会改写 fields["content"]（删坏块/修坏码），旧实现先比较，
+        # 管线改写造成的实质正文变更不退审核（G9 家族漏网；对照 shrink 无条件重置）。
         cur = await db.execute("SELECT content, review_status FROM sections WHERE id=?", (section_id,))
         _old_row = await cur.fetchone()
         _old_content = (_old_row[0] or "") if _old_row else ""
         _review_reset = False
-        if _old_content != (fields["content"] or ""):
-            # 重置由 review 模块统一写库 + 落 review_records（单一写入口）
-            _review_reset = await reset_review_on_content_change(db, scheme_id, section_id, actor="用户手动编辑")
         # ✅ BUG 修复（2026-09-23 · B31 手动保存与图表登记脱钩）：
-        #    旧实现仅生成链路（_persist_section）登记内联图表，用户在编辑器
-        #    手动保存含 ```mermaid / ```chart-json 的正文时 chart_predictions
-        #    完全不动 —— 删掉的图残留僵尸登记（导出幽灵图），新增的图无登记
-        #    （图表清单/预检看不到）。现复用 register_inline_charts 全量同步
-        #    （先清后登，不 commit、与下方正文 UPDATE 同事务提交）。
-        #    enforce_limits=False：手动保存是用户显式意图，不做程序级限额裁剪；
-        #    校验失败的块仍会被修复或删除（宁缺勿滥，避免导出坏图）。
-        #    失败降级：登记异常不阻断保存（退回旧行为，仅日志告警）。
+        # 旧实现仅生成链路（_persist_section）登记内联图表，用户在编辑器
+        # 手动保存含 ```mermaid / ```chart-json 的正文时 chart_predictions
+        # 完全不动 —— 删掉的图残留僵尸登记（导出幽灵图），新增的图无登记
+        # （图表清单/预检看不到）。现复用 register_inline_charts 全量同步
+        # （先清后登，不 commit、与下方正文 UPDATE 同事务提交）。
+        # enforce_limits=False：手动保存是用户显式意图，不做程序级限额裁剪；
+        # 校验失败的块仍会被修复或删除（宁缺勿滥，避免导出坏图）。
+        # 失败降级：登记异常不阻断保存（退回旧行为，仅日志告警）。
         try:
             _chart_n, _fixed = await register_inline_charts(
                 db, scheme_id, section_id, fields["content"], enforce_limits=False
@@ -1107,6 +1110,10 @@ async def update_section(scheme_id: str, section_id: str, data: SectionUpdate, d
                 logger.info("章节 %s 手动保存：同步登记 %d 个内联图表", section_id[:8], _chart_n)
         except Exception as e:
             logger.warning("章节 %s 手动保存图表同步失败（保留原文）: %s", section_id[:8], e)
+        # 重置由 review 模块统一写库 + 落 review_records（单一写入口）——
+        # 在图表登记改写定稿后与最终正文比较（F9）。
+        if _old_content != (fields["content"] or ""):
+            _review_reset = await reset_review_on_content_change(db, scheme_id, section_id, actor="用户手动编辑")
         # ✅ 统一编号命名空间（2026-09-26 · 补齐死代码）：正文落库前把 Markdown
         #    子标题编号规范化为导出口径（与 export.write_section 同一套算法），使
         #    「前端预览 = 落库正文 = 导出成稿」三处同源。实现收口到
@@ -1115,10 +1122,34 @@ async def update_section(scheme_id: str, section_id: str, data: SectionUpdate, d
         #    本节存在 DB 子章节时降级为节内 body 命名空间（1）/ a、），
         #    彻底隔离 DB 子章节与正文子标题的编号冲突。
         _content_renorm_pending = True
+    # ✅ R223（2026-11-12 · P3 · DAT-5）：word_budget/word_count 单独变更时同样
+    #    重算 word_status。派生列 (word_count, word_budget) 的重算旧实现整体挂在
+    #    `if "content" in fields:` 分支内 —— 仅调预算的 PATCH 落库后 word_status
+    #    与真实档位分叉（调大预算仍显示「超字」；调小预算显示「正常」掩盖真实
+    #    超字），直到下一次正文写路径才自愈。执行侧（word_adjust 批处理 / 自动
+    #    压缩）本就实时重算不受影响，本修复只对齐展示/导出侧派生列。
+    if "content" not in fields and ("word_budget" in fields or "word_count" in fields):
+        if "word_count" in fields:
+            _wc223 = fields["word_count"] or 0
+        else:
+            cur = await db.execute("SELECT word_count FROM sections WHERE id=?", (section_id,))
+            _row223 = await cur.fetchone()
+            _wc223 = (_row223[0] if _row223 else 0) or 0
+        if "word_budget" in fields:
+            _wb223 = fields["word_budget"] or DEFAULT_WORD_BUDGET
+        else:
+            cur = await db.execute("SELECT word_budget FROM sections WHERE id=?", (section_id,))
+            _row223 = await cur.fetchone()
+            _wb223 = (_row223[0] if _row223 else DEFAULT_WORD_BUDGET) or DEFAULT_WORD_BUDGET
+        fields["word_status"] = word_status_for(_wc223, _wb223)
     if fields:
         fields["updated_at"] = datetime.now().isoformat()
         sets = ", ".join(f"{k}=?" for k in fields)
-        await db.execute(f"UPDATE sections SET {sets} WHERE id=?", (*fields.values(), section_id))
+        _upd_cur = await db.execute(f"UPDATE sections SET {sets} WHERE id=?", (*fields.values(), section_id))
+        # ✅ R224（F11）：归属校验与写入之间隔 await —— 并发删章命中 0 行此前
+        #    仍返回 ok:true（R209 给 reorder/结构回写补了同一守卫，update 族漏接）。
+        if not safe_rowcount(_upd_cur, what=f"章节更新 scheme={scheme_id[:8]} sec={section_id[:8]}"):
+            raise HTTPException(409, "章节不存在或已被删除，请刷新后重试")
     # ✅ BUG 修复（2026-10-04 · 原子性窗口）：旧实现在此处立即 commit，而编号重算 /
     #    正文重规范化 / 缓存失效在其后才执行、由函数末尾第二次 commit 提交。
     #    崩溃或异常会留下「结构已移动、outline_json.id 仍旧号」的撕裂态（编号漂移、
@@ -1133,11 +1164,12 @@ async def update_section(scheme_id: str, section_id: str, data: SectionUpdate, d
     #    树中位置是编号的唯一事实源，显式传入的 level 也以位置折算为准）。
     _struct_changed = bool({"parent_id", "level", "sort_order"} & set(fields.keys()))
     if _struct_changed:
-        await renumber_sections_after_reorder(db, scheme_id)
-        # ✅ 编号统一（2026-09-26 · D4）：结构变更（移动/层级/排序）使本节及兄弟章节
-        #    编号整体顺移，按新编号统一重规范化所有含正文章节的子标题（落库正文与导出
-        #    成稿同源）。单章的规范化由下方 _content_renorm_pending 分支覆盖（无结构变更时）。
-        await _renormalize_all_section_contents(db, scheme_id)
+        # ✅ R223（DAT-6）：重排回写少行耗尽重试（False）时跳过重规范化。
+        if await renumber_sections_after_reorder(db, scheme_id):
+            # ✅ 编号统一（2026-09-26 · D4）：结构变更（移动/层级/排序）使本节及兄弟章节
+            #    编号整体顺移，按新编号统一重规范化所有含正文章节的子标题（落库正文与导出
+            #    成稿同源）。单章的规范化由下方 _content_renorm_pending 分支覆盖（无结构变更时）。
+            await _renormalize_all_section_contents(db, scheme_id)
     # ✅ BUG 修复（2026-09-26 · 编号规范化时序）：正文子标题编号规范化必须在
     #    **结构重排之后**执行。旧实现把它放在 fields UPDATE 之前 —— 同一次请求里
     #    既改 parent_id 又改正文时（如「把第 3 章挂到第 1 章下并补充正文」），
@@ -1236,7 +1268,18 @@ async def update_section(scheme_id: str, section_id: str, data: SectionUpdate, d
     # ✅ G9/G10：前端据此提示「审核结论已失效」并刷新审核工作台
     # （此前 update 只回 {"ok": true}，连 word_count 都不带，
     #  前端 `data.word_count` 恒为 undefined → 成功提示里显示「已保存，当前 0 字」）
-    _result = {"ok": True, "word_count": int(fields.get("word_count") or 0), "review_reset": _review_reset}
+    # ✅ R224（F22）：title-only 改名 / word_budget-only PATCH（R223 DAT-5 只写
+    # word_status）不落 fields["word_count"] —— 旧实现恒报 0 字，G10 要消灭的
+    # 「已保存，当前 0 字」假提示在这两条路径原样复现。缺字段时读库内现值。
+    _resp_wc = fields.get("word_count")
+    if _resp_wc is None:
+        try:
+            _wc_cur = await db.execute("SELECT word_count FROM sections WHERE id=?", (section_id,))
+            _wc_row = await _wc_cur.fetchone() if _wc_cur is not None else None
+            _resp_wc = (_wc_row[0] if _wc_row else 0) or 0
+        except Exception:  # noqa: BLE001 — 响应字数读失败不影响保存结果
+            _resp_wc = 0
+    _result = {"ok": True, "word_count": int(_resp_wc or 0), "review_reset": _review_reset}
     if _title_sanitized_patch:
         # ✅ R190（FIX-3）：与 save-outline 的 title_sanitized 同口径（加法式，未清洗不出现）。
         _result["title_sanitized"] = _title_sanitized_patch
@@ -1316,10 +1359,11 @@ async def delete_section(scheme_id: str, section_id: str, db=Depends(get_db)):
     #    outline_json.id —— 删掉 "2" 后目录编号变成 1/3/4 断号，前端树与
     #    正文提示词「当前章节编号」错乱，后续新增/拖拽才被动纠正。
     #    与 /reorder 同口径：删除即按新树位置统一重排（空树时自然无操作）。
-    await renumber_sections_after_reorder(db, scheme_id)
-    # ✅ 编号统一（2026-09-26 · D4）：删章后剩余章节编号顺移，按新编号统一重规范化
-    #    所有含正文章节的子标题（落库正文与导出成稿同源，避免旧号滞留）。
-    await _renormalize_all_section_contents(db, scheme_id)
+    # ✅ R223（DAT-6）：重排回写少行耗尽重试（False）时跳过重规范化。
+    if await renumber_sections_after_reorder(db, scheme_id):
+        # ✅ 编号统一（2026-09-26 · D4）：删章后剩余章节编号顺移，按新编号统一重规范化
+        #    所有含正文章节的子标题（落库正文与导出成稿同源，避免旧号滞留）。
+        await _renormalize_all_section_contents(db, scheme_id)
     # ✅ 删章后作废扫描缓存：剩余章节编号顺移 + 被删章节的孤儿缓存行一并清理
     await invalidate_consistency_scan_cache(db, scheme_id)
     await db.commit()
@@ -1503,6 +1547,28 @@ async def _save_outline_to_db(
         row = await cur.fetchone()
         if not row:
             raise HTTPException(404, "方案不存在")
+        # ✅ R223（2026-11-12 · P3 · DAT-7）：清空分支补齐与非空分支同款安全网。
+        #    清空是本端点破坏性最强的操作（章节 + 已生成正文 + 图表登记一并删除），
+        #    旧实现既不留撤销快照（非空分支 :1754 有 snapshot_before 处理，唯独
+        #    此分支在 :1545 提前 return 之前）、也绕过取锁前双 409 复检。现补齐：
+        #    ① 双 409 复检（R216 B5 同口径同文案，只拦 running/paused）——
+        #      入口守卫与 DELETE 之间新启动的生成任务不被拦 ⇒ 整表删除与
+        #      _persist_section 竞态窗口重开；
+        #    ② 可选「变更前快照」（非空分支同款：同一事务、任何删除之前、
+        #      失败不阻断清空；随下方 db.commit() 一并落库）。
+        if content_generation_in_progress(scheme_id):
+            raise HTTPException(
+                409, "本方案正文正在后台生成中，请等待生成完成（或先停止任务）后再清空目录"
+            )
+        if outline_generation_in_progress(scheme_id):
+            raise HTTPException(409, "本方案目录正在后台生成中，请等待生成完成（或先停止任务）后再清空目录")
+        if snapshot_before:
+            try:
+                from app.services.outline_versions import create_outline_snapshot
+
+                await create_outline_snapshot(db, scheme_id, snapshot_type=str(snapshot_before), commit=False)
+            except Exception as e:  # noqa: BLE001 — 快照失败不阻断清空
+                logger.warning("清空目录：变更前快照创建失败（不影响清空）: %s", e)
         # ✅ 清空同样是「正文批量丢失」操作，量化后回传（与非空分支同口径）
         cur = await db.execute(
             "SELECT COUNT(*) FROM sections WHERE scheme_id=?" " AND COALESCE(content,'')!=''", (scheme_id,)
@@ -2492,7 +2558,7 @@ def passthrough_additive(result: dict) -> dict:
     return {k: result[k] for k in SAVE_OUTLINE_ADDITIVE_KEYS if result.get(k) is not None}
 
 
-async def renumber_sections_after_reorder(db, scheme_id: str) -> None:
+async def renumber_sections_after_reorder(db, scheme_id: str) -> bool:
     """按当前 sort_order 顺序重排所有章节的 outline_json.id / level（章节编号）。
 
     拖拽排序只改 sort_order，但前端树与正文生成提示词都依赖 outline_json.id
@@ -2512,14 +2578,14 @@ async def renumber_sections_after_reorder(db, scheme_id: str) -> None:
         tree = await _build_tree(db, scheme_id)
         oj_updates = renumber_section_outline_ids(tree)
         if not oj_updates:
-            return
+            return True
         cur = await db.executemany(
             "UPDATE sections SET outline_json=?, level=? WHERE id=? AND scheme_id=?",
             [(*u, scheme_id) for u in oj_updates],
         )
         _written = safe_rowcount(cur, what=f"重排编号回写 scheme={scheme_id[:8]}")
         if _written == len(oj_updates):
-            return
+            return True
         if _attempt == 0:
             # 首次少写行 → 并发增删了节点，重读树重试（幂等操作，无害）
             logger.warning(
@@ -2538,6 +2604,13 @@ async def renumber_sections_after_reorder(db, scheme_id: str) -> None:
             len(oj_updates),
             _written,
         )
+    # ✅ R223（2026-11-12 · P3 · DAT-6）：返回 False，调用方据此**跳过**下游
+    #    _renormalize_all_section_contents —— R203 的重试收窄了窗口，但重试耗尽
+    #    后旧调用链仍无条件按（可能半新半旧的）编号重写全方案正文子标题，把
+    #    本可由下次重排自愈的编号陈旧**固化**进正文（R203 注释自述的「静默放大
+    #    缺陷」通路在重试耗尽后仍开放）。跳过重规范化：正文保持旧子标题（与旧
+    #    编号同源自洽），下次结构变更成功重排后一并自愈。
+    return False
 
 
 async def _outline_structure_report(db, scheme_id: str) -> dict:
@@ -2812,7 +2885,9 @@ async def _renormalize_all_section_contents(db, scheme_id: str) -> None:
             try:
                 await db.execute(_SQL, upd)
             except Exception as e2:  # noqa: BLE001
-                logger.warning("章节 %s 重规范化写库失败（保留原正文）: %s", str(upd[2])[:8], e2)
+                # ✅ R224（F22b）：upd=(content, wc, word_status, sec_id, scheme_id)
+                #    —— 旧实现打 upd[2]（word_status，如「normal」）排障无法定位章节。
+                logger.warning("章节 %s 重规范化写库失败（保留原正文）: %s", str(upd[3])[:8], e2)
 
 
 @router.get("/numbering-consistency")
@@ -2856,6 +2931,29 @@ async def repair_numbering_consistency(scheme_id: str, db=Depends(get_db)):
     outline_fixed = await _repair_outline_structure_numbering(db, scheme_id)
     result = await repair_scheme_numbering_consistency(db, scheme_id)
     result["outline_fixed"] = outline_fixed
+    # ✅ R224（F10）：编号修复改写正文 → 审核退回经 review 模块**单一写入口**
+    #    reset_review_on_content_change（幂等 NEED_RESET 门控 + review_records
+    #    留痕；R175 B-09 的裸 UPDATE 无留痕、无门控，且 services 层不得依赖
+    #    routers —— AST 契约 test_numbering_imports_from_services_not_routers，
+    #    故由本唯一生产调用方执行，清单来自 repair 回报的 fixed_sections）。
+    _fixed_ids = result.get("fixed_sections") or []
+    for _sid in _fixed_ids:
+        try:
+            await reset_review_on_content_change(db, scheme_id, str(_sid), actor="编号一致性修复")
+        except Exception as _re:  # noqa: BLE001 — 留痕失败不得让修复结果 500
+            logger.warning("编号修复后审核退回失败（sec=%s）: %s", str(_sid)[:8], _re)
+    if _fixed_ids:
+        await db.commit()
+    # ✅ R224（F13）：编号修复改写正文（content/word_count/review_status）→
+    #    导出缓存必须失效（R46 家族漏网；与 update/delete/reorder/shrink/
+    #    save-outline 同口径——update:1254 族七处皆有，本端点此前只有
+    #    ensure_no_generation_write 守卫、无缓存失效）。
+    try:
+        from app.services.facts_extractor import invalidate_export_cache
+
+        await invalidate_export_cache(db, scheme_id)
+    except Exception as _e:  # noqa: BLE001
+        logger.warning("编号一致性修复：导出缓存失效失败（不影响修复结果）: %s", _e)
     return result
 
 
@@ -2891,7 +2989,7 @@ async def rollback_numbering_version(scheme_id: str, snapshot_id: str, db=Depend
         return _fixed
 
     try:
-        return await _rollback_numbering_version(
+        _rb = await _rollback_numbering_version(
             db, scheme_id, snapshot_id, resync_fn=_resync_rollback_charts
         )
     except ValueError as e:
@@ -2899,6 +2997,15 @@ async def rollback_numbering_version(scheme_id: str, snapshot_id: str, db=Depend
         if "不存在" in msg:
             raise HTTPException(404, msg)
         raise HTTPException(400, msg)
+    # ✅ R224（F13）：回滚恢复 content/word_count/word_status → 导出缓存失效
+    #    （R46 家族，与 repair 同批补齐）。
+    try:
+        from app.services.facts_extractor import invalidate_export_cache
+
+        await invalidate_export_cache(db, scheme_id)
+    except Exception as _e:  # noqa: BLE001
+        logger.warning("编号版本回滚：导出缓存失效失败（不影响回滚结果）: %s", _e)
+    return _rb
 
 
 @router.post("/reorder")
@@ -2949,12 +3056,24 @@ async def reorder_sections(scheme_id: str, body: dict, db=Depends(get_db)):
         raise HTTPException(
             400, f"order 含 {len(_unknown)} 个不属于本方案的章节 id（可能来自其他方案或已删除），" "请刷新目录后重试"
         )
-    _missing = set(parent_of) - _order_ids
+    # ✅ R223（2026-11-12 · P2 · DAT-4）：完备性校验的「必需集合」改为**可达（挂载）
+    #    集合**。旧实现把全表章节集（含 parent_id 成环/悬挂的不可达节点）都算进
+    #    必需集合，而前端树（_build_tree 只回挂载章节，R210/R216 已实证不可达
+    #    节点「读路径看不到但 DB 有行」）永远拿不到这些 id ⇒ 一旦库内存在该类
+    #    脏数据，**所有**拖拽排序请求永久 400，错误文案列出的章节在界面上根本不
+    #    存在、刷新无法自愈（只能走 /numbering-consistency/repair 重挂）——功能性
+    #    死锁；且 R216 补的 unmounted_count 警告位于本 400 判定之后，永远到不了。
+    #    现以 _build_tree（挂载规则唯一出口）+ _collect_section_ids（树 id 收集唯一
+    #    出口）计算必需集合：order 覆盖全部可达章节即可；不可达节点保持原
+    #    sort_order（下方 UPDATE 只写 order 内 id），可见性由既有 unmounted_count
+    #    警告负责。
+    _mounted_ids = _collect_section_ids(await _build_tree(db, scheme_id))
+    _missing = _mounted_ids - _order_ids
     if _missing:
         _names = "、".join(f"「{_titles.get(mid, '') or mid[:8]}」" for mid in list(_missing)[:5])
         raise HTTPException(
             400,
-            f"order 必须包含本方案全部 {len(parent_of)} 个章节（缺少 {len(_missing)} 个："
+            f"order 必须包含本方案全部 {len(_mounted_ids)} 个章节（缺少 {len(_missing)} 个："
             f"{_names}{'等' if len(_missing) > 5 else ''}）",
         )
     local_counters: dict[str, int] = {}
@@ -2988,10 +3107,11 @@ async def reorder_sections(scheme_id: str, body: dict, db=Depends(get_db)):
     #    仍是旧编号；正文生成提示词经 _section_outline_number 读取该 id 作为
     #    「当前章节编号」，导致拖拽后章节编号错乱（原第 3 章被当成第 1 章），
     #    正文里套错章节号。现拖拽后按新顺序统一重排编号并回写 outline_json.id / level。
-    await renumber_sections_after_reorder(db, scheme_id)
-    # ✅ 编号统一（2026-09-26 · D4）：拖拽重排后按新编号统一重规范化所有含正文章节
-    #    的子标题（落库正文与导出成稿同源，避免重排后旧号滞留）。
-    await _renormalize_all_section_contents(db, scheme_id)
+    # ✅ R223（DAT-6）：重排回写少行耗尽重试（False）时跳过重规范化。
+    if await renumber_sections_after_reorder(db, scheme_id):
+        # ✅ 编号统一（2026-09-26 · D4）：拖拽重排后按新编号统一重规范化所有含正文章节
+        #    的子标题（落库正文与导出成稿同源，避免重排后旧号滞留）。
+        await _renormalize_all_section_contents(db, scheme_id)
     # ✅ 拖拽后作废扫描缓存（缓存键不含结构指纹，旧扫描行仍会命中）
     await invalidate_consistency_scan_cache(db, scheme_id)
     await db.commit()
@@ -3137,10 +3257,15 @@ async def shrink_section(scheme_id: str, section_id: str, db=Depends(get_db)):
             )
 
     async def _call_ai(sys_prompt: str, user_payload: str) -> str:
+        # ✅ R224（F14）：手动压缩此前不传 max_tokens —— 与 sse_handlers.py
+        #    压缩链 :5802 明文设计约束（「压缩调用必须显式传 max_tokens，否则
+        #    _attempt_candidate 回退配置值（可能 32768）」）直接冲突，手动压缩
+        #    输出无预算上界。与自动压缩同口径按目标字数折算。
         return await asyncio.wait_for(
             chat_with_fallback(
                 [{"role": "system", "content": sys_prompt}, {"role": "user", "content": user_payload}],
                 timeout=180,
+                max_tokens=max_tokens_for_budget(word_budget),
                 scene="content_shrink",
             ),
             timeout=240,
@@ -3190,10 +3315,13 @@ async def shrink_section(scheme_id: str, section_id: str, db=Depends(get_db)):
             final_wc = text_word_count(current)
     except Exception as _ne:  # noqa: BLE001 - 编号规范化失败不得阻断压缩结果
         logger.warning("章节 %s 压缩后编号规范化失败（保留压缩正文）: %s", section_id[:8], _ne)
-    await db.execute(
+    _shrink_cur = await db.execute(
         "UPDATE sections SET content=?, word_count=?, word_status=?, updated_at=? WHERE id=?",
         (current, final_wc, word_status_for(final_wc, word_budget), datetime.now().isoformat(), section_id),
     )
+    # ✅ R224（F11）：与 update_section 主 UPDATE 同批 —— 并发删章 0 行不得静默 ok。
+    if not safe_rowcount(_shrink_cur, what=f"压缩落库 scheme={scheme_id[:8]} sec={section_id[:8]}"):
+        raise HTTPException(409, "章节不存在或已被删除，请刷新后重试")
     # ✅ G9（2026-09-21）：压缩改写了正文 → 原审核结论失效，退回「待审核」并留痕
     await reset_review_on_content_change(db, scheme_id, section_id, actor="字数压缩")
     await db.commit()

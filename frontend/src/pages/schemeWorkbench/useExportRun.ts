@@ -16,7 +16,10 @@ import {
   globalFactsStatusWarning,
   noHttpFallbackWarning,
   parseCacheStatus,
+  cachedChartDegradedWarning,
+  chartDeliveryWarning,
   noPilFallbackWarning,
+  pilFallbackDisabledWarning,
   parseChartRenderStats,
   parseExportBlock,
   parseExportDegraded,
@@ -207,7 +210,10 @@ export function useExportRun(deps: ExportRunDeps) {
         // ✅ R181（2026-11-06）：甘特 JSON 只有本地 PIL、没有 HTTP 兜底，
         //    失败单独成类展示；从泛化 failed 中扣除，避免双重提示误导。
         const noHttp = Math.max(0, Number(stats.no_http_fallback || 0));
-        const genericFailed = Math.max(0, Number(stats.failed || 0) - noPil - noHttp);
+        // ✅ R221：开关关闭导致的失败单独成类，从泛化 failed 中扣除，
+        //    避免「开启 PIL 兜底」这条有效建议被重复播报或淹没在泛化提示里。
+        const pilDisabled = Math.max(0, Number(stats.pil_fallback_disabled || 0));
+        const genericFailed = Math.max(0, Number(stats.failed || 0) - noPil - noHttp - pilDisabled);
         if (genericFailed > 0) {
           msg.warning(
             `${genericFailed} 张图表渲染失败，建议检查图表代码或开启「允许 PIL 兜底」后重试`,
@@ -217,10 +223,20 @@ export function useExportRun(deps: ExportRunDeps) {
         if (noPilWarn) msg.warning(noPilWarn, 8);
         const noHttpWarn = noHttpFallbackWarning(stats);
         if (noHttpWarn) msg.warning(noHttpWarn, 8);
+        const pilDisabledWarn = pilFallbackDisabledWarning(stats);
+        if (pilDisabledWarn) msg.warning(pilDisabledWarn, 8);
         const fbWarn = fallbackBorrowWarning(stats);
         if (fbWarn) msg.warning(fbWarn, 8);
         const ganttWarn = ganttTruncatedWarning(stats);
         if (ganttWarn) msg.warning(ganttWarn, 8);
+        // ✅ R222（日志驱动）：**成稿实际缺图**与「渲染器失败」是两件事 ——
+        //    前者可能因渲染成功却没插上、有围栏但无登记代码而发生，此时
+        //    failed=0，上面所有告警都不会响。必须独立提示且点明不写缓存。
+        const deliveryWarn = chartDeliveryWarning(stats);
+        if (deliveryWarn) msg.warning(deliveryWarn, 8);
+        // ✅ R222：命中历史产物时回带上次统计，避免复用缺图成稿却零提示。
+        const cachedWarn = cachedChartDegradedWarning(stats);
+        if (cachedWarn) msg.warning(cachedWarn, 8);
       }
       const fs = parseFixStats(resp.headers);
       if (fs) {

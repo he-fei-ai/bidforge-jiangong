@@ -21,8 +21,10 @@ from app.services.ai.json_mode_compat import json_mode_unsupported
 from app.services.ai.providers.anthropic_compatible import AnthropicCompatibleProvider
 from app.services.ai.providers.base import BaseProvider
 from app.services.ai.providers.openai_compatible import OpenAICompatibleProvider
+from app.services.ai.usage_logging import log_usage_event as _log_ai_usage
 from app.services.ai.workflows_base import circuit_breaker, concurrency_controller
 from app.services.crypto import decrypt_api_key, encrypt_api_key
+from app.utils.log_context import context_suffix as _context_suffix
 
 logger = logging.getLogger("provider_factory")
 
@@ -3895,6 +3897,19 @@ async def _attempt_candidate(
                     )
                     # ✅ 修复：成功路径补齐 token 用量（原实现不传，用量统计恒为 0）
                     u = extract_usage(provider)
+                    # ✅ R220（商业化可观测性）：逐调用结构化用量埋点。
+                    #    日志侧落 prompt/completion/cached/total + 命中率 +
+                    #    provider/model/scene/duration + trace，供成本基线与链路串联；
+                    #    快照侧按 provider/scene 有界累计，供 /system/prompt-metrics 查询。
+                    #    唯一出口内部全程 fail-soft，绝不改变 AI 返回或阻断降级链。
+                    _log_ai_usage(
+                        u,
+                        provider=pname,
+                        model=c.get("model", ""),
+                        scene=scene,
+                        duration_ms=duration * 1000,
+                        context=_context_suffix(),
+                    )
                     # ✅ 2026-11-05（方案 B）：尝试级记录只进 scope，
                     #    由 _chat_with_fallback_result 合并成一条主记录。
                     await _record_attempt(

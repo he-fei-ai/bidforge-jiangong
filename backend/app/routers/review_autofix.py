@@ -24,6 +24,7 @@ from fastapi import APIRouter, Depends, HTTPException, Response
 
 from app.db import get_db
 from app.routers.review import reset_review_on_content_change
+from app.services.content_utils import find_unclosed_fences
 from app.services.numbering import normalize_section_content_subheadings
 
 # ✅ R13 判空单一出口（2026-10-06）：静态护栏 tests/test_review_r13_closeout_20261006.py
@@ -73,29 +74,50 @@ def _guard_not_generating(scheme_id: str, action: str) -> None:
     ensure_no_generation_write(scheme_id, action)
 
 
-async def _resolve_finding(db, scheme_id: str, rule_id: str, section_id: str = "") -> dict:
+def _finding_from_payload(payload: dict, rule_id: str, section_id: str = "") -> dict | None:
+    """从**已算好**的总检 payload 中取出那一条 finding（纯函数，无 DB、无重算）。
+
+    ✅ R223（P1 · 预检重复重算收口）：抽出本函数，使同一请求内**只算一次**总检
+    （见 ``_resolve_finding`` 的 ``payload`` 形参）。旧实现每次调用都整轮重算预检，
+    ``confirm`` 的链式重算分支会对每个 (章节, 规则) 各算一遍 —— 生产实测单轮预检
+    在真实方案（159 章）上约 6.7s（其中 ``check_duplication`` 占 6.4s），4 条即约
+    27s，与日志中 ``/review/autofix/confirm`` 的 29.7s 吻合；且纯 CPU 持有 GIL，
+    拖慢事件循环（实测 loop lag 1.1~29s、同期 ``/sections`` 被拖到 10s）。
+    """
+    hits = [f for f in (payload.get("findings") or []) if (f.get("rule_id") or "") == (rule_id or "")]
+    if section_id:
+        hits = [f for f in hits if (f.get("section_id") or "") == section_id]
+    return hits[0] if hits else None
+
+
+async def _resolve_finding(
+    db, scheme_id: str, rule_id: str, section_id: str = "", *, payload: dict | None = None
+) -> dict:
     """按 rule_id 从**当前总检口径**重新派生那一条 finding。
     复用 ``compliance._readiness_overview_compute``（与总检页完全同一套聚合
     逻辑），不另写一份解析 —— 否则两处分叉就会出现「界面显示可修、后端说
     找不到」。``section_id`` 命中不到时**不**静默放宽：同规则可能涉及多章，
     悄悄改到别的章比直接报错危险得多。
-    """
-    from app.routers.compliance import _readiness_overview_compute
 
-    # persist=False（2026-10-03 数据链收口）：修复链路重算只取 findings，
-    # 不得落 preflight_runs —— 否则每点一次定位/修复都污染分数趋势。
-    payload = await _readiness_overview_compute(db, scheme_id, persist=False)
-    hits = [f for f in (payload.get("findings") or []) if (f.get("rule_id") or "") == (rule_id or "")]
-    if section_id:
-        hits = [f for f in hits if (f.get("section_id") or "") == section_id]
-    if not hits:
+    ✅ R223：新增可选 ``payload`` —— 同一请求内需解析**多条** finding 时
+    （``confirm`` 的链式重算分支），应先算一次总检并把结果传入，避免 O(k) 轮
+    整轮重算。缺省 ``None`` 时行为与旧实现逐字一致（自算一次）。
+    """
+    if payload is None:
+        from app.routers.compliance import _readiness_overview_compute
+
+        # persist=False（2026-10-03 数据链收口）：修复链路重算只取 findings，
+        # 不得落 preflight_runs —— 否则每点一次定位/修复都污染分数趋势。
+        payload = await _readiness_overview_compute(db, scheme_id, persist=False)
+    hit = _finding_from_payload(payload, rule_id, section_id)
+    if hit is None:
         raise HTTPException(
             404,
             f"当前检查结果中不存在问题 {rule_id}"
             + (f"（章节 {section_id}）" if section_id else "")
             + "，请先重新执行「一键总检」",
         )
-    return hits[0]
+    return hit
 
 
 # @deprecated 孤儿 API（2026-10-06 核实）：前端**零消费** —— 可修复性是随
@@ -274,6 +296,24 @@ async def _persist_fixed(
             )
         except Exception as _ne:  # noqa: BLE001 - 编号规范化失败不得阻断修复落库
             logger.warning("自动修复落库：章节 %s 编号规范化失败（保留修复正文）: %s", sid[:8], _ne)
+        # ✅ R227b（审核自动修复围栏加固）：审核自动修复是**整章 AI 改写**，模型
+        #    可能输出未闭合围栏（如只写 ```mermaid 开启行忘闭合）；若直接落库，
+        #    畸形正文永久留库（后续续写/压缩按「从围栏处截断」判定，整章字数虚低）。
+        #    与正文链 R224 F8（续写/压缩跳过未闭合围栏）同口径：命中则**跳过本章
+        #    修复**，保留原正文与旧审核态（content 未变，不触发 reset_review）。
+        if find_unclosed_fences(_persist_content):
+            _skipped.append(
+                {
+                    "rule_id": rule_id,
+                    "section_id": sid,
+                    "status": "unclosed_fence",
+                    "detail": "自动修复结果含未闭合围栏，已跳过以防落库畸形正文",
+                }
+            )
+            logger.warning(
+                "自动修复落库：跳过含未闭合围栏章节 section=%s（保留原正文）", str(sid)[:8]
+            )
+            continue
         wc = text_word_count(_persist_content)
         # ✅ R13（2026-10-06）：旧实现丢弃返回值 —— 正文 UPDATE 返回 None 时
         #    循环照常走完、commit 成功、函数返回快照 id，端点据此返回 ok=True。
@@ -691,6 +731,31 @@ async def confirm(scheme_id: str, body: dict | None = None, db=Depends(get_db)):
     sections = await _load_sections(db, scheme_id)
     sec_by_id = {s.get("id"): s for s in sections}
     pending: list[tuple[str, str, str]] = []
+
+    # ✅ R223（P1 · 预检重复重算收口）：链式重算分支（下方「非前缀拒绝」路径）
+    #    会对每个 (章节, 规则) 调 ``_resolve_finding``，且每章都要方案 + 事实；
+    #    旧实现每次都**整轮重算预检 / 重查方案与事实**（真实方案单轮 ~6.7s）。
+    #    改为**同一请求内只算一次**，并用惰性求值保证纯前缀分支（最常见路径）
+    #    零额外开销；两个值都与章节无关，缓存不改变任何判定。
+    _ov_payload: dict | None = None
+
+    async def _ov_once() -> dict:
+        nonlocal _ov_payload
+        if _ov_payload is None:
+            from app.routers.compliance import _readiness_overview_compute
+
+            _ov_payload = await _readiness_overview_compute(db, scheme_id, persist=False)
+        return _ov_payload
+
+    _scheme_facts: dict = {}
+
+    async def _scheme_facts_once():
+        if "v" not in _scheme_facts:
+            _sch = await _load_scheme(db, scheme_id)
+            _f, _st = await _build_facts(db, _sch)
+            _scheme_facts["v"] = (_sch, _f, _st)
+        return _scheme_facts["v"]
+
     # 罕见路径：非前缀拒绝 → 重新链式改写（需再调 AI）
     for sid, its in by_section.items():
         section = sec_by_id.get(sid)
@@ -736,11 +801,11 @@ async def confirm(scheme_id: str, body: dict | None = None, db=Depends(get_db)):
                 #   finding 如 CON-01 不带 section_id，保持历史行为可用），且
                 #   回退命中仍属别章 → 拒绝越章改写，记 skipped 留理由。
                 try:
-                    resolved.append(await _resolve_finding(db, scheme_id, rid, sid))
+                    resolved.append(await _resolve_finding(db, scheme_id, rid, sid, payload=await _ov_once()))
                 except HTTPException as first_err:
                     if first_err.status_code != 404:
                         raise
-                    fb = await _resolve_finding(db, scheme_id, rid)
+                    fb = await _resolve_finding(db, scheme_id, rid, payload=await _ov_once())
                     fb_sid = str(fb.get("section_id") or "")
                     if fb_sid and fb_sid != sid:
                         raise HTTPException(
@@ -763,8 +828,9 @@ async def confirm(scheme_id: str, body: dict | None = None, db=Depends(get_db)):
         if not resolved:
             continue
         resolved = sorted(resolved, key=lambda x: _severity_rank(x.get("severity")))
-        scheme = await _load_scheme(db, scheme_id)
-        facts, standards_text = await _build_facts(db, scheme)
+        # ✅ R223：方案与事实与章节无关，旧实现在每章循环体内各查一次 → 改为
+        #    请求内惰性缓存一次（同一请求内 sections/schemes/global_facts 不变）。
+        scheme, facts, standards_text = await _scheme_facts_once()
         _content, _items = await review_autofix._chain_section_fixes(section, resolved, scheme, facts, standards_text)
         # ✅ R197（B6，B-10 同口径）：链式重算在所有 finding 都 failed 时返回
         #    **原文**（仅 status=="repaired" 才更新 content）—— 无差异章节不得

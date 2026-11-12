@@ -79,6 +79,23 @@ _AUDIT_RULES: tuple[tuple[str, str, str, re.Pattern], ...] = (
         "warn",
         re.compile(r"[\u4e00-\u9fa5]\s*[a-z]{4,}(?:\s+[a-z]{3,})+\s*[\u4e00-\u9fa5]"),
     ),
+    # ✅ R226（2026-11-12 · F7 · 承 R179 §10-5 登记）：预检侧补 page_residue /
+    #    double_entity 两规则 —— 此前只有导出落盘 lint 事后兜底（lint_residual_page/
+    #    lint_residual_entity → content-residue 降级），预检不报 → 用户白烧一次
+    #    分钟级导出才在降级提示里看到。正则与 export.py 落盘 lint 逐字同源
+    #    （_RE_PAGE_RESIDUE / _RE_ENTITY 口径），双源由行为护栏钉住。
+    (
+        "page_residue",
+        "页码/页眉残留（上传文档带入，应删除）",
+        "warn",
+        re.compile(r"\s*=+\s*Page\s*\d+\s*=+\s*|\s*第\s*\d+\s*页\s*共\s*\d+\s*页\s*", re.I),
+    ),
+    (
+        "double_entity",
+        "HTML 实体编码残留（&amp;gt; 等，应还原为原文）",
+        "warn",
+        re.compile(r"&(?:amp;)+(?:gt|lt|amp|nbsp);", re.I),
+    ),
 )
 # 图表家族围栏（未闭合即视为生成被截断，残片渲染必失败）——
 # 统一定义在 content_blocks.INLINE_CHART_FENCE_LANGS（文件头别名赋值），
@@ -731,10 +748,18 @@ def _detect_duplicate_sections(sections: list[dict]) -> list[dict]:
 
 
 def _stored_outline_number(sec: dict) -> str:
-    """从章节行提取存储态编号（outline_json.id）；非法/缺失返回 ""。"""
-    from app.services.numbering import stored_outline_id
+    """从章节行提取存储态编号（outline_json.id）；非法/缺失返回 ""。
 
-    return stored_outline_id(sec)
+    ✅ R223（2026-11-12 · P3 · NUM-5）：返回值经
+    ``numbering.normalize_stored_id_text`` 文本归一（全角数字/点号 → ASCII）。
+    旧实现原样回吐全角存量 "３.２"，``_detect_section_number_mismatch`` 拿它与
+    结构推算的 ASCII 编号逐字比对 ⇒ 对各读路径都能正常消费（display/prefix
+    判据早已归一）的行报「编号不一致」假阳性。归一对 ASCII 合法编号恒等。
+    """
+    from app.services.numbering import normalize_stored_id_text, stored_outline_id
+
+    _s = stored_outline_id(sec)
+    return normalize_stored_id_text(_s) if _s else ""
 
 
 def _detect_section_number_mismatch(sections: list[dict]) -> list[dict]:

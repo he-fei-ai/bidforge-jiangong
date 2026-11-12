@@ -43,12 +43,20 @@ class TestImageEngineR196:
         """image_enabled=False 显式关闭生图：直接 return None，不发任何模型调用。"""
         from app.services.ai.image_providers import registry as reg
 
-        def _boom(*_a, **_k):
-            raise AssertionError("image_enabled=False 不得构建任何适配器/发起调用")
+        # ⚠️ 不能用「monkeypatch 抛 AssertionError」判短路：generate_illustration_image
+        #    的降级循环用 except Exception 吞掉适配器异常后继续下一候选，最终仍
+        #    return None（A/B M2 首轮 MISSED 的根因）。改为记录 get_adapter 调用
+        #    次数并断言为空 —— 短路删除后队列必然构建适配器，calls 非空即红。
+        calls: list[str] = []
 
-        monkeypatch.setattr(reg.ProviderRegistry, "get_adapter", _boom)
+        def _record(*args, **kwargs):
+            calls.append(str(args[0] if args else kwargs))
+            raise RuntimeError("不应到达适配器构建")
+
+        monkeypatch.setattr(reg.ProviderRegistry, "get_adapter", _record)
         out = await self._call(image_config={"image_enabled": False, "image_model": "m"})
         assert out is None
+        assert calls == [], "image_enabled=False 不得构建任何适配器（不得发起生成链）"
 
     @pytest.mark.asyncio
     async def test_a2_user_provider_always_first(self, monkeypatch):
@@ -86,7 +94,7 @@ class TestImageEngineR196:
 
         # 缓存 key 与 generate_illustration_image 同式（prompt|style|size|provider 的 md5）
         key = hashlib.md5(
-            f"一张施工示意图|engineering_diagram|16:9|agnes".encode()
+            "一张施工示意图|engineering_diagram|16:9|agnes".encode()
         ).hexdigest()
         with ie._image_cache_lock:
             ie._IMAGE_CACHE.clear()
@@ -105,7 +113,7 @@ class TestImageEngineR196:
 
         from app.services.ai import image_engine as ie
 
-        key = hashlib.md5(f"一张施工示意图|engineering_diagram|16:9|agnes".encode()).hexdigest()
+        key = hashlib.md5("一张施工示意图|engineering_diagram|16:9|agnes".encode()).hexdigest()
         ie._image_cache_set(key, "http://fresh/url")
         out = await self._call(image_config={"image_enabled": False})
         assert out == "http://fresh/url"

@@ -4,6 +4,7 @@ from fastapi import APIRouter, Depends
 
 from app.db import get_db, read_db, safe_rowcount
 from app.models import AuditLogCleanup
+from app.services.ai.usage_logging import compute_cache_hit_rate
 
 router = APIRouter(tags=["ai_config"])
 
@@ -75,9 +76,8 @@ async def ai_stats(days: int = 30, db=Depends(read_db)):
         # 尝试级失败 = 尝试数 - 成功次数（每次成功逻辑调用恰好 1 次成功尝试）
         p["attempt_failed"] = max(0, int(p.get("attempts") or 0) - int(p.get("success_count") or 0))
         # 缓存命中率：cached / prompt（输出 token 无缓存语义，不进分母）
-        p["cache_hit_rate"] = (
-            round((p["cached_tokens"] or 0) * 100.0 / p["prompt_tokens"], 1) if p["prompt_tokens"] else None
-        )
+        # ✅ R220：口径收口到 usage_logging 唯一出口（原此处与 summary 各算一份）。
+        p["cache_hit_rate"] = compute_cache_hit_rate(p["prompt_tokens"], p["cached_tokens"])
         p["avg_duration_ok"] = round(p["avg_duration_ok"] or 0, 1)
     # 只被熔断跳过、从未真实调用过的配置也要可见（否则「为什么它一次都没成功」无迹可寻）
     for (_pn, _mn, _cid, _url), _n in _skipped_map.items():
@@ -121,9 +121,8 @@ async def ai_stats(days: int = 30, db=Depends(read_db)):
     summary["avg_duration"] = summary.get("avg_duration") or 0.0
     summary["success_rate"] = round(summary["success_count"] * 100.0 / total, 1) if total else None
     # 缓存命中率：cached / prompt（✅ 口径修正，见上）
-    summary["cache_hit_rate"] = (
-        round(summary["cached_tokens"] * 100.0 / summary["prompt_tokens"], 1) if summary["prompt_tokens"] else None
-    )
+    # ✅ R220：与 by_provider 共用唯一计算出口，杜绝两份口径漂移。
+    summary["cache_hit_rate"] = compute_cache_hit_rate(summary["prompt_tokens"], summary["cached_tokens"])
     summary["days"] = days
     # ✅ 2026-11-05（方案 B）：failed_count = 逻辑调用失败数；attempt_failed = 尝试失败数
     summary["failed_count"] = total - summary["success_count"]

@@ -65,6 +65,11 @@ from app.services.facts_extractor import (
     MAX_SOURCE_EXCERPT,
     SCHEME_PROJECT_ID_SQL,
     _clip_excerpt,
+    # ✅ R225（2026-11-12 · B1 同族）：值比较归一出口（去空白+全角冒号，
+    #    docstring 即「用于去重/矛盾比较」）—— persist_extraction 的冲突登记
+    #    与本文件 value_changed 两处同族判据共用，杜绝 normalize_key（名称
+    #    空间函数）被误用于比较取值。
+    _norm_value,
     _safe_confidence,
     append_simulated_marker,
     extract_value_from_markdown_line,
@@ -896,7 +901,12 @@ def _collect_duplicate_injectable_conflicts(
         norm_name = _norm_fact_text(pname)
         if not norm_name:
             continue
-        peer_index.setdefault(norm_name, []).append((peer_id, _norm_fact_text(pvalue)))
+        # ✅ R225（2026-11-12 · A1）：peer 侧值同样剥注释再归一 —— peer 保留
+        #    「12.5 *(设计值)*」而计划值已被解析剥成「12.5」，旧实现误判异值
+        #    → 合法保存被标矛盾挡出正文。两侧统一「剥注释 → 归一」口径
+        #    （与分组重建的内容对比判据同源）。
+        _peer_plain = extract_value_from_markdown_line(f"x: {pvalue}")[1]
+        peer_index.setdefault(norm_name, []).append((peer_id, _norm_fact_text(_peer_plain)))
 
     conflicts: dict[str, list[str]] = {}
     planned_index: list[tuple[str, str, str]] = []
@@ -1016,7 +1026,7 @@ async def _recompute_inherited_fact_conflicts(
         return 0
     cur = await db.execute(
         "SELECT id, title, content, fact_key, is_simulated, is_resolved, "
-        "has_conflict, is_stale, is_shared, confidence, source_ref "
+        "has_conflict, is_stale, is_shared, confidence, source_ref, conflict_keys "
         "FROM global_facts WHERE scheme_id=? ORDER BY rowid",
         (scheme_id,),
     )
@@ -2257,6 +2267,13 @@ async def _apply_item_updates(db, updates: list[dict], *, commit: bool = True) -
     updated = 0
     # 一次批量更新通常同属一个作用域：唯一性闸门的 peers 只读一次（R183）
     gate_peer_cache: dict[tuple[str, str], list[dict]] = {}
+    # ✅ R225（2026-11-12 · C3）：批内 planned 互查 —— gate_peer_cache 加载于
+    #    本条 UPDATE 之前；同批前一条已把 B 改成「项目经理」时，本条仍按旧
+    #    快照比对（旧快照里 B 还是旧名）→ 一次 PATCH 两条改名可双双过闸，
+    #    正文双值。本批已应用的新 (name, value) 以虚拟 peer 并入比对
+    #    （batch_resolve 的 _collect_duplicate_injectable_conflicts 同语义，
+    #    此处是同族漏改）。
+    planned_gate_peers: dict[tuple[str, str], list[dict]] = {}
     for u in updates:
         fid = str(u.get("fact_id") or "").strip()
         row = rows.get(fid)
@@ -2317,8 +2334,14 @@ async def _apply_item_updates(db, updates: list[dict], *, commit: bool = True) -
             #    单条编辑弹窗总是全量提交 value，旧实现无条件清冲突标记，
             #    导致「只改分类/改名/切换模拟值」等操作静默吞掉未裁决矛盾。
             #    比较口径与 persist_extraction 的冲突登记口径一致：
-            #    strip 后文本不同且 normalize_key 不同才视为改值。
-            value_changed = old_value.strip() != new_value.strip() and normalize_key(old_value) != normalize_key(
+            #    strip 后文本不同且归一值不同才视为改值。
+            # ✅ R225（2026-11-12 · B1 同族第二份）：旧判据用 normalize_key 比较
+            #    **取值** —— 名称空间函数（子串最长匹配），值含「工期」「基坑
+            #    深度」等词条时两侧恒归同键 → 「工期 450 天改 600 天」被判
+            #    「未改值」：content 不落库、is_stale 不解除（改值静默丢失）。
+            #    与 persist_extraction 冲突登记判据同步改 _norm_value（去空白 +
+            #    全角冒号，两侧同为 R75 界面显示口径）。
+            value_changed = old_value.strip() != new_value.strip() and _norm_value(old_value) != _norm_value(
                 new_value
             )
             if value_changed:
@@ -2391,8 +2414,12 @@ async def _apply_item_updates(db, updates: list[dict], *, commit: bool = True) -
                 if _gate_peers is None:
                     _gate_peers = await _load_injectable_peers_for_gate(db, *_gate_key)
                     gate_peer_cache[_gate_key] = _gate_peers
+                # ✅ R225（2026-11-12 · C3）：批内 planned peers 并入比对 ——
+                #    真实 peer 快照不含同批前序条目刚应用的新 (name, value)，
+                #    一次 PATCH 两条改名可双双过闸（正文双值）。
                 await _assert_no_conflicting_injectable_duplicate(
-                    db, fid, dict(row), name=_name_now, value=_val_now, peers=_gate_peers
+                    db, fid, dict(row), name=_name_now, value=_val_now,
+                    peers=_gate_peers + planned_gate_peers.get(_gate_key, []),
                 )
         # ⚠️ 门控与应用都走 _rederive_dimension_columns 单一出口。
         # 旧实现此处写 `cat_changed or title_changed or value_changed`，与分组
@@ -2435,6 +2462,29 @@ async def _apply_item_updates(db, updates: list[dict], *, commit: bool = True) -
         cur = await db.execute(f"UPDATE global_facts SET {', '.join(sets)} WHERE id=?", (*vals, fid))
         _assert_fact_write_applied(cur, f"条目级更新事实 {fid}")
         updated += 1
+        # ✅ R225（2026-11-12 · C8）：人工改值即对矛盾的裁决（本文件 R75 注释
+        #    同语义「人工改值即为对矛盾的裁决」）—— 清除该事实的跨段矛盾
+        #    诊断记录，与 resolve_conflict 同口径（行状态与诊断面板一致）。
+        if value_changed:
+            try:
+                await db.execute(
+                    "DELETE FROM facts_cross_conflicts WHERE fact_name=? AND project_id=? AND scheme_id=?",
+                    (str(row["project_id"] or ""), str(row["scheme_id"] or ""), str(row["title"] or "")),
+                )
+            except Exception:  # noqa: BLE001 - 诊断清理 fail-soft，主写不受影响
+                logger.warning("改值后清理跨段矛盾诊断记录失败（fail-soft）", exc_info=True)
+        # ✅ R225（C3）：本条新 (name, value) 记为虚拟 peer，供同批后续条目的
+        #    唯一性闸门比对（真实 peer 快照不含本批已应用的新形态）。
+        if _norm_fact_text(_name_now):
+            _gate_key_now = (str(row["scheme_id"] or ""), str(row["project_id"] or ""))
+            planned_gate_peers.setdefault(_gate_key_now, []).append(
+                {
+                    "id": f"planned:{fid}",
+                    "title": _name_now,
+                    "content": _build_fact_content(_name_now, _val_now, False),
+                    "scheme_id": str(row["scheme_id"] or ""),
+                }
+            )
 
     if updated and commit:
         await db.commit()
@@ -2558,6 +2608,13 @@ async def update_fact(
             # ✅ 统一时间戳口径：与其它写接口一致使用 SQLite datetime 函数。
             #    旧实现用 datetime.now().isoformat()（'T' 分隔），与
             #    'YYYY-MM-DD HH:MM:SS' 混排导致 updated_at 排序错乱。
+            # ✅ R225（2026-11-12 · C9）：body 只含 category（或 content 非事实行
+            #    + category）时走本裸写路径 —— 此前不经 _normalize_fact_category
+            #    白名单、不经 _rederive_dimension_columns 重派生，与 :1742 起
+            #    「白名单覆盖全部写入路径」的宣称矛盾；非法分类落库后该行在
+            #    九大章节视图消失。现对齐结构化分支口径。
+            if "category" in fields:
+                fields["category"] = _normalize_fact_category(str(fields.get("category") or "").strip())
             sets = ", ".join(f"{k}=?" for k in fields)
             cur = await db.execute(
                 f"UPDATE global_facts SET {sets}, " f"updated_at=datetime('now','localtime') WHERE id=?",
@@ -2565,6 +2622,27 @@ async def update_fact(
             )
             # ✅ R13 收口（2026-10-06）：判空 + 校验影响行数，杜绝「假成功」
             _assert_fact_write_applied(cur, f"更新事实字段 fact_id={fact_id}")
+            if "category" in fields and str(fields["category"]) != str(row["category"] or ""):
+                # 分类实际变化 → 九大章节四维按新分类重派生（与条目级更新
+                # _rederive_dimension_columns 同一出口）。
+                _cat_sets = dict(
+                    _rederive_dimension_columns(
+                        old_name=row["title"] or "",
+                        new_name=row["title"] or "",
+                        old_value=row["content"] or "",
+                        new_value=row["content"] or "",
+                        old_category=row["category"] or "",
+                        new_category=str(fields["category"]),
+                        fact_type=(row["fact_type"] or "").strip(),
+                        fact_key=row["fact_key"] or "",
+                    )
+                )
+                if _cat_sets:
+                    _cat_clause = ", ".join(f"{k}=?" for k in _cat_sets)
+                    await db.execute(
+                        f"UPDATE global_facts SET {_cat_clause} WHERE id=?",
+                        (*_cat_sets.values(), fact_id),
+                    )
         await db.commit()
         # ✅ 2026-09-29：同上，项目级事实也必须失效项目下全部方案的导出缓存
         # （旧实现只判 scheme_id 非空，项目级行一个缓存都不失效）。
@@ -2752,7 +2830,23 @@ async def update_fact(
         #    现仅当该行内容确实被改动时才清除矛盾；内容未变则原样保留。
         has_conflict, conflict_keys = 0, ""
         if old:
-            if (old.get("content") or "").strip() == content_line.strip():
+            # ✅ R225（2026-11-12 · A1）：「内容确实被改动」不能逐字比 ——
+            #    解析剥注释（「12.5 *(设计值)*」→「12.5」）与全角冒号归一
+            #    （半角重建）是**格式性差异**：旧实现把它们当改值，未裁决矛盾
+            #    候选被静默清空（行变 is_resolved=1/has_conflict=0 直接可注入，
+            #    绕过裁决闸门）；反向场景（peer 保留注释 vs 计划值剥注释）则把
+            #    同值误标成矛盾挡出正文。现两侧同过读路径出口（_fact_name_value
+            #    保留注释 → extract 剥注释 → _norm_value 归一）比语义值。
+            _old_eq = (old.get("content") or "").strip() == content_line.strip()
+            if not _old_eq:
+                _old_nm, _old_val_raw = _fact_name_value(old)
+                _old_plain = extract_value_from_markdown_line(f"x: {_old_val_raw}")[1]
+                _old_eq = (
+                    (_old_nm or "").strip() == (nm or "").strip()
+                    and _norm_value(_old_plain) == _norm_value(val)
+                    and is_simulated_marked(str(old.get("content") or "")) == bool(is_sim)
+                )
+            if _old_eq:
                 has_conflict = int(old.get("has_conflict") or 0)
                 conflict_keys = old.get("conflict_keys") or ""
         _row_id = str(uuid.uuid4())
@@ -2816,6 +2910,9 @@ async def update_fact(
     #    链的冲突语义：把「同名不同值」的后出现行标记 has_conflict=1 / is_resolved=0，
     #    移出注入与导出，用户可在列表中看到并裁决/合并。组内同名不同值同样只放行
     #    第一行；模拟值/未裁决矛盾行本就进不了正文，不参与比对。
+    # ✅ R225（C8 配套）：重建后仍带矛盾的名称集合（gate 段填充），供
+    #    commit 前的跨段矛盾诊断记录清理判定。
+    _conflict_names: set[str] = set()
     if gate_candidates:
         _gate_peers = await _load_injectable_peers_for_gate(
             db, str(grow["scheme_id"] or ""), str(grow["project_id"] or "")
@@ -2844,6 +2941,7 @@ async def update_fact(
                         ensure_ascii=False,
                     )
                 insert_buf[_i] = tuple(_row)
+                _conflict_names.add(_name_by_id.get(_fid, ""))
                 logger.warning(
                     "分组重建：group_id=%s 名称「%s」与可注入事实 %s 取值不同，"
                     "该行已标记为矛盾待裁决（不进入正文注入）",
@@ -2884,6 +2982,20 @@ async def update_fact(
                     f"{len(_GROUP_REBUILD_COLS)} 个，请同步 _carry_* 返回长度"
                 )
         await db.executemany(_GROUP_REBUILD_SQL, insert_buf)
+        # ✅ R225（2026-11-12 · C8）：重建后全组行均无未裁决矛盾 → 清除该组
+        #    fact_name 的跨段矛盾诊断记录（旧行已 DELETE、新行可直接注入，
+        #    /cross-conflicts 的旧记录与行状态背离）。有矛盾行则交由
+        #    resolve_conflict 的清理出口处理。
+        _rebuilt_clean_names = sorted({nm for (nm, _v, _sim) in parsed} - _conflict_names - {""})
+        if _rebuilt_clean_names:
+            try:
+                _ph = ", ".join("?" for _ in _rebuilt_clean_names)
+                await db.execute(
+                    f"DELETE FROM facts_cross_conflicts WHERE fact_name IN ({_ph}) AND project_id=? AND scheme_id=?",
+                    (str(grow.get("project_id") or ""), str(grow.get("scheme_id") or ""), *_rebuilt_clean_names),
+                )
+            except Exception:  # noqa: BLE001 - 诊断清理 fail-soft
+                logger.warning("分组重建后清理跨段矛盾诊断记录失败（fail-soft）", exc_info=True)
         await db.commit()
 
     except Exception:
@@ -3301,6 +3413,17 @@ async def resolve_conflict(
     # ✅ R13 收口（2026-10-06）：人工裁决是「冲突消解」的唯一凭据，
     #    写入未生效却回 ok=True 会让冲突标记与实际取值永久不一致
     _assert_fact_write_applied(cur, f"人工裁决冲突 fact_id={fact_id}")
+    # ✅ R225（2026-11-12 · C8）：人工裁决后清除该事实的跨段矛盾诊断记录。
+    #    facts_cross_conflicts 此前只在「clear-all」与「该段重新提取」时删除
+    #    —— 裁决完行已按新值可注入，/cross-conflicts 仍返回旧矛盾（诊断面板
+    #    与行状态背离），若该段此后被增量跳过则永久残留。
+    try:
+        await db.execute(
+            "DELETE FROM facts_cross_conflicts WHERE fact_name=? AND project_id=? AND scheme_id=?",
+            (str(row["project_id"] or ""), str(row["scheme_id"] or ""), name),
+        )
+    except Exception:  # noqa: BLE001 - 诊断清理 fail-soft，主裁决不受影响
+        logger.warning("裁决后清理跨段矛盾诊断记录失败（fail-soft）", exc_info=True)
     await db.commit()
 
     if row["scheme_id"]:
@@ -3885,11 +4008,44 @@ async def adjust_facts(data: AdjustRequest, db=Depends(get_db)):
     valid_ids = {r["id"] for r in rows}
     # 既有事实名（归一化键）索引：供 add 的重复守卫（同名事实不得插第二份）。
     # 与 persist_extraction 的去重同用 normalize_key 单一出口，两侧口径一致。
-    existing_keys: set[str] = set()
+    base_existing_keys: set[str] = set()
     for r in rows:
         k = (r.get("fact_key") or "").strip() or normalize_key(r.get("title") or "")
         if k:
-            existing_keys.add(k)
+            base_existing_keys.add(k)
+
+    def _existing_keys_for_plan(plan_ops: list) -> set[str]:
+        """按操作计划计算 add 闸门用的既有键集合。
+
+        ✅ R225（2026-11-12 · B3）：R93 并存清单的 fact_key 带**值域后缀**
+        （``execution_standard::1a2b3c4d``），而 add 闸门按 ``normalize_key(名称)``
+        产出裸键 —— 裸键查不中 scoped 键集合，AI 落库的同名事实绕过防重：
+        裸键行与 N 条 scoped 行同名并存、逐行过注入门控（正文双值，正是该
+        闸门要防的形态）。scoped 键剥出 ``::`` 前的裸键部分一并入集（与
+        persist_extraction 的裸键回查同兼容方向）。
+
+        ✅ R225（B8）：同批「delete 旧行 + add 新同名行」是合法替换计划 ——
+        校验期集合仍含将被本批删除的键，add 被误拦（delete 照常应用、add
+        落空 → 「换项目经理」只删不增）。将被本批 delete 且无其他存活行
+        承载的裸键从集合中减去（保守：scoped 键族只要还有其他行存活就不减）。
+        """
+        del_ids = {str(op.get("fact_id") or "") for op in plan_ops if str(op.get("op") or "") == "delete"}
+        keys: set[str] = set(base_existing_keys)
+        surviving_bare: set[str] = set()
+        deleted_bare: set[str] = set()
+        for r in rows:
+            k = (r.get("fact_key") or "").strip() or normalize_key(r.get("title") or "")
+            if not k:
+                continue
+            bare = k.split("::", 1)[0].strip() if "::" in k else k
+            if bare:
+                keys.add(bare)
+                if str(r.get("id") or "") in del_ids:
+                    deleted_bare.add(bare)
+                else:
+                    surviving_bare.add(bare)
+        return keys - {b for b in deleted_bare if b not in surviving_bare}
+
     confirmed_ops = data.operations
     # ✅ 2026-11-08（口径对齐）：调整指令被削减时的用户可见账面，两条路径都回传。
     #    do_apply=True 复用已确认的操作计划、不做模型下发 —— 因此本路径**只可能**
@@ -3905,7 +4061,7 @@ async def adjust_facts(data: AdjustRequest, db=Depends(get_db)):
         # 用户已在 UI 预览并二次确认具体操作；直接校验这份计划，禁止再次调用 AI
         # 生成另一份可能不同的计划（否则“确认内容”与“实际落库内容”存在漂移）。
         ops, summary = _validate_adjust_ops(
-            {"operations": confirmed_ops}, valid_ids, existing_keys=existing_keys, ignored_out=ignored_ops
+            {"operations": confirmed_ops}, valid_ids, existing_keys=_existing_keys_for_plan(confirmed_ops), ignored_out=ignored_ops
         )
         # 本次不渲染提示词 → 不会有预算削减；但「指令本身超单条上限」与路径无关，
         # 照 do_apply=False 的口径回传物理上限账面（纯账面：不截断、不重复留痕）。
@@ -3960,7 +4116,8 @@ async def adjust_facts(data: AdjustRequest, db=Depends(get_db)):
             safe_error = redact_sensitive_text(str(e))
             logger.warning("全局事实 AI 调整失败: %s", safe_error)
             raise HTTPException(502, f"事实调整失败：{safe_error}")
-        ops, summary = _validate_adjust_ops(obj, valid_ids, existing_keys=existing_keys, ignored_out=ignored_ops)
+        _ai_plan_ops = obj.get("operations") if isinstance(obj.get("operations"), list) else []
+        ops, summary = _validate_adjust_ops(obj, valid_ids, existing_keys=_existing_keys_for_plan(_ai_plan_ops), ignored_out=ignored_ops)
 
     applied = {"updated": 0, "added": 0, "deleted": 0}
     if do_apply and ops:
@@ -3990,6 +4147,10 @@ async def adjust_facts(data: AdjustRequest, db=Depends(get_db)):
                 detail={"code": "facts_write_conflict", "message": redact_sensitive_text(str(e))},
             )
         try:
+            # ✅ R225（A3）：应用期键索引 —— 校验期的 _existing_keys_for_plan 是
+            #    锁外快照；本集合跟踪**锁内**本批已落库的键（update 改名/add 落库
+            #    实时增补），供 add 分支的库内复检快速短路同批重复。
+            apply_keys: set[str] = set()
             for op in ops:
                 if op["op"] == "update":
                     n, _sid = await _apply_item_updates(
@@ -4012,7 +4173,7 @@ async def adjust_facts(data: AdjustRequest, db=Depends(get_db)):
                         # 同批内后续 add 不得再插同名事实副本（键索引实时更新）
                         _nk = normalize_key(op.get("name") or "")
                         if _nk:
-                            existing_keys.add(_nk)
+                            apply_keys.add(_nk)
                 elif op["op"] == "delete":
                     cur = await db.execute("DELETE FROM global_facts WHERE id=?", (op["fact_id"],))
                     # ✅ R13 收口（2026-10-06）
@@ -4020,6 +4181,37 @@ async def adjust_facts(data: AdjustRequest, db=Depends(get_db)):
                     applied["deleted"] += 1
                 else:  # add
                     content = _build_fact_content(op["name"], op["value"], False)
+                    # ✅ R225（2026-11-12 · A3）：校验期的 existing_keys 是**锁外
+                    #    快照**，AI 生成窗口最长 120s —— 窗口内 SSE 提取落库的新
+                    #    同名可注入行不在快照里（update/delete 锁内有行级复检，
+                    #    唯 add 直接 INSERT 裸奔）。落库前按**当前库内状态**复检：
+                    #    同作用域已有可注入同名键族（裸键或 R93 scoped 后缀键）
+                    #    → 丢弃该 add 并留痕，杜绝正文双值（T-01 数据真实性红线）。
+                    _new_key = normalize_key(op["name"])
+                    if _new_key:
+                        _scope_sql, _scope_params = _fact_scope_where(scheme_scope, real_pid)
+                        _dup_cur = await db.execute(
+                            f"SELECT id FROM global_facts{_scope_sql} "
+                            "AND (fact_key=? OR fact_key LIKE ?) AND has_conflict=0 "
+                            "AND is_resolved=1 AND is_simulated=0 AND is_stale=0 LIMIT 1",
+                            (*_scope_params, _new_key, _new_key + "::%"),
+                        )
+                        _dup_row = await _dup_cur.fetchone() if _dup_cur is not None else None
+                        if _dup_row is not None or _new_key in apply_keys:
+                            ignored_ops.append(
+                                {
+                                    "op": "add",
+                                    "reason": "duplicate_fact_key_db_recheck",
+                                    "name": op["name"],
+                                    "detail": "落库前复检发现同名可注入事实（AI 窗口期新增），已丢弃本次新增",
+                                }
+                            )
+                            logger.warning(
+                                "AI 调整 add 落库前复检命中同名可注入事实（丢弃）：scheme=%s name=%s",
+                                scheme_scope,
+                                op["name"],
+                            )
+                            continue
                     # ✅ R75b 修复：AI 新增的安全关键事实不得自动确认。
                     #    旧实现恒写 is_resolved=True，使 AI 新增的危大参数
                     #    （如 "基坑开挖深度" "起重荷载"）立即越过注入门控进入
@@ -4064,7 +4256,7 @@ async def adjust_facts(data: AdjustRequest, db=Depends(get_db)):
                         applied["added_pending"] += 1
                     _ak = normalize_key(op["name"])
                     if _ak:
-                        existing_keys.add(_ak)
+                        apply_keys.add(_ak)
             await db.commit()
         except Exception:
             await db.rollback()
@@ -4076,7 +4268,23 @@ async def adjust_facts(data: AdjustRequest, db=Depends(get_db)):
                 await release_project_facts_write(db, str(real_pid), _adjust_lease)
         # ✅ 2026-09-29：项目级（scheme_scope 为空）调整此前不失效任何缓存，
         #    与 create_fact / update_fact / delete_fact 口径对齐。
-        await _invalidate_fact_scope_cache(db, scheme_scope, str(real_pid))
+        # ✅ R225（2026-11-12 · A2）：AI 调整的 valid_ids 来自 _fact_scope_where
+        #    双命名空间 —— 可能改/删**项目共享行**（scheme_id=''）。旧实现按
+        #    调用方 scheme_scope 失效，_invalidate_fact_scope_cache 对 scheme_id
+        #    非空早退 → 共享行的兄弟方案导出缓存不失效（B 方案导出命中旧值
+        #    docx 且章节树无「事实已变更」提示）。与 batch_resolve 口径对齐：
+        #    触及共享行 → 项目下全部方案失效。
+        _rows_by_id = {str(r.get("id") or ""): r for r in rows}
+        _touched_shared = any(
+            str(op.get("op") or "") in ("update", "delete")
+            and str((_rows_by_id.get(str(op.get("fact_id") or "")) or {}).get("scheme_id") or "") == ""
+            and str(op.get("fact_id") or "") in _rows_by_id
+            for op in ops
+        )
+        if _touched_shared:
+            await _invalidate_fact_scope_cache(db, "", str(real_pid))
+        else:
+            await _invalidate_fact_scope_cache(db, scheme_scope, str(real_pid))
     if ignored_ops:
         # 丢弃必须有痕迹：日志留全量理由，响应体回传摘要（前端 FactsAdjustPanel
         # 可提示「N 条操作未生效」）。旧实现只有 `if fid not in valid_ids: continue`

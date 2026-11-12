@@ -37,6 +37,7 @@ Jaccard 负责）与段落级搬运（由本模块负责）。本模块实现两
 
 from __future__ import annotations
 
+import math
 import re
 import unicodedata
 from collections import Counter, defaultdict
@@ -336,6 +337,51 @@ def sentences_near_match(a: str, b: str) -> dict | None:
     return _skeleton_match(sk_a, sk_b)
 
 
+def _near_match_from_grams(
+    sk_a: str, sk_b: str, grams_a: frozenset, grams_b: frozenset, shared: int | None = None
+) -> dict | None:
+    """用**已算好的** bigram 集合做双阈值判定（与 :func:`sentences_near_match` 同口径）。
+
+    ✅ R223（P1 · 预检 CPU 热点）：两两循环里对每个候选都调
+    :func:`sentences_near_match`，而它会重跑 ``build_skeleton_key`` +
+    ``char_bigrams`` —— 但入参本就是 ``_prepare_sections`` 用同一函数产出的
+    **骨架串**，属纯重复劳动（实测是预检 6.4s 的主要成分）。``build_skeleton_key``
+    对骨架串幂等（真实方案 2176 句 0 例不幂等，护栏
+    ``test_r223_grams_reuse_equals_public_api`` 双向锁定），故直接复用预算集合，
+    结论逐字不变。
+    """
+    if not sk_a or not sk_b:
+        return None
+    if min(len(sk_a), len(sk_b)) < MIN_SENTENCE_CHARS:
+        return None
+    if sk_a == sk_b:
+        return _exact_match(sk_a, sk_b)
+    n_a, n_b = len(grams_a), len(grams_b)
+    total = n_a + n_b
+    if not total:
+        return None
+    if shared is None:
+        shared = len(grams_a & grams_b)
+    if not shared:
+        return None
+    short_len, long_len = (len(sk_a), len(sk_b)) if len(sk_a) <= len(sk_b) else (len(sk_b), len(sk_a))
+    _, tier_cont, tier_dice = _tier_for(short_len)
+    dice_v = 2.0 * shared / total
+    cont_v = shared / (n_a if n_a <= n_b else n_b)
+    if cont_v < tier_cont or dice_v < tier_dice:
+        return None
+    return {
+        "reason": "skeleton",
+        "dice": round(dice_v, 4),
+        "containment": round(cont_v, 4),
+        "length_ratio": round(short_len / long_len, 4) if long_len else 0.0,
+        "tier_cont": tier_cont,
+        "tier_dice": tier_dice,
+        "skeleton_a": sk_a,
+        "skeleton_b": sk_b,
+    }
+
+
 # ---------------------------------------------------------------------------
 # 句子切分
 # ---------------------------------------------------------------------------
@@ -471,7 +517,19 @@ def _build_bigram_inverted_index(flat: list) -> dict:
 
 
 def _candidate_indices(a_bg: frozenset, inv: dict, self_idx: int, flat: list) -> list:
-    """收集与 ``self_idx`` 共享 ≥ ``_MIN_SHARED_BIGRAMS`` 个 bigram 的候选下标。
+    """收集与 ``self_idx`` 共享 ≥ ``_MIN_SHARED_BIGRAMS`` 个 bigram 的**后向**候选下标。
+
+    ✅ R223（P1 · 预检 CPU 热点）：只取 ``idx > self_idx``。``flat`` 已按骨架键
+    长度升序，故候选满足 ``|B| ≥ |A|``；而判定对两个入参完全对称（Dice /
+    containment / 分档均只依赖两者），有序对 (i, j) 与 (j, i) 结论相同，
+    ``claimed`` 亦只认**无序章节对**。旧实现对同一对**双向各比一次**，等于把
+    两两判定整轮做两遍（纯浪费）。只保留前向与旧结论逐字等价。
+
+    ⚠️ **不得**在此按「分档阈值反导的交集下界」收紧：本函数的计数刻意跳过
+    高文档频率 gram（``_MAX_POSTING_LEN``），故 ``计数 ≤ 真实交集``，用它在
+    索引层收紧会漏判「共有 bigram 以高频词为主」的真实搬运（2026-11-12 实测
+    真实方案漏 7 对）。下界必须在拿到**真实 bigram 集合**后施加，见
+    ``_collect_near_groups``。
 
     返回**升序且去重**的下标列表（保持与朴素两两一致的遍历顺序 → 结论可复现）。
     """
@@ -483,10 +541,11 @@ def _candidate_indices(a_bg: frozenset, inv: dict, self_idx: int, flat: list) ->
             # ⚠️ 跳过「几乎每句都出现」的 gram（如「要求」「工程」「进行」）。
             #    这类高文档频率 gram 的倒排表可达上万条，全量展开会让候选生成
             #    退化成朴素两两。这是**标准 IR 剪枝**：高 DF 词本身不具判别力，
-            #    跳过后由更具体的 gram 决定候选，故不损失任何「真重复」。
+            #    跳过后由更具体的低频 gram 决定候选，故不损失任何「真重复」。
             continue
         for idx in posting:
-            if idx == self_idx or flat[idx][0] == self_sid:
+            if idx <= self_idx or flat[idx][0] == self_sid:
+                # idx <= self_idx：只保留前向对（见 docstring，结论对称、省一半）
                 continue  # 同章节内不比（自我重复由 split 去重处理）
             shared_counts[idx] += 1
     return sorted(idx for idx, count in shared_counts.items() if count >= _MIN_SHARED_BIGRAMS)
@@ -556,6 +615,20 @@ def _collect_near_groups(flat: list, excluded: set, claimed: set) -> tuple[list[
     候选生成**：只有「至少共享 N 个 bigram」的句子对才进入 Dice 精判。
     不共享任何 bigram 的两条句子 Dice 必为 0，跳过它**不改变任何结论**，
     故这是**精确剪枝**而非近似采样（护栏 test_pairwise_pruning_is_lossless）。
+
+    ✅ R223（P1 · 预检 CPU 热点 · 生产实证 6.4s）追加两道**保结论不变**的提速：
+
+      ① **复用预算 bigram + 交集下界**：候选拿到后先算**真实**交集
+         ``shared = |A ∩ B|``（用 ``_prepare_sections`` 已算好的集合），按分档
+         双阈值反导下界 ``max(⌈tier_cont·min(|A|,|B|)⌉, ⌈tier_dice·(|A|+|B|)/2⌉)``
+         直接跳过不可能命中的候选；命中者再用 :func:`_near_match_from_grams`
+         算 Dice/containment（不再重跑归一化）。下界用的是**真实交集**，与
+         ``_MAX_POSTING_LEN`` 高 DF 剪枝正交，故不引入任何漏判。
+
+         ⚠️ 该下界**不可**下沉到 ``_candidate_indices``（那里的计数跳过高频 gram，
+         只是真实交集的下界，用它会漏判 —— 2026-11-12 实测漏 7 对）。
+      ② 只比前向对（见 ``_candidate_indices``）。
+
     预算仍作为硬上限：触顶即停并置 truncated=True，调用方据此判断完整性。
     """
     groups: list[dict] = []
@@ -570,16 +643,25 @@ def _collect_near_groups(flat: list, excluded: set, claimed: set) -> tuple[list[
         if not a_grams:
             continue
         a_len = len(a_skeleton)
+        a_n = len(a_grams)
+        _, tier_cont_a, tier_dice_a = _tier_for(a_len)
         for j in _candidate_indices(a_grams, inverted, i, flat):
-            b_id, b_title, b_skeleton, _b_grams = flat[j]
-            # flat 已按长度升序：超过 2 倍即 Dice 有上界，直接剪枝
+            b_id, b_title, b_skeleton, b_grams = flat[j]
+            # flat 已按长度升序：超过 2 倍即 Dice 有上界（|B| ≥ |A|），直接剪枝
             if len(b_skeleton) > a_len * 2:
                 continue
             key = frozenset((a_id, b_id))
             if key in claimed or key in excluded:
                 continue
+            # ✅ R223①：真实交集 + 分档下界（j>i ⇒ |B| ≥ |A| ⇒ min 即本句）
+            shared = len(a_grams & b_grams)
+            b_n = len(b_grams)
+            mn = a_n if a_n <= b_n else b_n
+            need = max(math.ceil(tier_cont_a * mn), math.ceil(tier_dice_a * (a_n + b_n) / 2.0))
+            if shared < need:
+                continue
             compared += 1
-            match = sentences_near_match(a_skeleton, b_skeleton)
+            match = _near_match_from_grams(a_skeleton, b_skeleton, a_grams, b_grams, shared)
             if match is None:
                 continue
             claimed.add(key)

@@ -227,6 +227,10 @@ def _content_fingerprint(prep: dict) -> tuple[str, str]:
                 "fe_render": fe_sig,
                 # R-1：前端 PNG 像素字节指纹（补 fe_render 只看 code 的盲区）
                 "fe_render_pixels": fe_pixels_sig,
+                # ✅ R226（A7）：封面落款日期（构建日）写进产物但不进指纹 →
+                #    跨天命中昨日产物、封面日期停在上一导出日。按「天」粒度纳入：
+                #    同一天内缓存照常命中，跨天自然失效（产物确实变了）。
+                "export_date": _sh.datetime.now().strftime("%Y-%m-%d"),
                 "exporter": _sh._EXPORTER_VERSION,
                 # ✅ 缓存失效修复（2026-09-27 · P1）：配图侧的生成参数纳入指纹。
                 #    mermaid 侧早已用 _RENDERER_VERSION 解决"渲染器变了旧图被烤进二进制"，

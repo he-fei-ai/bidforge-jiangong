@@ -177,6 +177,23 @@ async def _load_task_checkpoint(task_id: str, kind: str) -> dict | None:
     return None
 
 
+async def _load_task_db_status(task_id: str) -> str | None:
+    """读取任务 DB 行的当前 status；无行返回 None。
+
+    ✅ R226（DAT-6′ · R223 遗留 #1）：供「迟到收尾不覆写终态」守卫使用——
+    任务已进入 completed/degraded 终态（成果已落 checkpoint）时，迟到停止
+    /断线兜底不得再用 partial 覆盖。与 task_status 的 DB 分支（断线重挂）
+    同源读取，避免内存态（_tasks）在进程重启/跨进程时失真。
+    """
+    conn = await get_read_conn()
+    try:
+        cur = await conn.execute("SELECT status FROM task_registry WHERE id=?", (task_id,))
+        row = await cur.fetchone()
+    finally:
+        await release_read_conn(conn)
+    return row[0] if row else None
+
+
 async def _checkpoint_partial_outline(
     task_id: str,
     outline,

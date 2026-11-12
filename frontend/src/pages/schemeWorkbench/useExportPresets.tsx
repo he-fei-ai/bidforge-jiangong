@@ -4,6 +4,7 @@ import type { ModalFuncProps } from "antd";
 import { Input } from "antd";
 import { exportApi } from "../../api";
 import { findDefaultExportPreset } from "../../utils/workflowDerived";
+import type { ChartRenderReadiness } from "../../utils/exportResponse";
 import type { MutableRefObject } from "react";
 import type { ExportFormatConfig } from "../../types/api";
 
@@ -59,6 +60,8 @@ export interface ExportStats {
   chart_done?: number;
   /** ✅ B-17：交叉引用三态；`undetermined=true` 时前端必须显示「无法判定」而非通过。 */
   crossref_check?: CrossrefCheckState;
+  /** ✅ R221：图表渲染就绪度（`/export/check` 加法字段，缺省时页面不展示提示）。 */
+  chart_render_readiness?: ChartRenderReadiness;
 }
 
 /** 导出预检结论（exportPreflight state；页面读 released/total/stale/grade/verdict/rule_version） */

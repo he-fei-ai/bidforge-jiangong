@@ -1,5 +1,6 @@
 import {
   collectAllKeys,
+  findSectionById,
   hasUnsavedLocalNodes,
   scrollToNodeInContainer,
   type TreeNode,
@@ -250,7 +251,18 @@ export const SchemeTreePanel = memo(function SchemeTreePanel(p: SchemeTreePanelP
                         icon={<EditOutlined />}
                         onClick={(e) => {
                           e.stopPropagation();
-                          const initial = typeof node.title === "string" ? node.title : "";
+                          // ✅ R223（2026-11-12 · P3 · FE-6）：重命名预填取原始标题 ——
+                          //    本面板 treeData 的 title 一律是 JSX（Tooltip 包裹 span），
+                          //    `typeof node.title === "string"` 恒假 ⇒ 预填恒空串，
+                          //    用户必须整句重打、直接回车还会报「标题不能为空」。
+                          //    现按 key 从原始模型树（p.tree，字符串标题）回查预填值。
+                          const raw = findSectionById(p.tree, String(node.key));
+                          const initial =
+                            typeof node.title === "string"
+                              ? node.title
+                              : raw?.title != null
+                                ? String(raw.title)
+                                : "";
                           setRenameDraft(initial);
                           setRenamingValue(initial);
                           setRenamingKey(node.key as string);

@@ -73,6 +73,43 @@ export interface ChartRenderStats {
   no_http_fallback?: number;
   /** 上述失败涉及的类型明细（后端去重后给出）。 */
   no_http_fallback_types?: string[];
+  /**
+   * ✅ R221（2026-11-11 · 报告 §6.1 短期建议②）：本次导出中**HTTP 失败后
+   * 由本地 PIL 兜底出图**的张数。此前 `backend_ok` 把 HTTP 原生、JSON 原生、
+   * PIL 兜底混成一个数字，运维无法回答「哪些图用了兜底」。缓存命中不计入
+   * （那不是本次渲染动作）。0/缺省时不展示。
+   */
+  pil_fallback?: number;
+  /** 本次导出中由 Mermaid HTTP 渲染服务原生出图的张数（同样不含缓存命中）。 */
+  http_ok?: number;
+  /**
+   * ✅ R221：本可本地兜底、却因导出开关 `allow_pil_fallback=false` 被关闭而
+   * 丢图的张数。与 `no_pil_fallback` 语义相反 —— 这类图只要开启开关就能出图，
+   * 必须单独提示可行动建议，不能混进「开启也没用」的告警里。
+   */
+  pil_fallback_disabled?: number;
+  /** 上述失败涉及的类型明细（后端去重后给出）。 */
+  pil_fallback_disabled_types?: string[];
+  /**
+   * ✅ R222（2026-11-12 · 日志驱动）：**交付侧实际落图**统计。
+   * 预渲染的 `backend_ok` 只说明「渲染器产出了 PNG」，不等于「图进了成稿」；
+   * 正文每处图表围栏记一个 expected，成功插图记 inserted，跳过/插入失败记
+   * dropped。后台日志实证存在「成稿缺图、failed=0、还写了缓存」的导出，
+   * 这三项是与预渲染统计互补的单一事实源。0/缺省时不展示。
+   */
+  chart_expected?: number;
+  chart_inserted?: number;
+  chart_dropped?: number;
+  /** 同图重复引用的去重跳过次数（有意设计，不计入缺图）。 */
+  chart_duplicate_skipped?: number;
+  /** 缺图明细（最多 20 条），reason 为 no_code / render_or_probe_failed / insert_failed。 */
+  chart_dropped_details?: Array<{ section_id: string; chart_type: string; reason: string }>;
+  /** 缓存命中标识（复用上次成果，本次未重新渲染）。 */
+  cached?: boolean;
+  /** ✅ R222：命中时回带的**上次导出**图表统计（旁车加法字段，旧后端无此键）。 */
+  cached_stats?: ChartRenderStats;
+  /** 上次导出的成稿本身存在缺图（cached_stats.chart_dropped > 0）。 */
+  cached_degraded?: boolean;
 }
 
 /** 解析 X-Chart-Render-Stats；头缺失或 JSON 非法返回 null。 */
@@ -96,7 +133,60 @@ export function chartRenderStatsParts(stats: ChartRenderStats): string[] {
   if (stats.fallback_borrowed) {
     parts.push(`跨章借图 ${stats.fallback_borrowed} 张`);
   }
+  // ✅ R221：`backend_ok` 仍是总数，这里只**追加**细分项（旧 stats 无此字段时
+  //    不追加，既有 `chartRenderStatsParts` 的精确形状断言逐字不受影响）。
+  if (stats.pil_fallback) parts.push(`PIL 兜底 ${stats.pil_fallback} 张`);
+  // ✅ R222：仅当**成稿真的缺图**才追加，正常导出不新增噪声；
+  //    旧 stats 无此字段时不追加，既有精确形状断言逐字不受影响。
+  if (stats.chart_expected && stats.chart_dropped) {
+    parts.push(
+      `成稿落图 ${Number(stats.chart_inserted || 0)}/${Number(stats.chart_expected)} 张（缺 ${stats.chart_dropped} 张）`,
+    );
+  }
   return parts;
+}
+
+const CHART_DROP_REASON_TEXT: Record<string, string> = {
+  no_code: "无登记图表代码",
+  render_or_probe_failed: "渲染失败或图片损坏",
+  insert_failed: "图片插入失败",
+};
+
+/**
+ * ✅ R222：成稿缺图告警（数据丢失级）。返回 null 表示无需提示。
+ *
+ * 与「渲染失败」类告警不同：这里说的是**已经交付的文档里少了几张图**，
+ * 必须明确告知「本次已标记降级且不写缓存」，并给出可行动建议。
+ */
+export function chartDeliveryWarning(stats: ChartRenderStats): string | null {
+  const n = Number(stats?.chart_dropped || 0);
+  if (!Number.isFinite(n) || n <= 0) return null;
+  const expected = Number(stats?.chart_expected || 0);
+  const inserted = Number(stats?.chart_inserted || 0);
+  const details = Array.isArray(stats?.chart_dropped_details) ? stats.chart_dropped_details : [];
+  const reasons = Array.from(
+    new Set(
+      details
+        .map((d) => (d && typeof d.reason === "string" ? CHART_DROP_REASON_TEXT[d.reason] : ""))
+        .filter((t): t is string => Boolean(t)),
+    ),
+  );
+  const reasonText = reasons.length ? `（${reasons.join("、")}）` : "";
+  return `成稿有 ${n} 张图表未插入${reasonText}：正文共 ${expected} 处图表围栏，实际落图 ${inserted} 张。本次导出已标记「降级」且本次不写入缓存，建议检查图表代码或登记后重新导出`;
+}
+
+/**
+ * ✅ R222：缓存命中时，若**上次导出**的成稿本身缺图，必须提示用户重新导出。
+ *
+ * 坏缓存守卫只拦「本次降级」；历史已落盘的缺图产物仍会被命中，旧实现只回
+ * `{"cached":true}` → 用户以为复用的是完整成稿。旧旁车无统计时返回 null。
+ */
+export function cachedChartDegradedWarning(stats: ChartRenderStats): string | null {
+  if (!stats?.cached || !stats.cached_stats) return null;
+  const prev = stats.cached_stats;
+  const n = Number(prev.chart_dropped || 0);
+  if (!stats.cached_degraded && (!Number.isFinite(n) || n <= 0)) return null;
+  return `本次复用了上次导出的成果，而该成稿当初有 ${n} 张图表未插入（正文 ${Number(prev.chart_expected || 0)} 处，实际落图 ${Number(prev.chart_inserted || 0)} 张）。建议重新导出以生成完整成稿`;
 }
 
 /**
@@ -138,15 +228,19 @@ export function noPilFallbackWarning(stats: ChartRenderStats): string | null {
     ? stats.no_pil_fallback_types.filter((t): t is string => typeof t === "string").slice(0, 5)
     : [];
   const detail = types.length ? `（${types.join("、")}）` : "";
-  return `${n} 张图表依赖 Mermaid HTTP 渲染服务失败${detail}，这些类型没有本地渲染兜底，开启「允许 PIL 兜底」也无法补救；请确认图表服务可用后重试`;
+  // ✅ R221：后端判据已由「类型不在白名单」改为「该载荷无本地解析器」，
+  //    告警覆盖 architecture/labor/layout 的 Mermaid 语法载荷，措辞同步放宽。
+  return `${n} 张图表依赖 Mermaid HTTP 渲染服务失败${detail}，这些类型或载荷形态没有本地渲染兜底，开启「允许 PIL 兜底」也无法补救；请确认图表服务可用，或改用受支持的图表类型 / JSON 数据载荷后重试`;
 }
 
 /**
  * 无 HTTP 出口告警文案（R181）。返回 null 表示无需提示。
  *
- * 甘特图 chart-json 载荷与 Mermaid 甘特轨出口不同：JSON 只在本地 PIL 渲染，
- * 不会回退到 HTTP 图表服务。失败时旧实现只并入泛化 `failed`，用户会被
- * 「检查图表服务」类建议误导；这里明确区分「该形态没有 HTTP 兜底」。
+ * JSON 数据载荷只在本地渲染，不经过 HTTP 图表服务。失败时旧实现只并入泛化
+ * `failed`，用户会被「检查图表服务」类建议误导；这里明确区分「该形态没有 HTTP 兜底」。
+ *
+ * ✅ R221：后端判据由「仅甘特图」扩到全部 7 类 chart-json，文案同步去掉
+ * 「N 张甘特图」的硬编码（否则 flowchart/labor 等失败时会张冠李戴）。
  */
 export function noHttpFallbackWarning(stats: ChartRenderStats): string | null {
   const n = Number(stats?.no_http_fallback || 0);
@@ -155,7 +249,65 @@ export function noHttpFallbackWarning(stats: ChartRenderStats): string | null {
     ? stats.no_http_fallback_types.filter((t): t is string => typeof t === "string").slice(0, 5)
     : [];
   const detail = types.length ? `（${types.join("、")}）` : "";
-  return `${n} 张甘特图使用 JSON 数据格式，本地渲染失败${detail}；该形态没有 HTTP 渲染兜底，请检查任务/日期数据或改用 Mermaid 甘特语法后重试`;
+  return `${n} 张图表使用 JSON 数据格式，本地渲染失败${detail}；该形态没有 HTTP 渲染兜底，请检查图表数据（任务 / 日期 / 节点）或改用受支持的 Mermaid 语法后重试`;
+}
+
+/**
+ * ✅ R221：「PIL 兜底开关被关闭」告警。返回 null 表示无需提示。
+ *
+ * 与 `noPilFallbackWarning` 恰好相反：这批图本地渲染器**本来能画**，只是
+ * 用户在导出设置里关掉了开关（或旧预设库带了 false）。旧实现把它并进泛化
+ * `failed`，提示「开启允许 PIL 兜底」虽有方向但混在别的失败里；更糟的是
+ * 判据修正前它可能误进 no_pil_fallback，得到「开启也无法补救」的错误结论。
+ */
+export function pilFallbackDisabledWarning(stats: ChartRenderStats): string | null {
+  const n = Number(stats?.pil_fallback_disabled || 0);
+  if (!Number.isFinite(n) || n <= 0) return null;
+  const types = Array.isArray(stats?.pil_fallback_disabled_types)
+    ? stats.pil_fallback_disabled_types.filter((t): t is string => typeof t === "string").slice(0, 5)
+    : [];
+  const detail = types.length ? `（${types.join("、")}）` : "";
+  return `${n} 张图表${detail}因「PIL兜底渲染」开关被关闭而未能出图；这些图本地渲染器本可绘制，请在导出设置中开启「PIL兜底渲染」后重试`;
+}
+
+/**
+ * ✅ R221：导出预检的图表渲染就绪度（后端 `/export/check` 的加法式响应字段）。
+ * `http_service_available` 是**三态**：true/false/null(尚未探测)，不能当布尔用。
+ */
+export interface ChartRenderReadiness {
+  http_service_available?: boolean | null;
+  all_backends_unavailable?: boolean;
+  syntax_payload_count?: number;
+  unrenderable_syntax_count?: number;
+  unrenderable_syntax_types?: string[];
+  pil_fallback_default?: boolean;
+}
+
+/**
+ * 预检就绪度 → 用户可见提示。返回 null 表示无需提示。
+ *
+ * 旧预检只看图表状态（done/generated），「5 张图全部完成」却仍可能导出后
+ * 整张消失。这里把「HTTP 服务不可用 + 存在语法载荷」提前暴露，尤其点名
+ * 「本地渲染器画不了」的那批 —— 它们改默认值也救不回来。
+ */
+export function chartRenderReadinessHint(r: ChartRenderReadiness | null | undefined): string | null {
+  if (!r) return null;
+  const down = r.all_backends_unavailable === true || r.http_service_available === false;
+  if (!down) return null;
+  const syntax = Number(r.syntax_payload_count || 0);
+  if (!Number.isFinite(syntax) || syntax <= 0) return null;
+  const unrenderable = Number(r.unrenderable_syntax_count || 0);
+  const types = Array.isArray(r.unrenderable_syntax_types)
+    ? r.unrenderable_syntax_types.filter((t): t is string => typeof t === "string").slice(0, 4)
+    : [];
+  const detail = types.length ? `（${types.join("、")}）` : "";
+  const base = `图表 HTTP 渲染服务不可用，本方案有 ${syntax} 张 Mermaid 语法图表，导出将依赖前端预览渲染或本地 PIL 兜底`;
+  if (!Number.isFinite(unrenderable) || unrenderable <= 0) {
+    return r.pil_fallback_default
+      ? `${base}；「PIL兜底渲染」默认已开启，多数图表仍可出图`
+      : `${base}；建议开启「PIL兜底渲染」`;
+  }
+  return `${base}；其中 ${unrenderable} 张${detail}本地渲染器无法绘制，若前端预览渲染失败，这些图会在成稿中缺失，建议改用受支持的图表类型或部署图表渲染服务`;
 }
 
 export interface FixStats {
@@ -252,6 +404,9 @@ const EXPORT_DEGRADED_TEXT: Record<string, string> = {
   // ✅ R195（2026-11-09）：章节级渲染失败被 fail-soft 跳过 → 产物缺章
   "section-dropped":
     "部分章节渲染失败被跳过，成稿缺少该章内容（后端已降级导出，本次不写入缓存），请检查对应章节内容后重新导出",
+  // ✅ R222（2026-11-12）：交付侧落图数 < 正文图表围栏数（成稿确实缺图）。
+  "charts-dropped":
+    "成稿有图表未插入（渲染成功却没进文档、或有图表围栏但无登记代码），后端已降级导出且本次不写入缓存，请检查图表代码或登记后重新导出",
 };
 
 /**

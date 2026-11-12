@@ -1456,3 +1456,60 @@ describe("ReadinessDashboard · R76 来源读取失败告警", () => {
     expect(container.textContent || "").not.toContain("本次总检读取失败");
   });
 });
+
+// ✅ R220（2026-11-11 · 商业化「未检查 / 已检查」显式化）
+//    SAF-08 在事实为空时直接跳过，finding 清单里「零条问题」与「根本没查」
+//    长得完全一样。后端顶层加法式回传 fact_coverage，这里锁三态渲染。
+//    ⚠️ 用例通过 mockResolvedValue 覆盖 OVERVIEW，不修改 vi.hoisted 共享对象，
+//    避免跨用例串扰（mocks.OVERVIEW 被 beforeEach 复用）。
+describe("ReadinessDashboard · R220 事实覆盖度三态", () => {
+  const runCheck = async () => {
+    const { container } = render(
+      <App>
+        <ReadinessDashboard schemeId="s1" />
+      </App>,
+    );
+    await waitFor(() => expect(container.textContent || "").toContain("尚未总检"));
+    fireEvent.click(btnByText(container, "一键总检")!);
+    await waitFor(() => expect(container.textContent || "").toContain("引用废止标准"));
+    return container.textContent || "";
+  };
+
+  it("unchecked → 显示黄色「未检查」警告，明确不是核对通过", async () => {
+    (complianceApi.overview as any).mockResolvedValue({
+      data: {
+        ...mocks.OVERVIEW,
+        fact_coverage: {
+          state: "unchecked",
+          participating: 0,
+          rules: ["SAF-08"],
+          reason: "全局事实未装配或注入门控排除了全部事实，危大参数反哺未执行",
+        },
+      },
+    });
+    const t = await runCheck();
+    expect(t).toContain("全局事实未参与本次危大参数核对（未检查）");
+    expect(t).toContain("这不属于「核对通过」");
+    expect(t).toContain("不得据此判定方案非危大");
+    expect(t).not.toContain("危大参数反哺已执行");
+  });
+
+  it("checked → 显示参与核对的事实条数，不误报未检查", async () => {
+    (complianceApi.overview as any).mockResolvedValue({
+      data: {
+        ...mocks.OVERVIEW,
+        fact_coverage: { state: "checked", participating: 3, rules: ["SAF-08"], reason: "" },
+      },
+    });
+    const t = await runCheck();
+    expect(t).toContain("危大参数反哺已执行（SAF-08）");
+    expect(t).toContain("参与核对事实 3 条");
+    expect(t).not.toContain("全局事实未参与本次危大参数核对");
+  });
+
+  it("旧后端无 fact_coverage → 不渲染覆盖度区块（加法式兼容）", async () => {
+    const t = await runCheck();
+    expect(t).not.toContain("全局事实未参与本次危大参数核对");
+    expect(t).not.toContain("危大参数反哺已执行（SAF-08）");
+  });
+});

@@ -65,12 +65,15 @@ _ENTRIES = [
         "file": "app/routers/global_facts.py",
         "func": "update_fact",
         "kind": "UPDATE",
-        "count": 1,
+        "count": 2,
         "mode": "whitelist",
         "reason": (
             "仅非结构化正文/分类字段：title 与可回解成 name/value 的 content 已转入"
             " _apply_item_updates 走闸门；纯正文回解不出事实身份，且字段集受"
-            " FactGroupUpdate 模型约束（见 test_05）"
+            " FactGroupUpdate 模型约束（见 test_05）。"
+            " ✅ R225：第二条 UPDATE 是 body 仅含 category（裸写路径）时的九大"
+            " 章节四维重派生（_rederive_dimension_columns 单一出口，与条目级"
+            " 更新同源），已过 _normalize_fact_category 白名单归一"
         ),
     },
     {

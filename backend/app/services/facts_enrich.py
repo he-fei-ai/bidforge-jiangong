@@ -295,6 +295,20 @@ def apply_finalize_result(items: list, obj: Any) -> tuple[list, int]:
                 )
                 continue
             target.value = new_value
+            # ✅ R225（2026-11-12 · B2）：改值后强制重派生四维 —— R214（F1）修了
+            #    知识库补丁链（facts_patches._rederive_patched_dimensions），
+            #    最终整理链是同族第三条漏改路径：提示词核心动作「要求句改写为
+            #    事实句」（如「工期不超过450天」→「建设工期450日历天」）恰恰
+            #    最易改变 fact_attr（qualitative→norm）与 chapter；直写 value
+            #    后四维停在提取期旧值，落库后九大章节视图/按章精选/属性统计
+            #    错配，且 apply_fact_dimensions「已有值不覆盖」永远无法自愈。
+            #    与补丁链同用 facts_classification 单一出口（惰性导入同形态）。
+            try:
+                from app.services.facts_classification import force_rederive_fact_dimensions
+
+                force_rederive_fact_dimensions(target)
+            except Exception:  # noqa: BLE001 - 读路径惰性派生兜底，不中断整理
+                logger.debug("整理改值后四维重派生失败（读路径将惰性派生兜底）", exc_info=True)
             changed += 1
     if rejected:
         global _REJECTED_TRUNCATED_WRITES

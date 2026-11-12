@@ -13,6 +13,28 @@ from app.utils.log_context import clear_context, new_trace_id, set_context
 
 logger = logging.getLogger("http")
 
+
+def _format_stream_duration(ms: float) -> str:
+    """把长连接时长渲染为可读串（小时/分钟级），便于访问日志直读。
+
+    ✅ R219：SSE 常连接的「耗时」实为连接生命周期（生产日志实测最长
+    26483691ms ≈ 7h21m），以毫秒裸数呈现既不可读，也会把 P95/P99
+    与慢请求定位一并污染。纯函数、零依赖；非法值按 0 处理，
+    绝不因格式化异常影响请求日志。
+    """
+    try:
+        total = max(0, int(ms // 1000))
+    except (TypeError, ValueError, OverflowError):
+        total = 0
+    h, rem = divmod(total, 3600)
+    m, s = divmod(rem, 60)
+    if h:
+        return f"{h}h{m:02d}m{s:02d}s"
+    if m:
+        return f"{m}m{s:02d}s"
+    return f"{s}s"
+
+
 # 无需鉴权的路径（精确匹配）。仅保留健康检查与接口文档：
 #   - /health 供探活与前端启动自检使用；
 #   - /docs、/redoc、/openapi.json 供内网排障查阅，本身不含业务数据。
@@ -143,8 +165,14 @@ class RequestLogMiddleware:
         if scope["type"] != "http":
             await self.app(scope, receive, send)
             return
-        start = time.time()
+        # ✅ R219：耗时测量改用单调时钟。旧实现用 time.time()（墙钟），
+        #    NTP 校准 / 系统休眠 / 手工改时间都会让差值虚高甚至为负，
+        #    而日志里恰有 7h 量级的极端数值需要可判读。
+        start = time.monotonic()
         status_code = 500
+        # ✅ R219：流式响应（SSE）的「耗时」是连接生命周期，不是请求处理耗时。
+        #    单独打标，让耗时基线可把两类量分开统计（普通请求日志逐字不变）。
+        is_stream = False
         # ✅ R178（F-13）：4xx/5xx 响应体首段（失败原因）的暂存位。
         err_detail = ""
         method = scope.get("method", "")
@@ -160,10 +188,16 @@ class RequestLogMiddleware:
             trace_id = new_trace_id()
 
         async def send_wrapper(message: dict) -> None:
-            nonlocal status_code, err_detail
+            nonlocal status_code, err_detail, is_stream
             if message["type"] == "http.response.start":
                 status_code = message["status"]
                 headers = list(message.get("headers") or [])
+                # ✅ R219：按响应头识别 SSE 流式响应（只读判定，绝不改响应）。
+                #    识别失败/非流式一律按普通请求处理，零行为变化。
+                for _hname, _hvalue in headers:
+                    if _hname.lower() == b"content-type" and b"text/event-stream" in _hvalue.lower():
+                        is_stream = True
+                        break
                 if not any(h[0].lower() == b"x-trace-id" for h in headers):
                     headers.append((b"x-trace-id", trace_id.encode("latin-1")))
                 message = dict(message, headers=headers)
@@ -183,9 +217,20 @@ class RequestLogMiddleware:
         except Exception:
             logger.exception("请求异常 %s %s [trace=%s]", method, path, trace_id)
             raise
-        cost = (time.time() - start) * 1000
+        cost = (time.monotonic() - start) * 1000
         if path not in ("/api/v1/health",):
-            logger.info("%s %s -> %s (%.0fms) [trace=%s]", method, path, status_code, cost, trace_id)
+            if is_stream:
+                logger.info(
+                    "%s %s -> %s (%.0fms) [trace=%s] kind=stream conn=%s",
+                    method,
+                    path,
+                    status_code,
+                    cost,
+                    trace_id,
+                    _format_stream_duration(cost),
+                )
+            else:
+                logger.info("%s %s -> %s (%.0fms) [trace=%s]", method, path, status_code, cost, trace_id)
             # ✅ R178（F-13）：失败原因补记（加法式，不改既有访问日志格式）。
             if err_detail:
                 logger.warning("%s %s -> %s 失败原因：%s [trace=%s]", method, path, status_code, err_detail, trace_id)

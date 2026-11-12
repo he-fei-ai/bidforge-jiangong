@@ -1723,7 +1723,12 @@ def _parse_fact_dict(f: dict, default_source: str = "") -> FactItem | None:
     else:
         value = str(value_raw).strip()
 
-    key = f.get("key") or normalize_key(name)
+    # ✅ R225（2026-11-12 · B5）：**不采信**模型自带的 key 字段 —— 输出 Schema
+    #    与修复提示词都不含 key，这是不受控输入：弱模型自造键（"depth_1"）会让
+    #    同名事实跨段产出不同身份 → merge 不聚类、XV 不比对、persist 不去重、
+    #    is_safety_critical 的 key 映射失配，双值静默进正文。身份一律由
+    #    normalize_key(名称) 派生（与同名闸门/去重/聚类同源）。
+    key = normalize_key(name)
     # fact_type → category 映射
     fact_type = f.get("fact_type", "")
     category = _FACT_TYPE_TO_CATEGORY.get(fact_type, "other")
@@ -1774,7 +1779,9 @@ def _parse_legacy_fact_dict(it: dict, chunk_index: int = 0) -> FactItem | None:
     value = (it.get("value") or "").strip()
     if not name or not value:
         return None
-    key = it.get("key") or normalize_key(name)
+    # ✅ R225（B5）：同 _parse_fact_dict —— 不采信模型自带 key（不受控输入，
+    #    身份漂移会让同名事实三处判据全盲），一律 normalize_key(名称) 派生。
+    key = normalize_key(name)
     cat = it.get("category") or "other"
     return FactItem(
         name=name,
@@ -3214,7 +3221,17 @@ async def persist_extraction(
             if isinstance(refs, dict):
                 refs = [refs]
             for ref in refs if isinstance(refs, list) else []:
-                fname = str((ref or {}).get("file") or "").strip()
+                # ✅ R225（2026-11-12 · B6）：list-of-strings 形态（历史迁移/
+                #    手工改库可达；routers 侧 _parse_source_ref 明确兼容并把
+                #    非 dict 元素当文件名）此前 (ref or {}).get 直接 AttributeError
+                #    → 冒泡出 persist_extraction → SSE 终态 failed，整轮 AI 提取
+                #    白烧。与 routers 侧解析器同语义对齐。
+                if isinstance(ref, dict):
+                    fname = str(ref.get("file") or "").strip()
+                elif ref:
+                    fname = str(ref).strip()
+                else:
+                    continue
                 # ✅ 精确白名单：旧实现的 `"手动" in fname` 子串判定会把 AI 溯源
                 # 标题含"手动"的事实（如"手动操作步骤""手动计算"）误判为手动来源，
                 # 导致其被永久保护、重新提取时同 key 重复堆积。
@@ -3356,11 +3373,20 @@ async def persist_extraction(
                 prior_content = str(prior.get("content") or "")
                 prior_value = extract_value_from_markdown_line(prior_content)[1]
                 new_value = _as_text(it.value)
+                # ✅ R225（2026-11-12 · B1）：旧判据用 normalize_key 比较**取值**
+                #    —— 那是事实名空间的函数（子串最长匹配），值含「工期」「基坑
+                #    深度」等词条时两侧恒归同键，「工期 450 天 → 600 天」的真变化
+                #    被吞进同值分支且 is_stale 被清零（假证明）；而记法变体
+                #    （"GB 50300-2013" vs "GB50300-2013"）哈希键不同反判异值
+                #    （假矛盾把已确认行挡出正文）。现改用 _norm_value（去空白 +
+                #    全角冒号归一，本函数 docstring 即「用于去重/矛盾比较」）：
+                #    记法变体归同值、真数值变化必异值 —— 判据方向只会**多报**
+                #    冲突候选（保守），绝不吞新证据。刻意不用数字签名判等：
+                #    「12.5m vs 12.5cm」签名同值会把单位错误当「再次证明」。
                 if (
                     prior_value.strip()
                     and new_value.strip()
-                    and normalize_key(prior_value) != normalize_key(new_value)
-                    and prior_value.strip() != new_value.strip()
+                    and _norm_value(prior_value) != _norm_value(new_value)
                 ):
                     try:
                         candidates = json.loads(prior.get("conflict_keys") or "[]")
@@ -3998,7 +4024,18 @@ async def invalidate_export_cache(db, scheme_id: str, facts_touched: bool = Fals
     ✅ BUG 修复（磁盘文件泄漏）：旧实现只删 DB 记录、不删磁盘产物 ——
     而 export.py 的保留策略是"按 export_cache 行数最多保留 5 份 / 方案"，
     记录一旦被这里清空，那些 .docx 文件就再没有任何引用方，永远不会被
-    保留策略回收，`data/_exports` 随事实迭代无限膨胀。现改为随记录一并删除。
+    保留策略回收，`data/_exports` 随事实迭代无限膨胀。
+
+    ✅ R226（2026-11-12 · A2）：磁盘产物**不再由本函数直接 unlink** ——
+    旧实现的裸删除绕过了导出域的两道保护与唯一删除出口：(a) 正在被
+    FileResponse 流式读取（读租约登记中）的产物会被删 → 下载中断/文件成
+    无行孤儿；(b) `.audit.json` 旁车残留（违反 R177「产物+旁车同生共死、
+    唯一删除出口 _remove_export_artifact」）。改为：本函数只删 DB 行，
+    产物交由导出域的孤儿回收（_gc_orphan_exports）统一清理 —— 该路径带
+    在飞/读租约/protect 三重保护，删产物时连带删旁车。服务层不得依赖
+    路由层（AST 级分层契约），故保护判据无法在此处内联，交由唯一出口
+    是唯一正确姿势。下一次该方案的导出交付即触发回收，磁盘不泄漏
+    （最坏情况 = 文件在磁盘多留一轮导出周期）。
 
     ⚠️ 失效范围边界（数据流审计 2026-09-23 文档化 + 2026-09-29 收口）：
     本函数负责「导出产物」层（export_cache 行 + 磁盘 .docx）的失效。
@@ -4018,8 +4055,8 @@ async def invalidate_export_cache(db, scheme_id: str, facts_touched: bool = Fals
             ``bid_analysis`` 的提取项失效）行为完全不变 —— 那些路径没有改动
             事实表，推进时间戳会让已生成正文被**误标**为过时。
     """
-    from pathlib import Path
-
+    # ✅ R226（A2）：产物删除移交导出域孤儿回收后，本函数不再触碰磁盘文件，
+    #    函数内 `from pathlib import Path` 一并移除（原为裸 unlink 循环服务）。
     cur = await db.execute("SELECT id, result_path FROM export_cache WHERE scheme_id=?", (scheme_id,))
     # ✅ R189（2026-11-08 · R13 服务层漏网面）：本查询是事实链收尾的**缓存失效**
     #    步骤，事实此时已由 persist_extraction 落库。若 db.execute 返回 None，
@@ -4053,15 +4090,9 @@ async def invalidate_export_cache(db, scheme_id: str, facts_touched: bool = Fals
             await db.commit()
 
         await retry_db_op(_delete_cache_once, max_retries=3, base_delay=0.1, jitter=0.05)
-        for r in rows:
-            p = r.get("result_path")
-            if not p:
-                continue
-            try:
-                Path(p).unlink(missing_ok=True)
-            except OSError as e:  # 文件被占用/权限不足不影响主流程
-                logger.warning("清理导出产物失败（可忽略）: %s (%s)", p, e)
-        logger.info("已清空 %d 条 export_cache（scheme=%s）", cache_count, scheme_id)
+        # ✅ R226（A2）：磁盘产物不再在此处裸 unlink —— 交由导出域孤儿回收
+        #    统一清理（在飞/读租约/protect 保护 + 旁车连带删除，见 docstring）。
+        logger.info("已清空 %d 条 export_cache（scheme=%s）；磁盘产物由导出域孤儿回收路径统一清理", cache_count, scheme_id)
 
     if facts_touched:
         # 章节失效标记的数据源。写失败只告警不阻断：正文与导出缓存已正确处理，

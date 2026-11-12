@@ -147,6 +147,10 @@ export interface ContentGenEvent extends SseBaseEvent, SseStatsFields {
   } | null;
   standard_summary?: unknown;
   fact_autofix_summary?: unknown;
+  /** ✅ R224（F23）：completed 随附的「本次落库字数/超字章数」（后端 R-1 口径，
+   *  此前仅 checkpoint 白名单声明、在线事件零消费） */
+  run_words?: number;
+  over_count?: number;
   /** progress 事件随附的权威统计快照（pickStats 消费） */
   stats?: GenStats;
 }

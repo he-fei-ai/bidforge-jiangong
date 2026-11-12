@@ -74,6 +74,26 @@ export interface PreflightFinding {
    * 前端**必须**据此决定按钮状态，不得自行按 rule_id 猜测。
    */
   autofix?: AutoFixCapability;
+  /**
+   * ✅ R220（2026-11-11）：SAF-08 结论所依据的已确认事实条数。
+   * 后端加法式回传，用于审计追溯「这条结论看过几条事实」。
+   */
+  facts_participating?: number;
+  /** R220：事实覆盖态（checked = 规则已执行 / unchecked = 未执行） */
+  facts_coverage_state?: "checked" | "unchecked";
+}
+
+/**
+ * ✅ R220：全局事实覆盖度（后端 /compliance/overview 与 /preflight 顶层回传）。
+ * 「未检查」与「检查通过」在 finding 清单里都是零条，必须显式区分，
+ * 否则用户会把「事实未装配」误读成「已核对、无危大超阈值」。
+ * 后端刻意不提供 partial：路由层只装配门控后可注入的事实，无法反推总量。
+ */
+export interface FactCoverage {
+  state: "checked" | "unchecked";
+  participating: number;
+  rules: string[];
+  reason?: string;
 }
 
 /** 自动修复能力声明 */
@@ -299,6 +319,11 @@ export interface ReadinessOverview {
   //    程序化检查项异常）。失败源走 failed_sources，部分源走本字段，两者
   //    都不得折叠成「通过」。
   partial_sources?: string[];
+  /**
+   * ✅ R220：SAF-08 事实覆盖度（加法式）。旧后端无此键时不渲染，
+   * 用于区分「零条问题 = 未检查」与「零条问题 = 已核对通过」。
+   */
+  fact_coverage?: FactCoverage;
 }
 
 /** 预检历史（分数趋势） */

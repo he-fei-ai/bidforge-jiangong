@@ -32,10 +32,51 @@ def _reset_outline_quota_breaker():
     _m = sys.modules.get(_key)
     if _m is not None:
         _m._QUOTA_BLOCKED_TASKS.clear()
+    # ✅ R224（F7）：正文链任务级熔断表同族隔离（sse_handlers 侧新增）。
+    _key2 = "app.routers.sse_handlers"
+    _m2 = sys.modules.get(_key2)
+    if _m2 is not None:
+        _m2._QUOTA_BLOCKED_TASKS.clear()
     yield
     _m = sys.modules.get(_key)
     if _m is not None:
         _m._QUOTA_BLOCKED_TASKS.clear()
+    _m2 = sys.modules.get(_key2)
+    if _m2 is not None:
+        _m2._QUOTA_BLOCKED_TASKS.clear()
+
+
+@pytest.fixture(autouse=True)
+def _reset_export_domain_globals():
+    """✅ R226（A10）：导出路由的进程级全局状态按用例隔离。
+
+    导出域有五张模块级表（读租约 TTL 600s / 取消事件 / 在飞产物 / 在飞路径 /
+    ZIP 完整性记忆化），此前只有个别测试文件各自手工清理 —— 产物路径是
+    确定性命名（``{scheme}_{cfg}_{fp}.docx``），上一个用例命中真实路由登记的
+    读租约会让后续用例的 prune/GC 断言跳过删除；残留取消事件会让
+    ``/cancel`` 幂等性断言（期望 ``in_progress=False``）翻红。在此按用例
+    前后各清一次，纯测试隔离，不改生产语义；模块未导入时无需处理。
+    """
+    import sys
+
+    def _clear():
+        m = sys.modules.get("app.routers.export")
+        if m is not None:
+            for attr in ("_EXPORT_READ_LEASES", "_EXPORT_CANCEL_EVENTS", "_EXPORT_INFLIGHT_PATHS"):
+                obj = getattr(m, attr, None)
+                if isinstance(obj, dict):
+                    obj.clear()
+                elif isinstance(obj, set):
+                    obj.clear()
+        mc = sys.modules.get("app.routers._export_cache")
+        if mc is not None:
+            zc = getattr(mc, "_ZIP_VERIFIED", None)
+            if isinstance(zc, dict):
+                zc.clear()
+
+    _clear()
+    yield
+    _clear()
 
 # ✅ 图表缓存目录隔离（2026-10-09 · NTFS 共享冲突根治）：
 #    默认图表渲染缓存位于 `data/_exports/charts`，与常驻后端服务(uvicorn)共享。

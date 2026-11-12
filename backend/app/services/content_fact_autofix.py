@@ -226,26 +226,31 @@ async def autofix_section_fact_conflicts(
     from app.services.consistency_edits import apply_unique_edits
 
     result["attempted"] = True
-    messages = [
-        {"role": "system", "content": render("content_fact_autofix_system")},
-        {
-            "role": "user",
-            "content": render(
-                "content_fact_autofix_user",
-                global_facts=facts_text,
-                section_id=section_id or "-",
-                section_title=section_title or "-",
-                generation_standard=standard or "",
-                conflicts=json.dumps(conflicts, ensure_ascii=False, indent=2),
-            )
-            + f"\n\n【待修复章节原文】\n{body}",
-        },
-    ]
 
     failures: list[str] = []
     for attempt in range(1, FACT_AUTOFIX_MAX_ATTEMPTS + 1):
         result["attempts"] = attempt
-        req = list(messages)
+        # ✅ R225（2026-11-12 · C7）：每轮用**最新正文**重建 user 消息 ——
+        #    旧实现 messages 循环外一次性构建（内嵌修复前 body），第 1 轮
+        #    applied 改写后第 2 轮 AI 看到的仍是旧原文：要么 not_found 白烧
+        #    最后一轮，要么 old_text 在新正文唯一命中但语义位置已漂移。
+        #    （「old_text 相对最新正文定位」的注释只对 apply 端成立，
+        #    提示词层从未跟上。）
+        req = [
+            {"role": "system", "content": render("content_fact_autofix_system")},
+            {
+                "role": "user",
+                "content": render(
+                    "content_fact_autofix_user",
+                    global_facts=facts_text,
+                    section_id=section_id or "-",
+                    section_title=section_title or "-",
+                    generation_standard=standard or "",
+                    conflicts=json.dumps(conflicts, ensure_ascii=False, indent=2),
+                )
+                + f"\n\n【待修复章节原文】\n{body}",
+            },
+        ]
         if failures:
             # 失败原因回灌（「上次修复应用失败原因」块）：让下一轮带着具体问题定向重试。
             req.append(

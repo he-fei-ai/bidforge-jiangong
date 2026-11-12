@@ -198,6 +198,16 @@ def _render_cache_put(key: tuple, value: BytesIO | None) -> None:
             _render_cache.popitem(last=False)
 
 
+def _record_render_strategy(out: dict | None, name: str) -> None:
+    """✅ R221：把本次真实渲染策略写回调用方提供的 dict（纯出参、零副作用）。
+
+    调用方按图传入独占 dict，线程内单写、回主线程读；缓存命中路径不调用，
+    因此统计口径天然是「本次真实发生的渲染动作」而非进程累计。
+    """
+    if isinstance(out, dict):
+        out["strategy"] = name
+
+
 def render_mermaid_to_bytes(
     mermaid_code: str,
     chart_type: str = "flowchart",
@@ -207,6 +217,7 @@ def render_mermaid_to_bytes(
     tick: int = 5,
     skip_http: bool = False,
     allow_pil: bool = True,
+    strategy_out: dict | None = None,
 ) -> BytesIO | None:
     """
     将 Mermaid 代码/JSON 数据渲染为 PNG 图片字节流（商业级渲染管道 — 无降级 V5.0）
@@ -232,6 +243,9 @@ def render_mermaid_to_bytes(
         skip_http: BUG-E-02 修复：跳过 HTTP Service 渲染路径（当 HTTP 服务不可用时）
                    直接走 PIL v2 渲染路径，节省重试超时等待
         allow_pil: V7.0 不降级开关——False 时 Mermaid 语法载荷禁用 PIL 兜底（默认 True 保持兼容）
+        strategy_out: ✅ R221 可选出参 dict，写入本次真实策略
+            （``http`` / ``pil_json`` / ``pil_syntax_fallback`` / ``cache`` / ``none``）。
+            不传时行为逐字不变，旧调用方（预览、/charts/render、既有测试）零影响。
 
     Returns:
         BytesIO of PNG image, or None if all levels fail
@@ -246,6 +260,7 @@ def render_mermaid_to_bytes(
     # 不应作为 WARNING 刷屏（此前 22 次连续同一签名淹没真实错误信号）。
     if not mermaid_code or not str(mermaid_code).strip():
         logger.debug("[渲染] 空输入直接返回 None（chart_type=%s）", chart_type)
+        _record_render_strategy(strategy_out, "none")
         return None
 
     chart_type = (chart_type or "flowchart").lower().strip()
@@ -258,6 +273,7 @@ def render_mermaid_to_bytes(
         logger.debug(
             "[渲染] 缓存命中 chart_type=%s code长度=%d 耗时=%.3fs", chart_type, len(code), _time.perf_counter() - _t0
         )
+        _record_render_strategy(strategy_out, "cache")
         return _cached
 
     # ⚠️ 语句分隔符归一已**下移**到「载荷归一化（包装器解包）」之后：
@@ -358,6 +374,7 @@ def render_mermaid_to_bytes(
         code = normalize_mermaid_statements(strip_leading_mermaid_comments(code))
         if not code:
             logger.warning("[渲染] 归一化后为空载荷（chart_type=%s），返回 None", chart_type)
+            _record_render_strategy(strategy_out, "none")
             return None
 
     # =========================================================
@@ -476,6 +493,7 @@ def render_mermaid_to_bytes(
                 #    内第二次调用 ``render_mermaid_to_bytes`` 仍会重新走 HTTP（数秒/次），
                 #    而 ChartCache 之外的直接调用方（/charts/render 等）没有磁盘缓存兜底。
                 _render_cache_put(_cache_key, BytesIO(_http_bytes))
+                _record_render_strategy(strategy_out, "http")
                 return BytesIO(_http_bytes)
             else:
                 logger.warning(
@@ -509,6 +527,7 @@ def render_mermaid_to_bytes(
             "[渲染] 不降级模式: HTTP Service 失败且 allow_pil=False, " "Mermaid 载荷不回退 PIL (chart_type=%s)",
             chart_type,
         )
+        _record_render_strategy(strategy_out, "none")
         return None
 
     # ---------- Level 2 (PIL v2): 商业级渲染器（零外部依赖，始终可用）----------
@@ -770,6 +789,9 @@ def render_mermaid_to_bytes(
         except Exception as e:
             logger.debug("渲染结果 BytesIO seek(0) 失败（chart_type=%s，忽略）: %s", chart_type, e)
         _render_cache_put(_cache_key, _level2_result)
+        # ✅ R221：语法载荷在此出图意味着 HTTP 失败后的本地兜底确实发生了；
+        #    JSON 载荷走的是其唯一原生路径，不计入「兜底」。
+        _record_render_strategy(strategy_out, "pil_json" if _is_json_payload else "pil_syntax_fallback")
         return _level2_result
 
     elapsed = _time.perf_counter() - _t0
@@ -785,6 +807,7 @@ def render_mermaid_to_bytes(
         )
     logger.warning("[渲染] 全部渲染策略失败 chart_type=%s 耗时=%.2fs", chart_type, elapsed)
     logger.warning("[渲染] 建议检查: 1)HTTP服务是否可用 2)PIL v2渲染器是否正常")
+    _record_render_strategy(strategy_out, "none")
     return None
 
 
@@ -1058,7 +1081,13 @@ class ChartCache:
                 self._access_order.pop(f"{oldest_key}.fmt", None)
 
     def get_or_render(
-        self, mermaid_code: str, chart_type: str, fmt: str = "png", skip_http: bool = False, allow_pil: bool = True
+        self,
+        mermaid_code: str,
+        chart_type: str,
+        fmt: str = "png",
+        skip_http: bool = False,
+        allow_pil: bool = True,
+        strategy_out: dict | None = None,
     ) -> BytesIO | None:
         """获取缓存或渲染新图表（线程安全，V1.1 新增）
 
@@ -1163,7 +1192,13 @@ class ChartCache:
 
         try:
             # 锁外渲染（render_mermaid_to_bytes 可能耗时数秒到20秒）
-            result = render_mermaid_to_bytes(mermaid_code, chart_type, skip_http=skip_http, allow_pil=allow_pil)
+            # ✅ R221：仅当调用方确实要策略时才透传该关键字 —— 既有测试/预览链路
+            #    monkeypatch 的 render_mermaid_to_bytes fake 签名保持逐字兼容，
+            #    不用为新参数去改一批无关的护栏。
+            _render_kwargs = {"skip_http": skip_http, "allow_pil": allow_pil}
+            if strategy_out is not None:
+                _render_kwargs["strategy_out"] = strategy_out
+            result = render_mermaid_to_bytes(mermaid_code, chart_type, **_render_kwargs)
             if result:
                 content = result.getvalue()
                 # 渲染完成后再加锁写入

@@ -789,6 +789,11 @@ def _add_table_from_markup(doc, tbl_lines: list[str], font_name: str = "宋体")
             p.alignment = WD_ALIGN_PARAGRAPH.CENTER
             p.paragraph_format.first_line_indent = Pt(0)
             if cell_text:
+                # ✅ R226（B13）：单格 10 万字符截断出口 —— 旧实现只在普通段落与
+                #    引用行截断（R195 ⑥-2），AI 把整章灌进一个单元格时绕过上限，
+                #    构建/Word 解析承受超大节点。``_clamp_paragraph_text`` 为本模块
+                #    既有纯函数，直接复用。
+                cell_text = _clamp_paragraph_text(cell_text)
                 # 单元格内也解析 **加粗** 等行内标记（旧实现整格按纯文本输出）
                 _sh._add_runs_with_inline_format(p, cell_text)
             for run in p.runs:

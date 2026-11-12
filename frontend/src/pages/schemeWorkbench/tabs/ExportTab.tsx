@@ -111,7 +111,7 @@ export function ExportTab({
         show_title_page: false,
         show_toc: false,
         bidder_name: "",
-        allow_pil_fallback: false,
+        allow_pil_fallback: true,
         // ✅ 新增排版选项（默认值 = 标准专项方案版式）
         chapter_page_break: true,
         line_spacing: 1.15,
@@ -279,7 +279,7 @@ export function ExportTab({
                       label="PIL兜底渲染"
                       valuePropName="checked"
                       style={{ marginBottom: 8 }}
-                      tooltip="默认关闭：图表仅用 mermaid 原生引擎渲染（前端预览同款/后端高清服务），失败图表默认整张跳过且不占图号（成稿不会出现红字报错段，可配合「渲染失败占位」开关定位失败图）。开启后失败图表改用内置 PIL 渲染器兜底（版式与预览略有差异）。总平面布置图/里程碑时间线始终使用内置渲染器，不受此开关影响。"
+                      tooltip="默认开启（推荐）：Mermaid HTTP 渲染服务不可用时自动回退内置 PIL 渲染器，保证图表始终出现在成稿中。关闭后仅用 mermaid 原生引擎，失败图表整张跳过且不占图号（成稿不会出现红字报错段，可配合「渲染失败占位」开关定位失败图）。总平面布置图/里程碑时间线始终使用内置渲染器，不受此开关影响。"
                     >
                       <Switch size="small" />
                     </Form.Item>

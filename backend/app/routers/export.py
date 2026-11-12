@@ -41,6 +41,8 @@ from app.services.ai.json_response import strip_outline_numbering
 #    避免本模块与 _chart_pipeline 的映射继续分叉（曾三份互不一致）。
 from app.services.chart_validators import (
     MERMAID_KEYWORD_TO_CHART_TYPE,
+    PIL_SYNTAX_CHART_TYPES,
+    chart_render_capability,
 )
 
 # ✅ R102（G2 · 排序键单一出口）：导出序与展示序/生成序共用同一归一键。
@@ -67,6 +69,11 @@ from app.services.preflight_engine import LOW_WORD_THRESHOLD
 
 logger = logging.getLogger("export")
 router = APIRouter(prefix="/api/v1/schemes/{scheme_id}/export", tags=["export"])
+
+# ✅ R221（2026-11-11）：「PIL 兜底」默认值的**后端唯一事实源**。
+#    前端 ExportTab 的 initialValues 必须同值（双端契约，见报告 §4.3）；
+#    预检就绪度也读这里，避免默认值散成三份后各说各话。
+ALLOW_PIL_FALLBACK_DEFAULT = True
 
 
 # ---------------------------------------------------------------------------
@@ -149,6 +156,58 @@ async def _db_fetch_one(cur, *, what: str, strict: bool = False):
         return None
 
 
+# ✅ R222（2026-11-12 · 日志驱动）：**交付侧实际落图**统计的线程局部累加器。
+#    预渲染阶段的 render_stats 只回答「渲染器有没有产出 PNG」，回答不了
+#    「这张图最终有没有进成稿」—— 渲染成功但 _add_inline_chart_from_bytes
+#    插入失败、_chart_probe 判坏图、无登记代码、去重跳过，全都发生在构建期。
+#    后台日志实证（2026-11-09 21:15~21:16 方案 8d3594d4）：一次成稿缺甘特图的
+#    导出，全程零图表 WARNING，且 X-Cache-Status=miss（缺图产物被写进缓存）。
+#    DOCX 构建全程单线程，threading.local 天然隔离并发导出（与 _FIX_STATS_LOCAL
+#    同款口径）；每次构建入口显式 reset，避免线程池线程复用串数据。
+_CHART_DELIVERY_LOCAL = threading.local()
+
+
+def _chart_delivery_reset() -> dict:
+    _CHART_DELIVERY_LOCAL.stats = {
+        "expected": 0,
+        "inserted": 0,
+        "dropped": 0,
+        "duplicate_skipped": 0,
+        "details": [],
+    }
+    return _CHART_DELIVERY_LOCAL.stats
+
+
+def _chart_delivery() -> dict:
+    d = getattr(_CHART_DELIVERY_LOCAL, "stats", None)
+    if d is None:
+        d = _chart_delivery_reset()
+    return d
+
+
+def _note_chart_delivery(reason: str, sec_id: str, chart_type: str, *, dropped: bool = True) -> None:
+    d = _chart_delivery()
+    if not dropped:
+        d["inserted"] += 1
+        return
+    if reason == "duplicate":
+        d["duplicate_skipped"] += 1
+        return
+    d["dropped"] += 1
+    if len(d["details"]) < 20:
+        d["details"].append(
+            {"section_id": str(sec_id)[:16], "chart_type": str(chart_type or ""), "reason": reason}
+        )
+
+
+def _chart_delivery_dropped(fix_stats: dict | None) -> int:
+    """交付侧「成稿确实缺图」的张数（degraded / 不写缓存的唯一判据）。"""
+    try:
+        return int((fix_stats or {}).get("chart_delivery_dropped") or 0)
+    except (TypeError, ValueError):
+        return 0
+
+
 def _merge_borrowed_stats(render_stats: dict, fix_stats: dict | None) -> dict:
     """把构建期统计的「跨章借图」并入渲染统计（单一出口，DOCX / PDF 共用）。
 
@@ -164,6 +223,22 @@ def _merge_borrowed_stats(render_stats: dict, fix_stats: dict | None) -> dict:
     details = (fix_stats or {}).get("chart_fallback_borrowed_details")
     if details:
         render_stats["fallback_borrowed_details"] = details
+    # ✅ R222：把「成稿实际落图」并入同一响应头。加法式字段 —— 只有本次构建
+    #    真的解析到图表块时才挂键；旧消费端（只认 fe/backend_ok/failed）零影响。
+    #    `chart_expected` / `chart_inserted` / `chart_dropped` 回答的是
+    #    「正文里 N 处图表围栏，最终 M 张进了成稿，K 张没进」，与预渲染
+    #    `backend_ok` 互补而非替代：后者可能把「渲染成功却没插上」算成成功。
+    _delivery = (fix_stats or {}).get("chart_delivery_expected")
+    if _delivery:
+        render_stats["chart_expected"] = int(_delivery)
+        render_stats["chart_inserted"] = int((fix_stats or {}).get("chart_delivery_inserted") or 0)
+        render_stats["chart_dropped"] = int((fix_stats or {}).get("chart_delivery_dropped") or 0)
+        _dup = int((fix_stats or {}).get("chart_delivery_duplicate_skipped") or 0)
+        if _dup:
+            render_stats["chart_duplicate_skipped"] = _dup
+        _dropped_details = (fix_stats or {}).get("chart_delivery_dropped_details")
+        if _dropped_details:
+            render_stats["chart_dropped_details"] = _dropped_details
     return render_stats
 
 
@@ -404,7 +479,12 @@ def _resolve_chart_code(
 #        lint 豁免（代码内容不再被残留修复改写）、字面 \n 边界对齐、正文路径
 #        XML 非法字符清洗、表格/图片宽度按版面可用宽钳制。版式/产物字节变化
 #        烤进导出缓存，必须整体失效旧缓存（v23 产物不再命中）。
-_EXPORTER_VERSION = "24"
+#    v25（R220 · 2026-11-12）：畸形图表围栏形态修复（content_blocks.normalize_chart_fence_shapes）——
+#        「图题假表格包裹图表」（| 图 X | / | --- | / | ```mermaid … ``` |）与
+#        「文档围栏包裹正文+内嵌图表」（```markdown 吞正文）此前在成稿中
+#        丢图 + 源码泄漏 + 正文 run-on；修复后同一正文渲染产物字节变化，
+#        旧缓存（v24）必须整体失效。
+_EXPORTER_VERSION = "25"
 
 
 _CHART_TYPE_MAP = {
@@ -601,6 +681,65 @@ async def placeholder_history(scheme_id: str, limit: int = 20, db=Depends(get_db
     #    监控旁路，降级为空历史即可，不应 500。
     rows = [dict(r) for r in await _db_fetch_all(cur, what="placeholder_history")]
     return {"scheme_id": scheme_id, "history": rows, "keep": _PLACEHOLDER_BASELINE_KEEP}
+
+
+def _chart_render_readiness(rows) -> dict:
+    """✅ R221：导出预检的「图表渲染就绪度」探测（报告 §6.1 短期建议①）。
+
+    旧预检只看图表**状态**（done / generated），从不看载荷形态与渲染后端 ——
+    于是「5 张图全部 done、预检通过，导出后甘特图却整张消失」这种事故
+    在导出前完全不可见。这里给出可机读的补充信号：
+
+      · ``http_service_available``：最近一次探测缓存的三态（True/False/None=未探测），
+        同步读取、零网络请求，绝不让预检变慢；
+      · ``syntax_payload_count``：本方案 Mermaid 语法载荷图表数（依赖 HTTP /
+        前端 mermaid.js 的那一批）；
+      · ``unrenderable_syntax_count``：其中**本地 PIL 无解析器**的张数 ——
+        这批图在 HTTP 不可用且前端未出图时必丢，改默认值也救不回来。
+
+    纯计算 + 加法式响应字段；探测或载荷解析失败一律降级为「未探测」，
+    不影响原有预检结论，也不新增配置项。
+    """
+    from app.services.chart_payload import extract_chart_payload
+
+    try:
+        from app.services.ai.mermaid_service import get_mermaid_service_client
+
+        _client = get_mermaid_service_client()
+        _http = _client.is_available()
+        _all_down = bool(_client.all_backends_probed_unavailable())
+    except Exception as e:  # noqa: BLE001 — 探测失败不阻断预检
+        logger.debug("导出预检: 图表渲染服务探测失败（降级为未探测）: %s", e)
+        _http = None
+        _all_down = False
+
+    syntax_count = 0
+    unrenderable = 0
+    unrenderable_types: list[str] = []
+    for row in rows or []:
+        try:
+            ct = str(row["chart_type"] or "")
+            code = extract_chart_payload(row["data_json"])
+        except Exception:  # noqa: BLE001 — 单行脏数据不应影响整份预检
+            continue
+        if not code:
+            continue
+        cap = chart_render_capability(ct, code)
+        if cap["payload"] != "mermaid":
+            continue
+        syntax_count += 1
+        if cap["pil"] == "unsupported":
+            unrenderable += 1
+            if ct and ct not in unrenderable_types:
+                unrenderable_types.append(ct)
+    return {
+        "http_service_available": _http,
+        "all_backends_unavailable": _all_down,
+        "syntax_payload_count": syntax_count,
+        "unrenderable_syntax_count": unrenderable,
+        "unrenderable_syntax_types": unrenderable_types[:10],
+        "pil_fallback_default": ALLOW_PIL_FALLBACK_DEFAULT,
+    }
 
 
 async def collect_export_issues(
@@ -1055,8 +1194,25 @@ async def collect_export_issues(
         _titles = [t for t in _titles if t][:3]
         if _titles:
             _iss["section_titles"] = _titles
+    # ✅ R221（报告 §6.1 短期建议①）：额外读一次图表载荷，给出渲染就绪度。
+    #    这是**加法式旁路**：strict_read 的 fail-fast 语义只管主判定链，
+    #    探测读不到数据时降级为「未探测/0」，绝不把预检变成 503 或假通过。
+    _chart_payload_rows: list = []
+    try:
+        _pcur = await db.execute(
+            "SELECT chart_type, data_json FROM chart_predictions WHERE scheme_id=?", (scheme_id,)
+        )
+        _chart_payload_rows = [
+            dict(r)
+            for r in await _db_fetch_all(_pcur, what="collect_export_issues:chart_payloads", strict=False)
+        ]
+    except Exception as e:  # noqa: BLE001 — 探测旁路失败不影响预检结论
+        logger.debug("导出预检: 图表载荷读取失败（渲染就绪度降级）: %s", e)
+        _chart_payload_rows = []
+    chart_render_readiness = _chart_render_readiness(_chart_payload_rows)
     return {
         "issues": issues,
+        "chart_render_readiness": chart_render_readiness,
         "section_count": len(sections),
         "generated_count": _cov["generated_count"],
         "total_words": total_words,
@@ -2286,6 +2442,12 @@ def _docx_final_lint(doc) -> dict:
         _RE_ENTITY = re.compile(r"&(?:amp;)*(?:gt|lt|amp|nbsp);", re.I)
         #: 残留 LaTeX：命令名、行内/行间公式分隔符（成稿中不应出现任何 `\命令`）。
         _RE_LATEX = re.compile(r"\\[A-Za-z]+|\\\(|\\\[")
+        # ✅ R226（2026-11-12 · B16）：Windows 路径豁免。``C:\Users\new`` 形态的
+        #    真实路径会被 ``_RE_LATEX``（``\Users``/``\new``）判成残留 LaTeX →
+        #    计数进 lint_residual_latex → 整次导出永久走 content-residue 降级、
+        #    不写缓存。渲染层 _latex_to_plain 对未知命令**保留原文**（实测路径
+        #    无损），只有检测层误报 —— 检测前先剥路径 token。
+        _RE_WIN_PATH = re.compile(r"[A-Za-z]:\\(?:[^\\/:*?\"<>|\r\n]+\\?)+")
         #: 表号重复检测（`表4-1` / `表 4-1` 统一成无空格形态后比较）。
         _RE_TABLE_NO = re.compile(r"表\s*\d+\s*-\s*\d+")
 
@@ -2325,7 +2487,7 @@ def _docx_final_lint(doc) -> dict:
                     if _RE_ENTITY.search(new):
                         new = _normalize_delivery_text(new, residual=True)
                         stats["lint_entity_residue"] += 1
-                    if _RE_LATEX.search(new):
+                    if _RE_LATEX.search(_RE_WIN_PATH.sub("", new)):
                         new = _normalize_delivery_text(new, residual=True)
                         stats["lint_latex_residue"] += 1
                     if new != t:
@@ -2351,7 +2513,8 @@ def _docx_final_lint(doc) -> dict:
                     stats["lint_residual_html"] += 1
                 if _RE_ENTITY.search(t):
                     stats["lint_residual_entity"] += 1
-                if _RE_LATEX.search(t):
+                # ✅ R226（B16）：Windows 路径 token 先剥再判（见 _RE_WIN_PATH 注释）。
+                if _RE_LATEX.search(_RE_WIN_PATH.sub("", t)):
                     stats["lint_residual_latex"] += 1
             if not is_code and p_text.count("|") >= 2:
                 stats["lint_residual_pipe"] += 1
@@ -2949,6 +3112,24 @@ async def _write_audit_sidecar(result_path, prep: dict, content_hash: str) -> No
     if not isinstance(audit, dict):
         return
     sidecar = _audit_sidecar_path(result_path)
+    # ✅ R222：把本次导出的图表渲染/落图统计一并固化进旁车。旧命中路径只回
+    #    ``{"cached":true}``，运维与前端无法知道复用的这份成稿当初有没有缺图；
+    #    而坏缓存守卫只拦「本次降级」，历史已落盘的缺图产物仍会被命中。
+    #    读侧用 ``.get`` 容错，不改 _AUDIT_SIDECAR_VERSION（纯加法字段）。
+    _stats = prep.get("render_stats") or {}
+    _chart_keys = (
+        "fe",
+        "backend_ok",
+        "failed",
+        "chart_expected",
+        "chart_inserted",
+        "chart_dropped",
+        "chart_duplicate_skipped",
+        "gantt_truncated",
+        "fallback_borrowed",
+        "pil_fallback",
+    )
+    chart_delivery = {k: _stats[k] for k in _chart_keys if isinstance(_stats.get(k), (int, float))}
     payload = {
         "v": _AUDIT_SIDECAR_VERSION,
         "audit_fp": audit_rules_fingerprint(),
@@ -2956,6 +3137,7 @@ async def _write_audit_sidecar(result_path, prep: dict, content_hash: str) -> No
         "fences_fixed": int(prep.get("fences_fixed") or 0),
         "sections": len(prep.get("sections") or []),
         "audit": audit,
+        "chart_delivery": chart_delivery,
     }
 
     def _write():
@@ -2974,6 +3156,28 @@ async def _write_audit_sidecar(result_path, prep: dict, content_hash: str) -> No
         await asyncio.to_thread(_write)
     except Exception as e:
         logger.warning("审计旁车写入失败（不影响导出，下次命中将回退重算）: %s", e)
+
+
+async def _read_chart_delivery_sidecar(result_path, content_hash: str) -> dict:
+    """✅ R222：读旁车里的历史图表统计；任何不可用情形 → ``{}``（绝不阻断命中）。
+
+    与 ``_read_audit_sidecar`` 共用同一个 JSON 文件，但**独立读取**：前者返回
+    ``audit`` dict 且被 R177 护栏锁死形状，改返回值会破坏既有契约。这里只取
+    加法字段 ``chart_delivery``，旧旁车（没有该键）自然得到空 dict。
+    """
+    sidecar = _audit_sidecar_path(result_path)
+
+    def _read() -> dict:
+        try:
+            data = json.loads(sidecar.read_text(encoding="utf-8"))
+            if not isinstance(data, dict) or data.get("content_hash") != content_hash:
+                return {}
+            v = data.get("chart_delivery")
+            return dict(v) if isinstance(v, dict) else {}
+        except Exception:
+            return {}
+
+    return await asyncio.to_thread(_read)
 
 
 async def _resolve_content_audit(prep: dict, *, content_hash: str, cached_path=None) -> dict:
@@ -3119,7 +3323,11 @@ def _get_or_add_appendix_heading_style(doc):
 _RE_PIPE_ROW = re.compile(r"^\s*\|.*\|\s*$")
 _RE_PIPE_WITH_CAPTION = re.compile(r"^(?P<cap>[^|\n]{1,80}?)\s*\|(?P<rest>.+)\|\s*$")
 _RE_TABLE_CAPTION_LINE = re.compile(r"^\s*表\s*(?:[0-9０-９一二三四五六七八九十]+[0-9.\-–—]*|[：:])")
-_RE_ADHERED_TITLE = re.compile(r"^([\u4e00-\u9fffA-Za-z0-9]{2,14})\1")
+# ✅ R226（B10）：重复单元最小 3 字 —— 旧 {2,14} 把正文副词叠用（"逐步逐步
+#    实施…"）拆成标题"逐步"+正文段，凭空多出无编号裸标题；标题粘连形态的
+#    重复单元（"施工准备"）几乎总是 ≥3 字的名词短语，2 字单元（总则）粘连
+#    远比副词叠用罕见，漏拆仅是观感问题、误拆是结构破坏。
+_RE_ADHERED_TITLE = re.compile(r"^([\u4e00-\u9fffA-Za-z0-9]{3,14})\1")
 #: ✅ R181（2026-11-06）：列表项字母序前缀的唯一实现在
 #: ``content_blocks.strip_subitem_ordinal_prefix``，本模块已删除本地副本，
 #: 避免落库侧与导出侧两套正则漂移。
@@ -3152,7 +3360,15 @@ def _looks_like_table_caption(text: str) -> bool:
     t = (text or "").strip()
     if not t:
         return False
-    return bool(_RE_TABLE_CAPTION_LINE.match(t)) or (t.endswith("表") and len(t) <= 40)
+    if _RE_TABLE_CAPTION_LINE.match(t):
+        return True
+    if t.endswith("表") and len(t) <= 40:
+        # ✅ R226（2026-11-12 · B9）：「见/下/附 + 表」结尾的引导语（"详见下表"
+        #   "质量控制要点详见附表"）不是表题 —— 旧宽分支会把表格上方的普通
+        #    引导句整段吞进表题（成稿出现 "表 3-1 详见下表"）。带编号/冒号形态
+        #    已由上方严格正则覆盖；此处只放行真正的无编号表题（"工种配置表"）。
+        return t[-2] not in ("见", "下", "附")
+    return False
 
 
 def _normalize_render_blocks(blocks: list[dict]) -> list[dict]:
@@ -3245,10 +3461,12 @@ def _normalize_render_blocks(blocks: list[dict]) -> list[dict]:
                             if len(old_hdr) == len(cells):
                                 merged = dict(nxt)
                                 sep = "| " + " | ".join(["---"] * len(cells)) + " |"
+                                # ✅ R226（B12）：粘连段 cells 本身就是表头（"表 6-1 …
+                                #    | 工种 | 人数 |"），规范表 nxt_lines[0] 是同一表头
+                                #    —— 旧合并把它再插一行，成稿表格出现重复表头数据行。
                                 merged["lines"] = [
                                     "| " + " | ".join(cells) + " |",
                                     sep,
-                                    nxt_lines[0],
                                     *nxt_lines[2:],
                                 ]
                                 merged["caption"] = cap or nxt.get("caption", "")
@@ -3329,6 +3547,10 @@ def _build_docx_sync(
 
     # ✅ R106 FIX-1：入口检查点 —— 排队期间已被取消则一个块都不写。
     _check_export_cancelled(cancel_event)
+
+    # ✅ R222：交付侧落图统计必须**每次构建从零开始**（线程池线程会被复用，
+    #    不 reset 会把上一次导出的计数串进本次响应头）。
+    _chart_delivery_reset()
 
     # ✅ R99（2026-10-17）：把前置围栏补齐数并入本次构建的修复统计。
     #    必须在**本构建线程内**累加（_FIX_STATS_LOCAL 是 threading.local，
@@ -3645,6 +3867,10 @@ def _build_docx_sync(
                         _add_table_from_markup(doc, block["lines"], font_name)
                     elif block["type"] == "chart":
                         chart_type = block["chart_type"]
+                        # ✅ R222：正文里每出现一处图表围栏，就记一个「预期落图」。
+                        #    后续每个跳过出口都会记原因，最终 expected - inserted
+                        #    才是成稿真实缺图数（预渲染 render_stats 看不到这些）。
+                        _chart_delivery()["expected"] += 1
                         # ✅ 加固（2026-10-06 · D1）：取码收敛到唯一出口
                         #    _resolve_chart_code，并回传「是否跨章借图 + 借自谁」。
                         mermaid_code, borrowed_from = _resolve_chart_code(
@@ -3676,11 +3902,17 @@ def _build_docx_sync(
                         if not mermaid_code:
                             # ✅ 2026-09-25：图表被跳过时同步回收其孤儿引导语
                             #    （"如下图所示："留在成稿里却无图 = 图文不连贯）。
+                            # ✅ R222：这是**成稿缺图**，但预渲染段压根没见过这张图
+                            #    （unique_codes 只收有码的块），旧链路 failed 恒 0。
+                            _note_chart_delivery("no_code", sec_id, chart_type)
                             _pop_orphan_lead_in(doc)
                             continue
                         if render_key in rendered_charts:
                             # ✅ 2026-09-25：同代码第二次出现（去重跳过）→ 该处引导语
                             #    同样指向一张不会出现的图，一并回收。
+                            # ✅ R222：同图重复引用是有意设计（图已在别处出现 + 引导语
+                            #    已回收），单列为 duplicate_skipped，不误报成缺图。
+                            _note_chart_delivery("duplicate", sec_id, chart_type)
                             _pop_orphan_lead_in(doc)
                             continue
                         rendered_charts.add(render_key)
@@ -3710,6 +3942,10 @@ def _build_docx_sync(
                                 chart_type,
                             )
                             # ✅ 2026-09-25：跳过该图 → 回收其孤儿引导语（图文连贯）
+                            # ✅ R222：渲染/探测失败导致成稿缺图 —— 若这张图是
+                            #    fe_images 命中或缓存命中而预期成功，此处是唯一
+                            #    能发现「后端说成功、成稿却没有」的地方。
+                            _note_chart_delivery("render_or_probe_failed", sec_id, chart_type)
                             _pop_orphan_lead_in(doc)
                             continue
                         chapter_num = _figure_chapter_num(heading_gen)
@@ -3730,6 +3966,13 @@ def _build_docx_sync(
                             placeholder=chart_fail_placeholder,
                             probe=_probe,
                         )
+                        # ✅ R222：插入失败是**最隐蔽**的一类成稿缺图 —— 预渲染
+                        #    backend_ok 已 +1、failed 为 0，坏缓存守卫全部放行，
+                        #    缺图产物被写进缓存长期固化。此处是唯一记账点。
+                        if not _ok:
+                            _note_chart_delivery("insert_failed", sec_id, chart_type)
+                        else:
+                            _note_chart_delivery("ok", sec_id, chart_type, dropped=False)
                         if not _ok and not chart_fail_placeholder:
                             figure_counters[fig_key] = figure_counters.get(fig_key, 0) - 1
                             _pop_orphan_lead_in(doc)
@@ -3791,10 +4034,17 @@ def _build_docx_sync(
                             figure_counters[fig_key] = figure_counters.get(fig_key, 0) - 1
                             _pop_orphan_lead_in(doc)
                     elif block["type"] == "heading":
-                        h_lv = min(block.get("_heading_style", min(level + block.get("level", 1), 7)), 7)
-                        h = doc.add_paragraph(style=f"Heading {h_lv}")
-                        _add_runs_with_inline_format(h, block.get("_fixed_text", block.get("text", "")))
-                        _finalize_heading_runs(h)
+                        _h_text = _clamp_paragraph_text(str(block.get("_fixed_text", block.get("text", ""))))
+                        # ✅ R226（B14）：剥编号/字母前缀后为空的子标题（源行只有
+                        #    "1.1" / "a、"）旧实现仍渲染空 Heading → 带 Heading 样式
+                        #    与大纲级别的空段落被 ``TOC \o`` 收录为空目录条目。
+                        #    文本为空 → 跳过整块（解析层「降级空标题仍返回样式」的
+                        #    契约不动，导出渲染侧不再为空文本造大纲节点）。
+                        if _h_text.strip():
+                            h_lv = min(block.get("_heading_style", min(level + block.get("level", 1), 7)), 7)
+                            h = doc.add_paragraph(style=f"Heading {h_lv}")
+                            _add_runs_with_inline_format(h, _h_text)
+                            _finalize_heading_runs(h)
                     elif block["type"] == "list_item":
                         # ✅ P1-1 修复（2026-10-07 · 列表样式拍平）：
                         #    旧实现将列表项渲染为普通段落（Normal 样式），无缩进、
@@ -3834,6 +4084,7 @@ def _build_docx_sync(
                             if _item_text.startswith(prefix):
                                 _item_text = _item_text[len(prefix) :].lstrip()
                             _item_text = strip_subitem_ordinal_prefix(_item_text)
+                        _item_text = _clamp_paragraph_text(_item_text)
                         p = doc.add_paragraph(style=_lp_style)
                         _add_runs_with_inline_format(p, prefix + _item_text)
                         lpf = p.paragraph_format
@@ -4046,6 +4297,38 @@ def _build_docx_sync(
     # ✅ 2026-11-05：落盘前 lint 守卫（修复/检出计数并入本次统计）
     fix_stats = _log_fix_stats()
     fix_stats.update(_docx_final_lint(doc))
+    # ✅ R222（日志驱动）：把「交付侧实际落图」汇总进 fix_stats —— 复用跨章借图
+    #    同款 fix_stats → render_stats 桥，DOCX / PDF 两条链自动同口径。
+    _dv = _chart_delivery()
+    if _dv["expected"]:
+        fix_stats["chart_delivery_expected"] = _dv["expected"]
+        fix_stats["chart_delivery_inserted"] = _dv["inserted"]
+        fix_stats["chart_delivery_dropped"] = _dv["dropped"]
+        fix_stats["chart_delivery_duplicate_skipped"] = _dv["duplicate_skipped"]
+        if _dv["details"]:
+            fix_stats["chart_delivery_dropped_details"] = _dv["details"][:20]
+        if _dv["dropped"]:
+            # 结构化、可聚合：后台日志此前对「成稿缺图」零留痕（实证 2026-11-09
+            # 21:15~21:16 缺甘特图的导出全程无图表 WARNING 且写缓存）。
+            _reasons = ",".join(sorted({str(x["reason"]) for x in _dv["details"]}))
+            logger.warning(
+                "export_chart_degraded scheme=%s expected=%d inserted=%d dropped=%d "
+                "duplicate_skipped=%d reasons=%s",
+                str((scheme or {}).get("id", ""))[:8],
+                _dv["expected"],
+                _dv["inserted"],
+                _dv["dropped"],
+                _dv["duplicate_skipped"],
+                _reasons,
+            )
+        else:
+            logger.info(
+                "export_chart_delivery scheme=%s expected=%d inserted=%d duplicate_skipped=%d",
+                str((scheme or {}).get("id", ""))[:8],
+                _dv["expected"],
+                _dv["inserted"],
+                _dv["duplicate_skipped"],
+            )
     # ✅ 加固（D1）：把「本次构建跨章借图」的明细回传给调用方，写进
     #    X-Chart-Render-Stats（前端提示 + 审计）。加法式：dict 里多一个键，
     #    既有渲染统计键语义一字未动。
@@ -4834,7 +5117,7 @@ async def _prepare_export_render(plan: dict) -> dict:
     #    必须计入统计（旧实现只写 INFO，响应头 failed 仍为 0 → 成稿缺图却报「失败 0」）。
     _parse_diag: dict = plan.setdefault("_parse_diagnostics", {})
     fe_images = plan.get("fe_images") or {}
-    allow_pil_fallback = bool(config.get("allow_pil_fallback", False))
+    allow_pil_fallback = bool(config.get("allow_pil_fallback", ALLOW_PIL_FALLBACK_DEFAULT))
     render_stats: dict = {
         "fe": 0,
         "backend_ok": 0,
@@ -4886,39 +5169,62 @@ async def _prepare_export_render(plan: dict) -> dict:
     #    不得新建局部 dict —— 否则渲染结果不会回传到 plan。
     rendered_bytes = plan["rendered_bytes"]
 
-    def _note_no_pil_fallback(ct: str) -> None:
+    def _note_no_pil_fallback(ct: str, code: str) -> None:
         """✅ R179（G-06）：记录「无本地渲染兜底」类型的渲染失败，避免静默缺图。
 
         旧实现只累加 ``failed`` —— 用户在响应头/日志里无法区分「语法坏了」
         与「本地 PIL 根本不会画、必须依赖 HTTP 引擎」两类失败。新增计数与类型
         明细为**加法式字段**，默认不出现（0 时不挂键），旧消费端零回归。
+
+        ✅ R221（2026-11-11）：判据由「类型不在 7 类白名单内」改为「PIL 对该
+        **载荷形态**无解析器」。旧判据漏掉 architecture / labor / layout 的
+        Mermaid 语法载荷 —— 类型在白名单内，但渲染器只解析 JSON 数据，HTTP
+        不可用时这类图同样必丢，却拿不到专用告警，前端还会给出「开启 PIL
+        兜底」这种对它们完全无效的建议。判定统一走 ``chart_render_capability``。
         """
-        try:
-            from app.services.chart_validators import PIL_RENDERABLE_CHART_TYPES
-        except Exception:  # pragma: no cover - 导入失败不应影响导出主流程
-            return
-        if ct in PIL_RENDERABLE_CHART_TYPES:
+        if chart_render_capability(ct, code)["pil"] != "unsupported":
             return
         render_stats["no_pil_fallback"] = render_stats.get("no_pil_fallback", 0) + 1
         _types = render_stats.setdefault("no_pil_fallback_types", [])
         if ct not in _types:
             _types.append(ct)
             logger.warning(
-                "图表 %s 无本地渲染兜底（PIL 仅支持 %s），HTTP Service 不可用时该图会缺失",
+                "图表 %s 的 Mermaid 语法载荷无本地 PIL 解析器（仅 %s 具备语法兜底），"
+                "HTTP Service 不可用时该图会缺失",
                 ct,
-                sorted(PIL_RENDERABLE_CHART_TYPES),
+                "/".join(sorted(PIL_SYNTAX_CHART_TYPES)),
+            )
+
+    def _note_pil_fallback_disabled(ct: str, code: str) -> None:
+        """✅ R221：记录「本可本地兜底、却被开关关闭」的语法载荷失败。
+
+        与 ``no_pil_fallback`` 恰好相反：这类图只要开启 ``allow_pil_fallback``
+        就能出图，前端应给出可行动建议；若混进 no_pil_fallback，文案会误告
+        知用户「开启兜底也无法补救」。加法式字段，0 时不挂键。
+        """
+        if allow_pil_fallback or chart_render_capability(ct, code)["pil"] != "syntax":
+            return
+        render_stats["pil_fallback_disabled"] = render_stats.get("pil_fallback_disabled", 0) + 1
+        _types = render_stats.setdefault("pil_fallback_disabled_types", [])
+        if ct not in _types:
+            _types.append(ct)
+            logger.warning(
+                "图表 %s 的 Mermaid 语法载荷本可本地兜底，但 allow_pil_fallback=False 已关闭该出口",
+                ct,
             )
 
     def _note_no_http_fallback(ct: str, code: str) -> None:
-        """✅ R181（2026-11-06）：记录「仅本地 PIL、无 HTTP 出口」的甘特 JSON 失败。
+        """✅ R181（2026-11-06）：记录「仅本地 PIL、无 HTTP 出口」的 JSON 载荷失败。
 
-        甘特 chart-json 与 mermaid 甘特轨出口不同：JSON 载荷只在本地 PIL 渲染，
-        不经过 Mermaid HTTP 服务。旧实现失败时只累加 ``failed``，前端无法区分
-        「HTTP 服务/语法问题」与「该载荷形态本来就没有 HTTP 兜底」。新增计数与
-        类型明细为**加法式字段**（0 时不挂键），复用 no_pil_fallback 同款机制，
-        旧消费端零回归。
+        JSON 数据载荷只在本地 PIL 渲染，不经过 Mermaid HTTP 服务。旧实现失败时
+        只累加 ``failed``，前端无法区分「HTTP 服务/语法问题」与「该载荷形态
+        本来就没有 HTTP 兜底」。新增计数与类型明细为**加法式字段**（0 时不挂键）。
+
+        ✅ R221：判据由「仅甘特图」扩到**全部** JSON 数据载荷 —— 7 类 chart-json
+        一律不经过 HTTP 服务，旧实现让其余 6 类失败只进泛化 ``failed``，前端会
+        给出「检查图表服务」这类无效建议。判定统一走 ``chart_render_capability``。
         """
-        if ct != "gantt" or not str(code or "").lstrip().startswith("{"):
+        if chart_render_capability(ct, code)["payload"] != "json":
             return
         render_stats["no_http_fallback"] = render_stats.get("no_http_fallback", 0) + 1
         _types = render_stats.setdefault("no_http_fallback_types", [])
@@ -4975,11 +5281,21 @@ async def _prepare_export_render(plan: dict) -> dict:
 
             # ✅ 不降级开关透传：allow_pil=False 时 Mermaid 语法载荷在 HTTP Service 失败后
             # 不回退 PIL 自绘（JSON 数据载荷由渲染器内部豁免——PIL 是其唯一路径）
+            # ✅ R221：strategy_out 接收本次真实渲染策略（每张图独占一个 dict，
+            #    线程内写、回主线程读，无共享状态），用于区分「HTTP 原生出图」
+            #    与「HTTP 失败后 PIL 兜底出图」。缓存命中路径不写，故计数只统计
+            #    本次真实发生的渲染动作。
+            _strategy: dict = {}
             rendered_bytes[(ct, code)] = await asyncio.to_thread(
-                _chart_cache.get_or_render, code, ct, "png", False, allow_pil_fallback
+                _chart_cache.get_or_render, code, ct, "png", False, allow_pil_fallback, _strategy
             )
             if rendered_bytes[(ct, code)] is not None:
                 render_stats["backend_ok"] += 1
+                _used = _strategy.get("strategy")
+                if _used == "pil_syntax_fallback":
+                    render_stats["pil_fallback"] = render_stats.get("pil_fallback", 0) + 1
+                elif _used == "http":
+                    render_stats["http_ok"] = render_stats.get("http_ok", 0) + 1
                 # ✅ D-23（R176 · 2026-11-04）：甘特图 >30 任务只渲染前 30 项，
                 #    旧实现仅留日志 —— 用户看到「完整」的横道图而少了一批任务。
                 #    现把截断计数并入 X-Chart-Render-Stats（0 时不挂键）。
@@ -4992,14 +5308,16 @@ async def _prepare_export_render(plan: dict) -> dict:
             else:
                 render_stats["failed"] += 1
                 _note_render_failure(ct, code, "render_returned_none")
-                _note_no_pil_fallback(ct)
+                _note_no_pil_fallback(ct, code)
+                _note_pil_fallback_disabled(ct, code)
                 _note_no_http_fallback(ct, code)
         except Exception as e:
             logger.warning("图表预渲染失败 (%s): %s", ct, e)
             rendered_bytes[(ct, code)] = None
             render_stats["failed"] += 1
             _note_render_failure(ct, code, f"exception:{type(e).__name__}")
-            _note_no_pil_fallback(ct)
+            _note_no_pil_fallback(ct, code)
+            _note_pil_fallback_disabled(ct, code)
             _note_no_http_fallback(ct, code)
 
     # ✅ 2026-11-05（第二轮日志驱动分析 · 图表缓存可观测）：后端渲染轨的
@@ -5028,14 +5346,6 @@ async def _prepare_export_render(plan: dict) -> dict:
                 await _render_one(ct, code)
 
         await asyncio.gather(*[_render_one_limited(ct, code) for ct, code in unique_codes])
-        logger.info(
-            "渲染轨统计: 前端图 %d, 后端 %d, 失败 %d（总计 %d, allow_pil=%s）",
-            render_stats["fe"],
-            render_stats["backend_ok"],
-            render_stats["failed"],
-            len(unique_codes),
-            allow_pil_fallback,
-        )
         if _cache_counters_before is not None:
             try:
                 from app.services.ai.mermaid_renderer import _chart_cache
@@ -5045,6 +5355,21 @@ async def _prepare_export_render(plan: dict) -> dict:
                 render_stats["cache_misses"] = max(0, _after["misses"] - _cache_counters_before["misses"])
             except Exception as e:  # noqa: BLE001 — 统计失败不影响导出
                 logger.debug("图表缓存计数读取失败（忽略）: %s", e)
+    # ✅ R222：统计日志移出 `if unique_codes`，零图路径不再完全静默。
+    #    后台日志实证（2026-11-09 21:15~21:16）：成稿缺甘特图的导出，渲染段
+    #    连一行统计都没有，运维无法区分「方案本来就没图」与「图表块在解析期
+    #    被丢弃 / 无登记代码」。交付侧落图统计（export_chart_delivery）会进一步
+    #    给出 expected/inserted，二者合起来才构成完整链路证据。
+    logger.info(
+        "渲染轨统计: 前端图 %d, 后端 %d, 失败 %d（总计 %d, allow_pil=%s）",
+        render_stats["fe"],
+        render_stats["backend_ok"],
+        render_stats["failed"],
+        len(unique_codes),
+        allow_pil_fallback,
+    )
+    if not unique_codes:
+        logger.info("渲染轨统计: 本次无待渲染图表代码（图表块可能在解析期被跳过或无登记代码，见交付侧统计）")
 
     # ✅ R106 FIX-1：图表段与 AI 配图段之间的取消检查点（命中即抛，
     #    后续「计费生图 + 位图下载 + DOCX 构建」全部不再发生）。
@@ -5157,17 +5482,25 @@ async def _prepare_export_render(plan: dict) -> dict:
 
 def _build_docx_options(config: dict, _float, _int) -> dict:
     """导出版式选项（``_prepare_export`` 与缓存命中路径共用的唯一构造出口）。"""
+    # ✅ R226（A6）：显式 None 与「未传」必须在产物侧同语义。指纹归一
+    #    （_normalize_config）把 None/空串丢弃 = 视同未传，而旧读取端
+    #    ``config.get(key, True)`` 对「键存在值为 None」返回 None（falsy）
+    #    → 同一指纹两种产物（页码/分章页一开一关），跨变体错误命中缓存。
+    #    归一为默认值后：显式 None 与未传产物一致，缺口闭合。
+    #    （其余开关默认值为 falsy —— None→get 默认 False → falsy，天然无缺口。）
+    _spn = config.get("show_page_number", True)
+    _cpb = config.get("chapter_page_break", True)
     return {
         "font_name": config.get("font_name", "宋体"),
         "font_size": _clamp_font_size(config.get("font_size", 12), 12),
         "page_header": config.get("page_header", ""),
         "page_footer": config.get("page_footer", ""),
-        "show_page_number": config.get("show_page_number", True),
+        "show_page_number": True if _spn is None else _spn,
         "show_title_page": config.get("show_title_page", False),
         "show_toc": config.get("show_toc", False),
         "bidder_name": config.get("bidder_name", ""),
         # ✅ 新增排版开关（老前端不传时取默认值，行为等同"标准专项方案版式"）
-        "page_break_before_chapter": bool(config.get("chapter_page_break", True)),
+        "page_break_before_chapter": bool(True if _cpb is None else _cpb),
         "line_spacing": max(1.0, min(_float("line_spacing", 1.15), 3.0)),
         "page_number_style": str(config.get("page_number_style", "simple") or "simple"),
         "toc_depth": max(1, min(_int("toc_depth", 3), 7)),
@@ -5857,6 +6190,12 @@ async def export_docx(scheme_id: str, body: dict, db=Depends(get_db)):
     _inflight_final = None
     try:
         _lk = await _export_dedup_acquire(("docx", scheme_id, _export_config_hash(body)))
+        # ✅ R226（A4）：锁内复查生成互斥守卫。守卫本体在锁外（内存判定，让注定
+        #    409 的请求不白等）；但本请求可能在去重锁上排队数分钟，此窗口内
+        #    用户发起正文/目录生成时，锁外那一次判定已过期 —— 取数段将读到
+        #    生成到一半的章节（部分空章不触发 empty_sections 降级），半成品
+        #    照常渲染交付并写缓存。锁内零 DB 成本复查一次，闭合该窗口。
+        _ensure_no_generation_on_export(scheme_id, "docx")
         # ✅ B-15（R182 · 2026-11-06）：DLV-13「high 级问题阻断导出」承诺落地。
         #    默认阻断并返回可执行 409；前端「已知悉并继续」显式携带 override 放行，
         #    放行时写 X-Export-Override 响应头 + 审核留痕（见 _export_override_note）。
@@ -5893,6 +6232,13 @@ async def export_docx(scheme_id: str, body: dict, db=Depends(get_db)):
         #    判据与记忆化逻辑一字未改（_cache_row_viable 本体保持原样），
         #    「坏产物绝不复用」不变；仅首次命中付一次线程切换成本。
         if cached and cached[0] and await asyncio.to_thread(_cache_row_viable, cached[0]):
+            # ✅ R226（A5）：租约登记**提前到 viable 判定通过后立即**。旧实现登记点
+            #    在 _resolve_content_audit（线程池体检）与 _bump_export_round_and_trace
+            #    （DB 事务）之后 —— 中间两个 await 的窗口内，另一配置指纹的并发导出
+            #    INSERT 新行可使本行跌出保留 top-5，_prune_export_cache 因「租约未
+            #    登记」删除产物 → 随后的 FileResponse 打不开文件报 500。租约 TTL
+            #    600s 自过期，提前登记零副作用。
+            _export_read_lease_register(cached[0])
             # ✅ R111（P2-5）：缓存命中日志埋点（纯可观测；此前命中态只回
             #    X-Cache-Status 响应头，运维无法从 backend.log 统计命中率）。
             logger.info("导出缓存命中（scheme=%s · docx · 秒级返回历史产物）", scheme_id[:8])
@@ -5916,11 +6262,23 @@ async def export_docx(scheme_id: str, body: dict, db=Depends(get_db)):
             # ✅ BUG-6（R175）：登记读租约 —— FileResponse 懒打开，文件在本响应
             #    流式读取期间不得被并发 prune 删除。
             _export_read_lease_register(cached[0])
+            # ✅ R222（日志驱动）：命中路径回传**上次导出**的图表统计。
+            #    坏缓存守卫只拦「本次降级」；历史已落盘的缺图产物仍会被命中，
+            #    旧实现只回 {"cached":true} → 用户/运维完全不知道复用的是缺图件。
+            #    旧旁车（无该加法字段）走原字面量，响应逐字不变。
+            _cached_stats = await _read_chart_delivery_sidecar(cached[0], content_hash)
+            if _cached_stats:
+                _hit_payload = {"cached": True, "cached_stats": _cached_stats}
+                if int(_cached_stats.get("chart_dropped") or 0) > 0:
+                    _hit_payload["cached_degraded"] = True
+                _hit_stats_header = json.dumps(_hit_payload, ensure_ascii=True)
+            else:
+                _hit_stats_header = '{"cached":true}'
             # ✅ 契约完整：缓存命中也回传统计/缓存标识响应头，前端统计条行为一致
             return FileResponse(
                 cached[0],
                 filename=export_filename,
-                headers={"X-Chart-Render-Stats": '{"cached":true}', "X-Cache-Status": "hit", **name_headers},
+                headers={"X-Chart-Render-Stats": _hit_stats_header, "X-Cache-Status": "hit", **name_headers},
                 media_type=_DOCX_MIME,
             )
 
@@ -5961,6 +6319,14 @@ async def export_docx(scheme_id: str, body: dict, db=Depends(get_db)):
         # ✅ 资源守卫：构建异常时必须清理临时文件，否则数十 MB 的 tmp.docx 永久残留。
         try:
             fix_stats = await asyncio.to_thread(_build_docx_sync, *_build_docx_task(tmp_out_path, prep))
+            # ✅ R226（2026-11-12 · A9）：构建完成后的取消检查点。旧实现最后
+            #    一个检查点在章节写入循环内（_build_docx_sync 内部），构建线程
+            #    收尾之后到 os.replace / 写缓存行之间的窗口里置位的取消事件
+            #    从不生效 —— /cancel 晚了一步的产物照样 replace + 写缓存行，
+            #    违反本模块「取消后不写缓存行、不 os.replace」的语义契约
+            #    （_EXPORT_CANCEL_EVENTS 注释）。放 try 内：命中即清理本次
+            #    临时产物、注销在飞保护、上抛转 499（与构建线程取消同一路径）。
+            _check_export_cancelled(cancel_ev)
         except ExportCancelled:
             # ✅ R106 FIX-1：构建线程在段边界命中取消 —— 清理本次临时产物、
             #    注销在飞保护（out_path 从未 replace 出来，不存在成品），
@@ -5977,36 +6343,15 @@ async def export_docx(scheme_id: str, body: dict, db=Depends(get_db)):
             #    （集合随失败次数缓慢膨胀 + GC 盲区）。
             _export_inflight_unregister(_inflight_final)
             raise
-        import os
-
-        # ✅ Windows 竞争窗口：并发同指纹导出时 FileResponse 懒打开目标文件，
-        # os.replace 可能抛 WinError 32；重试 3 次后退化为直接使用本次临时产物。
-        replaced = False
-        cacheable = True
-        for _attempt in range(3):
-            try:
-                os.replace(tmp_out_path, out_path)
-                replaced = True
-                break
-            except PermissionError:
-                await asyncio.sleep(0.3 * (_attempt + 1))
-        if not replaced:
-            # ✅ BUG 修复（2026-10-06 · P1 交付物/缓存路径治理）：旧实现把
-            #    ``out_path = tmp_out_path`` 之后**继续写缓存**，于是 export_cache
-            #    的 result_path 永久指向一个 ``.tmp.docx`` 文件：文件名带 uuid 与
-            #    .tmp 后缀（运维按名字辨识产物时极具误导），且该行命中即返回，
-            #    后续导出即便成功 replace 到规范路径也不会更新该行
-            #    （INSERT OR IGNORE 不覆盖已存在行）→ 磁盘与 DB 双双留下孤儿。
-            #    现降级为「本次不写缓存」：本次响应体仍是完整产物（tmp 文件
-            #    保留给 FileResponse 读取），下次导出重走全链路并落到规范路径。
-            out_path = tmp_out_path
-            cacheable = False
-            logger.warning(
-                "DOCX 缓存原子替换 3 次重试均失败（scheme=%s, out=%s），" "本次不写入导出缓存（响应体仍为完整产物）",
-                scheme_id[:8],
-                EXPORTS_DIR.name,
-            )
-
+        # ✅ R226（2026-11-12 · A1 · P1）：坏缓存守卫判定**前移到 os.replace 之前**。
+        #    旧实现先 os.replace 再判降级：降级产物（缺图/空章/残留）已经把
+        #    out_path 上「历史成功导出」的产物**原地覆盖成残缺版**，而 DB 缓存行
+        #    仍指向该确定性路径、_cache_row_viable 只查 ZIP 结构照常放行 →
+        #    后续同指纹导出永远命中残缺文档，且命中路径不带 X-Export-Degraded、
+        #    旁车统计还是旧好导出的 —— 守卫注释声称要防的场景恰由自身制造。
+        #    现降级产物**只交付本次临时文件**（带 uuid 的 .tmp.docx，与历史产物
+        #    不同路径），绝不触碰 out_path；既有的「降级不写缓存行」语义不变。
+        #    PDF 链本就 `if not degraded:` 才落盘，两链口径由此对齐。
         # ✅ 坏缓存守卫：存在图表渲染失败 / AI 配图未生成 / 配图位图下载失败时产物含缺图，
         #    不写入缓存——否则 AI 渲染服务恢复后，因内容指纹不变永远命中残缺文档。
         # ✅ BUG-5（R175）：空章/全空章同样走降级分支 —— 不写缓存 + 响应头留痕。
@@ -6025,6 +6370,10 @@ async def export_docx(scheme_id: str, body: dict, db=Depends(get_db)):
         )
         # ✅ R195 收口（P1）：章级 fail-soft 丢章 → 与附录同口径不写缓存。
         _section_dropped = _export_section_dropped(fix_stats) > 0
+        # ✅ R222（P1 · 日志实证）：成稿确实缺图（构建期落图数 < 预期）时也
+        #    必须降级且不写缓存。旧判据只看预渲染 failed，覆盖不到「渲染成功
+        #    却没插上 / 有围栏但无登记代码 / 解析期被跳过」这几类成稿缺图。
+        _chart_dropped = _chart_delivery_dropped(fix_stats)
         if (
             render_stats.get("failed", 0) > 0
             or prep.get("ai_image_pending", 0) > 0
@@ -6034,6 +6383,7 @@ async def export_docx(scheme_id: str, body: dict, db=Depends(get_db)):
             or _content_residue > 0
             or _appendix_dropped
             or _section_dropped
+            or _chart_dropped > 0
         ):
             _merge_borrowed_stats(render_stats, fix_stats)
             headers = {
@@ -6070,24 +6420,68 @@ async def export_docx(scheme_id: str, body: dict, db=Depends(get_db)):
             if _section_dropped:
                 _sig = headers.get("X-Export-Degraded")
                 headers["X-Export-Degraded"] = f"{_sig},section-dropped" if _sig else "section-dropped"
+            if _chart_dropped > 0:
+                # ✅ R222：与 empty-sections / appendix-dropped 同口径的细分原因。
+                _sig = headers.get("X-Export-Degraded")
+                headers["X-Export-Degraded"] = f"{_sig},charts-dropped" if _sig else "charts-dropped"
             if fix_stats:
-                headers["X-Fix-Stats"] = json.dumps(fix_stats, ensure_ascii=False)
+                # ✅ R226（B1 · R180 同族收口）：X-Fix-Stats 可能含中文
+                #    `chart_delivery_dropped_details[].chart_type`（围栏标记允许
+                #    Unicode 词字符），`ensure_ascii=False` 会让已构建完成的成稿
+                #    在交付阶段死于 latin-1 编码错误。三处（DOCX 降级/成功、PDF）
+                #    与 X-Chart-Render-Stats 同口径改 `ensure_ascii=True`。
+                headers["X-Fix-Stats"] = json.dumps(fix_stats, ensure_ascii=True)
             # ✅ 收口（2026-10-14）：留痕 → 回收 → 注销 统一走 _finalize_export_delivery
-            #    （与 PDF 分支同一实现；GC protect 传 out_path——该文件即将被流式返回，
-            #    不得在本次回收；cacheable=False 时本次无缓存行，只能靠这里回收孤儿）。
+            #    降级产物只交付 tmp（gc_protect 保护本次响应读取；.tmp. 超龄后由
+            #    孤儿 GC 回收），out_path 上的历史好产物不被覆盖 —— 下次同指纹
+            #    导出命中历史好产物，而不是本次残缺版。
             await _finalize_export_delivery(
                 db,
                 scheme_id=scheme_id,
                 kind="docx",
                 round_no=round_no,
                 export_filename=export_filename,
-                gc_protect={out_path},
+                gc_protect={tmp_out_path},
                 inflight_path=_inflight_final,
                 note=_override_note,
             )
             # ✅ BUG-6（R175）：交付前登记读租约（防并发 prune 删除正在下载的文件）
-            _export_read_lease_register(out_path)
-            return FileResponse(str(out_path), filename=export_filename, headers=headers, media_type=_DOCX_MIME)
+            _export_read_lease_register(tmp_out_path)
+            return FileResponse(str(tmp_out_path), filename=export_filename, headers=headers, media_type=_DOCX_MIME)
+
+        import os
+
+        # ✅ Windows 竞争窗口：并发同指纹导出时 FileResponse 懒打开目标文件，
+        # os.replace 可能抛 WinError 32；重试 3 次后退化为直接使用本次临时产物。
+        replaced = False
+        cacheable = True
+        for _attempt in range(3):
+            try:
+                os.replace(tmp_out_path, out_path)
+                replaced = True
+                break
+            except PermissionError:
+                await asyncio.sleep(0.3 * (_attempt + 1))
+        if not replaced:
+            # ✅ BUG 修复（2026-10-06 · P1 交付物/缓存路径治理）：旧实现把
+            #    ``out_path = tmp_out_path`` 之后**继续写缓存**，于是 export_cache
+            #    的 result_path 永久指向一个 ``.tmp.docx`` 文件：文件名带 uuid 与
+            #    .tmp 后缀（运维按名字辨识产物时极具误导），且该行命中即返回，
+            #    后续导出即便成功 replace 到规范路径也不会更新该行
+            #    （INSERT OR IGNORE 不覆盖已存在行）→ 磁盘与 DB 双双留下孤儿。
+            #    现降级为「本次不写缓存」：本次响应体仍是完整产物（tmp 文件
+            #    保留给 FileResponse 读取），下次导出重走全链路并落到规范路径。
+            out_path = tmp_out_path
+            cacheable = False
+            logger.warning(
+                "DOCX 缓存原子替换 3 次重试均失败（scheme=%s, out=%s），" "本次不写入导出缓存（响应体仍为完整产物）",
+                scheme_id[:8],
+                EXPORTS_DIR.name,
+            )
+
+        # ✅ 坏缓存守卫（R226·A1）：降级判定已前移到 os.replace 之前 ——
+        #    能走到这里即产物完好，replace 到确定性路径 + 写缓存行均安全。
+
 
         # 缓存记录
         # ✅ B5（2026-09-23）：INSERT OR IGNORE + (scheme_id, content_fingerprint) 唯一约束，
@@ -6100,6 +6494,11 @@ async def export_docx(scheme_id: str, body: dict, db=Depends(get_db)):
         #    2026-10-13 确立的双提交口径，详见 helper docstring）。
         # ✅ B1-3（R176 · 2026-11-04）：写入前用**与命中同一判据**复核产物 ——
         #    截断/损坏（size>0 但结构不完整）绝不落缓存行，避免坏缓存被长期命中。
+        # ✅ 加固（D1）：把构建期统计（跨章借图 + ✅ R222 交付侧落图）并入渲染统计，
+        #    一并回传 X-Chart-Render-Stats（前端展示 + 用户知情）。加法式合并，既有键不变。
+        # ✅ R222：这一步必须**早于**写旁车 —— 否则 sidecar 固化的是 merge 之前的
+        #    render_stats，命中路径读到的历史统计永远是残缺快照。
+        _merge_borrowed_stats(render_stats, fix_stats)
         if cacheable and not _cache_row_viable(str(out_path)):
             cacheable = False
             logger.warning("DOCX 产物完整性判据未通过（scheme=%s），本次不写缓存: %s", scheme_id[:8], out_path.name)
@@ -6118,9 +6517,6 @@ async def export_docx(scheme_id: str, body: dict, db=Depends(get_db)):
             #    行，旁车也永远不会被读到，写了只会变成孤儿文件。
             await _write_audit_sidecar(out_path, prep, content_hash)
 
-        # ✅ 加固（D1）：把构建期统计到的「跨章借图」并入渲染统计，一并回传
-        #    X-Chart-Render-Stats（前端展示 + 用户知情）。加法式合并，既有键不变。
-        _merge_borrowed_stats(render_stats, fix_stats)
         # ✅ R180 修复：header 值须 latin-1 可编码（ensure_ascii=True 让中文标题
         #    以 \uXXXX 转义出现，JSON.parse 后语义不变）。
         headers = {
@@ -6131,7 +6527,10 @@ async def export_docx(scheme_id: str, body: dict, db=Depends(get_db)):
         # ✅ R111（P2-5）：缓存未命中日志埋点（纯可观测）。
         logger.info("导出缓存未命中（scheme=%s · docx · 本轮全量渲染，产物已写缓存）", scheme_id[:8])
         if fix_stats:
-            headers["X-Fix-Stats"] = json.dumps(fix_stats, ensure_ascii=False)
+            # ✅ R226（B1 · R180 同族收口）：fix_stats 可含中文（chart_delivery_
+            #    dropped_details[].chart_type 走 Unicode \w+ 放行），header 值必须
+            #    latin-1 可编码 → ensure_ascii=True（JSON.parse 后原文不变）。
+            headers["X-Fix-Stats"] = json.dumps(fix_stats, ensure_ascii=True)
         # ✅ G12：导出成稿落一条审核留痕（from_status = to_status，只留痕不改状态机）
         # ✅ 收口（2026-10-14）：留痕 → 回收 → 注销 统一走 _finalize_export_delivery
         #    （protect 传本次产物，避免被当成孤儿删掉）。
@@ -6424,6 +6823,8 @@ async def export_pdf(scheme_id: str, body: dict, db=Depends(get_db)):
     _inflight_final = None
     try:
         _lk = await _export_dedup_acquire(("pdf", scheme_id, _export_config_hash(body)))
+        # ✅ R226（A4）：锁内复查生成互斥守卫（与 DOCX 链同口径，见该处注释）。
+        _ensure_no_generation_on_export(scheme_id, "pdf")
         # ✅ B-15（R182 · 2026-11-06）：与 DOCX 同一 high 级问题闸门（同位置：
         #    守卫/去重锁之后、_prepare_export 之前）。
         _blockers, _gate = await _export_high_issue_gate(scheme_id, db, body)
@@ -6458,6 +6859,9 @@ async def export_pdf(scheme_id: str, body: dict, db=Depends(get_db)):
         # ✅ R176 补漏（2026-11-04）：同 DOCX —— PDF 头尾校验同样下沉线程，
         #    判据不减（%PDF- 与 %%EOF 都必须满足），坏产物仍不复用。
         if cached and cached[0] and await asyncio.to_thread(_cache_row_viable, cached[0]):
+            # ✅ R226（A5）：与 DOCX 命中路径同口径 —— 租约登记提前到 viable 通过后立即，
+            #    闭合「判据通过 → 登记」之间的并发 prune 删文件窗口。
+            _export_read_lease_register(cached[0])
             # ✅ R111（P2-5）：PDF 缓存命中日志埋点（纯可观测，与 DOCX 同口径）。
             logger.info("导出缓存命中（scheme=%s · pdf · 秒级返回历史产物）", scheme_id[:8])
             # ✅ R176 · D2-2（2026-11-04）：与 DOCX 同口径 —— 命中优先读旁车。
@@ -6479,11 +6883,20 @@ async def export_pdf(scheme_id: str, body: dict, db=Depends(get_db)):
             }
             # ✅ BUG-6（R175）：PDF 缓存命中同样登记读租约
             _export_read_lease_register(cached[0])
+            # ✅ R222：与 DOCX 同口径回传上次导出的图表统计（旧旁车 → 原字面量）。
+            _cached_stats = await _read_chart_delivery_sidecar(cached[0], pdf_content_hash)
+            if _cached_stats:
+                _hit_payload = {"cached": True, "cached_stats": _cached_stats}
+                if int(_cached_stats.get("chart_dropped") or 0) > 0:
+                    _hit_payload["cached_degraded"] = True
+                _hit_stats_header = json.dumps(_hit_payload, ensure_ascii=True)
+            else:
+                _hit_stats_header = '{"cached":true}'
             return FileResponse(
                 str(cached[0]),
                 filename=export_filename,
                 media_type=_PDF_MIME,
-                headers={"X-Chart-Render-Stats": '{"cached":true}', "X-Cache-Status": "hit", **name_headers},
+                headers={"X-Chart-Render-Stats": _hit_stats_header, "X-Cache-Status": "hit", **name_headers},
             )
 
         # 未命中：本次导出即一轮（PDF 与 DOCX 共用同一轮次计数，中间 DOCX 不额外计数）
@@ -6541,6 +6954,10 @@ async def export_pdf(scheme_id: str, body: dict, db=Depends(get_db)):
                 raise HTTPException(501, str(e))
 
             # 读取 PDF 内容返回（临时目录会被清理，所以必须读入内存）
+            # ✅ R226（A9）：转换完成后的取消检查点 —— Word COM 转换可达分钟级，
+            #    其间置位的取消事件原要到「写缓存行前」才被间接触发（甚至不触发）；
+            #    此处命中即 499 退出，不再读取/交付/落盘（TemporaryDirectory 退出自动清理）。
+            _check_export_cancelled(cancel_ev)
             # ✅ R176 · P1-3：整文件读（可能数十 MB）下沉线程池；句柄在工作线程内新建。
             pdf_bytes = await asyncio.to_thread(_read_path_bytes, tmp_pdf)
             # ✅ R195 收口（P2）：交付前统一完整性复核 —— 旧实现只在「缓存命中」与
@@ -6549,7 +6966,10 @@ async def export_pdf(scheme_id: str, body: dict, db=Depends(get_db)):
             #    _pdf_integrity_ok 相同的结构判据（%PDF- 头 + %%EOF 尾）：
             #    结构不完整的产物不得作为交付物（502 可行动失败，不静默给坏文件）。
             if not (b"%PDF-" in pdf_bytes[:1024] and b"%%EOF" in pdf_bytes[-2048:]):
-                logger.error("PDF 产物完整性判据未通过（scheme=%s），拒绝交付: %s", scheme_id[:8], tmp_pdf.name)
+                # ✅ R226（A3）：tmp_pdf 是 str（str(Path(tmpdir)/...)），旧实现取
+                #    `.name` 必抛 AttributeError → 预定的 502 可行动失败被 500 顶替，
+                #    「产物不完整」的 ERROR 文案也从未出现在日志里。
+                logger.error("PDF 产物完整性判据未通过（scheme=%s），拒绝交付: %s", scheme_id[:8], tmp_pdf)
                 raise HTTPException(502, "PDF 转换产物不完整（截断/结构损坏），请重试；若连续出现请检查 Word 状态")
 
         # ✅ 坏缓存守卫（D-2）：与 DOCX 同口径 —— 图表渲染失败 / AI 配图未生成 /
@@ -6567,6 +6987,9 @@ async def export_pdf(scheme_id: str, body: dict, db=Depends(get_db)):
         )
         # ✅ R195 收口（P1）：章级 fail-soft 丢章 → 与 DOCX 同口径不写缓存。
         _section_dropped = _export_section_dropped(fix_stats) > 0
+        # ✅ R222：PDF 与 DOCX 共用 `_build_docx_sync`，落图统计同源，
+        #    判据必须逐字对齐（否则同一方案导出 PDF 不降级、DOCX 降级）。
+        _chart_dropped = _chart_delivery_dropped(fix_stats)
         degraded = (
             render_stats.get("failed", 0) > 0
             or prep.get("ai_image_pending", 0) > 0
@@ -6577,7 +7000,14 @@ async def export_pdf(scheme_id: str, body: dict, db=Depends(get_db)):
             or _content_residue > 0
             or _appendix_dropped
             or _section_dropped
+            or _chart_dropped > 0
         )
+
+        # ✅ 加固（D1）：PDF 链路合流跨章借图计数（与 DOCX 同口径）。
+        # ✅ R222：位置必须在**写缓存/写旁车之前**且全链只此一处 ——
+        #    否则旁车固化的是 merge 前的残缺统计，命中路径读不到落图数；
+        #    同时 `test_merge_helper_is_single_source` 锁死「每链单一合流点」。
+        _merge_borrowed_stats(render_stats, fix_stats)
 
         if not degraded:
             import os as _os
@@ -6657,6 +7087,7 @@ async def export_pdf(scheme_id: str, body: dict, db=Depends(get_db)):
                             what="export_cache 写入(PDF)",
                         )
                         # ✅ R176 · D2-2：与 DOCX 同口径 —— 只在落缓存行时写旁车。
+                        #    ✅ R222：合流已在降级判据之后完成，此处统计含落图数。
                         await _write_audit_sidecar(out_path, prep, pdf_content_hash)
             except Exception as e:
                 # 缓存写入失败不得影响本次交付（用户仍拿到完整 PDF）
@@ -6668,8 +7099,6 @@ async def export_pdf(scheme_id: str, body: dict, db=Depends(get_db)):
 
         from fastapi.responses import Response
 
-        # ✅ 加固（D1）：PDF 链路同样合流跨章借图计数（与 DOCX 同口径）
-        _merge_borrowed_stats(render_stats, fix_stats)
         # ✅ R111（P2-5）：PDF 缓存未命中日志埋点（纯可观测，与 DOCX 同口径；
         #    degraded 也记——它同样走了全量渲染 + Word 转换）。
         logger.info(
@@ -6677,16 +7106,28 @@ async def export_pdf(scheme_id: str, body: dict, db=Depends(get_db)):
             scheme_id[:8],
             "已" if not degraded else "因缺图未写入",
         )
+        # ✅ R222：PDF degraded 时与 DOCX 同口径回传 AI 配图待办数；
+        #    miss 分支保持逐字不变（两项均为 0，无须新增键）。
+        _pdf_chart_stats = dict(render_stats)
+        if degraded:
+            _pdf_chart_stats["ai_image_pending"] = prep.get("ai_image_pending", 0)
+            _pdf_chart_stats["ai_image_download_pending"] = prep.get("ai_image_download_pending", 0)
         headers = {
             "Content-Disposition": _attachment_disposition(export_filename),
             # ✅ R180 修复：同 DOCX，header 值须 latin-1 可编码
-            "X-Chart-Render-Stats": json.dumps(render_stats, ensure_ascii=True),
+            "X-Chart-Render-Stats": json.dumps(_pdf_chart_stats, ensure_ascii=True),
             # ✅ 与 DOCX 对齐：补 X-Cache-Status，缺图时标记 degraded（旧实现完全没有）
             "X-Cache-Status": "degraded" if degraded else "miss",
             **name_headers,
         }
         if fix_stats:
-            headers["X-Fix-Stats"] = json.dumps(fix_stats, ensure_ascii=False)
+            # ✅ R226（B1 · R180 同族收口）：与 DOCX 两分支同口径，header 必须 latin-1 可编码。
+            headers["X-Fix-Stats"] = json.dumps(fix_stats, ensure_ascii=True)
+        # ✅ R226（A8）：空章导出的 PDF 与 DOCX 同口径补 empty-sections 细分信号
+        #    （旧实现 degraded 判定含空章，响应头却没有该键 —— 前端降级提示条分类缺失）。
+        if bool(prep.get("empty_sections")):
+            _sig = headers.get("X-Export-Degraded")
+            headers["X-Export-Degraded"] = f"{_sig},empty-sections" if _sig else "empty-sections"
         if _facts_query_failed:
             headers["X-Export-Degraded"] = "global-facts-query-failed"
         if _content_residue > 0:
@@ -6700,6 +7141,10 @@ async def export_pdf(scheme_id: str, body: dict, db=Depends(get_db)):
             # ✅ R195 收口：与 DOCX 同口径 —— 章级丢章留痕。
             _sig = headers.get("X-Export-Degraded")
             headers["X-Export-Degraded"] = f"{_sig},section-dropped" if _sig else "section-dropped"
+        if _chart_dropped > 0:
+            # ✅ R222：与 DOCX 同口径 —— 成稿缺图细分原因。
+            _sig = headers.get("X-Export-Degraded")
+            headers["X-Export-Degraded"] = f"{_sig},charts-dropped" if _sig else "charts-dropped"
         # ✅ G12：PDF 成稿同样落一条审核留痕
         # ✅ 收口（2026-10-14）：留痕 → 回收 → 注销 统一走 _finalize_export_delivery。
         #    GC 不传 protect：PDF 响应体是**内存字节**，本次产物不再依赖磁盘文件。

@@ -146,7 +146,17 @@ class TestWiringParity:
         src = _ROUTER_SRC.read_text(encoding="utf-8")
         bare = re.findall(r"_readiness_overview_compute\(db, scheme_id\)", src)
         assert not bare, "存在未带 persist=False 的重算调用（会污染分数趋势）"
-        assert src.count("_readiness_overview_compute(db, scheme_id, persist=False)") == 3
+        # ✅ R223：断言从「恰好 3 处」（锁实现）重锚为「**每一处**重算调用都带
+        #    persist=False」（锁意图）。原因：R223 为消除 confirm 的 O(k) 重复重算
+        #    新增了一处惰性 `_ov_once` 调用点（同样 persist=False，语义不变），
+        #    固定计数会把正确的重构判红。新判据仍能在「有人新增裸调用」时立即报红。
+        call_sites = len(re.findall(r"_readiness_overview_compute\(", src))
+        with_persist = src.count("_readiness_overview_compute(db, scheme_id, persist=False)")
+        assert call_sites >= 3, f"重算调用点异常减少（{call_sites}）"
+        assert with_persist == call_sites, (
+            f"存在未带 persist=False 的重算调用：call_sites={call_sites} with_persist={with_persist}"
+            "（会污染分数趋势）"
+        )
 
     async def test_overview_endpoint_keeps_persist(self):
         """compliance.py /overview 端点本体仍走缺省落库（主链路数据源）。

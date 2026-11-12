@@ -64,9 +64,16 @@ READ_PATH_FNS = [
 #:   · update_fact：PATCH 的 content 字段是用户提交行，需底层解析。
 #: ✅ R75b：``_fact_name_value`` 已从白名单摘除 —— 权威定义下沉 services 后
 #: 它是纯委托薄包装，不再需要直调权；若包装里回流自持切分即红。
+#: ✅ R225（2026-11-12）：新增 ``_collect_duplicate_injectable_conflicts`` ——
+#: 唯一性闸门的 peer 值**比对口径对齐**（刻意利用 extract 的剥注释能力）：
+#: peer 侧值保留「12.5 *(设计值)*」而计划值已被解析剥成「12.5」，不剥注释
+#: 会误判异值 → 合法保存被标矛盾挡出正文。这与锁的本意「读路径回解不得
+#: 误剥注释」方向相反：回解要保注释、比对要剥注释，两者共用同一原语但
+#: 职责不同（A1 分组重建内容对比的直调在 update_fact 内，本就在白名单）。
 ALLOWED_DIRECT_EXTRACT_CALLERS = {
     "_split_fact_lines",
     "update_fact",
+    "_collect_duplicate_injectable_conflicts",
 }
 
 

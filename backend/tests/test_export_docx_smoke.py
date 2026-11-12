@@ -8,9 +8,12 @@
   “渲染失败”提示而非崩溃，因此不校验图片像素。
 
 ⚠️ 关于「PIL 兜底 / 渲染失败产物形态」的契约：
-  · `allow_pil_fallback` 默认 False（与前端导出表单 Switch 初值、tooltip 一致），
-    Mermaid 类图表在 HTTP Service 不可用时**不静默 PIL 自绘**；
-    `test_export_docx_smoke` 显式传 True，守护「离线确实能出图」路径。
+  · ✅ R221（2026-11-11）：`allow_pil_fallback` 默认**已改为 True**（唯一事实源
+    为 `app.routers.export.ALLOW_PIL_FALLBACK_DEFAULT`，前端 ExportTab 初值同值）——
+    修复「HTTP Service 未部署时 Mermaid 语法载荷图表整张丢失」。旧注释记载的
+    「默认 False」是 2026-11-11 之前的历史快照，勿据此判断触发条件。
+  · 本文件两条用例分别显式传 True / 不传，守护「离线确实能出图」与
+    「渲染失败时跳过插图且不占图号」两条路径；显式传值不受默认值改动影响。
   · ✅ 2026-09-19（v12）契约变更：渲染失败的图表**默认整块跳过且不占图号**，
     交付文档不再出现红字「渲染失败」段（评审场景报错文字比缺图更糟）；
     "不静默"承诺转移到系统侧信号（X-Chart-Render-Stats / X-Content-Audit /

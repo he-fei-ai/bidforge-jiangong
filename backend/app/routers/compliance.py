@@ -91,6 +91,7 @@ from app.services.facts_extractor import (
 )
 from app.services.preflight_engine import (
     PreflightContext,
+    build_fact_coverage,
     preflight_stats,
     run_preflight,
 )
@@ -722,6 +723,10 @@ async def compliance_check(body: ComplianceCheckIn, db=Depends(get_db)):
             #    与 json_response 模块「弱模型稳定 JSON 工作流」的前提相悖。
             json_mode=True,
             temperature=0.2,
+            # ✅ R226（R-5）：补显式 timeout —— 主调用原可跑满 provider 900s
+            #    （_candidate_timeout 主候选不封顶）；显式 300s 对齐模块族惯例，
+            #    与 total_timeout=600 形成双层截止（单调用 300 / 整体 600）。
+            timeout=300,
             scene="compliance_check",
         )
         return _text, _obj, time.perf_counter() - _t0
@@ -1030,6 +1035,8 @@ async def expert_review(body: ExpertReviewIn, db=Depends(get_db)):
         lambda o: [] if "score" in o else ["缺少 score"],
         json_mode=True,
         temperature=0.2,
+        # ✅ R226（R-5）：补显式 timeout（主调用原可跑满 provider 900s）。
+        timeout=300,
         scene="expert_review",
     )
 
@@ -1208,6 +1215,8 @@ async def run_consistency_audit(scheme_id: str, db=Depends(get_db)):
             _validate_consistency_audit,
             json_mode=True,
             temperature=0.2,
+            # ✅ R226（R-5）：补显式 timeout（主调用原可跑满 provider 900s）。
+            timeout=300,
             scene="consistency_audit",
         )
         return _obj
@@ -1753,6 +1762,8 @@ async def run_preflight_check(scheme_id: str, db=Depends(get_db), force: bool = 
                 "scheme_name": ctx.scheme_name,
                 "stats": stats,
                 "sources": ["program"],
+                # ✅ R220：与 /overview 同口径，两处总检出口都显式回传覆盖度。
+                "fact_coverage": build_fact_coverage(ctx.facts),
                 "created_at": datetime.now().isoformat(timespec="seconds"),
                 # ✅ G3：本次结论对应的内容指纹（落库后供 /runs /report 判定是否过期）
                 "content_fingerprint": fingerprint,
@@ -2387,6 +2398,10 @@ async def _readiness_overview_compute(
             # ✅ B-01（加法式）：跑成但未覆盖全文的来源。为空即表示所有已参与
             #    评分的来源都是完整检查。
             "partial_sources": partial_sources,
+            # ✅ R220（商业化「未检查 / 已检查」显式化）：SAF-08 在事实为空时
+            #    直接跳过，finding 清单里「零条问题」与「根本没查」长得一样。
+            #    顶层加法式回传覆盖度，前端据此显示灰色「未检查」而非绿色「通过」。
+            "fact_coverage": build_fact_coverage(ctx.facts),
             "created_at": datetime.now().isoformat(timespec="seconds"),
             # ✅ G3：落库后供 /runs /report / 导出页判定「结论是否已过期」
             # ✅ P1-4：调用方已传入指纹时直接复用（同一请求只扫一次库）；

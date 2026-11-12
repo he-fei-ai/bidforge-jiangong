@@ -258,8 +258,14 @@ export function useOutlineActions(deps: OutlineActionsDeps): OutlineActions {
    * 与「保存目录」的区别：这里导出的是后端权威编号（level 已归一），
    * 可直接给外部工具/存档使用，不改动数据库。
    */
+  // ✅ R223（2026-11-12 · P3 · FE-7）：handleExportTree 专属在飞锁 —— 旧守卫读的
+  //    `exportingRef` 是 DOCX/PDF 导出链的 ref（本函数从不置位），同帧双击时
+  //    异步 state `exportingTree` 仍为旧值 ⇒ 双 GET /export-tree、双下载文件。
+  //    与本 hook 既有 saveInFlightRef / importInFlightRef 同型（ref 判据）。
+  const exportTreeInFlightRef = useRef(false);
   async function handleExportTree() {
-    if (!id || exportingRef.current || exportingTree) return;
+    if (!id || exportTreeInFlightRef.current) return;
+    exportTreeInFlightRef.current = true;
     setExportingTree(true);
     try {
       const { data } = await sectionsApi.exportTree(id);
@@ -292,6 +298,7 @@ export function useOutlineActions(deps: OutlineActionsDeps): OutlineActions {
       const err = e as { message?: string };
       msg.error(err.message || "导出目录树失败");
     } finally {
+      exportTreeInFlightRef.current = false;
       setExportingTree(false);
     }
   }
@@ -380,8 +387,13 @@ export function useOutlineActions(deps: OutlineActionsDeps): OutlineActions {
     saveLibForm.setFieldsValue({ name: lastUpload.name.replace(/\.[^.]+$/, "") });
   }
 
+  // ✅ R223（2026-11-12 · P3 · FE-8）：入库在飞锁 —— 弹窗无 confirmLoading、
+  //    函数无任何判据，同帧双击「入库（待审核）」会双 POST save-as-library，
+  //    同一识别结果入库两条。与 saveInFlightRef 同型（ref 判据）。
+  const saveLibInFlightRef = useRef(false);
   async function submitSaveAsLibrary() {
-    if (!lastUpload) return;
+    if (!lastUpload || saveLibInFlightRef.current) return;
+    saveLibInFlightRef.current = true;
     try {
       const values = await saveLibForm.validateFields();
       const { data } = await uploadOutlineApi.saveAsLibrary(lastUpload.id, {
@@ -394,6 +406,8 @@ export function useOutlineActions(deps: OutlineActionsDeps): OutlineActions {
       const err = e as { errorFields?: unknown; message?: string };
       if (err.errorFields) return;
       msg.error(err.message || "存入目录库失败");
+    } finally {
+      saveLibInFlightRef.current = false;
     }
   }
 

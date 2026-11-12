@@ -29,7 +29,13 @@ W_NS = "http://schemas.openxmlformats.org/wordprocessingml/2006/main"
 # ---------------------------------------------------------------------------
 
 # 控制字符：除 \t \n \r 外的 C0 控制符
-_CTRL_RE = re.compile(r"[\x00-\x08\x0b\x0c\x0e-\x1f\x7f]")
+# ✅ R226（2026-11-12 · B2）：补 XML 1.0 完全非法的三类 —— U+FFFE/U+FFFF
+#    （非字符 noncharacters，字节序反转 BOM 的典型产物）与孤立代理项
+#    （U+D800-DFFF，成对代理被解码拆散后落单）。python-docx 的 add_run 对它们
+#    抛 ValueError（lxml 序列化拒绝），旧清洗集不含 → 含该字符的段落/表格
+#    单元格在构建期 fail-soft 整块丢弃（内容静默丢失）。XML 1.0 规定这三类
+#    任何版本都不合法，剥除零误伤。
+_CTRL_RE = re.compile(r"[\x00-\x08\x0b\x0c\x0e-\x1f\x7f\ud800-\udfff\ufffe\uffff]")
 # ✅ R195 收口（P2-5）：零宽字符族 —— U+200B（零宽空格）/U+200C（零宽不连字）/
 #    U+2060（词连接符）/U+FEFF（BOM 残留）。这些属 Unicode「格式字符（Cf）」，
 #    非空白类，\s 不匹配，也非 XML 非法字符（不会触发崩溃），但 AI 正文夹带后
@@ -198,7 +204,12 @@ def clean_text(text: str) -> str:
     # ✅ 2026-10-17（文档质量报告 公式乱码）：带边界空白的 `$ x $` 归一为 `$x$`，
     #    使其落回严格形态被 OMML 转换器消费（否则 LaTeX 源码原样印进成稿）
     out = normalize_spaced_inline_math(out)
-    return out
+    # ✅ R226（B2 补口）：``decode_html_entities`` 会把 ``&#xFFFE;`` / ``&#xD800;``
+    #    等数字实体**物化**成 XML 非法字符，而上方 :204 的实体还原发生在
+    #    首轮 _CTRL_RE 剥离之后 —— 源文本干净、数字实体脏的形态会把
+    #    U+FFFE/孤立代理项漏进成稿并让 add_run 抛 ValueError（整块 fail-soft
+    #    丢弃）。物化后终末再剥一次（_CTRL_RE 现含该三类）。
+    return _CTRL_RE.sub("", out)
 
 
 # ---------------------------------------------------------------------------
@@ -519,6 +530,14 @@ def _tokenize(latex: str) -> List[Tuple[str, str]]:
     while pos < len(latex):
         m = _TOKEN_RE.match(latex, pos)
         if not m:
+            # ✅ R226（2026-11-12 · B4）：LaTeX 转义标点（``\% \& \# \{ \} \_ \$``）。
+            #    旧实现反斜杠落进「孤立 char」逐字保留 → ``p = 50\%`` 的 OMML
+            #    出现独立的反斜杠 run（成稿公式印出「50\%」）。反斜杠后的
+            #    非字母字符是**字面标点**，剥掉反斜杠直接输出该字符。
+            if latex[pos] == "\\" and pos + 1 < len(latex) and not latex[pos + 1].isalpha():
+                tokens.append(("char", latex[pos + 1]))
+                pos += 2
+                continue
             # 无法匹配的单个字符（如孤立反斜杠）按文本处理
             tokens.append(("char", latex[pos]))
             pos += 1
@@ -686,7 +705,9 @@ class _LatexParser:
         inner, ni = _is_group_consume(tokens, i)
         if inner is not None:
             nodes, _ = self._parse_seq(inner, 0, stop_brace=True)
-            return nodes, ni
+            # ✅ R226（B6）：与 _parse_script_arg 同口径 —— frac/sqrt 操作数组
+            #    内的 script_marker 附着（``\frac{\sigma_{max}}{f}`` 下标不再拍平）。
+            return self._attach_scripts(nodes), ni
         # 无花括号：单个原子
         if i < len(tokens):
             node, ni = self._parse_atom(tokens, i)
@@ -723,7 +744,12 @@ class _LatexParser:
         inner, ni = _is_group_consume(tokens, i)
         if inner is not None:
             nodes, _ = self._parse_seq(inner, 0, stop_brace=True)
-            return nodes, ni
+            # ✅ R226（B6）：组参数内的 script_marker 也必须附着 —— 旧实现只在
+            #    parse() 顶层与 nary body 调 _attach_scripts，``\frac{\sigma_{max}}{f}``
+            #    分子里的 ``_{max}`` 滞留为裸 marker → 下标语义静默丢失（平排
+            #    字符，``max``/``u`` 与正文难区分）。计算书高频形态 ``l_0/i``、
+            #    ``\frac{M_u}{M_{max}}`` 全部受影响。
+            return self._attach_scripts(nodes), ni
         if i < len(tokens):
             node, ni = self._parse_atom(tokens, i)
             return [node], ni
@@ -892,7 +918,10 @@ def _node_to_omml(node) -> str:
 #: 悬空运算符结尾判据：``=`` / ``≤`` / ``≥`` / ``<`` / ``>`` 等（允许尾随空格）。
 #: 命中表示「等式右端取值待定」的残式，旧实现只渲染运算符、右值位置空无一物，
 #: 成稿在该处出现语义空洞（配合外层残留空格表现为双空格）。
-_DANGLING_OP_RE = re.compile(r"(?:=|≤|≥|<|>|≈|le|geq?|leq?|ne)\s*$")
+# ✅ R226（B15）：字母命令（le/leq/geq/ne）加词边界 —— 旧无边界判据把
+#    以「ne」结尾的普通词（``machine`` / ``V_machine``）判成悬空运算符，
+#    成稿公式尾部凭空出现「待填」虚线框。
+_DANGLING_OP_RE = re.compile(r"(?:=|≤|≥|<|>|≈|\ble\b|\bleq\b|\bgeq?\b|\bne\b)\s*$")
 
 #: 悬空右值的可见占位文本（虚线方框由 OMML 边框呈现）。
 _DANGLING_PLACEHOLDER = "待填"
@@ -925,6 +954,60 @@ def _dangling_placeholder_omml() -> str:
     )
 
 
+#: ✅ R226（B5）：矩阵环境族（整式即单一环境的形态才走专用转换）。
+_MATRIX_ENV_RE = re.compile(
+    r"\\begin\s*\{((?:p|b|B|v|V)?matrix)\}(.+)\\end\s*\{\1\}",
+    re.S,
+)
+#: 环境名 → 定界符（OMML m:d 的 begChr/endChr；None = 无括号）。
+_MATRIX_DELIMS = {
+    "matrix": None,
+    "pmatrix": ("(", ")"),
+    "bmatrix": ("[", "]"),
+    "Bmatrix": ("{", "}"),
+    "vmatrix": ("‖", "‖"),
+    "Vmatrix": ("‖", "‖"),
+}
+
+
+def _matrix_to_omml(env: str, body: str) -> str:
+    """把单一矩阵环境体转成 OMML 矩阵（``m:m``，可选括号 ``m:d`` 包裹）。
+
+    ``&`` 分列、``\\\\`` 分行；每格递归 :func:`latex_to_omml`（格内允许下标/
+    分数/希腊字母），剥其 ``m:oMath`` 外壳后并进 ``m:mr``。短行以空格补齐。
+    """
+    rows = [r for r in re.split(r"\\\\", body) if r.strip()]
+    if not rows:
+        rows = [""]
+    grid = [[c.strip() for c in row.split("&")] for row in rows]
+    ncols = max(len(r) for r in grid)
+    mr_parts: list[str] = []
+    for row in grid:
+        cells: list[str] = []
+        for ci in range(ncols):
+            cell_latex = row[ci] if ci < len(row) else ""
+            if cell_latex:
+                inner_xml = latex_to_omml(cell_latex)
+                mm = re.search(r"<m:oMath[^>]*>(.*)</m:oMath>", inner_xml, re.S)
+                cells.append(mm.group(1) if mm else "")
+            else:
+                cells.append("")
+        mr_parts.append("<m:mr>" + "".join(cells) + "</m:mr>")
+    matrix = (
+        "<m:m><m:mPr><m:mcs><m:mc><m:mcPr>"
+        f'<m:count m:val="{ncols}"/><m:mcJc m:val="center"/>'
+        "</m:mcPr></m:mc></m:mcs></m:mPr>" + "".join(mr_parts) + "</m:m>"
+    )
+    delims = _MATRIX_DELIMS.get(env)
+    if delims:
+        matrix = (
+            "<m:d><m:dPr>"
+            f'<m:begChr m:val="{_esc(delims[0])}"/><m:endChr m:val="{_esc(delims[1])}"/>'
+            f"</m:dPr><m:e>{matrix}</m:e></m:d>"
+        )
+    return f"<m:oMath xmlns:m='{M_NS}'>{matrix}</m:oMath>"
+
+
 def latex_to_omml(latex: str) -> str:
     """将 LaTeX 数学表达式转为 OMML 内联公式 XML（``<m:oMath>...</m:oMath>``）。
 
@@ -932,6 +1015,15 @@ def latex_to_omml(latex: str) -> str:
     虚线「待填」占位框：既明确提示此处需补数值，又避免成稿在该处出现语义空洞。
     仅作用于本就不完整的残式，完整公式产物逐字节不变。
     """
+    # ✅ R226（2026-11-12 · B5）：矩阵环境优先走专用转换。旧实现把
+    #    ``\begin{pmatrix}`` / ``\end{pmatrix}`` 当未知命令丢弃、``{pmatrix}``
+    #    花括号组按普通文本输出、``&`` / ``\\`` 原样残留 —— 成稿公式区出现
+    #    「pmatrix a & b c & d pmatrix」垃圾字样且无任何矩阵结构（深基坑/
+    #    脚手架计算书的刚度方程/工况组合受影响）。仅对**整式即单一矩阵环境**
+    #    的形态转换真矩阵（m:m）；混合形态维持旧解析（登记遗留，见报告）。
+    m_env = _MATRIX_ENV_RE.fullmatch(latex.strip())
+    if m_env:
+        return _matrix_to_omml(m_env.group(1), m_env.group(2))
     nodes = _LatexParser().parse(latex)
     inner = "".join(_node_to_omml(n) for n in nodes)
     if _DANGLING_OP_RE.search(latex.strip()):

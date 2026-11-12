@@ -229,7 +229,10 @@ def test_snapshot_paused_ms_deducted_from_eta_section_elapsed():
     ETA 回退口径 = 任务耗时（已扣暂停）→ 章节阶段口径同理（B1 注释）。"""
     prog = _make_prog(elapsed=200.0, section_elapsed=50.0)
     s = _snapshot_stats(prog, paused_ms=30_000.0)
-    effective = 2 + _section_partial(prog["running"]["a"], time.monotonic())
+    # ✅ R224 重锚：partial 与 ETA 同源扣暂停（_section_partial 新增 paused_ms，
+    #    rec 无锚点水位时全额扣除）—— effective 算式与实现对齐，意图不变
+    #    （暂停期间 ETA 不增长），扣减面从「分子」扩展到「分母的进行中贡献」。
+    effective = 2 + _section_partial(prog["running"]["a"], time.monotonic(), None, paused_ms=30_000.0)
     # 回退口径：章节阶段耗时 = elapsed_ms = 200s - 30s = 170s
     expect = int(170000 / effective * (10 - effective))
     assert s["eta_ms"] == pytest.approx(expect, rel=1e-3)

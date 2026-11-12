@@ -311,6 +311,8 @@ async def parse_outline(
                 lambda o: [] if o.get("outline") else ["缺少 outline"],
                 scene="outline_recognition",
                 repair_key=OUTLINE_REPAIR_KEY,
+                # ✅ R226（R-5）：补显式 timeout（主调用原可跑满 provider 900s）。
+                timeout=300,
             )
             ai_outline = obj.get("outline", [])
             if _outline_seems_valid(ai_outline):

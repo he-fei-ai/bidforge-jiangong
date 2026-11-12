@@ -92,6 +92,8 @@ export function useExportCheck(deps: ExportCheckDeps) {
         chart_done: data.chart_done,
         // ✅ B-17（R182 · 2026-11-06）：交叉引用三态（无图表集合 → 无法判定）。
         crossref_check: data.crossref_check,
+        // ✅ R221：图表渲染就绪度（后端加法字段；旧后端无此键 → undefined → 不展示）。
+        chart_render_readiness: data.chart_render_readiness,
       });
       // ✅ G1：导出预检反向打通就绪度总检 —— 同一份数据、同一套规则词表，
       // 用户不用在两个页面之间来回比对「到底能不能交付」

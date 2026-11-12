@@ -278,6 +278,17 @@ class Settings(BaseSettings):
     #    100% 无用（运行库实测 265 次纯浪费）。False（默认）= 章节级重试循环
     #    识别后直接放弃本章节（不重试）；True = 旧行为（任何错误都按原次数重试）。
     ai_retry_on_quota_error: bool = False
+    # ---------- AI Token 用量结构化埋点（R220 · 2026-11-11） ----------
+    # 每次 AI **成功**调用在 provider_factory 落一条 key=value 结构化日志
+    # （prompt/completion/cached/total_tokens + cache_hit_rate + provider/model/
+    #  scene/duration + trace），并累计到进程内有界快照，供运维页查询：
+    # GET /system/prompt-metrics 的 ai_usage 键（加法式，既有键逐字不变）。
+    # 默认开启；关闭后埋点与聚合均零开销。快照重启清零、不落库、不新增表列，
+    # 未落密钥/正文/提示词原文，单次调用仅一行日志。
+    ai_usage_log_enabled: bool = True
+    # 快照按 provider / scene 两个维度各自的 key 上限；超过归 __overflow__，
+    # 防止长跑时配置/场景枚举无限增长。非法（≤0）值回落内置 256。
+    ai_usage_snapshot_max_keys: int = 256
     # ✅ R4 修复（2026-09-22）：流式请求命中确定性错误（402/403/404/quota/invalid key 等）时
     # 是否走普通请求重试。True（默认）= 跳过普通请求重试，直接抛出让上层候选链切换；
     # 因为对同一 provider 而言确定性错误非流式同样 100% 失败，重试白烧一次 HTTP。
@@ -568,6 +579,12 @@ class Settings(BaseSettings):
     content_request_timeout: int = 300
     # 含降级链的总超时（秒）：首稿与续写共用。
     content_total_timeout: int = 660
+    # ✅ R226（2026-11-12 · OBS-1 接线）：JSON 收集「首轮+全部修复轮」整体截止
+    #    （秒）。``collect_json_response*`` 的 ``total_timeout`` 参数未显式指定
+    #    （None）时回退本值。默认 600s：覆盖全部现实合法流程（目录 3×180=540s、
+    #    事实 3×240=720s 主调用在 600s 内），仅截真正卡死的长跑（未传 timeout 的
+    #    调用点主调用原可跑满 provider 900s）；设 ``0`` 显式禁用（逐字节兼容旧行为）。
+    json_total_timeout: int = 600
     # 章节生成失败后的重试次数（首稿；续写不重试，见 sse_handlers P1-1 注释）。
     content_section_retries: int = 1
     # 普通错误退避基数（秒）。

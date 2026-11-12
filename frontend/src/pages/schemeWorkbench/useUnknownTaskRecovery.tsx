@@ -37,6 +37,12 @@ export interface UnknownTaskRecoveryDeps {
   //    生成不写 sections（必须经一级闸门确认才入库），completed 只 load() 刷不出
   //    任何东西 ⇒ checkpoint 里的目录成果凭空丢失。镜像 onContentResult 注入。
   onOutlineResult?: (fin: TaskTerminalInfo) => void;
+  // ✅ R224（F17）：facts 任务手动接管终态消费 facts_result —— segment_stats /
+  //    cross_conflicts 此前只在断线重挂恢复（useFactsGeneration reattach 分支），
+  //    手动接管与刷新接管两路缺口（content=R194 FIX-16 / outline=R216 D-1 同族）。
+  //    completed/degraded 的统计恢复与 loadFacts 在回调内完成；failed/stopped
+  //    仍走通用分支。
+  onFactsResult?: (fin: TaskTerminalInfo) => void;
   unknownTaskTypeLabel: Record<string, string>;
 }
 
@@ -57,6 +63,7 @@ export function useUnknownTaskRecovery(deps: UnknownTaskRecoveryDeps) {
     pollTaskUntilTerminal,
     onContentResult,
     onOutlineResult,
+    onFactsResult,
     unknownTaskTypeLabel,
   } = deps;
 
@@ -93,6 +100,17 @@ export function useUnknownTaskRecovery(deps: UnknownTaskRecoveryDeps) {
     // ✅ R194（FIX-13）：本协程是否回填过 activeTaskIdRef（退出时只清自己写的值）
     let didBackfill = false;
     if (!ut || !id) return;
+    // ✅ R223（2026-11-12 · P2 · FE-3）：任务归属校验 —— 恢复回调（onOutlineResult →
+    //    outlineRestoreFnRef）闭包捕获**当前页面**的方案 id，接管异方案任务会把
+    //    旧方案的 checkpoint 目录 setTree 到本页并在闸门确认后写进当前方案
+    //    （跨方案整表重建）。标记点已带 schemeId（R223 同批），有归属且不匹配
+    //    时拒绝接管并清除横幅；无 schemeId 的旧内存态放行（同页面生命周期，
+    //    不存在跨升级持久化）。
+    if (ut.schemeId && ut.schemeId !== id) {
+      msg.warning("该未知任务属于其他方案，已清除本页标记；请回到对应方案页面接管");
+      clearUnknownTask();
+      return;
+    }
     if (generating) {
       msg.info("当前已有任务在前台监听，请等待其结束");
       return;
@@ -147,14 +165,27 @@ export function useUnknownTaskRecovery(deps: UnknownTaskRecoveryDeps) {
       //    （树恢复 / 截断与复用信号 / 闸门）—— 此前 completed 走
       //    「已完成，正在刷新」+ load()，目录生成不写 sections ⇒ 成果丢失。
       if (ut.genType === "outline") onOutlineResult?.(fin);
-      if (fin.status === "completed" || fin.status === "degraded") {
-        msg.success("后台任务已完成，正在刷新");
-        load();
-      } else if (fin.status === "failed") {
-        msg.error(fin.message || "后台任务失败");
-      } else {
-        msg.info("后台任务已停止");
-        load();
+      // ✅ R224（F17）：facts 手动接管 completed/degraded 走专用消费（统计恢复 +
+      //    loadFacts 都在回调内），不走下方通用分支防双提示；failed/stopped 仍走
+      //    通用分支。
+      if (ut.genType === "facts" && (fin.status === "completed" || fin.status === "degraded")) {
+        onFactsResult?.(fin);
+      } else if (ut.genType !== "outline") {
+        // ✅ R223（2026-11-12 · P2 · FE-1）：outline 终态**不得再走通用 load() 分支** ——
+        //    onOutlineResult 已恢复树/闸门（或无成果时自行 load），此处的无条件
+        //    load() 会拉回保存前旧树，把刚 setTree 的成果预览冲掉（目录生成不写
+        //    sections，刷新拿不到生成成果）；对照刷新接管（有 checkpoint 成果时
+        //    不 load）与断线重挂同纪律，手动接管是漏网的第三条。content/facts
+        //    写各自的数据表，通用 load() 刷新语义保留。
+        if (fin.status === "completed" || fin.status === "degraded") {
+          msg.success("后台任务已完成，正在刷新");
+          load();
+        } else if (fin.status === "failed") {
+          msg.error(fin.message || "后台任务失败");
+        } else {
+          msg.info("后台任务已停止");
+          load();
+        }
       }
     } finally {
       if (genSeqRef.current === mySeq) {
@@ -201,7 +232,25 @@ export function useUnknownTaskRecovery(deps: UnknownTaskRecoveryDeps) {
       cancelText: "取消",
       onOk: async () => {
         try {
-          const { data } = await tasksApi.status(ut.taskId);
+          // ✅ R224（F18）：空 taskId（断线时未收到 task_id 的未知态）直接
+          //    GET /sse/task/"" → 路由不匹配必 404 → 被 catch 按「任务已不存在，
+          //    可安全重新生成」放行 —— 守卫对该形态恒 fail-open。与
+          //    handleReattachUnknownTask（:116 空 id 检索兜底）对称：先按类型
+          //    检索最近同类型任务，检索不到才判「后台确无在跑任务」放行。
+          let checkTaskId = ut.taskId;
+          if (!checkTaskId) {
+            checkTaskId =
+              (await findRecentOutlineTaskImpl(async () => (await tasksApi.list(id)).data, {
+                typeFilter: `${ut.genType}_generation`,
+              })) || "";
+            if (!checkTaskId) {
+              clearUnknownTask();
+              msg.info("未发现仍在运行的后台任务，可安全重新生成");
+              proceed();
+              return;
+            }
+          }
+          const { data } = await tasksApi.status(checkTaskId);
           const next = resolveUnknownTaskNext(data?.status);
           if (next === "reattach") {
             msg.warning("后台任务仍在运行，已转入重新接管监听，本次未发起新生成");

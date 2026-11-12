@@ -18,6 +18,7 @@ import logging
 import re
 from dataclasses import asdict, dataclass
 from datetime import date
+from types import SimpleNamespace
 
 from app.services.ai.prompts._norm_dicts import (
     grade_rank,
@@ -138,6 +139,13 @@ def _check_material_vs_design(merged) -> tuple[list[CrossConflict], list]:
     """
     conflicts: list[CrossConflict] = []
     range_merged: list = []
+    # ✅ R225（2026-11-12 · C2）：撤销粒度收窄到「全部候选兼容」。旧判据
+    #    「任一候选满足范围」即进 range_merged —— [C25(低于下限), C35(兼容)]
+    #    时 high 的 material_below_range_floor 冲突记录照常产出，行上矛盾标记
+    #    却被整体撤销 → 行过注入门控而诊断面板仍显示高危矛盾（记录与标记背离）。
+    #    此集合记录「该条目存在低于范围下限的真矛盾候选」，返回前从
+    #    range_merged 中剔除，交由人工裁决。
+    range_conflicted: set[int] = set()
     for it in merged:
         if not it.has_conflict or not it.conflict_values:
             continue
@@ -190,6 +198,9 @@ def _check_material_vs_design(merged) -> tuple[list[CrossConflict], list]:
                                 resolution_hint="实际取用值低于范围约束下限，" "疑似笔误或取值错误",
                             )
                         )
+                        # ✅ R225（C2）：该条目存在低于范围下限的真矛盾候选，
+                        #    不得因其他候选兼容而被整体撤销标记。
+                        range_conflicted.add(id(it))
                     continue
 
             # ③ 同类可比 → 档位差分档
@@ -225,6 +236,10 @@ def _check_material_vs_design(merged) -> tuple[list[CrossConflict], list]:
                         resolution_hint="两值不同类且无法比对，疑似名称归一错误，转人工复核",
                     )
                 )
+    # ✅ R225（C2）：返回前剔除「存在真矛盾候选」的条目 —— 全部候选兼容
+    #    才允许撤销（判据方向只会多留冲突标记，保守）。
+    if range_conflicted:
+        range_merged = [x for x in range_merged if id(x) not in range_conflicted]
     return conflicts, range_merged
 
 
@@ -429,6 +444,23 @@ def _check_flow_sequence(merged) -> list[CrossConflict]:
                     )
                 )
                 continue
+            if len(seq_a) * len(seq_b) > _LCS_CELL_CAP:
+                # ✅ R225（2026-11-12 · C5）：LCS 规模超闸是**性能保护**（_lcs_len
+                #    按无公共子序列近似返回 0），不是判定真矛盾的依据 —— sim=0
+                #    是保护性假值，旧实现让 600 步仅一处写法差异的近乎相同流程
+                #    落进 else 分支被判「相似度 0%；属真矛盾 high」。降档 low 并
+                #    如实提示未全量比对；换位专项（不依赖 LCS）仍在上方先行判定。
+                conflicts.append(
+                    CrossConflict(
+                        rule_id="XV-FLOW-SEQ",
+                        severity="low",
+                        conflict_type="flow_sequence_divergence",
+                        side_a=_side(it),
+                        side_b=_side(it, cand_val),
+                        resolution_hint="流程序列过长未做全量比对，需人工复核两条流程是否一致",
+                    )
+                )
+                continue
             if sim >= 0.85:
                 sev, hint = "low", "可能是详略差异，确认是否为同一流程的粗/细两级描述"
             elif sim >= 0.6:
@@ -511,6 +543,33 @@ def _check_same_name_conflicts(merged, initial_had_candidate: dict) -> list[Cros
         for it, _ in valued:
             if not initial_had_candidate.get(id(it)):
                 it.has_conflict = True
+                # ✅ R225（2026-11-12 · C4）：打标同时登记组内其他 distinct 值为
+                #    候选 —— 旧实现只置 has_conflict 不写 conflict_values，落库
+                #    conflict_keys 为空 → resolve_conflict 409「请先选择正确的
+                #    候选值」而前端裁决弹窗无任何「选此值」可渲染（假死锁，
+                #    用户只能手填任意值绕行）。候选结构与 merge_and_deduplicate
+                #    的 conflict_values 同构（value/source/confidence/is_simulated），
+                #    resolve 按值裁决时据此重算 is_simulated 的既有逻辑直接可用。
+                for d in distinct:
+                    if d == _norm_text_value(it.value):
+                        continue
+                    rep = next((x for x, v in valued if v == d), None)
+                    if rep is None:
+                        continue
+                    rep_val = str(getattr(rep, "value", "") or "")
+                    if not any(
+                        str(c.get("value", "")) == rep_val
+                        for c in it.conflict_values
+                        if isinstance(c, dict)
+                    ):
+                        it.conflict_values.append(
+                            {
+                                "value": getattr(rep, "value", ""),
+                                "source": getattr(rep, "source", ""),
+                                "confidence": _safe_confidence(getattr(rep, "confidence", 1.0), 1.0),
+                                "is_simulated": bool(getattr(rep, "is_simulated", False)),
+                            }
+                        )
         for i in range(len(reps)):
             for j in range(i + 1, len(reps)):
                 a, _ = reps[i]
@@ -761,12 +820,58 @@ def _check_numeric_unit_consistency(merged) -> list[CrossConflict]:
         # ✅ R166：与 _check_same_name_conflicts 同口径 —— key 非空只按 key
         #    分组（不再按 name 二次分裂），key 缺失回落 name（旧 shim 兼容）。
         key = str(getattr(it, "key", "") or "").strip()
+        nm = (it.name or "").strip()
         if key:
             by_key.setdefault(key, []).append((it, q))
             continue
-        nm = (it.name or "").strip()
         if nm:
             by_name.setdefault(nm, []).append((it, q))
+
+    # ✅ R225（2026-11-12 · C1）：merge_and_deduplicate 先把同 key 多值折叠成
+    #    「1 条主值 + conflict_values 候选」，本规则只比对「组内不同条目的
+    #    value」→ 标准管线里每组恒为单例，全部空转 —— 「12.5m vs 1250cm
+    #    数值等价建议统一单位」「12.5m vs 12.5cm 量级差恰为换算比」的量纲
+    #    诊断在主链永不出现。此处对**单例组**把候选值展开为虚拟比对条目
+    #    （SimpleNamespace 带 name/value/source/confidence/key，_side 可直接
+    #    呈现候选取值），复用组内既有换算判据；_add_num_candidate 自带按值
+    #    去重。组内 ≥2 真实条目时不展开：组间比对已覆盖该对（且 C4 给
+    #    XV-SAME-NAME 登记的候选值本来就来自组内条目，展开会产出重复诊断
+    #    记录）。XV-SAME-NAME 对带候选条目让位 material 规则的既有契约不受
+    #    影响（本规则不触碰 has_conflict 打标，仅产出诊断记录）。
+    for _group_items in list(by_key.values()) + list(by_name.values()):
+        if len(_group_items) != 1:
+            continue
+        it0, _q0 = _group_items[0]
+        if isinstance(it0.value, (list, tuple)):
+            continue
+        _gkey = str(getattr(it0, "key", "") or "").strip()
+        for cand in (it0.conflict_values or []):
+            if not isinstance(cand, dict):
+                continue
+            cand_val = cand.get("value", "")
+            if isinstance(cand_val, (list, tuple)):
+                continue
+            cq = _extract_quantity(str(cand_val))
+            if not cq:
+                continue
+            _group_items.append(
+                (
+                    SimpleNamespace(
+                        name=it0.name,
+                        value=str(cand_val),
+                        source=str(cand.get("source") or ""),
+                        confidence=_safe_confidence(cand.get("confidence"), 1.0),
+                        key=_gkey,
+                        # _add_num_candidate 会遍历/回写 conflict_values 与
+                        # has_conflict —— 虚拟条目给空容器承接（对象即抛即弃，
+                        # 不影响真实条目）。
+                        conflict_values=[],
+                        has_conflict=True,
+                        is_simulated=bool(cand.get("is_simulated", False)),
+                    ),
+                    cq,
+                )
+            )
 
     for items in list(by_key.values()) + list(by_name.values()):
         by_dim: dict[str, list] = {}
@@ -904,10 +1009,36 @@ def run_cross_validations(merged) -> list[dict]:
     conflicts.extend(mat_conflicts)
     # ✅ 加固：按条目身份撤销（旧实现按 name 全文匹配，同名不同 key
     #    的无关条目会被误撤销矛盾标记）。
+    reverted_keys: set[tuple[str, str]] = set()
     for merged_it in range_merged:
         merged_it.has_conflict = False
         merged_it.conflict_values = []
+        reverted_keys.add(
+            (
+                str(getattr(merged_it, "key", "") or ""),
+                _norm_text_value(merged_it.value),
+            )
+        )
         logger.info("范围值兼容合并：%s（撤销冲突标记）", merged_it.name)
+    # ✅ R225（2026-11-12 · C2）：行标记撤销后，本轮冲突记录中指向已撤销
+    #    条目（fact_key+归一值双匹配）的诊断同步剔除 —— 否则行过注入门控
+    #    而 /cross-conflicts 诊断面板仍显示高危矛盾（记录与标记背离，C8 家族）。
+    if reverted_keys:
+
+        def _side_matches_reverted(side: dict) -> bool:
+            if not isinstance(side, dict):
+                return False
+            fk = str(side.get("fact_key") or "")
+            val = side.get("value")
+            if isinstance(val, (list, tuple)):
+                nv = _norm_text_value(val)
+            else:
+                nv = _norm_text_value(str(val or ""))
+            return bool(fk) and (fk, nv) in reverted_keys
+
+        conflicts = [
+            c for c in conflicts if not _side_matches_reverted(getattr(c, "side_a", None))
+        ]
 
     conflicts.extend(_check_machinery_vs_schedule(eligible))
     conflicts.extend(_check_flow_sequence(eligible))

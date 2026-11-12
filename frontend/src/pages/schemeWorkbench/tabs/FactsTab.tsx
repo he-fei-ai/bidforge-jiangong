@@ -453,9 +453,14 @@ export function FactsTab({
         {/* ✅ R45 · D5：AI 调整事实抽为独立子组件（FactsAdjustPanel）。
                 状态机 / 竞态守卫 / 二次确认全部归位到组件内，交互行为由
                 factsAdjust.test.tsx 钉住；页面只保留后端契约接线。 */}
+        {/* ✅ R225（2026-11-12 · D4）：busy 补 !!parsingDocId 维度 —— 副本门禁
+                口径分裂家族第 4 处漏改（同 Space 内其余按钮均含该维度，权威
+                口径 DocumentParseList:188）。单份解析（OCR 分钟级）在飞时
+                apply 落库与解析完成时的批量置 stale 交叉：刚调整的值被打
+                stale（调整白做且无提示）或命中后端写锁 409。 */}
         <FactsAdjustPanel
           schemeId={id}
-          busy={generating || uploadingFacts || parsingDocs}
+          busy={generating || uploadingFacts || parsingDocs || !!parsingDocId}
           disabled={(factsSummary?.total || 0) === 0}
           confirmDialog={(opts) => modal.confirm(opts)}
           preview={async (instruction, signal) => {

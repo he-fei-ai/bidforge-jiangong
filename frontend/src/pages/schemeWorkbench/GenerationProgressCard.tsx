@@ -29,6 +29,12 @@ export type GenerationProgressProps = {
   stats?: GenStats;
   /** ✅ 可感知重连态：SSE 断线后正在重新挂接后台任务 */
   reconnecting?: boolean;
+  /** ✅ R227（修复10）：任务已达终态（completed/degraded/stopped/failed）。
+   *  正文生成终态事件把 progress 置 1（completed/degraded），但 stopped 保留真实
+   *  进度（<1）。原 `hasFailed = failedShown>0 && progress>=1` 在 stopped+有失败时
+   *  恒假 —— 进度条不显示 exception（不对称：completed 显示、stopped 不显示）。
+   *  缺省 false（旧行为），由调用方在终态事件处置时置 true。 */
+  terminal?: boolean;
 };
 
 /** ✅ 实时日志面板的最大渲染行数：仅限制渲染，数据源保持全量。
@@ -95,7 +101,10 @@ export const GenerationProgressCard = memo(function GenerationProgressCard(
   const failedShown = Math.max(failedCount, typeof stats?.failed === "number" ? stats.failed : 0);
   // 目录生成分步链路才有章节维度（done/total = 已生成子目录的章数 / 总章数）
   const outlineStepwise = isOutline && !!stats?.stepwise;
-  const hasFailed = failedShown > 0 && progress >= 1;
+  // ✅ R227（修复10）：stopped 终态 progress 保留真实值（<1），`progress >= 1`
+  //    恒假 ⇒ 有失败也不显示 exception。终态信号与 completed/degraded 的
+  //    `progress >= 1` 并集，消除不对称（default 旧行为，未接终态时不变）。
+  const hasFailed = failedShown > 0 && (progress >= 1 || p.terminal === true);
   return (
     <Card
       size="small"

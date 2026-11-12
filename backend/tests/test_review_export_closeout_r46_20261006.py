@@ -235,11 +235,25 @@ async def test_cache_status_marks_missing_files_as_stale(db_ctx, tmp_path):
 # 3. reset_content 必须失效导出缓存（sections.py 唯一漏接的正文写路径）
 # ---------------------------------------------------------------------------
 @pytest.mark.asyncio
-async def test_reset_content_invalidates_export_cache(db_ctx, tmp_path):
-    """清空正文后旧缓存行与磁盘产物一并清理（不留孤儿）。"""
+async def test_reset_content_invalidates_export_cache(db_ctx, tmp_path, monkeypatch):
+    """清空正文后旧缓存行与磁盘产物一并清理（不留孤儿）。
+
+    ✅ R227 重锚（意图保留、强度不减）：R226（A2）把 invalidate_export_cache
+    改为**只删 DB 缓存行**——磁盘产物改交 :func:`_gc_orphan_exports` 统一回收，
+    避免在文件仍被响应流式读取时误删（R46 的「清空即删文件」断言随设计升级）。
+    原「不留孤儿」意图改为两段契约共同承载：
+      1) reset_content 后缓存行必须清零（失效本身）；
+      2) 对孤儿目录调 :func:`_gc_orphan_exports` 后磁盘产物必须回收（不留孤儿）。
+    """
+    import app.routers.export as _export_mod
+    from app.routers._export_cache import _gc_orphan_exports
+
     db, pid, sid = db_ctx
     await _insert_section(db, sid, pid, content="要被清掉的正文" * 20)
-    artifact = tmp_path / "cached-export.docx"
+    # GC 只扫 EXPORTS_DIR 顶层文件且要求 `{scheme_id}_` 文件名前缀（三重收窄），
+    # 测试需指向临时目录并遵守命名契约。
+    monkeypatch.setattr(_export_mod, "EXPORTS_DIR", tmp_path)
+    artifact = tmp_path / f"{sid}_cached-export.docx"
     artifact.write_bytes(b"PK\x03\x04dummy")
     await db.execute(
         "INSERT INTO export_cache (id, project_id, scheme_id, config_hash,"
@@ -253,7 +267,10 @@ async def test_reset_content_invalidates_export_cache(db_ctx, tmp_path):
     assert all((r[0] or "") == "" for r in await cur.fetchall()), "reset_content 未清空正文"
     cur = await db.execute("SELECT COUNT(*) AS c FROM export_cache WHERE scheme_id=?", (sid,))
     assert (await cur.fetchone())[0] == 0, "正文已重置但导出缓存未失效（孤儿行残留）"
-    assert not artifact.exists(), "正文已重置但磁盘导出产物残留"
+    # ✅ R227：磁盘产物已改由孤儿回收统一清理（R226 A2 设计），调 GC 验证不留孤儿。
+    assert artifact.exists(), "前置：孤儿产物必须先在盘上"
+    await _gc_orphan_exports(db, sid)
+    assert not artifact.exists(), "正文已重置且孤儿回收后磁盘导出产物仍残留"
 
 
 @pytest.mark.asyncio

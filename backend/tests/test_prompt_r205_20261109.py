@@ -73,6 +73,61 @@ def test_total_timeout_none_unchanged(monkeypatch):
 
     r = asyncio.run(_run())
     assert r[0] == {"ok": 1}  # collect_json_response 返回 (obj, raw)
+    # ✅ R226（OBS-1 接线）：None 现在回退 settings.json_total_timeout（默认 600s），
+    #    快速 mock 不受影响；真正「不限制」须显式传 0（见 test_total_timeout_zero_disables）。
+
+
+def test_total_timeout_zero_disables(monkeypatch):
+    """✅ R226（OBS-1 接线）：显式传 0 才真正禁用整体截止（逐字节兼容旧行为）。
+
+    即使 settings.json_total_timeout 被设得很小（1s），0 也必须绕过它 —— 这是
+    「主动加固」与「行为变更」的分界护栏。
+    """
+    import app.services.ai.json_response as jr
+    from app.config import settings
+
+    monkeypatch.setattr(settings, "json_total_timeout", 1)
+
+    async def _slow(msgs, **kw):
+        await asyncio.sleep(3.0)
+        return "{}"
+
+    monkeypatch.setattr(jr, "chat_with_fallback", _slow)
+
+    async def _run():
+        return await collect_json_response(
+            [{"role": "system", "content": "s"}, {"role": "user", "content": "u"}],
+            total_timeout=0,
+        )
+
+    r = asyncio.run(_run())  # 0 禁用 → 不抛 TimeoutError
+    assert r[0] == {}
+
+
+def test_total_timeout_none_uses_settings_default(monkeypatch):
+    """✅ R226（OBS-1 接线）：None（未显式指定）→ 回退 settings.json_total_timeout。
+
+    证明主动上界生效：settings 设 1s，slow mock 3s → 必须被截断。
+    """
+    import app.services.ai.json_response as jr
+    from app.config import settings
+
+    monkeypatch.setattr(settings, "json_total_timeout", 1)
+
+    async def _slow(msgs, **kw):
+        await asyncio.sleep(3.0)
+        return "{}"
+
+    monkeypatch.setattr(jr, "chat_with_fallback", _slow)
+
+    async def _run():
+        return await collect_json_response(
+            [{"role": "system", "content": "s"}, {"role": "user", "content": "u"}],
+            total_timeout=None,
+        )
+
+    with pytest.raises(asyncio.TimeoutError):
+        asyncio.run(_run())
 
 
 # ---------------------------------------------------------------------------

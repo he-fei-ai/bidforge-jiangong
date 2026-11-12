@@ -617,11 +617,11 @@ def reset_prompt(key: str) -> str | None:
 #:   引号边界；集中声明一处维护、一处校验，且新增/删除模板时契约一目了然。
 #:
 #: 声明口径 = **已核对全部渲染调用点的实际传参**（不是猜的）：
-#:   · content_generation_system  ← sse_handlers.py 正文渲染（4/4 全传）
-#:   · content_continue_system    ← sse_handlers.py 续写渲染（3/3 全传）
-#:   · outline_short_system       ← sse_handlers.py 短方案目录（4/4 全传）
-#:   · outline_level1_system      ← sse_handlers.py 长方案一级目录（6/6 全传）
-#:   · outline_review_system      ← sse_handlers.py 目录审核（6/6 全传）
+#:   · content_generation_system  ← sse_handlers.py 正文渲染（7/7 全传）
+#:   · content_continue_system    ← sse_handlers.py 续写渲染（4/4 全传）
+#:   · outline_short_system       ← sse_handlers.py 短方案目录（7/7 全传）
+#:   · outline_level1_system      ← sse_handlers.py 长方案一级目录（9/9 全传）
+#:   · outline_review_system      ← sse_handlers.py 目录审核（9/9 全传）
 #:   · outline_patch_system       ← sse_handlers.py 外科式补齐（6/6 全传）
 #:   · outline_feedback_system    ← sse_handlers.py 反馈修正（6/6 全传）
 #:

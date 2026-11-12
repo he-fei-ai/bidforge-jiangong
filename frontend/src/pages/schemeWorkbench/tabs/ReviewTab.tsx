@@ -30,6 +30,7 @@ import PlaceholderReportPanel from "../../../components/PlaceholderReportPanel";
 import { NumberingConsistencyPanel } from "../NumberingConsistencyPanel";
 import { DEFAULT_COMPLIANCE_CHECKLIST } from "../reviewShared";
 import { EXPORT_ISSUE_LABEL, describeExportIssue } from "../exportShared";
+import { chartRenderReadinessHint } from "../../../utils/exportResponse";
 import {
   SEVERITY_COLOR,
   SEVERITY_LABEL,
@@ -774,6 +775,19 @@ export function ReviewTab({
                 </div>
               </Col>
             </Row>
+            {(() => {
+              // ✅ R221：图表「状态完成」不等于「导出能出图」——把渲染后端
+              //    不可用 + 无本地解析器的语法载荷提前暴露在预检卡片里。
+              const hint = chartRenderReadinessHint(exportStats.chart_render_readiness);
+              return hint ? (
+                <div
+                  data-testid="export-chart-render-readiness"
+                  style={{ marginTop: 8, fontSize: 12, color: "#d48806" }}
+                >
+                  ⚠️ {hint}
+                </div>
+              ) : null;
+            })()}
             {exportStats.crossref_check?.undetermined && (
               // ✅ B-17（R182 · 2026-11-06）：无图表集合 → 交叉引用「无法判定」，
               //    绝不能显示成「✓ 已就绪 / 通过」。

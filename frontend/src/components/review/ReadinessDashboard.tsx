@@ -689,6 +689,24 @@ function ReadinessDashboard({
               description="这些维度的问题清单可能不完整，未覆盖的部分既未确认通过也未确认不通过（无法判定）；请补齐检查范围后重新总检，在此之前结论不得据此放行。"
             />
           )}
+          {/* ✅ R220（商业化「未检查 / 已检查」显式化）：SAF-08 在全局事实未装配
+              时直接跳过，finding 清单里「零条问题」与「根本没查」长得完全一样。
+              后端已加法式回传 fact_coverage，此处显式区分；缺省（旧后端）不渲染。 */}
+          {overview.fact_coverage?.state === "unchecked" && (
+            <Alert
+              type="warning"
+              showIcon
+              icon={<ExclamationCircleOutlined />}
+              style={{ marginTop: 12 }}
+              message="全局事实未参与本次危大参数核对（未检查）"
+              description={`${overview.fact_coverage.reason || "未装配可注入的已确认事实"}。这不属于「核对通过」：SAF-08 规则本次未执行，请先完成资料解析与事实确认后重新总检，在此之前不得据此判定方案非危大。`}
+            />
+          )}
+          {overview.fact_coverage?.state === "checked" && (
+            <Text type="secondary" style={{ fontSize: 12, display: "block", marginTop: 12 }}>
+              危大参数反哺已执行（SAF-08）：参与核对事实 {overview.fact_coverage.participating ?? 0} 条
+            </Text>
+          )}
           {(overview.findings || []).length > 0 && (
             <div style={{ marginTop: 12 }}>
               <Space style={{ marginBottom: 6 }} wrap>

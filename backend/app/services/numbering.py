@@ -485,13 +485,26 @@ def _stored_id_parts(stored_id) -> list[str]:
     #    对 "01.02" 落库写出 "02.1"），与导出模板的 int 渲染（{num}/{last2}）
     #    分叉 ⇒ 预览≠成稿。归一只收窄「数值语义不变」的形态，
     #    "abc1.2"/"1.a"/"0.3" 等真垃圾仍 fail-closed（返回 []）。
-    s = str(stored_id).strip().translate(_FULLWIDTH_DIGITS_TRANS)
+    s = normalize_stored_id_text(stored_id)
     if not _DOT_PATH_RE.fullmatch(s):
         return []
     parts = [str(int(p)) for p in s.split(".")]
     if any(p == "0" for p in parts):
         return []
     return parts
+
+
+def normalize_stored_id_text(stored_id) -> str:
+    """存储态编号**文本归一**的单一出口：去首尾空白 + 全角数字/点号 → ASCII。
+
+    ✅ R223（2026-11-12 · P3 · NUM-5）：此前全角归一只活在 ``_stored_id_parts``
+    （display/prefix 判据）里，而 ``stored_outline_id``（提取出口）只 ``strip``
+    不翻译，全角存量行 "３.２" 被原样放行 ⇒ 导出预检
+    ``_detect_section_number_mismatch`` 拿全角原值与结构推算的 ASCII 编号逐字
+    比对，对「各读路径都能正常消费」的行报假阳性。现归一收敛为本公开函数，
+    判据与提取/比对两侧共用（对 ASCII 合法编号恒等，行为零变化）。
+    """
+    return str(stored_id or "").strip().translate(_FULLWIDTH_DIGITS_TRANS)
 
 
 #: ✅ R86（L2 · 编号命名空间统一）：``_stored_id_parts`` 的**公开别名**。
@@ -1128,7 +1141,7 @@ async def repair_scheme_numbering_consistency(db, scheme_id: str) -> dict:
     report = await validate_scheme_content_numbering(db, scheme_id)
     drifted = [s for s in report.get("sections", []) if not s.get("consistent") and not s.get("skipped")]
     if not drifted:
-        return {"fixed": 0, "total": report["checked"], "report": report, "snapshot_id": None}
+        return {"fixed": 0, "total": report["checked"], "report": report, "snapshot_id": None, "fixed_sections": []}
     # ✅ 性能（2026-09-27）：快照与修复两段各自逐章 SELECT content（各 N 次），
     #    修复段还逐章调 normalize（再 2N 次）。实测 200 章漂移方案合计 >1000 次
     #    execute。这里各用**一次批量查询**取回 content 字典，两段共用。
@@ -1189,6 +1202,7 @@ async def repair_scheme_numbering_consistency(db, scheme_id: str) -> dict:
         logger.warning("编号修复批量预取 word_budget 失败（回退逐章读取）: %s", e)
         wb_by_id = {}
     fixed = 0
+    _fixed_section_ids: list[str] = []  # ✅ R224（F10）：审核退回由路由层按此清单执行
     for sec in report.get("sections", []):
         if sec.get("consistent") or sec.get("skipped"):
             continue
@@ -1236,13 +1250,14 @@ async def repair_scheme_numbering_consistency(db, scheme_id: str) -> dict:
                     (new_content, _wc, word_status_for(_wc, _wb), sec_id, scheme_id),
                 )
                 # ✅ B-09（R175，闭环）：编号修复同样改写了正文 → 原审核结论
-                #    必须失效（此前只有一致性修复链会重置 review_status，编号
-                #    修复后章节仍挂着 approved，导出的评审结论与正文不一致）。
-                await db.execute(
-                    "UPDATE sections SET review_status='pending' "
-                    "WHERE id=? AND scheme_id=? AND IFNULL(review_status,'')!=''",
-                    (sec_id, scheme_id),
-                )
+                #    必须失效。✅ R224（F10）：审核退回收口到**路由层单一写入口**
+                #    ``reset_review_on_content_change``（幂等门控 + review_records
+                #    留痕）—— services 层不得依赖 routers
+                #    （test_numbering_imports_from_services_not_routers AST 级契约；
+                #    同函数 R188 L10「resync_fn 由路由层构造后注入」同纪律）。
+                #    本函数改回报修复章清单（fixed_sections，加法式键），由唯一
+                #    生产调用方（sections.numbering-consistency/repair）执行退回。
+                _fixed_section_ids.append(sec_id)
                 fixed += 1
         except Exception as e:  # noqa: BLE001
             logger.warning("章节 %s 编号修复失败（保留原正文）: %s", sec_id[:8], e)
@@ -1250,7 +1265,15 @@ async def repair_scheme_numbering_consistency(db, scheme_id: str) -> dict:
     # ✅ B-09（R175）：返回**修复后重新校验**的报告。旧实现回传修复前的
     #    ``report``，前端展示「仍有 N 处漂移」而正文其实已修好，用户反复点修复。
     fresh = await validate_scheme_content_numbering(db, scheme_id)
-    return {"fixed": fixed, "total": fresh.get("checked", 0), "report": fresh, "snapshot_id": snapshot_id}
+    return {
+        "fixed": fixed,
+        "total": fresh.get("checked", 0),
+        "report": fresh,
+        "snapshot_id": snapshot_id,
+        # ✅ R224（F10）：修复章清单 —— 唯一生产调用方据此走 review 单一写入口
+        #    退审核（services 不得依赖 routers）。
+        "fixed_sections": _fixed_section_ids,
+    }
 
 
 # ============================================================

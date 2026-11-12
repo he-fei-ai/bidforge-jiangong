@@ -1476,6 +1476,13 @@ TRIGGER_KEYWORDS = {
         "计划...开始，...结束",
         "工期60天",
         "第30天",
+        # ✅ R228（2026-11-12）· 对齐 AI 提示词触发表（prompts/content.py:205-213）：
+        #    程序侧旧库（v3.1）与 AI 判定脱节，导致「总体施工部署/工期控制」等
+        #    AI 会配图的场景在程序侧漏判。纯加法补词，不改判定逻辑。
+        "总体施工部署",
+        "工期控制",
+        "流水施工",
+        "工序穿插",
     ],
     "flowchart": [
         "施工工序",
@@ -1508,6 +1515,11 @@ TRIGGER_KEYWORDS = {
         "是否合格",
         "满足要求",
         "条件判断",
+        # ✅ R228（2026-11-12）· 对齐 AI 提示词触发表（prompts/content.py:208）：
+        #    补齐「检验流程/验收程序/加工制作」，降低流程图漏判。
+        "检验流程",
+        "验收程序",
+        "加工制作",
     ],
     "architecture": [
         "组织机构",
@@ -1552,6 +1564,13 @@ TRIGGER_KEYWORDS = {
         "下设...个部门",
         "由...负责...，...向...汇报",
         "包含...层",
+        # ✅ R228（2026-11-12）· 对齐 AI 提示词触发表（prompts/content.py:209）：
+        #    补齐「项目组织架构/任务分解/智慧工地/质量保证体系/安全保证体系」。
+        "项目组织架构",
+        "任务分解",
+        "智慧工地",
+        "质量保证体系",
+        "安全保证体系",
     ],
     "labor": [
         "劳动力配置",
@@ -1574,6 +1593,9 @@ TRIGGER_KEYWORDS = {
         "高峰期80人",
         "钢筋工30人",
         "木工25人",
+        # ✅ R228（2026-11-12）· 对齐 AI 提示词触发表（prompts/content.py:210）：
+        #    补齐「施工人员动态管理」。
+        "施工人员动态管理",
     ],
     "layout": [
         "总平面布置",
@@ -1608,6 +1630,10 @@ TRIGGER_KEYWORDS = {
         "进入...区域",
         "...区布置",
         "...侧为...",
+        # ✅ R228（2026-11-12）· 对齐 AI 提示词触发表（prompts/content.py:212）：
+        #    补齐「临建设施布置/施工平面布置图」（「临建布置」不含「临建设施布置」子串）。
+        "临建设施布置",
+        "施工平面布置图",
     ],
     "comparison": [
         "得分权重",
@@ -1637,6 +1663,26 @@ TRIGGER_KEYWORDS = {
         "百分比",
         "一方面...另一方面...",
         "与...相比，...高出...",
+        # ✅ R228（2026-11-12）· 对齐 AI 提示词触发表（prompts/content.py:211）：
+        #    补齐「方案比选/多方案对比/投入对比」（旧库只有「方案对比/指标对比」）。
+        "方案比选",
+        "多方案对比",
+        "投入对比",
+    ],
+    # ✅ R228（2026-11-12）· 补齐 timeline 类别（旧库 6 类缺 timeline，
+    #    而 AI 提示词触发表有 timeline，程序侧检测器对里程碑/时间轴类章节
+    #    无法判定）。关键词与 AI 提示词（prompts/content.py:213）对齐；
+    #    「里程碑」与 gantt 重叠，由分数排序解决（gantt 优先，宁缺毋滥）。
+    "timeline": [
+        "关键节点",
+        "里程碑",
+        "实施步骤节点",
+        "时间轴",
+        "关键里程碑",
+        "重大节点",
+        "节点计划",
+        "工期节点",
+        "时序安排",
     ],
 }
 
@@ -1846,8 +1892,14 @@ def detect_chart_with_metadata(text: str) -> dict:
         if ct not in matched_keywords:
             matched_keywords[ct] = []
 
-    top_chart = results[0][0] if results else None
+    # ✅ 零分 = 无匹配（2026-11-12 · R228）：旧实现 top_score==0 时仍返回
+    #    results[0][0] —— 按类型名升序排序后恒为 `architecture`，导致「无任何
+    #    关键词/句式命中」的章节被系统性误判为架构图（探针实测：安全教育培训/
+    #    项目概况/质量方针/文明施工/绿色施工全部误判 architecture，score=0）。
+    #    修复为「零分 → top_chart=None」：宁漏报不误报（与 input_coverage 同哲学），
+    #    接线方（生成后交叉校验）只在检测器给出明确正分匹配时才采信。
     top_score = results[0][1] if results else 0
+    top_chart = results[0][0] if top_score > 0 else None
 
     return {
         "chart_types": results,
@@ -2018,6 +2070,53 @@ PIL_RENDERABLE_CHART_TYPES: frozenset[str] = frozenset(
         "timeline",
     }
 )
+
+# ✅ R221（2026-11-11 · 图表导出增强）：7 类中**具备 Mermaid 语法解析器**的 4 类。
+#    architecture / labor / layout 只解析结构化 JSON 数据载荷；它们的 Mermaid
+#    语法载荷在 Level 2 没有对应解析器，HTTP Service 不可用时即便开启
+#    PIL 兜底也必然返回 None。把这张子集独立出来，是为了让「哪些图真的
+#    能被本地兜底」有唯一事实源，不再由调用方各自按类型名猜测。
+PIL_SYNTAX_CHART_TYPES: frozenset[str] = frozenset(
+    {
+        "flowchart",
+        "gantt",
+        "comparison",
+        "timeline",
+    }
+)
+
+
+def chart_render_capability(chart_type: str, code: str) -> dict:
+    """判定一张图（类型 × 载荷形态）在两条渲染轨上的**真实**可渲染性。
+
+    ✅ R221：此前「有没有本地兜底」的判据散在导出侧两处且口径互斥 ——
+    一处只按类型白名单反向判定，另一处只认甘特图。但可渲染性实际上是
+    **类型与载荷形态的二元函数**：
+
+      · JSON 数据载荷（以 ``{`` / ``[`` 开头）：PIL v2 是唯一路径，
+        HTTP 渲染服务不消费此类载荷；
+      · Mermaid 语法载荷 + 上述 4 类：PIL v2 有语法解析器，可兜底
+        （是否兜底由 allow_pil 开关决定）；
+      · Mermaid 语法载荷 + 其余类型（含 architecture / labor / layout，
+        以及 sequence / class / state / er / mindmap 等 12 类 HTTP-only）：
+        PIL v2 无对应解析器，只能靠 HTTP Service 或前端 mermaid.js，
+        开关开启也救不回来。
+
+    收口为单一事实源，供导出失败归因、预检就绪度与前端提示共用；
+    纯函数、零 IO、零配置，调用方显式传值行为不变。
+
+    Returns:
+        ``{"payload": "json"|"mermaid", "pil": "native"|"syntax"|"unsupported",
+        "http": bool}`` —— ``pil`` 三态分别表示「PIL 唯一路径」「PIL 可兜底」
+        「PIL 无解析器」；``http`` 表示该载荷是否可能由 HTTP 渲染服务出图。
+    """
+    ct = str(chart_type or "").strip().lower()
+    text = str(code or "")
+    if text.lstrip().startswith(("{", "[")):
+        return {"payload": "json", "pil": "native", "http": False}
+    if ct in PIL_SYNTAX_CHART_TYPES:
+        return {"payload": "mermaid", "pil": "syntax", "http": True}
+    return {"payload": "mermaid", "pil": "unsupported", "http": True}
 
 
 def first_mermaid_keyword(code: str) -> str:

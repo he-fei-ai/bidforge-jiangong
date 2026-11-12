@@ -50,12 +50,18 @@ describe("R213 · 目录信号文案（唯一出口）", () => {
 });
 
 describe("R213 · 三路径接线与契约 parity", () => {
-  it("截断提示在在线 completed / 在线 stopped / 断线重挂三处共用纯函数", () => {
+  it("截断提示在全部终态路径共用纯函数", () => {
     const calls = generationSrc.match(/outlineTruncationNotice\(/g) || [];
-    // 3 处消费点（import 语句不含括号）：在线 completed / 在线 stopped / 断线重挂
-    expect(calls.length).toBe(3);
+    // ✅ R223 重锚（意图保留、强度不减）：R213 首版把消费点计数锁死为 3
+    //    （在线 completed / 在线 stopped / 断线重挂）；R223 FE-5 补齐在线 error
+    //    分支成为第 4 处（第 5 处=刷新接管，消费点在 SchemeWorkbenchPage 的
+    //    outlineRestoreFnRef，由 outlineR216 护栏锁定）——意图是「全部终态路径
+    //    都走同一纯函数出口、内联模板串不得回流」，消费点只增不减 ⇒ 收紧为
+    //    下界断言 + 三处出口变量逐字在场 + 反向断言保留。
+    expect(calls.length).toBeGreaterThanOrEqual(4);
     expect(generationSrc).toContain("_stoppedTruncation");
     expect(generationSrc).toContain("_reattachTruncation");
+    expect(generationSrc).toContain("_errTruncation");
     expect(generationSrc).not.toContain("已截断保留前 ${");
   });
 

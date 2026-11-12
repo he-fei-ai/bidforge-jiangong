@@ -339,6 +339,26 @@ async def _finish_stopped_with_partial(task_id: str, holder: dict) -> str:
         payload["level1_total"] = int(holder.get("level1_total") or 0)
     # ✅ R210（L1-7）：输入指纹**只进 checkpoint**（续跑判据），不进 SSE 事件载荷。
     _fp = str(holder.get("input_fingerprint") or "")
+    # ✅ R226（DAT-6′ · P2 · R223 遗留 #1）：任务已进入终态后重入（迟到取消/断线
+    #    兜底落在 completed checkpoint 落库之后）。_write_task_checkpoint_db 是
+    #    无条件 UPDATE（sse_checkpoint.py:97 `WHERE id=?`），partial checkpoint 会
+    #    覆盖 completed 成果；finish_task 的 _write_task_terminal_db 有
+    #    `WHERE status IN running/paused` 守卫（不覆写终态），但 checkpoint 无守卫。
+    #    守卫读 DB 行状态：终态 completed/degraded 时跳过覆盖与 finish_task，
+    #    保留正确终态（R223 §10 登记：任务 completed 但重挂提示部分成果）。
+    #    读失败时保守放行（旧行为），finish_task 自身的 WHERE 守卫仍能阻止终态被
+    #    覆写；payload 此时尚未带 outline（仅 event=stopped），前端已收到过
+    #    completed 事件与完整成果，裸 stopped 恰是正确信号。
+    try:
+        _db_status = await _sh._load_task_db_status(task_id)
+    except Exception:
+        _db_status = None
+    if _db_status in ("completed", "degraded"):
+        _sh.logger.info(
+            "迟到停止请求被忽略（task=%s · 目录生成 · 任务已进入终态 %s，保留正确终态）",
+            task_id, _db_status,
+        )
+        return "data: " + json.dumps(payload, ensure_ascii=False) + "\n\n"
     _ckpt_ok = not outline  # 无成果本来就不写 checkpoint，也无需清 holder
     if outline:
         payload["outline"] = outline
@@ -688,7 +708,15 @@ async def _retry_empty_chapters(
                 _sh.logger.warning("空章定向重试异常（第%s章，第%d次）: %s", key, attempt, e)
                 continue
             if st2 == "stopped":
-                out[idx] = ("stopped", [])
+                # ✅ R223（2026-11-12 · P3 · SSE-2）：停止时**保留该章首试分类**，
+                #    不再原位改写为 ("stopped", [])。旧实现把首试已定格的
+                #    ("ok", []) / ("failed", []) 覆盖成 stopped ⇒ _merge_unit_results
+                #    对 stopped 项直接 break——该章既不进 full_outline 也不进
+                #    failed_chapters（违反 R89 S1「空章必须记账」），从部分成果与
+                #    失败清单**双消失**，用户零痕迹。保留原分类后：("ok", []) 走
+                #    R89 S1 记账（空壳章可见 + failed_chapters 有名），("failed", [])
+                #    照常记账；停止传播不受影响——重试循环本处 break，外层编排
+                #    点的 is_stopped 复检（R216）与同单元其他 stopped 项兜底。
                 rec["status"] = "stopped"
                 break
             if st2 == "ok" and children2:
@@ -1916,6 +1944,9 @@ async def _review_and_fix_outline(
                 scene="outline_fix",
                 repair_key=_sh.OUTLINE_REPAIR_KEY,
                 max_tokens=_sh.OUTLINE_FIX_MAX_TOKENS,
+                # ✅ R226（R-5）：补显式 timeout —— 与兄弟调用点（:1354 外科式补齐）
+                #    同用 OUTLINE_FIX_TIMEOUT（120s），主调用不再隐式跑满 provider 900s。
+                timeout=_sh.OUTLINE_FIX_TIMEOUT,
             )
 
         try:

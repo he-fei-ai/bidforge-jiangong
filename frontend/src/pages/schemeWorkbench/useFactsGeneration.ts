@@ -266,10 +266,13 @@ export function useFactsGeneration(deps: FactsGenerationDeps) {
           },
         );
         // ✅ R174 F2：轮询耗尽/连续网络失败（final=null）→ 显式进入可恢复未知态。
-        if (hit && !hit.final) {
+        // ✅ R223（2026-11-12 · P2 · FE-2）：与 outline/content 链同口径补世代守卫
+        //    + 方案归属（未知态跨方案残留会让横幅/toast 落在新方案页并拦截生成）。
+        if (hit && !hit.final && genSeqRef.current === mySeq) {
           markUnknownTask({
             taskId: hit.taskId,
             genType: "facts",
+            schemeId: id,
             reason: "重挂轮询超限（200×3s）或连续网络失败，未获得任务终态",
           });
         }
@@ -428,5 +431,37 @@ export function useFactsGeneration(deps: FactsGenerationDeps) {
     }
   };
 
-  return { runGenerateFactsSse, handleGenerateFacts, handleRetryFailedSegments };
+  // ✅ R224（F17）：手动接管（useUnknownTaskRecovery onFactsResult）/刷新接管
+  //    （页面 factsTerminalFnRef）的 facts 终态消费 —— segment_stats /
+  //    cross_conflicts 此前只在断线重挂（本 hook reattach 分支）恢复，三路恢复
+  //    矩阵缺口。解析复用 applyFactsCompletedEvent 单一事实源（缺 facts_result
+  //    时传空对象拿规范化的「空」值，与 reattach 分支 :330 同口径，不手写 null）。
+  const consumeFactsTerminal = (fin: TaskTerminalInfo) => {
+    const _fin = fin?.facts_result;
+    const _isDegraded = fin?.status !== "completed";
+    const _doneMsg = _fin?.message || fin?.message || "全局事实提取已在后台完成";
+    if (_fin) {
+      const _d = applyFactsCompletedEvent(_fin);
+      setFactsSegmentStats(_d.segmentStats);
+      setFactsCrossConflicts(_d.crossConflicts);
+      // segment_stats 为生成的宽松契约（Record<string, unknown>），failed 实际为 number
+      if (_isDegraded || ((_fin.segment_stats?.failed as number | undefined) || 0) > 0) {
+        msg.warning(_doneMsg);
+      } else {
+        msg.success(_doneMsg);
+      }
+    } else {
+      const _empty = applyFactsCompletedEvent({});
+      setFactsSegmentStats(_empty.segmentStats);
+      setFactsCrossConflicts(_empty.crossConflicts);
+      if (_isDegraded) {
+        msg.warning(_doneMsg);
+      } else {
+        msg.success(_doneMsg);
+      }
+    }
+    void loadFacts();
+  };
+
+  return { runGenerateFactsSse, handleGenerateFacts, handleRetryFailedSegments, consumeFactsTerminal };
 }

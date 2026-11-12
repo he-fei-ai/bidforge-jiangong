@@ -9,7 +9,9 @@ import app.routers.sse_handlers as _sh  # noqa: F401 — facade 命名空间延�
 from app.services.outline_utils import MAX_OUTLINE_DEPTH
 
 
-def _section_partial(rec: dict, now: float, expect_overrides: dict | None = None) -> float:
+def _section_partial(
+    rec: dict, now: float, expect_overrides: dict | None = None, paused_ms: float = 0.0
+) -> float:
     """折算单个「进行中章节」在本章内已完成的进度比例（0~1）。
 
     = 阶段基准（base） + 阶段跨度（span）× 该阶段已耗时/预期耗时（封顶 85%）
@@ -24,6 +26,10 @@ def _section_partial(rec: dict, now: float, expect_overrides: dict | None = None
     阶段在整章已跑 3 分钟后才开始，elapsed/expect 立刻 >1 → 该阶段开局
     就填满 85%，用户看到进度条"突然跳一格然后长时间不动"。
     旧调用方只传 started_at 时回退到它（向后兼容）。
+
+    ✅ R224（F16）：新增 ``paused_ms``（任务累计暂停毫秒，缺省 0）—— 扣除
+    rec 内锚点（started/stage_started 时记录的暂停水位）之后的暂停段；
+    旧调用方不传即无暂停，逐字节旧行为。
     """
     stage = rec.get("stage", "")
     model = _sh._STAGE_MODEL.get(stage, _sh._STAGE_MODEL["draft"])
@@ -39,9 +45,17 @@ def _section_partial(rec: dict, now: float, expect_overrides: dict | None = None
         return base
     # ✅ 阶段起点优先；缺失时回退整章起点（兼容旧调用方）
     started = rec.get("stage_started_at")
+    anchor_paused = rec.get("stage_started_paused_ms")
     if started is None:
         started = rec.get("started_at", now)
-    elapsed = max(0.0, now - started)
+    if anchor_paused is None:
+        anchor_paused = rec.get("started_paused_ms") or 0.0
+    # ✅ R224（F16 · 承 R215 B2 未覆盖的口径源）：渐近填充扣除**锚点之后**
+    #    的暂停段 —— 暂停期间心跳 progress 不再边暂停边走，恢复后不把暂停
+    #    时长算成章节进度。锚点缺失（旧任务/单测构造的 rec）时 paused_ms
+    #    全额扣除 = 冻结效果一致；无暂停时 paused_ms=0，逐字节旧行为。
+    paused_delta_ms = max(0.0, float(paused_ms or 0.0) - float(anchor_paused or 0.0))
+    elapsed = max(0.0, (now - started) - paused_delta_ms / 1000.0)
     frac = min(elapsed / expect, 1.0) * _sh._STAGE_FILL_MAX
     return base + span * frac
 
@@ -86,13 +100,16 @@ def _monotonic_progress(prev: float, new: float) -> float:
     return round(max(new_v, prev_v, 0.0), 4)
 
 
-def _weighted_progress(prog: dict) -> float:
+def _weighted_progress(prog: dict, paused_ms: float = 0.0) -> float:
     """把进度状态折算为 0~1 的平滑总进度。
 
     总进度 = _SECTION_PHASE_MAX × (已处理章节数 + Σ进行中章节的本章进度) / 总章数
     ——「已处理」含成功与失败（失败同样消耗了时间，否则进度永远到不了上限）。
     进行中章节按「阶段基准 + 阶段内按耗时渐近填充」贡献部分进度，使进度条在
     单章生成期间也持续前进，而不是等整章落库才跳一格。
+
+    ✅ R224（F16）：``paused_ms`` 透传 ``_section_partial`` —— 暂停期间
+    心跳快照的 progress 冻结（调用方传 ``get_task_paused_ms``）。
     """
     total = prog.get("total") or 0
     if total <= 0:
@@ -100,7 +117,10 @@ def _weighted_progress(prog: dict) -> float:
     processed = prog.get("done", 0)
     now = time.monotonic()
     overrides = prog.get("stage_expect") or None
-    partial = sum(_sh._section_partial(rec, now, overrides) for rec in (prog.get("running") or {}).values())
+    partial = sum(
+        _sh._section_partial(rec, now, overrides, paused_ms=paused_ms)
+        for rec in (prog.get("running") or {}).values()
+    )
     raw = (processed + partial) / total
     return round(min(raw, 1.0) * _sh._SECTION_PHASE_MAX, 4)
 
@@ -184,6 +204,13 @@ def _snapshot_stats(prog: dict, paused_ms: float = 0.0) -> dict:
         done = prog.get("done", 0)
         running = []
         for sid, rec in list((prog.get("running") or {}).items()):
+            # ✅ R224（F16）：running[].elapsed_ms 扣除锚点之后的暂停段 ——
+            #    暂停期间该值不再增长（与顶层 elapsed_ms 的 R215 B2 扣减同口径）。
+            _rec_anchor_paused = float(rec.get("started_paused_ms") or 0.0)
+            _rec_elapsed = max(
+                0.0,
+                (now - rec.get("started_at", now)) - max(0.0, float(paused_ms or 0.0) - _rec_anchor_paused) / 1000.0,
+            )
             running.append(
                 {
                     "section_id": sid,
@@ -191,7 +218,7 @@ def _snapshot_stats(prog: dict, paused_ms: float = 0.0) -> dict:
                     "index": rec.get("index", 0),
                     "stage": rec.get("stage", ""),
                     "stage_label": rec.get("stage_label", ""),
-                    "elapsed_ms": int((now - rec.get("started_at", now)) * 1000),
+                    "elapsed_ms": int(_rec_elapsed * 1000),
                 }
             )
         # 平均单章耗时：已完成（含失败）章节的实测均值，用于「还要多久」判断
@@ -202,7 +229,7 @@ def _snapshot_stats(prog: dict, paused_ms: float = 0.0) -> dict:
         # ETA：按「已处理 + 进行中部分贡献」的有效进度外推（口径见 docstring）
         eta_ms = None
         effective = done + sum(
-            _sh._section_partial(rec, now, prog.get("stage_expect") or None)
+            _sh._section_partial(rec, now, prog.get("stage_expect") or None, paused_ms=paused_ms)
             for rec in (prog.get("running") or {}).values()
         )
         if total > effective > 0:
@@ -234,7 +261,10 @@ def _snapshot_stats(prog: dict, paused_ms: float = 0.0) -> dict:
             "phase_label": prog.get("phase_label", ""),
             # R175 BUG-3：心跳快照与 progress 事件共用单调护栏，
             # 防止 running 移除与 done 自增之间的窗口让进度条回退。
-            "progress": _sh._monotonic_progress(prog.get("progress_max", 0.0), _sh._weighted_progress(prog)),
+            # ✅ R224（F16）：暂停期间心跳 progress 冻结（partial 不再吃墙钟）。
+            "progress": _sh._monotonic_progress(
+                prog.get("progress_max", 0.0), _sh._weighted_progress(prog, paused_ms=paused_ms)
+            ),
         }
     except Exception:
         # 统计只服务于展示，任何异常都不允许影响生成主流程
@@ -841,7 +871,14 @@ def _build_parent_chain(
             pid = s.get("parent_id", "")
             children_by_parent.setdefault(pid, []).append(s)
         for pid in children_by_parent:
-            children_by_parent[pid].sort(key=lambda x: x.get("sort_order", 0))
+            # ✅ R223（2026-11-12 · P3 · NUM-3）：与 sse_handlers by_parent 同族第 5 处 ——
+            #    裸排 sort_order 在脏数据（TEXT/int 混存）下 TypeError；经 facade
+            #    `_sh` 引用权威键（sse_handlers 已从 content_utils 导入），不新增
+            #    第二份导入。当前调用方恒传 children_by_parent（兜底分支未触发），
+            #    属同族预防性收口。
+            children_by_parent[pid].sort(
+                key=lambda x: _sh.section_sort_order_key(x.get("sort_order"), x.get("id"))
+            )
 
     def _get_chapter_index(node: dict) -> int:
         """获取节点在其同胞中的 1-based 索引"""

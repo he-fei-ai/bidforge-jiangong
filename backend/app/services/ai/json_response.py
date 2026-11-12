@@ -47,7 +47,26 @@ _INVALID_CONTENT_CAP = 8000
 
 #: ✅ R205（2026-11-09 · 整体截止时间）：``timeout`` 只约束**单次**调用，
 #:   多轮修复叠加可无限拉长。``total_timeout`` 约束**整段**生成+修复。
+#:   ✅ R226（2026-11-12 · OBS-1 接线）：``None`` 不再表示「不限制」，而是
+#:   回退到 ``settings.json_total_timeout``（默认 600s，主动上界）；显式传
+#:   ``0`` 才真正禁用（逐字节兼容旧行为）。多轮 JSON 修复从此有硬截止，
+#:   杜绝未传 timeout 的调用点主调用长跑（原可跑满 provider 900s）。
 _TOTAL_TIMEOUT_DEFAULT = None
+
+
+def _effective_total_timeout(value: int | None) -> int | None:
+    """解析 ``total_timeout`` 的有效值。
+
+    - ``value`` 非 None：原样使用（含 0 / 负值 = 禁用）。
+    - ``value`` is None（未显式指定）：回退 ``settings.json_total_timeout``
+      （默认 600s）。惰性导入 ``settings``，规避模块级 import 顺序风险。
+    """
+    if value is not None:
+        return value
+    from app.config import settings
+
+    v = int(getattr(settings, "json_total_timeout", 600) or 0)
+    return v or None
 
 
 def _clip_invalid(raw: str, limit: int = _INVALID_CONTENT_CAP) -> str:
@@ -510,7 +529,9 @@ async def collect_json_response_with_chat(
         chat_fn: 与 ``chat_with_fallback`` 同签名的异步可调用对象。
         其余参数、语义、返回值与 :func:`collect_json_response` 完全一致。
         total_timeout: ✅ R205（2026-11-09 · 整体截止）：约束「首轮+全部修复轮」
-            总耗时（秒）；``None`` 不限制（逐字节兼容旧行为）。
+            总耗时（秒）。✅ R226（2026-11-12 · OBS-1 接线）：``None``（未显式
+            指定）回退 ``settings.json_total_timeout``（默认 600s，主动上界）；
+            传 ``0`` 才真正禁用（逐字节兼容旧行为）。
     """
 
     async def _call(repair_messages: list) -> str:
@@ -533,8 +554,12 @@ async def collect_json_response_with_chat(
         on_call_failure=lambda: record_ai_failure(scene),
         on_repair=lambda: record_repair_triggered(repair_key),
     )
-    if total_timeout and total_timeout > 0:
-        return await asyncio.wait_for(coro, total_timeout)
+    # ✅ R226（OBS-1 接线）：None 由 _effective_total_timeout 回退 settings 默认（600s），
+    #    0/负值显式禁用；整体截止把「首轮+全部修复轮」硬约束住，不再依赖各调用点
+    #    是否显式传 timeout（未传时主调用原可跑满 provider 900s）。
+    _tt = _effective_total_timeout(total_timeout)
+    if _tt and _tt > 0:
+        return await asyncio.wait_for(coro, _tt)
     return await coro
 
 
@@ -562,7 +587,9 @@ async def collect_json_response(
     - ``scene``：业务场景标记，透传至 ``chat_with_fallback`` 写入
       ``ai_audit_logs.scene``，``/ai/stats`` 可按场景聚合调用次数。
     - ``total_timeout``：✅ R205（2026-11-09）约束「首轮+全部修复轮」总耗时（秒）；
-      ``None`` 不限制（逐字节兼容）。
+      ✅ R226（2026-11-12 · OBS-1 接线）``None``（未显式指定）回退
+      ``settings.json_total_timeout``（默认 600s）；传 ``0`` 才真正禁用
+      （逐字节兼容旧行为）。
 
     消息列表只有 system 时自动补一条最小 user 指令（见 :func:`_ensure_user_message`）。
 

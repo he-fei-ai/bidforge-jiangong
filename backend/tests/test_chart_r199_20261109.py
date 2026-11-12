@@ -321,11 +321,50 @@ class TestDegradedSignal:
         assert src.count("over_count") >= 2  # 唯一拼装点结构未破坏
 
     def test_ckpt_charts_accumulated_on_section_done(self):
+        """R199 配图累加防双计护栏。
+
+        ✅ R227 重锚（意图保留、强度不减）：R224（F20）把配图累加移出
+        count_progress 门控、改按**章节差值**修正 —— 同一章重复落库
+        （word_adjust 二次持久化）会重登记图表（缩字可删块、扩字可增块），
+        整段无条件累加会把首轮旧值再计一次。原「必须在 count_progress
+        门控内」的字面断言随机制升级为 per-section 幂等增量锁：
+          1) 记旧值表必须存在且初始化；
+          2) 累加必须是「新值 − 旧值」差值（同章重复落库幂等）；
+          3) 差值仅在变化时写入（防重复累加）。
+        """
         src = _sh_src()
         assert '_ckpt["charts"] = int(_ckpt.get("charts", 0) or 0)' in src
-        i = src.index('_ckpt["charts"]')
-        seg = src[max(0, i - 1000) : i]
-        assert "if count_progress:" in seg, "配图累加必须在 count_progress 门控内（防字数批调度双计）"
+        assert "_chart_counts_by_sid: dict = {}" in src, "per-section 配图旧值表必须在任务起点初始化"
+        assert "_prev_charts = int(_chart_counts_by_sid.get(str(section_id), 0) or 0)" in src
+        assert "+ _cur_charts - _prev_charts" in src, "累加必须按章节差值（防字数批调度双计）"
+        assert "_chart_counts_by_sid[str(section_id)] = _cur_charts" in src
+        # 结构闸门：累加行的直接包围控制流头（最近的更浅缩进 if/for/while/try）
+        # 必须是 per-section 差值守卫，而不是 count_progress 字数门控。
+        lines = src.splitlines()
+        idx = next(
+            i
+            for i, l in enumerate(lines)
+            if '_ckpt["charts"] = int(_ckpt.get("charts", 0) or 0)' in l
+        )
+        chart_ind = len(lines[idx]) - len(lines[idx].lstrip())
+        gate = None
+        for j in range(idx - 1, -1, -1):
+            l = lines[j].rstrip()
+            s = l.lstrip()
+            if not s or s.startswith("#"):
+                continue
+            ind = len(l) - len(s)
+            if ind < chart_ind and (
+                s.startswith("if ")
+                or s.startswith("for ")
+                or s.startswith("while ")
+                or s.endswith(":")
+            ):
+                gate = s
+                break
+        assert gate is not None and gate.startswith(
+            "if _cur_charts != _prev_charts:"
+        ), f"配图累加的直接闸门必须是 per-section 差值守卫（防双计），实际: {gate!r}"
 
     def test_frontend_labels_registered(self):
         fe = REPO / "frontend" / "src" / "utils" / "contentEvents.ts"

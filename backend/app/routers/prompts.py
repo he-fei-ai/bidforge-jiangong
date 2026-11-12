@@ -44,6 +44,7 @@ from app.services.ai.prompts._registry import (
     extract_user_variables,
     validate_prompt_content,
 )
+from app.services.ai.usage_logging import get_usage_snapshot as _get_usage_snapshot
 from app.services.audit_service import (
     PROMPT_MAX_CHARS,
     list_prompt_audit_logs,
@@ -533,6 +534,9 @@ async def get_prompt_metrics(db=Depends(read_db)):
             _today_stats["error"] = _err
     _today_stats["render_basis"] = "ai_audit_logs 调用数（每次 AI 调用渲染一次提示词，近似口径）"
     _snap["today"] = _today_stats
+    # ✅ R220（加法式）：AI Token 用量进程内快照。既有键逐字不变；
+    #    读取失败由 get_usage_snapshot 内部降级为空结构，绝不拖垮运维页。
+    _snap["ai_usage"] = _get_usage_snapshot()
     return _snap
 
 
