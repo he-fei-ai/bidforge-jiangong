@@ -1,5 +1,8 @@
 """图像模型配置模块 · R238 护栏（建表 / custom 适配器 / 路由 / 消费点 / 协同决策展示）。"""
+import httpx
 import pytest
+from app.db import get_db, read_db
+from app.main import app
 from app.schema_sql import SCHEMA_SQL
 from app.services.ai.image_providers import CustomAdapter, ProviderRegistry
 from app.services.ai.image_providers.custom import build_openai_payload
@@ -120,3 +123,93 @@ async def test_resolve_image_config_enabled_zero_short_circuits():
 
     out = await resolve_image_config(_Db(), _Settings())
     assert out["image_enabled"] is False
+
+
+# ===================== E. 路由契约（HTTP 级） =====================
+# 走 httpx.ASGITransport（无 lifespan）——TestClient 的 `with` 上下文会触发
+# lifespan → init_db() + 各启动钩子，在测试进程里副作用大且依赖真实库；这里
+# 只测「路由已注册 + 依赖注入假连接 + 响应契约」，不触发生命周期。
+# FastAPI 依赖在路由装饰时已捕获函数对象，monkeypatch 模块属性无效，故用
+# app.dependency_overrides 注入假连接（标准机制，经 monkeypatch.setitem 自动还原）。
+
+
+class _FakeCursor:
+    """模拟 aiosqlite.Cursor：fetchone 返回预置行。"""
+
+    def __init__(self, row):
+        self._row = row
+
+    async def fetchone(self, *a, **k):
+        return self._row
+
+
+class _FakeDb:
+    """模拟 aiosqlite.Connection：execute 记录 SQL、返回预置行。"""
+
+    def __init__(self, row=None):
+        self._row = row
+        self.executed = []
+        self.committed = False
+
+    async def execute(self, sql, *a, **k):
+        self.executed.append(sql)
+        return _FakeCursor(self._row)
+
+    async def commit(self):
+        self.committed = True
+
+
+def _primary_row():
+    """单条 primary 配置行（dict 形态，resolve_image_config 走 keys() 分支）。"""
+    return {
+        "provider": "custom",
+        "model": "dall-e-3",
+        "base_url": "https://api.openai.com/v1",
+        "api_key_encrypted": "ENC:abc",
+        "enabled": 1,
+        "default_size": "2K",
+        "concurrency": 2,
+        "price_per_image": 0.0,
+        "max_ai_images": 0,
+    }
+
+
+async def _client():
+    transport = httpx.ASGITransport(app=app)
+    return httpx.AsyncClient(transport=transport, base_url="http://testserver")
+
+
+@pytest.mark.asyncio
+async def test_image_config_get_returns_contract(monkeypatch):
+    """GET /api/v1/image-config 返回 {config, presets, decision} 三面。"""
+    async def _fake_read_db():
+        return _FakeDb(row=_primary_row())
+
+    monkeypatch.setitem(app.dependency_overrides, read_db, _fake_read_db)
+    async with await _client() as c:
+        r = await c.get("/api/v1/image-config")
+    assert r.status_code == 200, f"应 200：{r.text[:300]}"
+    body = r.json()
+    for key in ("config", "presets", "decision"):
+        assert key in body, f"缺 {key}"
+    # presets 含 5 家展示厂商
+    for v in ("dalle3", "tongyi_wanxiang", "doubao_seedream", "tencent_hunyuan", "custom"):
+        assert v in body["presets"], f"presets 缺 {v}"
+    # GET 不回传明文密钥（api_key 恒空 + has_key 反映是否已配置）
+    assert body["config"].get("api_key") == ""
+    assert body["config"].get("has_key") is True
+
+
+@pytest.mark.asyncio
+async def test_image_config_put_validates_provider(monkeypatch):
+    """PUT 非法 provider → 400。"""
+    async def _fake_get_db():
+        return _FakeDb()
+
+    monkeypatch.setitem(app.dependency_overrides, get_db, _fake_get_db)
+    async with await _client() as c:
+        r = await c.put(
+            "/api/v1/image-config",
+            json={"provider": "not_a_provider", "default_size": "2K"},
+        )
+    assert r.status_code == 400
