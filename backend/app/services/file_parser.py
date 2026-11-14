@@ -157,6 +157,14 @@ def signature_valid(ftype: str, prefix: bytes) -> bool:
 #    的 declared == dispatch 护栏仍作为回归锁保持，只是变为同对象恒等）。
 _SUPPORTED_EXTENSIONS = SUPPORTED_EXTENSIONS
 
+#: 图片扩展名全集（走 OCR 通道；是 ``SUPPORTED_EXTENSIONS`` 的图片子集）。
+# ✅ R243 单一事实源（2026-11-14）：此前 OCR 路由（:func:`parse_file_content_ex`）
+#    与上传置信度判定（``routers/upload_outline.parse_outline`` 的 ``is_image``）
+#    各持一份图片扩展名字面量，历史上已漂移过一次 —— OCR 路由支持 ``tif`` 而
+#    置信度判定漏掉，导致 ``.tif`` 上传不扣 OCR 噪声分。现集中定义并让两处引用，
+#    从此不可能背离（护栏用 ``is``/子集断言锁住）。
+IMAGE_EXTENSIONS = frozenset({"png", "jpg", "jpeg", "bmp", "tiff", "tif", "webp"})
+
 
 def _sniff_type(content: bytes) -> str:
     """按文件头嗅探明确可路由的二进制类型（无扩展名时也能正确解析）。
@@ -589,7 +597,7 @@ def parse_file_content_ex(content: bytes, fname: str) -> tuple[str, dict]:
             raw_text = _parse_csv(content, diag)
         elif ftype in ("xlsx", "xls"):
             raw_text = _parse_excel(content, ftype, diag)
-        elif ftype in ("png", "jpg", "jpeg", "bmp", "tiff", "tif", "webp"):
+        elif ftype in IMAGE_EXTENSIONS:
             raw_text = _parse_image_ocr(content, ftype, diag)
         elif ftype in ("doc", "wps"):
             raw_text = _parse_legacy_word(content, fname, diag)
@@ -992,6 +1000,35 @@ _W_NS = "http://schemas.openxmlformats.org/wordprocessingml/2006/main"
 #: config.py 属高频改动区，本开关为纯解析层逃生门，直接读环境变量避免耦合。
 _TABLE_MERGE_EXPAND = os.environ.get("PARSE_TABLE_MERGE_EXPAND", "1").strip().lower() not in ("0", "false", "no")
 
+#: R238 DOCX 非正文部件开关（2026-11-14，默认开）：
+#:   - 正文块递归下沉 w:sdt（内容控件）的 sdtContent（Word 表单/合同模板常见）；
+#:   - 追加页眉/页脚（headerReference/footerReference 经 document.xml.rels 解析）；
+#:   - 追加脚注/尾注（footnoteReference/endnoteReference 引用的条目）。
+#: 旧实现只遍历 body 的直接子元素 p/tbl，上述内容全部静默丢失。
+#: 置 PARSE_DOCX_PARTS=0 可整体回退到旧行为（正文之外一律不读）。
+_PARSE_DOCX_PARTS = os.environ.get("PARSE_DOCX_PARTS", "1").strip().lower() not in ("0", "false", "no")
+
+# R238：DOCX 透明容器标签（跨命名空间取局部名）。旧实现只在 ``w:body``
+# 直接子元素上识别 ``p``/``tbl``/``sdt``，以下容器内的正文整段静默丢失：
+#   - ``mc:AlternateContent``（含 ``Choice``/``Fallback``）：兼容性包装，Word
+#     把正文/绘图包进现代/回退两套表示，旧实现跳过后「现代内容/回退内容」全丢；
+#   - ``w:ins`` / ``w:del``：修订（跟踪更改）包装的段落，合同/红头文件常见，
+#     旧实现跳过导致整段修订正文丢失；
+#   - ``w:customXml``：自定义 XML 数据岛包装的内容。
+# 处理策略：递归下沉到容器子元素，交由 ``p``/``tbl``/``sdt`` 分支正常收集；
+# ``mc:AlternateContent`` 优先取第一个 ``Choice``（最现代表示，符合 OOXML
+# 「第一个匹配 Choice」语义），无 Choice 时取 ``Fallback``。
+_DOCX_TRANSPARENT_CONTAINERS = frozenset(
+    {
+        "AlternateContent",
+        "Choice",
+        "Fallback",
+        "ins",
+        "del",
+        "customXml",
+    }
+)
+
 
 def _docx_table_grid(tbl, para_text) -> list[list[str]]:
     """DOCX 表格 → 网格展开的二维行（处理 gridSpan / vMerge）。
@@ -1155,6 +1192,99 @@ def _docx_bold_heading_level(p_el) -> int:
     return 0
 
 
+_DOCX_RELS_NS = "http://schemas.openxmlformats.org/package/2006/relationships"
+#: document.xml 里 ``r:id`` 前缀用的是 officeDocument 关系命名空间（与
+#: document.xml.rels 根元素的 package 命名空间**不同**），两者不能混用。
+_DOCX_OFFICE_RELS_NS = "http://schemas.openxmlformats.org/officeDocument/2006/relationships"
+
+
+def _collect_docx_parts(z, root, w, collect_children, parts) -> None:
+    """R238：追加 DOCX 非正文部件（页眉/页脚/脚注/尾注）。
+
+    只读取正文实际引用到的部件：页眉/页脚经 ``document.xml.rels`` 解析
+    ``headerReference``/``footerReference`` 的目标，脚注/尾注按
+    ``footnoteReference``/``endnoteReference`` 的 id 取 ``footnotes.xml``/
+    ``endnotes.xml`` 对应条目。部件读取失败静默跳过（正文解析结果不受影响），
+    但安全闸门 ParseError 向上传播（不静默吞掉压缩炸弹防线）。
+    """
+    import xml.etree.ElementTree as ET
+
+    def _resolve_part(target: str) -> str:
+        if target.startswith("/"):
+            return target.lstrip("/")
+        return "word/" + target.lstrip("/")
+
+    def _append_part(part_name: str, marker: str) -> None:
+        try:
+            part_root = ET.fromstring(_read_zip_entry_limited(z, part_name))
+        except ParseError:
+            raise
+        except Exception:
+            return
+        collected: list[str] = []
+        collect_children(part_root, collected)
+        if collected:
+            parts.append(marker + "\n" + "\n".join(collected))
+
+    # id -> 目标部件（document.xml.rels 可能缺失/损坏 → 空表，正文不受影响）
+    rels_map: dict[str, str] = {}
+    try:
+        rels_root = ET.fromstring(_read_zip_entry_limited(z, "word/_rels/document.xml.rels"))
+        for rel in rels_root.findall(f"{{{_DOCX_RELS_NS}}}Relationship"):
+            if rel.get("TargetMode", "Internal") != "Internal":
+                continue
+            rid = rel.get("Id")
+            target = rel.get("Target")
+            if rid and target:
+                rels_map[rid] = target
+    except ParseError:
+        raise
+    except Exception:
+        rels_map = {}
+
+    # 页眉/页脚（headerReference/footerReference 在 sectPr 内，按部件去重）
+    seen_parts: set[str] = set()
+    for ref in root.iter():
+        tag = ref.tag.split("}")[-1] if ref.tag else ""
+        if tag not in ("headerReference", "footerReference"):
+            continue
+        rid = ref.get(f"{{{_DOCX_OFFICE_RELS_NS}}}id")
+        if not rid or rid not in rels_map:
+            continue
+        part_name = _resolve_part(rels_map[rid])
+        if part_name in seen_parts:
+            continue
+        seen_parts.add(part_name)
+        marker = "【页眉】" if tag == "headerReference" else "【页脚】"
+        _append_part(part_name, marker)
+
+    # 脚注/尾注（footnoteReference/endnoteReference 按 id 取对应条目）
+    for part_name, marker, ref_tag, note_tag in (
+        ("word/footnotes.xml", "【脚注】", "footnoteReference", "footnote"),
+        ("word/endnotes.xml", "【尾注】", "endnoteReference", "endnote"),
+    ):
+        try:
+            note_root = ET.fromstring(_read_zip_entry_limited(z, part_name))
+        except ParseError:
+            raise
+        except Exception:
+            continue
+        referenced_ids = {
+            ref.get(f"{{{w}}}id") for ref in root.iter(f"{{{w}}}{ref_tag}") if ref.get(f"{{{w}}}id") is not None
+        }
+        collected: list[str] = []
+        for note in note_root.findall(f"{{{w}}}{note_tag}"):
+            nid = note.get(f"{{{w}}}id")
+            if nid not in referenced_ids:
+                continue
+            sub: list[str] = []
+            collect_children(note, sub)
+            if sub:
+                collected.append("\n".join(sub))
+        if collected:
+            parts.append(marker + "\n" + "\n\n".join(collected))
+
+
 def _parse_docx(content: bytes, diag: dict | None = None) -> str:
     """DOCX 解析（增强版）：直接解析 OOXML，输出结构化 Markdown。
 
@@ -1167,6 +1297,15 @@ def _parse_docx(content: bytes, diag: dict | None = None) -> str:
     OCR 兜底/加密提示都会持久化到 parse_warnings，docx 的「正文来自回退
     通道的纯文本（无标题层级/表格结构）」却无任何持久化痕迹。现补
     ``_note_info``（diag 由调用方透传）。
+
+    ✅ R238（部件完整性）：旧实现只遍历 ``w:body`` 的直接子元素 ``p``/``tbl``，
+    ``w:sdt``（内容控件）与页眉/页脚/脚注/尾注全部静默丢失。现：
+      - ``w:sdt`` 下沉 ``sdtContent`` 递归收集（嵌套 sdt 亦递归）；
+      - ``headerReference``/``footerReference`` 经 ``document.xml.rels`` 解析
+        目标部件并追加（带「【页眉】/【页脚】」标记）；
+      - ``footnoteReference``/``endnoteReference`` 从 ``footnotes.xml``/
+        ``endnotes.xml`` 按 id 取对应条目追加。
+    置 PARSE_DOCX_PARTS=0 可回退旧行为；部件读取失败静默跳过（正文仍解析）。
     """
     import io as _io
     import xml.etree.ElementTree as ET
@@ -1175,9 +1314,76 @@ def _parse_docx(content: bytes, diag: dict | None = None) -> str:
     try:
         with zipfile.ZipFile(_io.BytesIO(content)) as z:
             xml_bytes = _read_zip_entry_limited(z, "word/document.xml")
-        body = ET.fromstring(xml_bytes).find(f"{{{_W_NS}}}body")
-        if body is None:
-            raise ValueError("document.xml 无 body")
+            root = ET.fromstring(xml_bytes)
+            body = root.find(f"{{{_W_NS}}}body")
+            if body is None:
+                raise ValueError("document.xml 无 body")
+
+            def para_text(p) -> str:
+                return "".join(t.text or "" for t in p.iter(f"{{{_W_NS}}}t")).strip()
+
+            def append_block(el, out) -> None:
+                """收集单个 OOXML 块（p / tbl / sdt / 透明容器）。
+
+                R238：除 ``p``/``tbl``/``sdt`` 外，识别透明容器
+                （``mc:AlternateContent`` / 修订 ``ins``/``del`` / 自定义 XML
+                数据岛），递归下沉收集其中正文，避免整段静默丢失。
+                """
+                tag = el.tag.split("}")[-1] if el.tag else ""
+                if tag == "p":
+                    txt = para_text(el)
+                    if not txt:
+                        return
+                    level = _docx_heading_level(el) or _docx_bold_heading_level(el)
+                    out.append(f"{'#' * level} {txt}" if level else txt)
+                elif tag == "tbl":
+                    if _TABLE_MERGE_EXPAND:
+                        # ✅ W-02（2026-11-05）：按网格展开 gridSpan/vMerge，列不错位
+                        row_cells = _docx_table_grid(el, para_text)
+                    else:
+                        row_cells = []
+                        for tr in el.findall(f"{{{_W_NS}}}tr"):
+                            cells = []
+                            for tc in tr.findall(f"{{{_W_NS}}}tc"):
+                                cell_txt = " ".join(t for t in (para_text(p) for p in tc.iter(f"{{{_W_NS}}}p")) if t)
+                                cells.append(cell_txt)
+                            row_cells.append(cells)
+                    if row_cells:
+                        # ✅ BUG 修复（表格结构完整性）：旧实现用自己的拼接逻辑，
+                        #    单元格内的竖线未做转义 → 内容里的「|」被下游当作列分隔符，
+                        #    整张表的列对齐被撕裂（机械统计表因此丢掉部分列）。
+                        #    现统一走 _md_cells（与 CSV/Excel 同一口径），并补上表头后的
+                        #    Markdown 对齐分隔行（GFM 渲染表格的必要条件，见 _md_separator）。
+                        md_rows = [_md_cells(c) for c in row_cells]
+                        md_rows.insert(1, _md_separator(row_cells[0]))
+                        out.append("【表格】\n" + "\n".join(md_rows))
+                elif tag == "sdt":
+                    # ✅ R238：内容控件（Word 表单/合同模板）——下沉 sdtContent
+                    sdt_content = el.find(f"{{{_W_NS}}}sdtContent")
+                    if sdt_content is not None:
+                        for sub in sdt_content:
+                            append_block(sub, out)
+                elif tag in _DOCX_TRANSPARENT_CONTAINERS:
+                    # R238：透明容器下沉。mc:AlternateContent 按 OOXML 语义
+                    # 取第一个 Choice（现代表示），无 Choice 时回退 Fallback。
+                    if tag == "AlternateContent":
+                        choices = [c for c in el if (c.tag or "").split("}")[-1] == "Choice"]
+                        target = choices[0] if choices else el
+                        for sub in target:
+                            append_block(sub, out)
+                    else:
+                        for sub in el:
+                            append_block(sub, out)
+
+            def collect_children(parent, out) -> None:
+                for child in parent:
+                    append_block(child, out)
+
+            parts: list[str] = []
+            collect_children(body, parts)
+
+            if _PARSE_DOCX_PARTS:
+                _collect_docx_parts(z, root, _W_NS, collect_children, parts)
     except ParseError:
         # 安全闸门（条目过大 / 压缩炸弹）必须直达用户，不能被回退链路吞掉
         raise
@@ -1185,40 +1391,6 @@ def _parse_docx(content: bytes, diag: dict | None = None) -> str:
         logger.warning("DOCX OOXML 解析失败，回退 docx2python: %s", e)
         _note_info(diag, "DOCX 结构化解析失败，已回退 docx2python 纯文本通道（无标题层级/表格结构）")
         return _parse_docx_fallback(content)
-
-    def para_text(p) -> str:
-        return "".join(t.text or "" for t in p.iter(f"{{{_W_NS}}}t")).strip()
-
-    parts: list[str] = []
-    for child in body:
-        tag = child.tag.split("}")[-1]
-        if tag == "p":
-            txt = para_text(child)
-            if not txt:
-                continue
-            level = _docx_heading_level(child) or _docx_bold_heading_level(child)
-            parts.append(f"{'#' * level} {txt}" if level else txt)
-        elif tag == "tbl":
-            if _TABLE_MERGE_EXPAND:
-                # ✅ W-02（2026-11-05）：按网格展开 gridSpan/vMerge，列不错位
-                row_cells = _docx_table_grid(child, para_text)
-            else:
-                row_cells: list[list[str]] = []
-                for tr in child.findall(f"{{{_W_NS}}}tr"):
-                    cells = []
-                    for tc in tr.findall(f"{{{_W_NS}}}tc"):
-                        cell_txt = " ".join(t for t in (para_text(p) for p in tc.iter(f"{{{_W_NS}}}p")) if t)
-                        cells.append(cell_txt)
-                    row_cells.append(cells)
-            if row_cells:
-                # ✅ BUG 修复（表格结构完整性）：旧实现用自己的拼接逻辑，
-                #    单元格内的竖线未做转义 → 内容里的「|」被下游当作列分隔符，
-                #    整张表的列对齐被撕裂（机械统计表因此丢掉部分列）。
-                #    现统一走 _md_cells（与 CSV/Excel 同一口径），并补上表头后的
-                #    Markdown 对齐分隔行（GFM 渲染表格的必要条件，见 _md_separator）。
-                md_rows = [_md_cells(c) for c in row_cells]
-                md_rows.insert(1, _md_separator(row_cells[0]))
-                parts.append("【表格】\n" + "\n".join(md_rows))
 
     text = "\n".join(parts)
     if not text.strip():
@@ -2183,6 +2355,7 @@ def _parse_excel(content: bytes, ftype: str, diag: dict | None = None) -> str:
         tmp.write(content)
         tmp.close()
         if ftype == "xls":
+            book = None
             try:
                 import xlrd
 
@@ -2214,6 +2387,19 @@ def _parse_excel(content: bytes, ftype: str, diag: dict | None = None) -> str:
                     "无法解析 .xls 文件：缺少 xlrd 库。请执行 "
                     "`pip install xlrd==1.2.0`，或将文件另存为 .xlsx 后重新上传"
                 )
+            finally:
+                # ✅ R238 修复（Windows 临时文件残留）：xlrd 的 open_workbook
+                #    内部对源文件做 mmap 并持有句柄，直到 release_resources()
+                #    才释放——旧实现从不调用，外层 finally 的 os.unlink 在
+                #    Windows 上抛 PermissionError（被 except OSError 静默吞掉），
+                #    临时文件永久残留。成功/异常路径都必须释放，否则 mmap 泄漏
+                #    会累积（长驻服务解析大量 .xls 时尤其明显）。
+                rel = getattr(book, "release_resources", None)
+                if rel is not None:
+                    try:
+                        rel()
+                    except Exception as _re:
+                        logger.debug("xlrd release_resources 失败（忽略）: %s", _re)
         from openpyxl import load_workbook
 
         # ✅ R180（2026-11-07）：先流式扫描 OOXML 元数据（合并区域 / 是否含公式），

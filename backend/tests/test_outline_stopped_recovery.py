@@ -99,9 +99,9 @@ class TestFinishStoppedWithPartial:
         order = []
         real_save = sh._save_outline_checkpoint
 
-        async def spy_save(task_id, payload):
+        async def spy_save(task_id, payload, *_sp_args, **_sp_kwargs):
             order.append("checkpoint")
-            return await real_save(task_id, payload)
+            return await real_save(task_id, payload, *_sp_args, **_sp_kwargs)
 
         async def fake_finish(task_id, status="completed", message=""):
             order.append("finish")
@@ -291,7 +291,7 @@ class TestFinishStoppedLateReentry:
 
         calls = []
 
-        async def spy_save(task_id, payload):
+        async def spy_save(task_id, payload, *_sp_args, **_sp_kwargs):
             calls.append(("checkpoint", payload))
 
         async def spy_finish(task_id, status="completed", message=""):
@@ -323,7 +323,7 @@ class TestFinishStoppedLateReentry:
         await _seed_task(db_conn, "t_dat6_run", status="running")
         calls = []
 
-        async def spy_save(task_id, payload):
+        async def spy_save(task_id, payload, *_sp_args, **_sp_kwargs):
             calls.append(("checkpoint", payload))
 
         async def spy_finish(task_id, status="completed", message=""):
@@ -348,7 +348,7 @@ class TestFinishStoppedLateReentry:
         await _seed_task(db_conn, "t_dat6_fail", status="running")
         calls = []
 
-        async def spy_save(task_id, payload):
+        async def spy_save(task_id, payload, *_sp_args, **_sp_kwargs):
             calls.append(("checkpoint", payload))
 
         async def spy_finish(task_id, status="completed", message=""):

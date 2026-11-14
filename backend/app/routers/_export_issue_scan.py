@@ -79,7 +79,7 @@ _AUDIT_RULES: tuple[tuple[str, str, str, re.Pattern], ...] = (
         "warn",
         re.compile(r"[\u4e00-\u9fa5]\s*[a-z]{4,}(?:\s+[a-z]{3,})+\s*[\u4e00-\u9fa5]"),
     ),
-    # ✅ R226（2026-11-12 · F7 · 承 R179 §10-5 登记）：预检侧补 page_residue /
+    # ✅ R230（2026-11-12 · F7 · 承 R179 §10-5 登记）：预检侧补 page_residue /
     #    double_entity 两规则 —— 此前只有导出落盘 lint 事后兜底（lint_residual_page/
     #    lint_residual_entity → content-residue 降级），预检不报 → 用户白烧一次
     #    分钟级导出才在降级提示里看到。正则与 export.py 落盘 lint 逐字同源

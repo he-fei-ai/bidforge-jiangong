@@ -635,3 +635,119 @@ async def list_snapshots(scheme_id: str, limit: int = 20, db=Depends(get_db)):
             what="一致性修复：读取快照列表",
         )
     }
+
+
+# ✅ 阶段 2 旁路：omp 主 Agent 同型防重入。一致性修复是 2 轮长任务，而
+#    ensure_no_generation_write 只拦「生成任务」、不拦「修复任务」。
+_OMP_CONSISTENCY_INFLIGHT: set[str] = set()
+
+
+@router.post("/omp-agent-check")
+async def omp_agent_check(scheme_id: str, body: dict | None = None, db=Depends(get_db)):
+    """阶段 2 旁路：正文生成后，用 omp 文件工作区主 Agent 做全文跨节一致性
+    比对 + 统一修复（``read`` 分段跨节读 / ``edit`` 统一改）。
+
+    ⚠️ 与既有链路的关系（刻意不碰硬化主链路）：
+      - **不触碰** ``sse_handlers`` 的 ``auto_consistency_repair`` 默认 pass；
+      - **不改动** 既有 ``/repair``（逐章 + fullbook 开关）任何一行；
+      - 复用 ``run_fullbook_repair`` 的整卷工作区装配、四道小节闸门、前置快照、
+        ``save_repair`` 与 confirm/rollback —— 仅把单次 ``chat_with_fallback``
+        注入为 ``OmpConsistencyAgent.revise_workspace``；
+      - 因此前端 CR 工作台（``items`` / ``repair_id`` / ``snapshot_id``）**零改动**。
+
+    请求体：``scan_id``（缺省取最近一次扫描）/ ``severity_threshold`` / ``conflict_ids``。
+    """
+    from app.config import settings as _settings
+
+    # 双闸：一致性修复是高风险写操作，独立于目录生成旁路灰度。
+    if not bool(getattr(_settings, "omp_task_enabled", False)) or not bool(
+        getattr(_settings, "omp_consistency_enabled", False)
+    ):
+        raise HTTPException(
+            409,
+            "omp 一致性主 Agent 未启用（需 omp_task_enabled=True 且 "
+            "omp_consistency_enabled=True）；请使用平台既有一致性修复链路",
+        )
+
+    body = body or {}
+    scan_id = body.get("scan_id", "")
+    severity_threshold = body.get("severity_threshold", "high")
+    conflict_ids = body.get("conflict_ids") or None
+
+    await _load_scheme(db, scheme_id)
+    # ✅ R98 单一事实源：整章改写 content 不得与在跑的生成任务互踩。
+    from app.routers.sections import ensure_no_generation_write
+
+    ensure_no_generation_write(scheme_id, "omp 全文一致性修复")
+
+    if scheme_id in _OMP_CONSISTENCY_INFLIGHT:
+        raise HTTPException(409, "本方案已有 omp 一致性检查任务在跑，请勿重复触发")
+    _OMP_CONSISTENCY_INFLIGHT.add(scheme_id)
+    try:
+        if not scan_id:
+            row = await review_db.fetch_one(
+                db,
+                "SELECT scan_id FROM consistency_conflicts WHERE scheme_id=? "
+                "ORDER BY created_at DESC, rowid DESC LIMIT 1",
+                (scheme_id,),
+                what="omp 一致性修复：定位最近一次扫描",
+            )
+            if not row:
+                raise HTTPException(422, "尚未扫描，请先执行全文一致性扫描")
+            scan_id = row["scan_id"]
+
+        conflicts = await _load_conflicts(db, scheme_id, scan_id)
+        if not conflicts:
+            raise HTTPException(422, "该扫描没有冲突记录，请重新扫描")
+        facts = await scanner.build_global_facts_text(db, scheme_id)
+
+        from app.services.ai.omp_consistency_agent import OmpConsistencyAgent
+
+        agent = OmpConsistencyAgent()
+        # 预检三道闸门：配置缺失若留到 run_fullbook_repair 的重试循环里会被
+        # except Exception 吞掉并记 failed，最终呈现「completed 但全失败」的假成功。
+        try:
+            agent.check_ready()
+        except RuntimeError as e:
+            raise HTTPException(422, f"omp 一致性主 Agent 配置不完整：{e}")
+
+        async def _progress(done: int, total: int, message: str):
+            logger.info("[omp 一致性修复] %s %d/%d %s", scheme_id, done, total, message)
+
+        from app.services import consistency_fullbook_repair as _fullbook
+
+        try:
+            result = await _fullbook.run_fullbook_repair(
+                db,
+                scheme_id=scheme_id,
+                scan_id=scan_id,
+                conflicts=conflicts,
+                facts=facts,
+                severity_threshold=severity_threshold,
+                conflict_ids=conflict_ids,
+                resync_fn=_make_chart_resync(scheme_id),
+                progress_cb=_progress,
+                workspace_agent_fn=agent.revise_workspace,
+            )
+        except HTTPException:
+            raise
+        except Exception as e:
+            logger.exception("omp 全文一致性修复失败")
+            raise HTTPException(500, f"omp 全文一致性修复失败：{e}")
+
+        result["status"] = "completed"
+        result["engine"] = "omp_agent"
+        # ✅ G9：改写正文 → 原审核结论失效（与 /repair 同口径）。
+        for _item in result.get("items") or []:
+            if _item.get("status") == "repaired" and _item.get("section_id"):
+                await reset_review_on_content_change(
+                    db,
+                    scheme_id,
+                    _item["section_id"],
+                    actor="omp 全文一致性修复",
+                    comment="omp 主 Agent 已改写正文，原审核结论失效，请重新送审",
+                )
+        await db.commit()
+        return result
+    finally:
+        _OMP_CONSISTENCY_INFLIGHT.discard(scheme_id)

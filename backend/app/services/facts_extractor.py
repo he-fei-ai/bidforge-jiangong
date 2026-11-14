@@ -1819,6 +1819,11 @@ _FACT_TYPE_TO_CATEGORY: dict[str, str] = {
     #    并仍可作为手工录入选项使用。
     "tech_param": "tech_param",
     "design_param": "tech_param",
+    # ✅ R245（2026-11-14）：scale 分类此前只在 CATEGORY_TITLES/_CATEGORY_ORDER
+    #    注册，_FACT_TYPE_TO_CATEGORY 无 fact_type 映射 → 弱模型输出
+    #    fact_type="scale" 会被静默归到 other，且 CATEGORY_TO_FACT_TYPE 反查不到。
+    #    现归位为独立 scale 类别（工程规模与地质参数，九大章节=overview）。
+    "scale": "scale",
     "equipment": "tech_param",
     "safety": "safety_critical",
     "risk": "risk",  # 新增：风险与危大工程
@@ -4026,7 +4031,7 @@ async def invalidate_export_cache(db, scheme_id: str, facts_touched: bool = Fals
     记录一旦被这里清空，那些 .docx 文件就再没有任何引用方，永远不会被
     保留策略回收，`data/_exports` 随事实迭代无限膨胀。
 
-    ✅ R226（2026-11-12 · A2）：磁盘产物**不再由本函数直接 unlink** ——
+    ✅ R230（2026-11-12 · A2）：磁盘产物**不再由本函数直接 unlink** ——
     旧实现的裸删除绕过了导出域的两道保护与唯一删除出口：(a) 正在被
     FileResponse 流式读取（读租约登记中）的产物会被删 → 下载中断/文件成
     无行孤儿；(b) `.audit.json` 旁车残留（违反 R177「产物+旁车同生共死、
@@ -4055,7 +4060,7 @@ async def invalidate_export_cache(db, scheme_id: str, facts_touched: bool = Fals
             ``bid_analysis`` 的提取项失效）行为完全不变 —— 那些路径没有改动
             事实表，推进时间戳会让已生成正文被**误标**为过时。
     """
-    # ✅ R226（A2）：产物删除移交导出域孤儿回收后，本函数不再触碰磁盘文件，
+    # ✅ R230（A2）：产物删除移交导出域孤儿回收后，本函数不再触碰磁盘文件，
     #    函数内 `from pathlib import Path` 一并移除（原为裸 unlink 循环服务）。
     cur = await db.execute("SELECT id, result_path FROM export_cache WHERE scheme_id=?", (scheme_id,))
     # ✅ R189（2026-11-08 · R13 服务层漏网面）：本查询是事实链收尾的**缓存失效**
@@ -4090,7 +4095,7 @@ async def invalidate_export_cache(db, scheme_id: str, facts_touched: bool = Fals
             await db.commit()
 
         await retry_db_op(_delete_cache_once, max_retries=3, base_delay=0.1, jitter=0.05)
-        # ✅ R226（A2）：磁盘产物不再在此处裸 unlink —— 交由导出域孤儿回收
+        # ✅ R230（A2）：磁盘产物不再在此处裸 unlink —— 交由导出域孤儿回收
         #    统一清理（在飞/读租约/protect 保护 + 旁车连带删除，见 docstring）。
         logger.info("已清空 %d 条 export_cache（scheme=%s）；磁盘产物由导出域孤儿回收路径统一清理", cache_count, scheme_id)
 

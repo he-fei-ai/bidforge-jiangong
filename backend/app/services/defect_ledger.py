@@ -485,7 +485,14 @@ async def verify_defect(db, defect_id: str, *, checker=None, checker_name: str =
 
 
 async def ledger_summary(db, scheme_id: str) -> dict:
-    """统计口径：``passed`` 只计 ``verdict=yes``；undetermined 单列，绝不并入通过。"""
+    """统计口径：``passed`` 只计 ``verdict=yes``；undetermined 单列，绝不并入通过。
+
+    ✅ R227（D2 · 2026-11-13 · 产品裁决「标记 stale 保留账本留痕」）：加法式新增
+    ``stale`` 键（指向已删章节的失效账本行数）。**不改**既有 total/passed/failed/
+    undetermined/pending 计数语义——失效账本仍是账本行（留痕），由显示层单独标注
+    「章节已删除」，不参与通过/失败重判。旧库无 stale 列（默认 0）时 stale=0，
+    返回体与升级前逐字一致（零迁移、零语义变化）。
+    """
     cur = await db.execute(
         "SELECT verdict, COUNT(*) AS c FROM scheme_defects WHERE scheme_id=? GROUP BY verdict",
         (scheme_id,),
@@ -493,12 +500,18 @@ async def ledger_summary(db, scheme_id: str) -> dict:
     rows = [dict(r) for r in await cur.fetchall()]
     counts = {str(r["verdict"] or VERDICT_PENDING): int(r["c"] or 0) for r in rows}
     total = sum(counts.values())
+    cur2 = await db.execute(
+        "SELECT COUNT(*) AS c FROM scheme_defects WHERE scheme_id=? AND stale=1", (scheme_id,)
+    )
+    _stale_row = await cur2.fetchone()
+    stale = int(_stale_row["c"] or 0) if _stale_row else 0
     return {
         "total": total,
         "passed": counts.get(VERDICT_YES, 0),
         "failed": counts.get(VERDICT_NO, 0),
         "undetermined": counts.get(VERDICT_UNDETERMINED, 0),
         "pending": counts.get(VERDICT_PENDING, 0) + counts.get("", 0),
+        "stale": stale,
         "counts": counts,
         "pass_rule": "passed 仅统计 verdict=yes；undetermined 永不计入通过",
     }

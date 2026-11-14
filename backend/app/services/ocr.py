@@ -203,16 +203,24 @@ def _ocr_tesseract(data: bytes, lang: str) -> str:
         pytesseract.pytesseract.tesseract_cmd = settings.tesseract_path
     cfg = getattr(settings, "tesseract_data_path", "")
     config = f'--tessdata-dir "{cfg}"' if cfg else ""
+    # ✅ R238：tesseract 超时（0 = 不限制，沿用旧行为）。旧实现不传 timeout，
+    #    挂起的 tesseract 进程会永久占住 _OCR_CALL_LOCK（进程级串行锁），
+    #    其后所有 OCR 请求排队卡死；超时后 ocr_bytes_sync 捕获并降级下一引擎。
+    timeout = int(getattr(settings, "ocr_timeout_seconds", 120) or 0)
+    timeout = timeout if timeout > 0 else 0
     img = _preprocess(data)
     if img is not None:
         with _OCR_CALL_LOCK:
-            return pytesseract.image_to_string(img, lang=lang, config=config) or ""
+            return pytesseract.image_to_string(img, lang=lang, config=config, timeout=timeout) or ""
     import io as _io
 
     from PIL import Image
 
     with _OCR_CALL_LOCK:
-        return pytesseract.image_to_string(Image.open(_io.BytesIO(data)), lang=lang, config=config) or ""
+        return (
+            pytesseract.image_to_string(Image.open(_io.BytesIO(data)), lang=lang, config=config, timeout=timeout)
+            or ""
+        )
 
 
 def _ocr_rapidocr(data: bytes) -> str:

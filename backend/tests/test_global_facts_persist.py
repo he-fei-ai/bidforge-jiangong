@@ -66,6 +66,38 @@ class TestCategoryMapping:
         assert it is not None
         assert it.category == "tech_param", "地质参数应归入技术参数类别"
 
+    def test_scale_fact_type_registered_as_scale_category(self):
+        """R245：scale 此前只注册在 CATEGORY_TITLES，提取映射无 fact_type 归位。
+
+        弱模型输出 fact_type="scale" 时旧实现会静默归到 other，且
+        CATEGORY_TO_FACT_TYPE 反查不到该类别。现注册为独立 scale 类别。
+        """
+        assert fe._FACT_TYPE_TO_CATEGORY["scale"] == "scale"
+        assert fe.CATEGORY_TO_FACT_TYPE.get("scale") == "scale"
+        assert fe.CATEGORY_TITLES["scale"] == "工程规模与地质参数"
+        it = fe._parse_fact_dict(
+            {
+                "name": "工程规模",
+                "value": "大型",
+                "fact_type": "scale",
+                "source_text": "本工程为大型",
+                "confidence": 0.9,
+            }
+        )
+        assert it is not None
+        assert it.category == "scale", "fact_type=scale 必须归入工程规模与地质参数"
+
+    def test_repair_schema_enum_accepts_scale(self):
+        """R245：facts_json_fix_system 修复 Schema 必须接受 fact_type=scale。
+
+        若修复 Schema 枚举缺 scale，弱修复模型可能把 fact_type="scale"
+        改名成 other，抵消 _FACT_TYPE_TO_CATEGORY 的归位修复。
+        """
+        from app.services.ai.prompts._registry import _ALL_PROMPTS
+
+        tpl = _ALL_PROMPTS["facts_json_fix_system"]["default_content"]
+        assert "/scale/" in tpl, "facts_json_fix_system Schema 枚举必须含 scale"
+
 
 # ---------------------------------------------------------------------------
 # 持久化防数据丢失

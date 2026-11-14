@@ -63,6 +63,7 @@ def test_session_end_closes_aiosqlite_worker_thread(tmp_path):
                 cwd=str(BACKEND_DIR),
                 capture_output=True,
                 text=True,
+                encoding="utf-8",
                 timeout=CHILD_TIMEOUT_SECONDS,
                 env=env,
             )

@@ -85,7 +85,7 @@ import type {
   SseEvent,
   SseSoftStopMarker,
 } from "../types/api";
-import type { OutlineSavePayload } from "../types/api";
+import type { OutlineSavePayload, GenerateOutlineOmpPayload, FeatureFlags } from "../types/api";
 // ✅ R179 Phase H（2026-11-07）：文种标签 / 缺陷账本 / 可复核底稿的前后端契约类型
 import type { GenreResponse } from "../types/genre";
 import type {
@@ -139,6 +139,16 @@ export function clearAuthShortCircuit(): void {
  *    秒数必须取自这里，不能在调用方各自写死。
  */
 export const API_GLOBAL_TIMEOUT_MS = 60000;
+
+/**
+ * ✅ 阶段 2 旁路：omp 目录生成的请求超时（6 分钟）。
+ *
+ * 后端 `omp_task_timeout` 默认 300s，且 omp 内部还有重试 —— 若沿用全局 60s，
+ * 前端会先超时报「timeout of 60000ms exceeded」，**而后端仍在跑并最终整表写入
+ * sections**；用户以为失败而重试，即触发重复生成 / 覆盖。故此处必须显著大于
+ * 后端单任务预算，且超时文案要提示「后端可能仍在生成，勿重复点击」。
+ */
+export const OMP_OUTLINE_TIMEOUT_MS = 360000;
 
 const api = axios.create({
   baseURL: "/api/v1",
@@ -393,6 +403,12 @@ export const sectionsApi = {
     api.get(`/schemes/${schemeId}/sections/outline-versions`, { params: { limit } }),
   restoreOutlineVersion: (schemeId: string, snapshotId: string) =>
     api.post(`/schemes/${schemeId}/sections/outline-versions/${snapshotId}/restore`),
+  /** ✅ 阶段 2 旁路：用 omp 文件工作区 Agent 生成目录并整表写入（受 omp_task_enabled 控制）。
+   *  普通同步 POST，不走 SSE；brief 缺省由后端从方案名/类型/专业派生。 */
+  generateOutlineOmp: (schemeId: string, body?: GenerateOutlineOmpPayload) =>
+    api.post(`/schemes/${schemeId}/sections/generate-outline-omp`, body ?? {}, {
+      timeout: OMP_OUTLINE_TIMEOUT_MS,
+    }),
 };
 
 // ✅ R179 M1（2026-11-05）：评分项 → 目录覆盖校验（三条接口，全部为新增）。
@@ -1539,6 +1555,8 @@ export const systemApi = {
   updateOutlineAutoConfirm: (body: { enabled: boolean }) =>
     api.put<OutlineAutoConfirmSettings>("/system/outline-auto-confirm", body),
   activity: (limit = 8) => api.get("/system/activity", { params: { limit } }),
+  /** ✅ 阶段 2：轻量功能开关下发（前端据此预显隐受控功能，如 omp Agent 入口） */
+  getFeatureFlags: () => api.get<FeatureFlags>("/system/feature-flags"),
   /** SSE 实时流：任务 / AI 状态变更时立即推送快照 */
   activityStream: (limit = 8, signal?: AbortSignal, softStop?: Promise<void>) =>
     sseGetStream("/system/activity/stream", { params: { limit }, signal, softStop }),

@@ -1,4 +1,4 @@
-import { chartDropTexts, type SectionLogItem } from "../../utils/contentEvents";
+import { chartDropTexts, chartSemanticTexts, type SectionLogItem } from "../../utils/contentEvents";
 import {
   STANDARD_LABELS,
   issueLabel,
@@ -149,24 +149,28 @@ export const SectionLogList = memo(function SectionLogList({ items }: { items: S
                   「配图 N」回答本章配了几张图；出现删图时改为「配图 N（已删 M）」并挂
                   Tooltip 列出每张图的删除理由 —— 用户在生成过程中即可解释
                   「为什么正文里少了几张图」，不必等整批结束翻报告或去 grep 后端日志。
-                  零图表且无删图的普通章节不占位（那是最常见的正常情况）。 */}
+                  零图表且无删图的普通章节不占位（那是最常见的正常情况）。
+                  ✅ R233（R228 遗留③收口）：语义交叉校验观测（charts_semantic_notes）
+                  追加进同一 Tooltip —— 「AI 选型 vs 程序检测」不匹配时提示复核
+                  （观测不干预：图不会被删或改型）。既有文案与 Tag 颜色语义不变。 */}
               {item.status === "success" &&
                 item.chart_yield &&
                 (item.chart_yield.chart_count > 0 || item.chart_yield.charts_dropped_count > 0) &&
                 (() => {
                   const cy = item.chart_yield!;
                   const texts = chartDropTexts(cy.charts_dropped);
-                  return texts.length > 0 ? (
-                    <Tooltip title={texts.join("；")}>
-                      <Tag color="warning" style={{ margin: 0, fontSize: 11, flexShrink: 0 }}>
-                        配图 {cy.chart_count}（已删 {cy.charts_dropped_count}）
-                      </Tag>
-                    </Tooltip>
-                  ) : (
-                    <Tag color="blue" style={{ margin: 0, fontSize: 11, flexShrink: 0 }}>
+                  const semTexts = chartSemanticTexts(cy.semantic_notes);
+                  const tipLines = [...texts, ...semTexts];
+                  const tag = (
+                    <Tag
+                      color={texts.length > 0 ? "warning" : "blue"}
+                      style={{ margin: 0, fontSize: 11, flexShrink: 0 }}
+                    >
                       配图 {cy.chart_count}
+                      {texts.length > 0 ? `（已删 ${cy.charts_dropped_count}）` : ""}
                     </Tag>
                   );
+                  return tipLines.length > 0 ? <Tooltip title={tipLines.join("；")}>{tag}</Tooltip> : tag;
                 })()}
               {/* ✅ F-CONTENT-STANDARD(2026-09-26)：模式徽标 + 校验告警。
                   模式徽标回答「这章是按哪种标准写的」，告警 Popover 回答

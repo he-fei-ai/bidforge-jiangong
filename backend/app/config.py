@@ -41,6 +41,11 @@ class Settings(BaseSettings):
     ocr_pdf_max_pages: int = 20  # 扫描件 PDF 的 OCR 页数上限
     ocr_pdf_dpi: int = 200  # PDF 渲染 DPI（越高越准、越慢）
     ocr_min_chars_per_page: int = 30  # 平均每页字符数低于该值 → 判定为扫描件
+    # tesseract 单次调用超时（秒）：0 表示不限制（沿用旧行为）。
+    # 旧实现不传 timeout，tesseract 一旦挂起会永久占住 _OCR_CALL_LOCK（进程级
+    # 串行锁），其后所有 OCR 请求全部排队卡死。默认 120s 给正常高 DPI 大图留
+    # 足余量；超时由 ocr_bytes_sync 捕获后降级到 RapidOCR/视觉模型。
+    ocr_timeout_seconds: int = 120
 
     # ---------- 上传文件大小上限（解析提取模块 · 目录识别上传） ----------
     # 单文件最大字节数：超过即 413 拒绝，避免超大文件一次性读入内存（OOM）。
@@ -120,6 +125,106 @@ class Settings(BaseSettings):
     agnes_api_key: str = ""
     agnes_base_url: str = "https://api.agnes-ai.cn/v1"
     agnes_model: str = "agnes-2.5-flash"
+
+    # ---------- Oh My Pi (omp) Agent 集成（阶段 1：OmpProvider 降级链候选，默认关闭） ----------
+    # 把 omp 作为 provider 降级链里的「对话模型代理」。默认全部关闭 / 空值，
+    # 不影响任何现有链路；启用需显式打开 omp_provider_enabled 并本机安装 omp。
+    omp_provider_enabled: bool = False
+    # omp 可执行文件路径；默认 "omp" 依赖 PATH。Windows 上可填绝对路径。
+    omp_binary_path: str = "omp"
+    # omp 运行工作区根目录（务必与业务数据库 / 项目资料隔离）；留空则用系统临时目录。
+    omp_workspace_dir: str = ""
+    # 单次 prompt 等待 omp 返回 prompt_result 的超时（秒）。
+    omp_rpc_timeout: int = 120
+    # 传给 omp --tools 的白名单；Provider 角色默认空（纯对话/JSON，不挂工具）。
+    # 真正的「文件工作区 Agent」工具白名单属于阶段 2 的 OmpTaskAgent。
+    omp_tools: str = ""
+
+    # ---------- Oh My Pi (omp) 文件工作区 Agent（阶段 2：OmpTaskAgent，默认关闭） ----------
+    # 把 omp 作为「文件工作区多步 Agent」辅助目录 / 正文生成。默认关闭；启用需
+    # omp_task_enabled=True + 本机安装 omp + omp_task_model 指向真实 LLM provider。
+    omp_task_enabled: bool = False
+    # omp 调用底层 LLM 所用的模型 id（必须对应 omp models.yml 中已配置的 provider）。
+    omp_task_model: str = ""
+    # 受控工具白名单；放开命令执行加入 bash（Agent 引擎命令可在软件内运行）。
+    omp_task_tools: str = "write,read,edit,grep,glob,bash"
+    # 单任务超时（秒）：目录生成多步循环可能较长。
+    omp_task_timeout: int = 300
+    # 任务结束后是否保留工作区（便于排查 omp 产物）；默认清理。
+    omp_task_keep_workspace: bool = False
+    # 「正文生成后全文一致性检查」omp 主 Agent 旁路的**二级灰度开关**。
+    # 一致性修复是高风险写操作，与目录生成旁路分开灰度：需同时
+    # omp_task_enabled=True 且 omp_consistency_enabled=True 才可用。
+    omp_consistency_enabled: bool = False
+
+    # ---------- Oh My Pi (omp) 三环节全自动工作流（阶段 3，默认关闭） ----------
+    # 统一的「目录生成 → 正文生成 → 审核修复」旁路编排入口。需同时
+    # omp_task_enabled=True 且 omp_workflow_enabled=True 才可用；禁用时 409 回退主链路。
+    omp_workflow_enabled: bool = False
+    # batch 委派的最大并发子 Agent 数（防止 15~30 路并发冷启动撞 429）。
+    omp_workflow_max_concurrency: int = 4
+    # verify 判定不通过后允许的最大定向 fix 轮数；超出则暂停并标记人工介入。
+    omp_workflow_max_fix_rounds: int = 2
+    # 累计错误达到该数量即进入 paused（对应 agentPauseGate 的平台侧等价兜底）。
+    omp_workflow_pause_after_failures: int = 3
+    # 公共上下文上限（字）；超限触发 compaction，完整内容仍写入 CONTEXT.md 由 read 分段读取。
+    omp_workflow_context_limit: int = 200000
+
+    # ---------- Oh My Pi (omp) 引擎路由与灰度（默认关闭，加法式） ----------
+    # 引擎默认偏好：auto（灰度 + 可用性综合判定）/ omp（显式走 omp）/ main（主链路）。
+    # 缺省 "omp" 逐字节保持既有端点行为（未传 engine 时仍走显式 omp 闸门）。
+    omp_engine_default: str = "omp"
+    # 任务级引擎覆盖（形态 "outline=omp,content=main"；空 = 无覆盖）。
+    omp_engine_overrides: str = ""
+    # 灰度方案白名单（逗号分隔 scheme_id；空 = 全量放行，非空 = 仅白名单内方案可用 omp）。
+    omp_gray_scheme_ids: str = ""
+
+    # ---------- Agent 引擎（R239 · omp 主路径 + 降级路径，可双轨） ----------
+    # ✅ R239（2026-11-13 · 用户裁决「以 can1357/oh-my-pi (omp) 作为底层 Agent 引擎，
+    #    为主路径，其它为降级路径，可双轨」）：撤销 R237「单轨无回退」裁决。
+    #    omp 恒为主路径；失败 ⇒ 指数退避重试 ⇒ 按 omp_engine_router.ENGINE_ORDER
+    #    （omp → local → main）**显式降级**（degraded 标注，绝不静默）⇒ 全链失败才
+    #    挂起（paused）保留现场。所有参数均从配置读取（本组 + 既有 omp_* 键）。
+    # 引擎开关（全局 Feature Flag）：关闭时 agent_engine 执行器整体不可用（显式报错，不猜）。
+    agent_engine_enabled: bool = True
+    # 主路径引擎（档位名必须属于 omp_engine_router.ENGINE_ORDER；非法值回落 omp）。
+    agent_engine_primary: str = "omp"
+    # 是否允许降级到其它引擎；False = omp 主路径失败即挂起（回到无兜底语义）。
+    agent_engine_fallback_enabled: bool = True
+    # 启用哪些降级档（逗号分隔）；空 = ENGINE_ORDER 中主路径之后的全部档。
+    # ⚠️ 只裁剪「启用集合」，相对顺序仍由 ENGINE_ORDER 单一事实源决定（不造第二份判据）。
+    agent_engine_fallback_order: str = ""
+    # omp 可执行文件路径；留空 = 回落既有 ``omp_binary_path``（单一事实源，避免双份配置漂移）。
+    agent_engine_omp_binary_path: str = ""
+    # 上下文压缩阈值（字）：单帧文本超过该值先压缩（首尾保留 + 摘要 + 全文写工作区文件）。
+    agent_engine_compaction_threshold: int = 120000
+    # 上下文阈值比率（0,1]：上下文体积 > 窗口 × 比率 时走文件工作区（引擎层判定）。
+    agent_engine_context_threshold_ratio: float = 0.7
+    # 指数退避基数（秒）：第 n 次重试前等 base * 2**n。
+    agent_engine_retry_backoff_base: float = 1.5
+    # omp 执行失败（未安装/未授权/崩溃/超时）时的最大重试次数；超限 ⇒ 任务挂起（无兜底）。
+    agent_engine_max_retries: int = 2
+    # Provider 授权凭据读取路径：空 = 不注入（沿用 omp 自身 models.yml 授权）；
+    # 非空且文件缺失/不可读 ⇒ 判定未授权 ⇒ 任务挂起。
+    # 文件内为 JSON 对象（环境变量名 → 值），仅注入 omp 子进程，绝不写日志。
+    agent_engine_provider_auth: str = ""
+
+    # ---------- Agent 引擎双轨演进（R240 · 路径 B 注入执行器 POC，默认零影响） ----------
+    # 架构决策：「双轨落地、引擎路由、默认回退、灰度上线」；业务层 Prompt 与流程逻辑
+    # **保持现状不动**。本组配置是 dual_track 层的唯一阈值来源，每次任务动态读取
+    # （实时环境变量优先），禁止在业务代码里写死模式 / 阈值 / 重试 / 路径 / 授权。
+    # 引擎模式：pi（旧轨，默认，等价改造前行为）/ omp（oh-my-pi 新轨）/ hybrid（灰度）。
+    agent_engine_mode: str = "pi"
+    # hybrid 灰度放量百分比 [0,100]：0 = 全量 pi，100 = 全量 omp；按 scheme_id / task_id
+    # 稳定哈希取模，同一 ID 恒定落同一轨；支持热更新，无需重启进程。
+    agent_engine_gray_percent: int = 0
+    # 灰度哈希键：scheme_id（项目/方案级稳定灰度）/ task_id（任务级灰度）。
+    agent_engine_gray_key: str = "scheme_id"
+    # 路径 B 执行器注入开关：real = 拉起真 omp 进程；mock = 注入 MockOmpExecutor
+    # （读取预置 JSON 响应 / 模拟流式输出，不启动子进程、不消耗真实额度）。
+    agent_engine_omp_executor_impl: str = "real"
+    # Mock 预置响应文件（JSON）；空 = 使用内置样例响应（仅离线 POC / 契约测试）。
+    agent_engine_mock_response_path: str = ""
 
     # ---------- 图片生成配置（自招投标方案平台移植） ----------
     # 支持：agnes / dashscope / volcengine / hunyuan / zhipu / stepfun / baidu

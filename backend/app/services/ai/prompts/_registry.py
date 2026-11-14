@@ -946,6 +946,10 @@ PROMPT_VARIABLE_CONTRACTS: dict[str, list[str]] = {
     "chart_mermaid_fix_comparison": ["code", "error", "scheme_type"],
     "chart_mermaid_fix_flowchart": ["code", "error", "scheme_type"],
     "chart_mermaid_fix_gantt": ["code", "error", "scheme_type"],
+    # --- 高保真图表生成域（R242 七段式生成提示词，唯一占位符 = {scheme_type}）---
+    "chart_gen_gantt_spec": ["scheme_type"],
+    "chart_gen_org_matrix_spec": ["scheme_type"],
+    "chart_gen_flow_complex_spec": ["scheme_type"],
     # --- 配图域 ---
     "ILLUSTRATION_PROMPT_OPTIMIZE": ["section_title", "style"],
     # --- ✅ R38 收口（2026-10-03）：剩余未登记模板全部接入契约表 ---

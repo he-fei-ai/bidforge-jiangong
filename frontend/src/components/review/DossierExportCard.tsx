@@ -28,6 +28,7 @@ export function DossierExportCard({ schemeId }: DossierExportCardProps) {
   const [exporting, setExporting] = useState(false);
   const [disabled, setDisabled] = useState(false);
   const abortRef = useRef<AbortController | null>(null);
+  const exportingRef = useRef(false);
   const schemeIdRef = useRef(schemeId);
   schemeIdRef.current = schemeId;
 
@@ -42,6 +43,12 @@ export function DossierExportCard({ schemeId }: DossierExportCardProps) {
   const handleExport = async () => {
     const sid = schemeIdRef.current;
     if (!sid) return;
+    // ✅ R241（2026-11-13）：同步重入锁 —— 主导出链刻意用同步 ref 锁（R-3），
+    //    本卡此前只靠 antd loading（React 18 批处理提交前的双击窗口可漏进
+    //    第二击：新建第二个 AbortController 覆盖 abortRef，第一击脱离取消管理、
+    //    两次下载两个成功 toast）。与主链口径对齐。
+    if (exportingRef.current) return;
+    exportingRef.current = true;
     const controller = new AbortController();
     abortRef.current = controller;
     setExporting(true);
@@ -57,7 +64,9 @@ export function DossierExportCard({ schemeId }: DossierExportCardProps) {
       document.body.appendChild(a);
       a.click();
       document.body.removeChild(a);
-      URL.revokeObjectURL(url);
+      // ✅ R230（F10）：延迟回收 blob URL，对齐主导出链（useExportRun 10s）——
+      //    同步 revoke 在 Firefox 等浏览器 click 派发未完成时可能丢下载。
+      setTimeout(() => URL.revokeObjectURL(url), 10_000);
       if (schemeIdRef.current === sid) message.success("可复核底稿已生成");
     } catch (e: unknown) {
       const resolution = await resolveExportError(e);
@@ -71,6 +80,7 @@ export function DossierExportCard({ schemeId }: DossierExportCardProps) {
     } finally {
       if (schemeIdRef.current === sid || !abortRef.current) setExporting(false);
       if (abortRef.current === controller) abortRef.current = null;
+      exportingRef.current = false;
     }
   };
 

@@ -284,16 +284,18 @@ class TestMoveSubtreeDepth:
         db.row_factory = sqlite3.Row
         await db.execute(
             # ✅ R190 重锚：update_section 改名残留修复（FIX-9）需读旧标题列
-            "CREATE TABLE sections (id TEXT PRIMARY KEY, scheme_id TEXT, parent_id TEXT, level INTEGER, title TEXT DEFAULT '')"
+            # ✅ R227（D6）：update_section 锁定守卫需读 locked 列 —— 补列（默认 0，
+            #    与 SCHEMA_SQL 同值），测试意图（子树深度守卫）不变。
+            "CREATE TABLE sections (id TEXT PRIMARY KEY, scheme_id TEXT, parent_id TEXT, level INTEGER, title TEXT DEFAULT '', locked INTEGER DEFAULT 0)"
         )
         await db.executemany(
-            "INSERT INTO sections VALUES (?,?,?,?,?)",
+            "INSERT INTO sections VALUES (?,?,?,?,?,?)",
             [
-                ("r1", "S", "", 1, "第一章"),
-                ("c1", "S", "r1", 2, "1.1 带子树的章"),
-                ("l1", "S", "c1", 3, "1.1.1 三级叶"),
-                ("r2", "S", "", 1, "第二章"),
-                ("c2", "S", "r2", 2, "2.1 目标父章"),
+                ("r1", "S", "", 1, "第一章", 0),
+                ("c1", "S", "r1", 2, "1.1 带子树的章", 0),
+                ("l1", "S", "c1", 3, "1.1.1 三级叶", 0),
+                ("r2", "S", "", 1, "第二章", 0),
+                ("c2", "S", "r2", 2, "2.1 目标父章", 0),
             ],
         )
         await db.commit()

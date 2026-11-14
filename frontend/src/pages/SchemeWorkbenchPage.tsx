@@ -88,6 +88,7 @@ import {
   bidAnalysisApi,
   docPipelineApi,
   systemApi,
+  OMP_OUTLINE_TIMEOUT_MS,
 } from "../api";
 import MarkdownRenderer from "../components/MarkdownRenderer";
 import UploadParseTab from "../components/UploadParseTab";
@@ -296,6 +297,7 @@ import {
 import { type FactsLogItem, type OutlineLogItem } from "./schemeWorkbench/logTypes.ts";
 import { formatOutlineTitle } from "./schemeWorkbench/outlineNumbering.ts";
 import {
+  buildPartialOutlineHint,
   buildTree,
   collectAllKeys,
   countGeneratedLeaves,
@@ -984,6 +986,9 @@ export default function SchemeWorkbenchPage() {
   //    开关存后端 governance_settings kv；delay 为后端只读倒计时（运维环境变量）。
   const [outlineAutoConfirmEnabled, setOutlineAutoConfirmEnabled] = useState(false);
   const [outlineAutoConfirmDelayMs, setOutlineAutoConfirmDelayMs] = useState(8000);
+  // ✅ 阶段 2 旁路：omp 文件工作区 Agent 目录生成开关（前端据此预显隐入口）
+  const [ompTaskEnabled, setOmpTaskEnabled] = useState(false);
+  const [generatingOmp, setGeneratingOmp] = useState(false);
   // ✅ 2026-09-23「上传解析 + 提取项目」合并：import 内部子 Tab（docs = 文档解析 / extract = 项目提取）
   //    顶层 Tab 数量从 7 降到 6，bidAnalysis 不再是独立 Tab key，而是 import 下的子 Tab。
   const [importSubTab, setImportSubTab] = useState<"docs" | "extract">("docs");
@@ -1484,6 +1489,14 @@ export default function SchemeWorkbenchPage() {
         if (Number.isFinite(d) && d > 0) setOutlineAutoConfirmDelayMs(d);
       })
       .catch(() => {});
+    // ✅ 阶段 2：读取受控功能开关（含 omp_task_enabled），前端据此预显隐入口。
+    systemApi
+      .getFeatureFlags()
+      .then(({ data }) => {
+        if (!alive) return;
+        setOmpTaskEnabled(!!data?.omp_task_enabled);
+      })
+      .catch(() => {});
     return () => {
       alive = false;
     };
@@ -1662,6 +1675,15 @@ export default function SchemeWorkbenchPage() {
       setTaskPaused(false);
       setTaskStopping(false);
       activeTaskIdRef.current = "";
+      // ✅ R231（2026-11-13 · P3 · D-02 家族）：omp 目录生成态跨方案复位 ——
+      //    generatingOmp 是页面级布尔（omp 请求属于发起时的旧方案 A），切到 B 后
+      //    A 的 omp 仍在飞 ⇒ B 页 outlineBusy 恒真，全部目录按钮被禁用数分钟
+      //    （omp 同步长任务 6 分钟超时窗），与 R193 D-02 复位的 generating 族
+      //    同因同修（omp 状态晚于复位块诞生而漏登记）。omp 请求本身不 abort：
+      //    后端照常完成 A 的整表写入（load 内建 currentSchemeIdRef 守卫，切走后
+      //    旧 load 空转不会把 A 的树灌进 B）；重新切回 A 时按钮恢复可用，重复
+      //    触发由后端 _OMP_OUTLINE_INFLIGHT 409 兜底。
+      setGeneratingOmp(false);
       // ✅ R215（2026-11-11 · P1）：正文选中章与生成摘要跨方案复位 —— 旧实现在
       //    D-02 复位块漏掉 selectedSection / crSummary，而 load() 只在旧 section
       //    key 于新树中找得到时才刷新（找不到时什么都不做）⇒ 方案 A 的章节对象
@@ -2004,7 +2026,25 @@ export default function SchemeWorkbenchPage() {
               // ✅ R224（F17b）：facts 任务的刷新接管终态消费 facts_result ——
               //    segment_stats / cross_conflicts 此前只在断线重挂恢复；与
               //    content（R194 FE-16）/ outline（R216 D-3）同批补齐三路矩阵。
-              if (active.task_type === "facts_generation") {
+              // ✅ R247（2026-11-14 · P2 · 刷新接管终态收窄 + 世代复核）：
+              //    旧实现把**全部终态**喂给 consumeFactsTerminal —— failed/stopped
+              //    被当降级完成（_isDegraded = status !== "completed" 恒真）：
+              //    ① 双 toast（通用 failed/stopped 分支已 msg.error/info，此处再
+              //       warning 一次）；② applyFactsCompletedEvent({}) 用空对象覆盖
+              //       segmentStats / crossConflicts，把分段失败横幅清空 ⇒ 用户
+              //       看不到哪几段提取失败、也无法「重试失败分段」。现与手动接管
+              //       路径（useUnknownTaskRecovery :171 已按 completed|degraded
+              //       收窄）同口径：仅 completed/degraded 消费成果，failed/stopped
+              //       落到下方通用分支（msg.error / msg.info + load()）。
+              //    ③ 终态消费前补 cancelled / genSeq 复核（与下方 catch 分支
+              //       R223 FE-2 同纪律）—— 切方案后 cancelled 由 effect cleanup
+              //       置位 / genSeq 被 bump，旧方案 segmentStats 不得写入新页面态。
+              if (
+                active.task_type === "facts_generation" &&
+                (st.status === "completed" || st.status === "degraded") &&
+                !cancelled &&
+                genSeqRef.current === takeoverSeq
+              ) {
                 factsTerminalFnRef.current?.(st);
               }
               const ckpt = st.outline_result;
@@ -2034,6 +2074,8 @@ export default function SchemeWorkbenchPage() {
                   msg.warning(
                     `后台目录生成完成，但 ${ckpt.failed_count || ckpt.failed_chapters.length} 章子目录失败，请确认后保存`,
                   );
+                } else if (st.status === "stopped") {
+                  msg.info("后台目录生成已停止，已生成部分成果，请确认保存");
                 } else {
                   msg.success("后台目录生成已完成，请确认保存");
                 }
@@ -2042,7 +2084,41 @@ export default function SchemeWorkbenchPage() {
                 summarizeOutlineReviewBasis(ckpt.review).logs.forEach((line) =>
                   pushOutlineLog(1, line),
                 );
-                if (outlineAutoConfirmEnabled) {
+                // ✅ R231（2026-11-13 · P1-1）：接管路径按 status 分流 —— 此前
+                //    仅判 task_type + outline 非空，stopped checkpoint（partial
+                //    部分成果）也进 handleOutlineReady；后端 stopped 出口的
+                //    auto_confirm 在 R231 前可判 ready（evaluate 无「目录不完整」
+                //    blocker）⇒ 8 秒倒计时**自动保存半份目录**，用户停止意图被
+                //    自动保存覆盖。stopped 走与断线重挂 stopped 分支
+                //    （useOutlineGeneration :575）同口径的手动部分保存确认，
+                //    绝不进 auto_confirm 倒计时（防御纵深：即使后端 future
+                //    回归也应在此拦截）。
+                if (st.status === "stopped") {
+                  const partialCount = countOutline(ckpt.outline);
+                  const hint = buildPartialOutlineHint({
+                    event: ckpt.event,
+                    partial: ckpt.partial,
+                    nodeCount: partialCount,
+                  });
+                  modal.confirm({
+                    title: hint.title,
+                    content: hint.content,
+                    okText: hint.okText,
+                    cancelText: hint.cancelText,
+                    onOk: async () => {
+                      try {
+                        const { data } = await sectionsApi.saveOutline(id, {
+                          outline: ckpt.outline,
+                          source: "ai",
+                        });
+                        msg.success(`已保存 ${partialCount} 个章节的目录`);
+                        load();
+                      } catch (saveErr: unknown) {
+                        msg.error((saveErr as { message?: string })?.message || "保存失败");
+                      }
+                    },
+                  });
+                } else if (outlineAutoConfirmEnabled) {
                   handleOutlineReady(ckpt.outline, ckpt.auto_confirm);
                 } else {
                   openOutlineGate(ckpt.outline);
@@ -2178,17 +2254,20 @@ export default function SchemeWorkbenchPage() {
     }
   }, [selectedSection?.key]);
 
-  // ✅ 关闭页面前检查未保存更改
+  // ✅ 关闭页面前检查未保存更改（R227 F14：正文编辑与目录树未保存新增节点均提示；
+  //    目录树 rename/删除/移动（无新增节点时）即时持久化，不属未保存；local_/upload_
+  //    前缀新增节点刷新即丢，必须纳入守卫，与左侧「有未保存的修改」橙色 Tag 同口径）
   useEffect(() => {
     const handler = (e: BeforeUnloadEvent) => {
-      if (isEditingSection && editDirty) {
+      const outlineDirty = hasUnsavedLocalNodes(tree);
+      if ((isEditingSection && editDirty) || outlineDirty) {
         e.preventDefault();
         e.returnValue = "有未保存的更改，确定要离开吗？";
       }
     };
     window.addEventListener("beforeunload", handler);
     return () => window.removeEventListener("beforeunload", handler);
-  }, [isEditingSection, editDirty]);
+  }, [isEditingSection, editDirty, tree]);
 
   // ✅ 草稿持久化已下沉到 SectionContentCard（组件自持 draft + localStorage 自动保存）；
   //    页面旧版草稿自动保存 effect 会用陈旧 editContent 覆盖卡片草稿，已移除（勿恢复）。
@@ -2394,6 +2473,38 @@ export default function SchemeWorkbenchPage() {
     pollTaskUntilTerminal,
   });
 
+  // ✅ 阶段 2 旁路：用 omp 文件工作区 Agent 生成目录（受 omp_task_enabled 控制）。
+  //    普通同步请求：后端拉起 omp 多步 Agent 写 OUTLINE.md 后整表回写入库；
+  //    成功即刷新左侧目录树（load），失败按后端 409/404/502 提示回退主链路。
+  const handleGenerateOutlineOmp = useCallback(async () => {
+    const sid = id;
+    if (!sid) return;
+    setGeneratingOmp(true);
+    try {
+      await sectionsApi.generateOutlineOmp(sid, {});
+      msg.success("omp Agent 已生成目录并保存，请检查左侧目录树");
+      await load();
+    } catch (e: unknown) {
+      const err = e as {
+        code?: string;
+        response?: { status?: number; data?: { detail?: string } };
+        message?: string;
+      };
+      const detail = err?.response?.data?.detail || err?.message || "未知错误";
+      const timedOut = err?.code === "ECONNABORTED" || /timeout/i.test(detail);
+      // ⚠️ 前端超时 ≠ 后端失败：omp 是同步长任务，超时后后端仍会跑完并整表
+      //    写入 sections。必须明确告知勿重复点击（后端 per-scheme 防重入会拦
+      //    第二个请求），稍后用目录树刷新按钮 load() 即可看到结果。
+      msg.error(
+        timedOut
+          ? `请求已超过 ${Math.round(OMP_OUTLINE_TIMEOUT_MS / 60000)} 分钟：后端可能仍在生成目录，请勿重复点击，稍后刷新目录树查看结果`
+          : `omp 生成目录失败：${detail}`,
+      );
+    } finally {
+      setGeneratingOmp(false);
+    }
+  }, [id, msg, load]);
+
   // ✅ R216（2026-11-11 · P2 · D-1）：未知态手动接管 outline 终态恢复（真实实现，
   //    经 outlineRestoreFnRef 间接注入 useUnknownTaskRecovery）。与刷新接管路径
   //    （:1939 outline 分支）和断线重挂路径（useOutlineGeneration reattach 分支）
@@ -2422,11 +2533,42 @@ export default function SchemeWorkbenchPage() {
         msg.warning(
           `后台目录生成完成，但 ${ckpt.failed_count || ckpt.failed_chapters.length} 章子目录失败，请确认后保存`,
         );
+      } else if (fin.status === "stopped") {
+        msg.info("后台目录生成已停止，已生成部分成果，请确认保存");
       } else {
         msg.success("后台目录生成已完成，请确认保存");
       }
       summarizeOutlineReviewBasis(ckpt.review).logs.forEach((line) => pushOutlineLog(1, line));
-      if (outlineAutoConfirmEnabled) {
+      // ✅ R231（2026-11-13 · P1-1）：未知态接管同按 status 分流（与上方刷新
+      //    接管同判据同口径——stopped 部分成果走手动确认，绝不进 auto_confirm
+      //    倒计时；R223 FE-1 的「outlineRestoreFnRef 全权负责终态消费」契约不变）。
+      if (fin.status === "stopped" && id) {
+        const sid: string = id;
+        const partialCount = countOutline(restoredOutline);
+        const hint = buildPartialOutlineHint({
+          event: ckpt.event,
+          partial: ckpt.partial,
+          nodeCount: partialCount,
+        });
+        modal.confirm({
+          title: hint.title,
+          content: hint.content,
+          okText: hint.okText,
+          cancelText: hint.cancelText,
+          onOk: async () => {
+            try {
+              const { data } = await sectionsApi.saveOutline(sid, {
+                outline: restoredOutline,
+                source: "ai",
+              });
+              msg.success(`已保存 ${partialCount} 个章节的目录`);
+              load();
+            } catch (saveErr: unknown) {
+              msg.error((saveErr as { message?: string })?.message || "保存失败");
+            }
+          },
+        });
+      } else if (outlineAutoConfirmEnabled) {
         handleOutlineReady(restoredOutline, ckpt.auto_confirm);
       } else {
         openOutlineGate(restoredOutline);
@@ -2671,6 +2813,10 @@ export default function SchemeWorkbenchPage() {
               chart_count: evt.chart_count,
               charts_dropped_count: evt.charts_dropped_count,
               charts_dropped: evt.charts_dropped,
+              // ✅ R233（R228 遗留③收口）：语义交叉校验观测透传（后端加法式字段，
+              //    旧版后端缺键 → normalizeChartYield 防御式回 []）
+              charts_semantic_notes: (evt as Record<string, unknown>).charts_semantic_notes,
+              charts_semantic_notes_count: (evt as Record<string, unknown>).charts_semantic_notes_count,
             }),
             // ✅ F-CONTENT-STANDARD(2026-09-26 · F4)：本章生效标准 + 校验报告
             //    （字段存在却丢弃 = 用户完全看不到生成标准的执行结果）
@@ -3405,6 +3551,8 @@ export default function SchemeWorkbenchPage() {
     renamingValue,
     setRenamingKey,
     setRenamingValue,
+    // ✅ R231（2026-11-13）：omp 目录生成期间禁用树行内改名（D-02 家族 omp 态）
+    ompBusy: generatingOmp,
   });
 
   // ✅ R106 FIX-4：任务不再运行（SSE stopped / 断线轮询接管 / 异常收尾）时复位
@@ -3879,6 +4027,9 @@ export default function SchemeWorkbenchPage() {
           projectId={schemeProjectId || ""}
           onCreateSuggestedSection={handleCreateSuggestedSection}
           onOutlineRestored={load}
+          ompTaskEnabled={ompTaskEnabled}
+          generatingOmp={generatingOmp}
+          handleGenerateOutlineOmp={handleGenerateOutlineOmp}
         />
       ),
     },

@@ -172,10 +172,17 @@ async def run_fullbook_repair(
     conflict_ids: list[str] | None = None,
     resync_fn=None,
     progress_cb=None,
+    workspace_agent_fn=None,
 ) -> dict:
     """整卷合并修复一次批次。返回 save_repair 结果（含 repair_id / snapshot_id / items）。
 
     仅修复**有权威值**且落在阈值 / 白名单内的冲突（复用 filter_conflicts 口径）。
+
+    ``workspace_agent_fn``（加法式可选，默认 None ⇒ 行为逐字不变）：注入一个
+    ``await fn(*, workspace, facts, conflicts_digest, section_count, repair_nudge) -> str``
+    回调，用「omp 主 Agent 文件工作区执行」替代单次 ``chat_with_fallback``。回包仍是
+    整卷工作区文本，故 ``parse_fullbook_workspace``、四道闸门、快照与 ``save_repair``
+    **全部复用**，不产生第二条修复管线（阶段 2 旁路灰度专用）。
 
     ✅ R168（2026-11-03 · 原子性收口）：回写阶段（章节 UPDATE + 冲突状态回写）改为
     **全程缓冲、不中途 commit**，统一由 :func:`repair_record.save_repair` 内部的那一次
@@ -252,7 +259,21 @@ async def run_fullbook_repair(
         if progress_cb:
             await progress_cb(min(attempt, 1), 1, f"整卷合并修复：第 {attempt} 轮往返")
         try:
-            raw = await chat_with_fallback(messages, temperature=0.1, timeout=180, scene="consistency_fullbook")
+            if workspace_agent_fn is not None:
+                # ✅ 阶段 2 omp 旁路：整卷正文走**文件工作区**（read 分段跨节比对
+                #    + edit 统一修复），回包文本仍是 technical-plan.md 全文 —— 因此
+                #    下方 parse_fullbook_workspace 与闸门 A/B/C/D 逐字复用。
+                #    messages 仅 chat 路径消费；此处忽略，闸门拒绝原因经
+                #    repair_nudge 透传给 Agent，让重问时一并纠正结构问题。
+                raw = await workspace_agent_fn(
+                    workspace=workspace,
+                    facts=facts,
+                    conflicts_digest=_digest_conflicts(targets),
+                    section_count=len(sections),
+                    repair_nudge=gate_reject_reason,
+                )
+            else:
+                raw = await chat_with_fallback(messages, temperature=0.1, timeout=180, scene="consistency_fullbook")
         except Exception as e:  # noqa: BLE001 - 调用失败重问一次，最终仍失败则整批放弃
             logger.warning("[整卷修复] 第 %d 轮调用异常：%s", attempt, e)
             gate_reject_reason = f"AI 调用异常：{str(e)[:120]}"

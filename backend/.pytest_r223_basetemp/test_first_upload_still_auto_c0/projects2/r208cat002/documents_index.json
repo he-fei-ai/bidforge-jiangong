@@ -1,0 +1,16 @@
+[
+  {
+    "doc_id": "44ce7333-645b-4919-a9b4-d6b06277fc61",
+    "file_name": "工程量清单.txt",
+    "file_type": "txt",
+    "doc_category": "报价清单",
+    "file_hash_md5": "9dafcf16a6ce51b688bd41ec1ec7c30d",
+    "parse_status": "pending",
+    "parse_version": "v1",
+    "extract_status": "pending",
+    "page_count": 0,
+    "quality_score": null,
+    "expires_at": "2027-11-13T16:02:02Z",
+    "updated_at": "2026-11-13T16:02:02Z"
+  }
+]

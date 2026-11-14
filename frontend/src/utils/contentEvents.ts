@@ -49,17 +49,49 @@ export type ChartDropItem = {
 };
 
 /**
+ * ✅ R233（2026-11-13 · R228 遗留③收口）：生成后语义交叉校验观测
+ * （后端 `_chart_pipeline.build_inline_chart_plan` 产出，section_done report
+ * 的 `charts_semantic_notes` 加法式字段透传）—— 检测器对图表块附近正文给出
+ * **明确正分匹配**且 ≠ AI 选型时记录（观测不干预：不删块、不改类型）。
+ * 前端消费为「AI 配图类型与章节语义可能不匹配」的复核提示。
+ */
+export type ChartSemanticNote = {
+  /** AI 实际选用的图表类型 */
+  type?: string;
+  /** 检测器判出的语义类型 */
+  detected?: string;
+  /** 检测器匹配得分（正分） */
+  score?: number;
+  /** 附近正文摘录（≤60 字） */
+  context?: string;
+};
+
+/** 图表类型 → 中文标签（与后端 chart_validators.CHART_TYPE_LABELS 同值） */
+export const CHART_SEMANTIC_TYPE_LABELS: Record<string, string> = {
+  flowchart: "流程图",
+  gantt: "甘特图",
+  architecture: "组织架构图",
+  labor: "劳动力配置图",
+  comparison: "对比图",
+  layout: "总平面布置图",
+  timeline: "时间轴",
+};
+
+/**
  * R49：图表产出闭环口径（后端 section_done 实时下发，与 last_generation_report
  * 同名同值 —— 断线重挂后与库内真相一致）：
  * - chart_count        = 最终正文里真实存活的图表块数（"留下的"）
  * - charts_dropped_count = 被删除/裁剪的图表块数（"被删的"）
  * 两者相加即 AI 的本节提名量，可区分「本应配图但 AI 零产出」（提示词/模型问题）
  * 与「产出了但被删」（限流/校验问题）。
+ * ✅ R233：semantic_notes = 语义交叉校验观测（可选，旧版后端缺键回 []）。
  */
 export type ChartYield = {
   chart_count: number;
   charts_dropped_count: number;
   charts_dropped: ChartDropItem[];
+  semantic_notes?: ChartSemanticNote[];
+  semantic_notes_count?: number;
 };
 
 /**
@@ -77,11 +109,24 @@ export function normalizeChartYield(raw: unknown): ChartYield {
         (x): x is ChartDropItem => !!x && typeof x === "object",
       )
     : [];
+  // ✅ R233：语义交叉校验观测（R228 遗留③收口）—— 防御式解析，旧版后端
+  //    缺键/类型不符回 []，绝不抛异常（事件循环里异常会中断生成会话日志）。
+  const semanticNotes = Array.isArray(obj.charts_semantic_notes)
+    ? (obj.charts_semantic_notes as ChartSemanticNote[]).filter(
+        (x): x is ChartSemanticNote => !!x && typeof x === "object",
+      )
+    : [];
+  const semanticCount = Number(obj.charts_semantic_notes_count);
   return {
     chart_count: Number.isFinite(count) && count > 0 ? Math.floor(count) : 0,
     charts_dropped_count:
       Number.isFinite(droppedCount) && droppedCount > 0 ? Math.floor(droppedCount) : dropped.length,
     charts_dropped: dropped,
+    semantic_notes: semanticNotes,
+    semantic_notes_count:
+      Number.isFinite(semanticCount) && semanticCount > 0
+        ? Math.floor(semanticCount)
+        : semanticNotes.length,
   };
 }
 
@@ -119,6 +164,24 @@ export function chartDropTexts(items: ChartDropItem[]): string[] {
     const reason = d.reason || "";
     const label = CHART_DROP_REASON_LABELS[reason] || reason || "未知理由";
     return `${t}：${label}`;
+  });
+}
+
+/**
+ * ✅ R233（R228 遗留③收口）：把语义交叉校验观测渲染成 Tooltip 行
+ * （空清单返回空数组，调用方据此不渲染提示）。展示口径：
+ * 「AI 选 X、正文语义判 Y」+ 可行动建议（复核章节内容与图类型是否匹配）。
+ * 观测不干预 —— 提示仅供参考，不代表图会被删除或改型。
+ */
+export function chartSemanticTexts(items: ChartSemanticNote[] | undefined): string[] {
+  if (!items || items.length === 0) return [];
+  const label = (t: string) => CHART_SEMANTIC_TYPE_LABELS[t] || t;
+  return items.map((n) => {
+    const ai = label(String(n.type || "?"));
+    const detected = label(String(n.detected || "?"));
+    const ctx = String(n.context || "").trim();
+    const ctxPart = ctx ? `（正文摘录：${ctx.slice(0, 30)}…）` : "";
+    return `「${ai}」与附近正文语义可能不匹配（程序检测更接近「${detected}」${ctxPart}）——建议复核该图是否贴合本章内容`;
   });
 }
 

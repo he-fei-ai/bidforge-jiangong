@@ -243,10 +243,17 @@ class TestReextractGroupDedup:
 # 导出缓存失效联动：清空 DB 记录的同时必须回收磁盘产物
 # ============================================================
 class TestInvalidateExportCache:
-    """✅ BUG 修复：旧实现只删 export_cache 记录、不删磁盘 .docx ——
-    记录被清空后这些文件再无引用方，保留策略永远不会回收，`data/_exports` 无限膨胀。"""
+    """导出缓存失效联动。
 
-    async def test_deletes_rows_and_files(self, db_conn, tmp_path):
+    ✅ R226（2026-11-12 · A2）语义重锚：invalidate 只删 DB 行，磁盘产物
+    **移交导出域孤儿回收路径**（_gc_orphan_exports）统一清理 —— 该路径带
+    在飞/读租约/protect 三重保护、删产物时连带删旁车。旧实现裸 unlink 会
+    删掉正被 FileResponse 流式读取（读租约登记中）的产物 → 下载中断，且
+    `.audit.json` 旁车残留（违反 R177「唯一删除出口」）。磁盘不泄漏的
+    目标不变：最坏情况 = 产物在磁盘多留一轮导出周期，下次导出交付即回收。
+    """
+
+    async def test_deletes_rows_and_defers_files_to_gc(self, db_conn, tmp_path, monkeypatch):
         artifact = tmp_path / "s1_abcd1234.docx"
         artifact.write_bytes(b"fake-docx")
         await db_conn.execute(
@@ -259,9 +266,23 @@ class TestInvalidateExportCache:
         n = await fe.invalidate_export_cache(db_conn, "s1")
 
         assert n == 1
-        assert not artifact.exists(), "磁盘产物应随缓存记录一并清理"
+        # ✅ R226（A2）：失效时**不删**产物（防删掉正在下载的文件）；行必须删干净。
+        assert artifact.exists(), "失效路径不得直接 unlink 产物（读租约/在飞保护在导出域，服务层不可越权）"
         cur = await db_conn.execute("SELECT COUNT(*) FROM export_cache WHERE scheme_id=?", ("s1",))
         assert (await cur.fetchone())[0] == 0
+
+        # 磁盘不泄漏目标由孤儿回收兜底：行已删 → 无行产物即孤儿 → 统一出口回收。
+        # ⚠️ 导入顺序：_export_cache 顶部反向绑定 export（facade 延迟绑定），
+        #    必须先初始化 export facade 再取 _export_cache（R218 教训③同款）；
+        #    isort 按字母序重排会让 _export_cache 先于 export 加载 → 循环导入炸
+        #    （R224 教训②同款），此处 noqa 锁定顺序敏感块。
+        import app.routers.export as _ex  # noqa: F401,I001 — 先建 export 初始化链
+        import app.routers._export_cache as _ec  # noqa: I001 — 顺序敏感（见上）
+
+        monkeypatch.setattr(_ec._sh, "EXPORTS_DIR", tmp_path)
+        deleted = await _ec._gc_orphan_exports(db_conn, "s1")
+        assert deleted >= 1, "孤儿回收必须收走已失效的产物"
+        assert not artifact.exists(), "GC 后产物必须被回收（磁盘不泄漏目标不变）"
 
     async def test_missing_file_does_not_raise(self, db_conn, tmp_path):
         await db_conn.execute(

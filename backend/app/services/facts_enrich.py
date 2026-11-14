@@ -105,9 +105,22 @@ def items_to_prompt_json(items: Sequence) -> list[dict]:
     只带 ``fact_key`` / ``name`` / ``value`` 三项：``fact_key`` 是 AI 回传
     ``target_fact_id`` 的稳定锚点；带上溯源/置信度/模拟值等运营字段只会诱导
     模型去改写它们（与本仓 ``/global-facts/adjust`` 的同一取舍）。
+
+    ✅ R247（2026-11-14 · P3 · 超限留痕）：旧实现超出
+    :data:`_MAX_PROMPT_FACTS` 的尾部事实**静默丢弃**，长库（>300 条）场景下
+    调用方与日志都看不到「AI 只见到前 N 条」⇒ 整理/补充链对尾部事实的漏改
+    无法归因。现超限时 WARNING 一次性留痕（含总数与上限），返回值形态不变。
     """
     out: list[dict] = []
-    for it in (items or [])[:_MAX_PROMPT_FACTS]:
+    _items = items or []
+    if len(_items) > _MAX_PROMPT_FACTS:
+        logger.warning(
+            "送 AI 的事实 %d 条超出上限 %d，仅送前 %d 条（尾部事实本轮不参与整理/补充）",
+            len(_items),
+            _MAX_PROMPT_FACTS,
+            _MAX_PROMPT_FACTS,
+        )
+    for it in _items[:_MAX_PROMPT_FACTS]:
         out.append(
             {
                 "fact_key": str(getattr(it, "key", "") or getattr(it, "fact_key", "") or ""),

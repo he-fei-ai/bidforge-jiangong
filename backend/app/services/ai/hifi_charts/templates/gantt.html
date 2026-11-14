@@ -1,0 +1,306 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+<meta charset="UTF-8">
+<style>
+  @import url('https://fonts.googleapis.com/css2?family=Noto+Sans+SC:wght@400;700&display=swap');
+
+  body {
+    margin: 0;
+    padding: 40px;
+    background: #ffffff;
+    font-family: 'Noto Sans SC', 'Microsoft YaHei', 'CJK', sans-serif;
+    font-smooth: always;
+    -webkit-font-smoothing: antialiased;
+  }
+
+  .gantt-container {
+    width: 1000px;
+    position: relative;
+  }
+
+  /* 顶部标题区 */
+  .header {
+    text-align: center;
+    margin-bottom: 30px;
+  }
+  .header .title {
+    font-size: 28px;
+    font-weight: bold;
+    color: #1f3a63;
+    letter-spacing: 2px;
+    margin-bottom: 8px;
+  }
+  .header .subtitle {
+    font-size: 16px;
+    color: #666;
+    font-weight: normal;
+  }
+
+  /* 图表区 */
+  .chart-body {
+    position: relative;
+    display: flex;
+  }
+
+  /* Y轴 任务列表 */
+  .y-axis {
+    width: 200px;
+    flex-shrink: 0;
+    padding-top: 40px;
+  }
+  .task-label {
+    height: 60px;
+    display: flex;
+    align-items: center;
+    justify-content: flex-end;
+    padding-right: 15px;
+    font-size: 16px;
+    font-weight: bold;
+    color: #333;
+    box-sizing: border-box;
+  }
+
+  /* X轴 时间刻度 */
+  .x-axis-container {
+    position: absolute;
+    top: 0;
+    left: 200px;
+    right: 0;
+    height: 40px;
+  }
+  .x-axis-ticks {
+    display: flex;
+    justify-content: space-between;
+    font-size: 16px;
+    color: #666;
+    padding: 0 20px;
+    position: relative;
+  }
+  .x-axis-ticks::after {
+    content: '';
+    position: absolute;
+    bottom: 5px;
+    left: 20px;
+    right: 20px;
+    height: 1px;
+    background: #5a7ca8;
+  }
+
+  /* 网格与画布 */
+  .canvas {
+    flex-grow: 1;
+    position: relative;
+    height: 300px;
+    background-image:
+      linear-gradient(to right, #f0f0f0 1px, transparent 1px),
+      linear-gradient(to bottom, #f0f0f0 1px, transparent 1px);
+    background-size: calc(100% / 6) 60px;
+    border-left: 1px solid #e0e0e0;
+  }
+
+  /* 进度条基础样式 */
+  .bar {
+    position: absolute;
+    height: 32px;
+    border-radius: 4px;
+    display: flex;
+    align-items: center;
+    justify-content: center;
+    color: #fff;
+    font-size: 14px;
+    font-weight: bold;
+    box-shadow: 0 2px 4px rgba(0,0,0,0.1);
+  }
+  .bar.primary { background: linear-gradient(90deg, #1a5294, #2b74e8); }
+  .bar.secondary { background: linear-gradient(90deg, #2b74e8, #4a8cf7); }
+  .bar.light { background: linear-gradient(90deg, #4a9bf5, #6ab4ff); }
+
+  /* 菱形里程碑 */
+  .milestone {
+    position: absolute;
+    width: 10px;
+    height: 10px;
+    background: #f58220;
+    transform: translate(-50%, -50%) rotate(45deg);
+    z-index: 3;
+  }
+
+  /* 依赖/搭接线 SVG */
+  .dependency-layer {
+    position: absolute;
+    top: 0;
+    left: 0;
+    width: 100%;
+    height: 100%;
+    pointer-events: none;
+    z-index: 2;
+  }
+  .dep-line {
+    fill: none;
+    stroke: #999;
+    stroke-width: 1.5;
+    stroke-dasharray: 4, 4;
+  }
+  .dep-triangle {
+    fill: #999;
+  }
+  .dep-text {
+    fill: #999;
+    font-size: 12px;
+  }
+
+  /* 底部信息 */
+  .footer {
+    display: flex;
+    justify-content: space-between;
+    margin-top: 40px;
+    padding: 0 50px;
+    font-size: 16px;
+    color: #666;
+  }
+  .footer .center-bold {
+    font-size: 20px;
+    font-weight: bold;
+    color: #1f3a63;
+  }
+</style>
+</head>
+<body>
+
+<div class="gantt-container">
+  <!-- 顶部标题 -->
+  <div class="header">
+    <div class="title" id="gTitle">施工进度横道图</div>
+    <div class="subtitle" id="gSubtitle"></div>
+  </div>
+
+  <!-- 图表主体 -->
+  <div class="chart-body">
+    <div class="y-axis" id="yAxis"></div>
+    <div class="canvas" id="canvas">
+      <div class="x-axis-container">
+        <div class="x-axis-ticks" id="xAxis"></div>
+      </div>
+      <svg class="dependency-layer" id="svgLayer"></svg>
+    </div>
+  </div>
+
+  <!-- 底部信息 -->
+  <div class="footer">
+    <div id="fStart">开工日期：--</div>
+    <div class="center-bold" id="fTotal">总工期：--</div>
+    <div id="fEnd">竣工日期：--</div>
+  </div>
+</div>
+
+<script>
+// 数据由后端注入：const data = {...};
+const data = {...};
+
+// ---- 1. 日期工具（数据驱动，不硬编码刻度） ----
+const MS_DAY = 86400000;
+const fmtDate = d => `${d.getFullYear()}-${String(d.getMonth()+1).padStart(2,'0')}-${String(d.getDate()).padStart(2,'0')}`;
+const fmtMD = d => `${d.getMonth()+1}/${d.getDate()}`;
+const fmtCN = d => `${d.getFullYear()}年${d.getMonth()+1}月${d.getDate()}日`;
+const parseD = s => new Date(s + 'T00:00:00');
+
+const startDate = parseD(data.start_date);
+const endDate = parseD(data.end_date);
+const totalDays = Math.round((endDate - startDate) / MS_DAY) + 1;
+const taskRows = data.tasks || [];
+
+// 顶部标题 / 副标题
+document.getElementById('gTitle').innerText = data.title || '施工进度横道图';
+document.getElementById('gSubtitle').innerText =
+  `总工期：${totalDays}日历天（${fmtCN(startDate)} — ${fmtCN(endDate)}）`;
+
+// ---- 2. X 轴刻度（均匀 7 个，从日期区间推算） ----
+const xAxis = document.getElementById('xAxis');
+const tickCount = Math.min(7, Math.max(3, Math.ceil(totalDays / 6)));
+for (let i = 0; i < tickCount; i++) {
+  const off = Math.round(i * (totalDays - 1) / (tickCount - 1));
+  const span = document.createElement('span');
+  span.innerText = fmtMD(new Date(startDate.getTime() + off * MS_DAY));
+  xAxis.appendChild(span);
+}
+
+// ---- 3. 渲染任务条 + 里程碑 ----
+const yAxis = document.getElementById('yAxis');
+const canvas = document.getElementById('canvas');
+const svgLayer = document.getElementById('svgLayer');
+const rowHeight = 60;
+const topOffset = 40;
+
+// 画布内容区宽度（去掉左右留白 20px）
+const canvasWidth = Math.max(canvas.offsetWidth || 800, 400);
+const padLR = 20;
+
+taskRows.forEach((task, index) => {
+  // Y 轴标签
+  const label = document.createElement('div');
+  label.className = 'task-label';
+  label.innerText = task.name;
+  yAxis.appendChild(label);
+
+  // 日期 → 百分比映射
+  const tStart = parseD(task.start);
+  const tEnd = parseD(task.end);
+  const leftDays = Math.round((tStart - startDate) / MS_DAY);
+  const widthDays = Math.round((tEnd - tStart) / MS_DAY) + 1;
+  const leftPct = leftDays / totalDays * 100;
+  const widthPct = widthDays / totalDays * 100;
+
+  // 进度条
+  const bar = document.createElement('div');
+  bar.className = `bar ${task.type || 'primary'}`;
+  bar.style.left = `calc(${leftPct}% + ${padLR}px)`;
+  bar.style.top = `${topOffset + index * rowHeight + 14}px`;
+  bar.style.width = `calc(${widthPct}% - ${padLR * 2}px)`;
+  bar.innerText = `${task.duration}天`;
+  canvas.appendChild(bar);
+
+  // 里程碑菱形（结束点正上方）
+  const milestone = document.createElement('div');
+  milestone.className = 'milestone';
+  milestone.style.left = `calc(${leftPct + widthPct}% + ${padLR}px)`;
+  milestone.style.top = `${topOffset + index * rowHeight + 10}px`;
+  canvas.appendChild(milestone);
+
+  task._coords = {
+    right: leftPct + widthPct,
+    left: leftPct,
+    yCenter: topOffset + index * rowHeight + 30
+  };
+});
+
+// ---- 4. 渲染依赖/搭接线 ----
+let svgContent = '';
+(data.dependencies || []).forEach(dep => {
+  const fromTask = taskRows.find(t => t.id === dep.from);
+  const toTask = taskRows.find(t => t.id === dep.to);
+  if (!fromTask || !toTask) return;
+
+  const fromX = `calc(${fromTask._coords.right}% + ${padLR}px)`;
+  const fromY = fromTask._coords.yCenter + 10;
+  const toX = `calc(${toTask._coords.left}% + ${padLR}px)`;
+  const toY = toTask._coords.yCenter - 15;
+
+  // 灰色倒三角
+  svgContent += `<polygon class="dep-triangle" points="0,0 8,0 4,8" transform="translate(${fromX}, ${fromY}) translate(-4, 0)" />`;
+  // 虚线折线（先垂直向下，再斜向目标）
+  svgContent += `<path class="dep-line" d="M ${fromX} ${fromY + 8} L ${fromX} ${fromY + 20} L ${toX} ${toY}" />`;
+  // 搭接文字
+  const textX = `calc(${(fromTask._coords.right + toTask._coords.left) / 2}% + ${padLR}px)`;
+  svgContent += `<text class="dep-text" x="${textX}" y="${fromY + 35}" text-anchor="middle">${dep.label || ''}</text>`;
+});
+svgLayer.innerHTML = svgContent;
+
+// ---- 5. 底部信息 ----
+document.getElementById('fStart').innerText = `开工日期：${fmtCN(startDate)}`;
+document.getElementById('fTotal').innerText = `总工期：${totalDays}日历天`;
+document.getElementById('fEnd').innerText = `竣工日期：${fmtCN(endDate)}`;
+</script>
+
+</body>
+</html>

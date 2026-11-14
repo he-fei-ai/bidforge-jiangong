@@ -14,6 +14,7 @@ import {
   fixStatsParts,
   ganttTruncatedWarning,
   globalFactsStatusWarning,
+  exportGateWarning,
   noHttpFallbackWarning,
   parseCacheStatus,
   cachedChartDegradedWarning,
@@ -21,8 +22,10 @@ import {
   noPilFallbackWarning,
   pilFallbackDisabledWarning,
   parseChartRenderStats,
+  parseContentAudit,
   parseExportBlock,
   parseExportDegraded,
+  parseExportGate,
   parseExportOverride,
   parseFixStats,
   parseGlobalFactsStatus,
@@ -125,6 +128,12 @@ export function useExportRun(deps: ExportRunDeps) {
       const validated = await exportForm.validateFields();
       const config = deepMergeExportConfig(exportForm.getFieldsValue(true), validated);
       let chartImages: ExportChartImage[] = [];
+      // ✅ R230（F8）：前端渲染失败计数（与设计跳过区分，见 renderChartsForExport）
+      // ✅ R233：skipped_json —— JSON 载荷设计跳过计数（后端 PIL 兜底），
+      //    「渲染 X/Y」的 Y 含 JSON 载荷与去重条目，差值不拆分会误读为「失败」。
+      // ✅ R241：dedup_skipped —— 同码去重跳过计数（R233 只修了 Y 缺口的 JSON
+      //    一半；多章共用同图时「渲染 1/10」被误读为 9 张失败）。
+      const chartRenderStats = { failed: 0, skipped_json: 0, dedup_skipped: 0 };
       try {
         const { data } = await chartsApi.list(sid, controller.signal);
         if (controller.signal.aborted || currentSchemeIdRef.current !== sid) return;
@@ -147,9 +156,21 @@ export function useExportRun(deps: ExportRunDeps) {
             }
           },
           controller.signal,
+          chartRenderStats,
         );
         if (chartImages.length > 0) {
-          msg.info(`已按预览样式渲染 ${chartImages.length}/${items.length} 张图表`, 3);
+          const failNote =
+            chartRenderStats.failed > 0 ? `，${chartRenderStats.failed} 张渲染失败已交后端兜底` : "";
+          // ✅ R233：口径拆分 —— Y 分母去掉 JSON 载荷条目（它们不走前端轨），
+          //    避免去重+跳过双重缩水被误读为「失败」。
+          // ✅ R241：分母同样剔除同码去重条目（R233 注释自认的另一半缺口）。
+          const feTotal = Math.max(
+            1,
+            items.length - chartRenderStats.skipped_json - chartRenderStats.dedup_skipped,
+          );
+          msg.info(`已按预览样式渲染 ${chartImages.length}/${feTotal} 张图表${failNote}`, 3);
+        } else if (chartRenderStats.failed > 0) {
+          msg.warning(`${chartRenderStats.failed} 张图表前端渲染失败，已交后端兜底渲染轨`, 4);
         }
       } catch (e) {
         if (controller.signal.aborted) throw e;
@@ -258,6 +279,16 @@ export function useExportRun(deps: ExportRunDeps) {
       }
       const factsWarn = globalFactsStatusWarning(parseGlobalFactsStatus(resp.headers));
       if (factsWarn) msg.warning(factsWarn, 8);
+      // ✅ R230（F2）：X-Content-Audit 头消费 —— 导出前体检命中（占位符/HTML
+      //    残留/投标用语/页码残留/实体编码）在导出成功时同步可见，不再要求
+      //    用户手动跑预检才能发现问题。
+      const contentAudit = parseContentAudit(resp.headers);
+      if (contentAudit) msg.warning(contentAudit.message, 10);
+      // ✅ R230（F3）：X-Export-Gate: unchecked 头消费 —— 预检 fail-open 放行
+      //    必须可见（R195 收口特意要求「不零痕迹」），否则阻断承诺失效在
+      //    界面上与普通成功无差别。
+      const gateWarn = exportGateWarning(parseExportGate(resp.headers));
+      if (gateWarn) msg.warning(gateWarn, 10);
     } catch (e: unknown) {
       // ✅ B-15：默认阻断 → 显式确认后才带 override 重试；非阻断错误走原路径。
       const blocked = overrideHighIssues ? null : await parseExportBlock(e);
@@ -287,6 +318,10 @@ export function useExportRun(deps: ExportRunDeps) {
           const errHeaders = (e as { response?: { headers?: unknown } } | null)?.response?.headers;
           const factsWarn = globalFactsStatusWarning(parseGlobalFactsStatus(errHeaders));
           if (factsWarn) msg.warning(factsWarn, 8);
+          // ✅ R230（F12）：失败导出同样刷新缓存状态卡 —— 失败会留孤儿产物行
+          //    （ExportTab 卡片 tooltip 自述），只在成功后刷新会让 total/stale
+          //    停留在上次成功时刻的快照。
+          if (currentSchemeIdRef.current === sid) await loadCacheStatus();
         }
       }
     } finally {
@@ -306,6 +341,11 @@ export function useExportRun(deps: ExportRunDeps) {
       currentSchemeIdRef.current === sid
     ) {
       await handleExport(format, true);
+    } else if (retryOverride && controller.signal.aborted) {
+      // ✅ R230（F9）：覆写确认弹窗期间用户点了「取消导出」→ abort 置位后
+      //    retryOverride 被上方守卫静默丢弃 —— 用户点完「已知悉并继续」却
+      //    无任何后续与反馈。此处必须可见（取消语义优先于覆写重试）。
+      msg.info("导出已被取消，覆写重试未执行");
     }
   };
 

@@ -200,6 +200,11 @@ export function DefectLedgerPanel({ schemeId }: DefectLedgerPanelProps) {
               <Tag color="default" data-testid="defect-summary-pending">
                 待检 {num(summary.pending)}
               </Tag>
+              {num(summary.stale) > 0 && (
+                <Tag color="default" data-testid="defect-summary-stale">
+                  章节已删除 {num(summary.stale)}
+                </Tag>
+              )}
             </Space>
           )}
         </Space>
@@ -286,14 +291,22 @@ export function DefectLedgerPanel({ schemeId }: DefectLedgerPanelProps) {
                   <Tag color={STATUS_COLOR[status] || "default"}>
                     {STATUS_LABEL[status] || status || "待处理"}
                   </Tag>
-                  {row.fix_policy === "protected" ? (
-                    <Tag color="red" data-testid={`defect-protected-${row.id}`}>
-                      禁改·需人工裁决
+                  {row.stale === 1 ? (
+                    <Tag color="default" data-testid={`defect-stale-${row.id}`}>
+                      章节已删除
                     </Tag>
                   ) : (
-                    <Tag color="blue" data-testid={`defect-free-${row.id}`}>
-                      建议可执行
-                    </Tag>
+                    <>
+                      {row.fix_policy === "protected" ? (
+                        <Tag color="red" data-testid={`defect-protected-${row.id}`}>
+                          禁改·需人工裁决
+                        </Tag>
+                      ) : (
+                        <Tag color="blue" data-testid={`defect-free-${row.id}`}>
+                          建议可执行
+                        </Tag>
+                      )}
+                    </>
                   )}
                 </Space>
               ),
@@ -303,10 +316,13 @@ export function DefectLedgerPanel({ schemeId }: DefectLedgerPanelProps) {
               key: "actions",
               width: 280,
               render: (_: unknown, row: DefectItem) => {
+                const isStale = row.stale === 1;
                 const hasAfter = Boolean((row.after_text || "").trim());
-                const applyDisabled = row.fix_policy === "protected" || !hasAfter || row.status === "applied";
-                const applyReason =
-                  row.fix_policy === "protected"
+                const applyDisabled =
+                  row.fix_policy === "protected" || !hasAfter || row.status === "applied" || isStale;
+                const applyReason = isStale
+                  ? "章节已删除，该缺陷为账本留痕，不可执行"
+                  : row.fix_policy === "protected"
                     ? "命中禁改白名单：自动执行已禁用，只能人工裁决"
                     : !hasAfter
                       ? "尚无建议全文，不能执行"
@@ -317,6 +333,7 @@ export function DefectLedgerPanel({ schemeId }: DefectLedgerPanelProps) {
                   <Space size={4} wrap>
                     <Button
                       size="small"
+                      disabled={isStale}
                       loading={busyId === row.id}
                       onClick={() => runAction(row.id, () => defectsApi.verify(row.id), "检查器已重跑")}
                     >
@@ -340,7 +357,7 @@ export function DefectLedgerPanel({ schemeId }: DefectLedgerPanelProps) {
                       <Popconfirm
                         title="确认人工接受该建议并写入正文？"
                         okText="确认接受"
-                        disabled={!hasAfter}
+                        disabled={!hasAfter || isStale}
                         onConfirm={() =>
                           runAction(
                             row.id,
@@ -355,7 +372,7 @@ export function DefectLedgerPanel({ schemeId }: DefectLedgerPanelProps) {
                       >
                         <Button
                           size="small"
-                          disabled={!hasAfter}
+                          disabled={!hasAfter || isStale}
                           data-testid={`defect-accept-${row.id}`}
                           loading={busyId === row.id}
                         >
@@ -365,6 +382,7 @@ export function DefectLedgerPanel({ schemeId }: DefectLedgerPanelProps) {
                     )}
                     <Popconfirm
                       title="确认驳回该缺陷？"
+                      disabled={isStale}
                       onConfirm={() =>
                         runAction(
                           row.id,
@@ -377,7 +395,7 @@ export function DefectLedgerPanel({ schemeId }: DefectLedgerPanelProps) {
                         )
                       }
                     >
-                      <Button size="small" danger data-testid={`defect-reject-${row.id}`}>
+                      <Button size="small" danger disabled={isStale} data-testid={`defect-reject-${row.id}`}>
                         驳回
                       </Button>
                     </Popconfirm>

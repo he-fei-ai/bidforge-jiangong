@@ -125,9 +125,24 @@ def test_pil_fallback_default_is_true_and_shared_with_frontend():
 
 
 def test_render_stage_reads_default_from_single_source():
-    """源码锁：渲染段不得再写死第二份默认值字面量。"""
+    """源码锁：渲染段默认值必须引用 ALLOW_PIL_FALLBACK_DEFAULT 单一常量。
+
+    ✅ R233（2026-11-13）重锚（意图保留、强度不减）：旧断言锁「实现形态」
+    `config.get(k, DEFAULT)`；R233 FIX-4 把读取改为显式 None 归一
+    （`DEFAULT if _apf is None else _apf`）—— R230 A6 同款收尾（显式 None
+    与「未传」必须同语义，指纹归一把 None 视同未传，旧 get(k, default) 对
+    「键存在值为 None」得 None falsy，同一指纹两种渲染行为）。单一常量引用
+    与「不得写死第二份字面量」的意图不变，断言改为同时锁：
+    ① 常量引用在位；② get 第二参形态（None 不传默认）不得回流。
+    """
     src = (_WS_ROOT / "backend/app/routers/export.py").read_text(encoding="utf-8")
-    assert "config.get(\"allow_pil_fallback\", ALLOW_PIL_FALLBACK_DEFAULT)" in src
+    assert "ALLOW_PIL_FALLBACK_DEFAULT if _apf is None else _apf" in src, "R233 None 归一形态在位"
+    assert src.count("ALLOW_PIL_FALLBACK_DEFAULT") >= 1
+    # 旧双参形态（get(k, default) 对显式 None 直通 falsy）不得回流；
+    # 无第二参的 config.get(k)（配合显式 None 归一）是合法形态，不禁。
+    assert 'config.get("allow_pil_fallback", ALLOW_PIL_FALLBACK_DEFAULT)' not in src, (
+        "旧 get(k, default) 双参形态不得回流（None 直通分叉）"
+    )
 
 
 # ===========================================================================

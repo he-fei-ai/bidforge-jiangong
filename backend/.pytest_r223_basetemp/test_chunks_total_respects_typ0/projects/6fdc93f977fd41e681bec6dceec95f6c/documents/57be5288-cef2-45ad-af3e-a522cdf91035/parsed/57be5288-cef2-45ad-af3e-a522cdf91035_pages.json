@@ -1,0 +1,18 @@
+{
+  "doc_id": "57be5288-cef2-45ad-af3e-a522cdf91035",
+  "page_count": 1,
+  "pages": [
+    {
+      "page_num": 1,
+      "text": "# 第一章 工程概况\n\n这里是正文段落，长度足够通过校验。\n\n工程规模表\n【表格】\n> 〔表格见 tables 结构化数据〕\n> 〔表格见 tables 结构化数据〕",
+      "tables": [
+        "t1"
+      ],
+      "images": [],
+      "bbox": null,
+      "rotation": 0,
+      "header": "",
+      "footer": ""
+    }
+  ]
+}

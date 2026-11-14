@@ -128,10 +128,15 @@ def test_b5_scheme_switch_effect_still_aborts_them():
 # --------------------------------------------------------------------------- #
 def test_b6_scheme_switch_resets_ba_selection():
     src = _page_src()
-    block = _slice_after(src, "const previousSchemeId = mountedSchemeIdRef.current", 4500)
-    end = block.find("}, [id]);")
+    anchor = "const previousSchemeId = mountedSchemeIdRef.current"
+    i = src.find(anchor)
+    assert i >= 0, f"锚点未命中：{anchor!r}（文件被改动或锚点失效，先复核源码）"
+    # 历轮（R193/R215/R216/R223/R231）向本 effect 追加复位分支，effect 体不断变长；
+    # 定长窗口（4500）会把 `}, [id]);` 切出窗口而误报。改为定位锚点后首个 effect 闭合，
+    # 意图（两个 reset 必须落在 [id] effect 内）不变，仅去除对窗口长度的脆弱依赖。
+    end = src.find("  }, [id]);", i)
     assert end > 0, "未定位到 [id] effect 的结束"
-    body = block[:end]
+    body = src[i:end]
     assert (
         "setSelectedBaItem(null);" in body
     ), "切换方案未清空 selectedBaItem —— 右侧面板残留上一个方案的提取项详情（B6 回归）"

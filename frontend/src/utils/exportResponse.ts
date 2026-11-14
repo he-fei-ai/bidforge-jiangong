@@ -509,6 +509,83 @@ export function globalFactsStatusWarning(status: GlobalFactsStatus | null): stri
   return `全局事实状态异常（${status.code}），成稿可能缺少「项目关键事实」`;
 }
 
+/**
+ * ✅ R230（F2 · 头 parity 收口）：后端导出成功时把「导出前内容体检」结果挂
+ * `X-Content-Audit`（export.py:_export_audit_headers，百分号编码 JSON：
+ * `{total, items:[{key,label,level,count,sections}]}`），此前前端零消费 ——
+ * 占位符/HTML 残留/投标用语等命中只在预检页可见，导出成功 toast 后零提示。
+ * 头缺失 / 解码失败 / 载荷不可解析 → null（容错不阻断）。
+ */
+export interface ContentAuditInfo {
+  /** 命中问题总类数 */
+  total: number;
+  /** 用户可读汇总（含前几类 label） */
+  message: string;
+  /** 原始 items（供组件级展示，最多 3 章/类的定位信息后端已截） */
+  items: Array<{
+    key: string;
+    label: string;
+    level: string;
+    count: number;
+    sections: string[];
+  }>;
+}
+export function parseContentAudit(headers: unknown): ContentAuditInfo | null {
+  const raw = headerValue(headers, "x-content-audit");
+  if (!raw) return null;
+  let decoded: string;
+  try {
+    decoded = decodeURIComponent(raw);
+  } catch {
+    return null;
+  }
+  let parsed: unknown;
+  try {
+    parsed = JSON.parse(decoded);
+  } catch {
+    return null;
+  }
+  if (typeof parsed !== "object" || parsed === null) return null;
+  const obj = parsed as Record<string, unknown>;
+  const items = Array.isArray(obj.items)
+    ? (obj.items as Array<Record<string, unknown>>)
+        .filter((it) => it && typeof it === "object" && typeof it.label === "string")
+        .map((it) => ({
+          key: String(it.key ?? ""),
+          label: String(it.label ?? ""),
+          level: String(it.level ?? "warn"),
+          count: typeof it.count === "number" ? it.count : 0,
+          sections: Array.isArray(it.sections) ? (it.sections as unknown[]).map(String) : [],
+        }))
+    : [];
+  if (!items.length) return null;
+  const total = typeof obj.total === "number" ? obj.total : items.length;
+  const shown = items.slice(0, 3).map((it) => `${it.label}×${it.count}`);
+  const more = items.length > 3 ? ` 等 ${items.length} 类` : "";
+  return {
+    total,
+    message: `导出前体检发现 ${total} 类可交付性问题：${shown.join("、")}${more}，建议在预检中查看明细`,
+    items,
+  };
+}
+
+/**
+ * ✅ R230（F3 · 头 parity 收口）：后端预检读取失败时以 fail-open 放行导出并挂
+ * `X-Export-Gate: unchecked`（export.py:_export_high_issue_gate），语义是
+ * 「high 级阻断承诺本次失效」。此前前端零消费 —— 阻断承诺失效在界面上
+ * 与普通「导出成功」无差别，用户与运维均不可见（R195 收口特意要求不零痕迹）。
+ */
+export function parseExportGate(headers: unknown): string | null {
+  const raw = headerValue(headers, "x-export-gate");
+  if (!raw) return null;
+  const v = raw.trim().toLowerCase();
+  return v || null;
+}
+export function exportGateWarning(signal: string | null): string | null {
+  if (signal !== "unchecked") return null;
+  return "导出前预检未能执行（系统异常），本次导出未经体检放行 —— 请人工核对新稿，或稍后重试以恢复体检闸门";
+}
+
 /** 导出失败解析结果。 */
 export interface ExportErrorResolution {
   /** 用户/组件主动取消（AbortError / ERR_CANCELED）：调用方不得弹错误提示 */

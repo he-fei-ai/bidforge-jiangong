@@ -359,6 +359,18 @@ async def _finish_stopped_with_partial(task_id: str, holder: dict) -> str:
             task_id, _db_status,
         )
         return "data: " + json.dumps(payload, ensure_ascii=False) + "\n\n"
+    # ✅ R231（2026-11-13 · P2-1）：holder 级终态标记 —— completed checkpoint
+    #    写成功后生成器在 holder 打 terminal_ckpt（:2826 同批）。R226 的 DB 读
+    #    守卫与 shield 内层落库（R177 finish_task 异常安全链）之间存在
+    #    「读时 running、写时 completed 已落库」窄窗；标记与写层 skip_terminal
+    #    守卫（sse_checkpoint._write_task_checkpoint_db 原子单语句）三层闭合
+    #    该窗口（标记覆盖 finish_task 未提交窗，写层守卫覆盖其余）。
+    if holder.get("terminal_ckpt"):
+        _sh.logger.info(
+            "迟到停止请求被忽略（task=%s · 目录生成 · completed checkpoint 已落库标记在位）",
+            task_id,
+        )
+        return "data: " + json.dumps(payload, ensure_ascii=False) + "\n\n"
     _ckpt_ok = not outline  # 无成果本来就不写 checkpoint，也无需清 holder
     if outline:
         payload["outline"] = outline
@@ -373,7 +385,7 @@ async def _finish_stopped_with_partial(task_id: str, holder: dict) -> str:
         if _fp:
             _ckpt_payload["input_fingerprint"] = _fp
         try:
-            await _sh._save_outline_checkpoint(task_id, _ckpt_payload)
+            await _sh._save_outline_checkpoint(task_id, _ckpt_payload, skip_terminal=True)
             _ckpt_ok = True
         except Exception:
             # ✅ R188（L8）：旧实现吞异常后无条件清空 holder，而 finish_task 之后
@@ -387,7 +399,7 @@ async def _finish_stopped_with_partial(task_id: str, holder: dict) -> str:
                 task_id, exc_info=True,
             )
             try:
-                await _sh._save_outline_checkpoint(task_id, _ckpt_payload)
+                await _sh._save_outline_checkpoint(task_id, _ckpt_payload, skip_terminal=True)
                 _ckpt_ok = True
             except Exception:
                 _sh.logger.error(
@@ -477,6 +489,13 @@ async def _fetch_chapter_children(
             await _sh.wait_resume(task_id)
             if _sh.is_stopped(task_id):
                 return "stopped", []
+            # ✅ R231（2026-11-13 · P3 · 同族漏改）：在途重试前复查熔断标记 ——
+            #    入口前置（:433）只拦「新调用」；并发窗口内其它单元先撞 402 已
+            #    `_mark_quota_blocked`，本单元恰在飞、首试此刻失败 ⇒ 重试照发
+            #    1 次必然失败请求。与入口同判据（R213 FIX-11）。
+            if _is_quota_blocked(task_id):
+                _sh.logger.warning("第%d章子目录重试前命中配额熔断（task=%s）——不再重试", index + 1, task_id[:8])
+                return "failed", []
             try:
                 obj, _raw = await _sh._await_with_stats(
                     _sh.collect_json_response(
@@ -568,6 +587,13 @@ async def _fetch_unit_children(
         await _sh.wait_resume(task_id)
         if _sh.is_stopped(task_id):
             return "stopped", []
+        # ✅ R231（2026-11-13 · P3 · 同族漏改）：批量 attempt=2 前复查熔断标记 ——
+        #    与单章路径（_fetch_chapter_children 重试前同款，R213 FIX-11 入口
+        #    判据同源）对称：并发窗口内其它单元先撞 402 已熔断，本单元 attempt=2
+        #    照发必然失败请求。
+        if _is_quota_blocked(task_id):
+            _sh.logger.warning("批量子目录尝试前命中配额熔断（task=%s）——整单元判 failed", task_id[:8])
+            return "failed", []
         try:
             obj, _raw = await _sh._await_with_stats(
                 _sh.collect_json_response(

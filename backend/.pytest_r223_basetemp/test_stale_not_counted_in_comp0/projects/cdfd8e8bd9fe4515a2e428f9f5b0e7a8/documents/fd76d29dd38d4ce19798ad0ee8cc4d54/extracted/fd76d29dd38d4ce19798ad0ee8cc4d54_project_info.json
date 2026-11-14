@@ -1,0 +1,19 @@
+{
+  "doc_id": "fd76d29dd38d4ce19798ad0ee8cc4d54",
+  "extract_time": "2026-11-14 00:01:51",
+  "extract_schema_version": "extract-v1",
+  "project_info": {
+    "project_name": {
+      "value": "某项目",
+      "confidence": 0.0,
+      "source": ""
+    }
+  },
+  "source_items": [
+    {
+      "item_id": "projectBasicInfo",
+      "label": "项目基本信息",
+      "output_type": "json"
+    }
+  ]
+}

@@ -340,7 +340,7 @@ _reg(
       "value_unit": "string | null 计量单位",
       "source_text": "string 原文完整引用",
       "page_ref": "integer | null",
-      "fact_type": "string 枚举：basic/basis/personnel/labor/schedule/machinery/material/construction_practice/deployment/process_flow/tech_param/design_param/safety/risk/monitoring/emergency/acceptance/temporary/environment/quality/other",
+      "fact_type": "string 枚举：basic/basis/personnel/labor/schedule/machinery/material/construction_practice/deployment/process_flow/tech_param/design_param/scale/safety/risk/monitoring/emergency/acceptance/temporary/environment/quality/other",
       "confidence": "number 0~1",
       "evidence_kind": "string 枚举：table/text/figure_ocr/header_footer",
       "is_simulated": false,

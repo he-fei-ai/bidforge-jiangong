@@ -144,6 +144,34 @@ def evaluate(
     }
 
 
+def partial_outline_block() -> dict[str, Any]:
+    """部分成果（用户停止 / 异常中断）的自动确认判定：**一律不可自动确认**。
+
+    ✅ R231（2026-11-13 · P1-1）：``evaluate`` 的硬前置只覆盖「完整目录的
+    质量缺陷」（占位标题 / 编号 / 重复 / 空壳父章 / 失败章 / 未审核 / 已有
+    正文）——「目录根本不完整」（未生成的章不在树里）不构成任何 blocker。
+    分步 stopped 出口此前把 partial 树无条件喂给 evaluate：干净的部分树
+    （无占位、编号合法、failed_chapters 为空、审核报告缺省为空 dict）可判
+    ``ready=True``，经刷新接管 / 未知态接管两条不分 status 的前端路径触发
+    8 秒倒计时**自动保存半份目录**（用户「停止」意图被自动保存覆盖）。
+
+    本函数是该场景的显式判定（fail-closed）：stopped 出口不再喂 evaluate，
+    改回本结构（与 ``_finish_stopped_with_partial`` 不带 auto_confirm 的
+    旧行为收敛为单一语义——「部分成果永不自动确认」；显式 blocker 让前端
+    describeAutoConfirmBlockers 可见原因，而非静默缺键）。
+    """
+    return {
+        "ready": False,
+        "blockers": [
+            {
+                "code": "partial_outline",
+                "message": "目录为部分成果（未生成完毕），禁止自动确认",
+                "count": 1,
+            }
+        ],
+    }
+
+
 async def scheme_has_content(db, scheme_id: str) -> bool:
     """方案下是否已有任何已生成正文（content 非空或字数 > 0）。"""
     if not scheme_id:

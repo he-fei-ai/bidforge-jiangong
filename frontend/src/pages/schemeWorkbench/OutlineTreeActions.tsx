@@ -17,6 +17,7 @@ export function OutlineTreeActions({
   onMove,
   onDelete,
   onNextStep,
+  disabled = false,
 }: {
   selected: TreeNode | null;
   moveFlags: Record<string, { up: boolean; down: boolean }>;
@@ -25,6 +26,11 @@ export function OutlineTreeActions({
   onMove: (dir: -1 | 1) => void;
   onDelete: () => void;
   onNextStep: () => void;
+  /** ✅ R231（2026-11-13）：omp 目录生成期间整表重建 sections，树行内结构操作
+   *  （新增/上移/下移/删除）必须一并禁用——后端双 409 只认主链路任务表，
+   *  感知不到 omp 旁路（可行性报告 §11.4 局限 B）；缺省 false，既有调用
+   *  不传时行为逐字不变。 */
+  disabled?: boolean;
 }) {
   return (
     <Space size={4}>
@@ -37,7 +43,7 @@ export function OutlineTreeActions({
         <Button
           size="small"
           icon={<CaretRightOutlined />}
-          disabled={!selected}
+          disabled={disabled || !selected}
           onClick={onAddChild}
         >
           新增子章节
@@ -47,7 +53,7 @@ export function OutlineTreeActions({
         <Button
           size="small"
           icon={<ArrowUpOutlined />}
-          disabled={!selected || !moveFlags[selected.key]?.up}
+          disabled={disabled || !selected || !moveFlags[selected.key]?.up}
           onClick={() => onMove(-1)}
         >
           上移
@@ -57,14 +63,20 @@ export function OutlineTreeActions({
         <Button
           size="small"
           icon={<ArrowDownOutlined />}
-          disabled={!selected || !moveFlags[selected.key]?.down}
+          disabled={disabled || !selected || !moveFlags[selected.key]?.down}
           onClick={() => onMove(1)}
         >
           下移
         </Button>
       </Tooltip>
       <Tooltip title="删除选中节点">
-        <Button size="small" danger icon={<StopOutlined />} disabled={!selected} onClick={onDelete}>
+        <Button
+          size="small"
+          danger
+          icon={<StopOutlined />}
+          disabled={disabled || !selected}
+          onClick={onDelete}
+        >
           删除
         </Button>
       </Tooltip>

@@ -124,8 +124,7 @@ def _content_fingerprint(prep: dict) -> tuple[str, str]:
     ``_image_generation_signature()`` 中受影响键。旧实现仅读取服务器 settings，
     测试环境 monkeypatch 到 prep（或未来前端传入 per-request 覆盖配置）后指纹不变
     → 换模型/尺寸仍命中旧缓存。合并策略：先取 settings 签名（保留生产路径），
-    再按 prep["image_config"] 全键映射覆盖 enabled / provider / model / base_url /
-    max_images，size 单独从 image_default_size 取（api_key 永不进指纹）。
+    再按 prep["image_config"] 逐项覆盖 model / size（api_key 永不进指纹）。
     """
     # ✅ 缓存失效修复（2026-09-23）：渲染器版本号纳入指纹（见下方 "renderer" 键）。
     from app.services.ai.mermaid_renderer import _RENDERER_VERSION
@@ -178,24 +177,12 @@ def _content_fingerprint(prep: dict) -> tuple[str, str]:
     except Exception:  # pragma: no cover
         _appendix_on = False
     # R-2：合并 prep["image_config"] 覆盖服务器 settings（保持 settings 路径不变）
-    # ✅ R238：由 Task 3 的 resolve_image_config 解析（DB 优先、settings 兜底），扩展为
-    #    全键映射 —— provider / enabled / base_url / max_ai_images 亦纳入指纹（换库配置
-    #    自动失效缓存，防命中旧图）；size 仍单独从 image_default_size 取；
-    #    api_key 绝不进指纹（has_key / 密钥字段不参与合并，映射表里没有它）。
     _img_sig = _sh._image_generation_signature()
     _img_cfg = prep.get("image_config") or {}
     if isinstance(_img_cfg, dict):
-        _mapping = {
-            "image_enabled": "enabled",
-            "image_provider": "provider",
-            "image_model": "model",
-            "image_base_url": "base_url",
-            "max_ai_images": "max_images",
-        }
-        for _src_key, _dst_key in _mapping.items():
-            _v = _img_cfg.get(_src_key)
-            if _v is not None:
-                _img_sig[_dst_key] = _v
+        _mc = _img_cfg.get("image_model")
+        if _mc is not None:
+            _img_sig["model"] = str(_mc)
         _ms = _img_cfg.get("image_default_size") or _img_cfg.get("image_size")
         if _ms is not None:
             _img_sig["size"] = str(_ms)
@@ -240,7 +227,7 @@ def _content_fingerprint(prep: dict) -> tuple[str, str]:
                 "fe_render": fe_sig,
                 # R-1：前端 PNG 像素字节指纹（补 fe_render 只看 code 的盲区）
                 "fe_render_pixels": fe_pixels_sig,
-                # ✅ R226（A7）：封面落款日期（构建日）写进产物但不进指纹 →
+                # ✅ R230（A7）：封面落款日期（构建日）写进产物但不进指纹 →
                 #    跨天命中昨日产物、封面日期停在上一导出日。按「天」粒度纳入：
                 #    同一天内缓存照常命中，跨天自然失效（产物确实变了）。
                 "export_date": _sh.datetime.now().strftime("%Y-%m-%d"),

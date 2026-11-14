@@ -1,0 +1,18 @@
+{
+  "doc_id": "2388e841-71bd-4382-a353-28dba3502c8a",
+  "page_count": 1,
+  "pages": [
+    {
+      "page_num": 1,
+      "text": "正文说明：本跨中弯矩按下式计算。\n\n> 〔公式见 formulas 结构化数据〕\n\n> 〔表格见 tables 结构化数据〕\n> 〔表格见 tables 结构化数据〕\n> 〔表格见 tables 结构化数据〕",
+      "tables": [
+        "t1"
+      ],
+      "images": [],
+      "bbox": null,
+      "rotation": 0,
+      "header": "",
+      "footer": ""
+    }
+  ]
+}

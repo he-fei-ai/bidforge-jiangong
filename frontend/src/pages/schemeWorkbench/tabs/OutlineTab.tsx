@@ -27,6 +27,7 @@ import {
   FileTextOutlined,
   FolderOpenOutlined,
   PlayCircleOutlined,
+  RobotOutlined,
   UploadOutlined,
 } from "@ant-design/icons";
 import {
@@ -109,6 +110,10 @@ export interface OutlineTabProps {
   ) => Promise<void>;
   /** ✅ R181 N1：目录版本回退成功后重新加载目录/章节（不传则面板只刷新自身）。 */
   onOutlineRestored?: () => void | Promise<void>;
+  // ✅ 阶段 2 旁路：omp 文件工作区 Agent 生成目录入口（受 omp_task_enabled 控制）
+  ompTaskEnabled?: boolean;
+  generatingOmp?: boolean;
+  handleGenerateOutlineOmp?: () => void | Promise<void>;
 }
 
 export function OutlineTab({
@@ -153,7 +158,14 @@ export function OutlineTab({
   projectId,
   onCreateSuggestedSection,
   onOutlineRestored,
+  ompTaskEnabled,
+  generatingOmp,
+  handleGenerateOutlineOmp,
 }: OutlineTabProps) {
+  // ✅ 阶段 2 旁路：omp 生成期间后端会整表重建 sections，所有会写目录树的入口
+  //    （主链生成 / 导入 / 套用 / 保存 / 清除 / 新增章节）必须一并禁用 ——
+  //    后端的 content/outline 双 409 只认主链路任务表，感知不到 omp 旁路。
+  const outlineBusy = generating || !!generatingOmp;
   // ✅ R179 M1（2026-11-05）：评分项缺失/多余章节的「定位」——复用既有
   //    findSectionById 与 selectedSection 选中态（不新增第二个选中状态），
   //    同时展开目标祖先节点保证节点可见。
@@ -243,11 +255,26 @@ export function OutlineTab({
           type="primary"
           icon={<PlayCircleOutlined />}
           onClick={handleGenerateOutline}
-          disabled={generating}
+          disabled={outlineBusy}
           loading={generating && genType === "outline"}
         >
           {tree.length > 0 ? "AI 重新生成目录" : "AI 生成目录"}
         </Button>
+        {/* ✅ 阶段 2 旁路：omp 文件工作区 Agent 生成目录（受 omp_task_enabled 控制）。
+            与主链路 SSE 不同，这是普通同步请求：后端拉起 omp 多步 Agent 写 OUTLINE.md
+            后整表回写入库。仅在开关开启时显隐；禁用由后端 409 兜底。 */}
+        {ompTaskEnabled && (
+          <Tooltip title="由 omp 文件工作区 AI Agent 独立生成目录（与主链路 SSE 互不干扰；多步生成可能需要数分钟）">
+          <Button
+            icon={<RobotOutlined />}
+            onClick={handleGenerateOutlineOmp}
+            disabled={outlineBusy}
+            loading={generatingOmp}
+          >
+              🤖 Agent 生成目录
+            </Button>
+          </Tooltip>
+        )}
         <Upload
           accept={UPLOAD_FILE_ACCEPT}
           beforeUpload={(file) => {
@@ -274,20 +301,20 @@ export function OutlineTab({
           }}
           showUploadList={false}
         >
-          <Button icon={<UploadOutlined />} disabled={generating}>
+          <Button icon={<UploadOutlined />} disabled={outlineBusy}>
             导入目录（智能识别）
           </Button>
         </Upload>
         <Tooltip title="勾选后，识别结果先按标准章节骨架归位（保留用户细分内容，未归位内容进「补充章节」）再应用">
           <Checkbox
             checked={outlineImportReorganize}
-            disabled={generating}
+            disabled={outlineBusy}
             onChange={(e) => setOutlineImportReorganize(e.target.checked)}
           >
             整理为标准结构
           </Checkbox>
         </Tooltip>
-        <Button icon={<FolderOpenOutlined />} onClick={openLibraryPicker} disabled={generating}>
+        <Button icon={<FolderOpenOutlined />} onClick={openLibraryPicker} disabled={outlineBusy}>
           从目录库套用
         </Button>
         <Tooltip
@@ -300,19 +327,19 @@ export function OutlineTab({
           <Button
             icon={<FileTextOutlined />}
             onClick={handleSaveAsLibrary}
-            disabled={generating || !lastUpload}
+            disabled={outlineBusy || !lastUpload}
           >
             存为目录库
           </Button>
         </Tooltip>
-        <Button icon={<CaretRightOutlined />} onClick={() => addChildNode()} disabled={generating}>
+        <Button icon={<CaretRightOutlined />} onClick={() => addChildNode()} disabled={outlineBusy}>
           新增一级章节
         </Button>
         <Button
           onClick={saveOutlineTree}
           type="primary"
           ghost
-          disabled={generating || tree.length === 0}
+          disabled={outlineBusy || tree.length === 0}
         >
           💾 保存目录
         </Button>
@@ -321,7 +348,7 @@ export function OutlineTab({
           danger
           type="primary"
           ghost
-          disabled={generating || tree.length === 0}
+          disabled={outlineBusy || tree.length === 0}
         >
           🗑️ 清除所有目录
         </Button>
@@ -358,6 +385,7 @@ export function OutlineTab({
             selected={selectedSection as TreeNode | null}
             moveFlags={moveFlags}
             showNext={tree.length > 0}
+            disabled={!!generatingOmp}
             onAddChild={() => selectedSection && addChildNode(selectedSection.key!)}
             onMove={(dir) => selectedSection && moveNode(selectedSection.key!, dir)}
             onDelete={() => selectedSection && deleteNode(selectedSection.key!)}
@@ -378,7 +406,10 @@ export function OutlineTab({
         )}
         {/* ✅ 字数预算编辑入口（2026-09-21 补齐功能缺口）：
             此前预算全链路只读，用户无法在正文生成前规划每章篇幅 */}
-        {selectedSection && tree.length > 0 && (
+        {/* ✅ R231（2026-11-13）：omp 生成期间整表重建 sections，选中章节可能被
+            删除 ⇒ 预算 PATCH 落 0 行 409；omp 期隐藏面板（omp 结束后随 load()
+            恢复）。主链路生成期间保持原行为（word_budget-only PATCH 豁免守卫）。 */}
+        {selectedSection && tree.length > 0 && !generatingOmp && (
           <OutlineNodeBudgetPanel
             node={selectedSection as TreeNode}
             onBudgetChange={handleBudgetChange}
@@ -394,7 +425,11 @@ export function OutlineTab({
           >
             <Tree
               treeData={outlineEditTreeData}
-              draggable
+              /* ✅ R231（2026-11-13）：omp 目录生成期间禁用拖拽——拖拽落库
+                 (reorder) 与 omp 结束后的整表重建互踩，后端双 409 感知不到
+                 omp 旁路（可行性报告 §11.4 局限 B）；主链路生成期间保持原行为
+                 （reorder 端点自带 outline_generation_in_progress 409）。 */
+              draggable={!generatingOmp}
               expandedKeys={expandedKeys}
               onExpand={(keys) => setExpandedKeys(keys as Key[])}
               selectedKeys={selectedSection ? [selectedSection.key!] : []}

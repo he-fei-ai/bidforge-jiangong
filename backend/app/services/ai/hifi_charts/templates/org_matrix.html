@@ -1,0 +1,212 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+<meta charset="UTF-8">
+<style>
+  body {
+    margin: 0; padding: 40px; background: #ffffff;
+    font-family: 'Microsoft YaHei', 'CJK', sans-serif;
+    font-smooth: always;
+    -webkit-font-smoothing: antialiased;
+  }
+  .org-chart-container {
+    position: relative;
+    width: 1200px;
+    height: 600px;
+    margin: 0 auto;
+  }
+
+  /* 节点基础样式 */
+  .node {
+    position: absolute;
+    display: flex; align-items: center; justify-content: center;
+    border: 1px solid #5a7ca8;
+    background: #ffffff;
+    color: #333; font-size: 14px;
+    box-shadow: 0 1px 3px rgba(0,0,0,0.05);
+    z-index: 2;
+    box-sizing: border-box;
+  }
+
+  /* 横向节点 */
+  .node-h {
+    height: 36px; padding: 0 15px;
+    border-radius: 0;
+  }
+
+  /* 竖向职能部门节点 */
+  .node-v {
+    width: 40px; height: 160px;
+    writing-mode: vertical-rl;
+    text-orientation: upright;
+    letter-spacing: 4px;
+    padding: 15px 0;
+    background: #f8f9fa;
+  }
+
+  /* SVG 连线层 */
+  svg.edges {
+    position: absolute; top: 0; left: 0;
+    width: 100%; height: 100%; z-index: 1;
+    pointer-events: none;
+  }
+  .edge {
+    fill: none; stroke: #4a7cc7; stroke-width: 1.5;
+  }
+</style>
+</head>
+<body>
+
+<div class="org-chart-container" id="chartArea">
+  <svg class="edges" id="svgCanvas"></svg>
+</div>
+
+<script>
+// 数据由后端注入：const data = {...};
+const data = {...};
+
+const container = document.getElementById('chartArea');
+const svg = document.getElementById('svgCanvas');
+let svgHtml = '';
+
+// --- 1. 全局布局配置（画布自适应节点数） ---
+const canvasW = 1200;
+const centerX = canvasW / 2;
+const y1 = 30;
+const y2 = 110;
+const y3_rect_top = 180;
+const y3_node_top = 190;
+const y3_rect_bottom = 350;
+const y4_rect_top = 430;
+const y4 = 440;
+
+const l1 = data.nodes.level1 || [];
+const l2 = data.nodes.level2 || [];
+const l3 = data.nodes.level3 || [];
+const l4 = data.nodes.level4 || [];
+
+// --- 2. 渲染节点函数 ---
+function renderNode(node, x, y, isVertical = false) {
+  const div = document.createElement('div');
+  div.className = `node ${isVertical ? 'node-v' : 'node-h'}`;
+  div.innerText = node.label;
+  const w = isVertical ? 40 : node.label.length * 14 + 30;
+  const h = isVertical ? 160 : 36;
+  div.style.left = `${x - w / 2}px`;
+  div.style.top = `${y - h / 2}px`;
+  container.appendChild(div);
+  return { id: node.id, cx: x, cy: y, top: y - h / 2, bottom: y + h / 2, left: x - w / 2, right: x + w / 2 };
+}
+
+// --- 3. 布局计算与渲染 ---
+const nodeMap = {};
+
+// L1
+if (l1.length) {
+  const pmNode = l1[0];
+  nodeMap[pmNode.id] = renderNode(pmNode, centerX, y1);
+}
+
+// L2（均匀分布）
+if (l2.length) {
+  const l2StartX = 150;
+  const l2Gap = (canvasW - 300) / Math.max(l2.length - 1, 1);
+  l2.forEach((node, i) => {
+    nodeMap[node.id] = renderNode(node, l2StartX + i * l2Gap, y2);
+  });
+}
+
+// L3（竖向部门，均匀分布）
+const l3Gap = 50;
+l3.forEach((node, i) => {
+  const x = 100 + i * (40 + l3Gap) + 20;
+  nodeMap[node.id] = renderNode(node, x, y3_node_top + 80, true);
+});
+
+// L4（基于 L3 最左/最右居中）
+let l3MinX = centerX, l3MaxX = centerX;
+if (l3.length) {
+  const l3Nodes = l3.map(n => nodeMap[n.id]);
+  l3MinX = Math.min(...l3Nodes.map(n => n.cx));
+  l3MaxX = Math.max(...l3Nodes.map(n => n.cx));
+}
+if (l4.length) {
+  const l4Gap = Math.max((l3MaxX - l3MinX) / (l4.length + 1), 60);
+  l4.forEach((node, i) => {
+    const x = l3MinX + l4Gap * (i + 1);
+    nodeMap[node.id] = renderNode(node, x, y4);
+  });
+}
+
+// --- 4. 连线绘制 ---
+svgHtml += `
+  <defs>
+    <marker id="arrow" viewBox="0 0 10 10" refX="5" refY="5" markerWidth="6" markerHeight="6" orient="auto-start-reverse">
+      <path d="M 0 0 L 10 5 L 0 10 z" fill="#4a7cc7" />
+    </marker>
+  </defs>
+`;
+
+// A. L1 到 L2 的连线 + 顶部总线
+if (l2.length) {
+  const l2Nodes = l2.map(n => nodeMap[n.id]);
+  const l2MinX = Math.min(...l2Nodes.map(n => n.cx));
+  const l2MaxX = Math.max(...l2Nodes.map(n => n.cx));
+  const busY1 = y1 + 30;
+  if (l1.length) {
+    svgHtml += `<path class="edge" d="M ${centerX} ${nodeMap[l1[0].id].bottom} L ${centerX} ${busY1}" />`;
+  }
+  svgHtml += `<path class="edge" d="M ${l2MinX} ${busY1} L ${l2MaxX} ${busY1}" />`;
+  l2Nodes.forEach(n => {
+    svgHtml += `<path class="edge" d="M ${n.cx} ${busY1} L ${n.cx} ${n.top}" marker-end="url(#arrow)" />`;
+  });
+}
+
+// B. L2 到 L3 的连线（只连有 parent 的）
+l3.forEach(l3node => {
+  if (l3node.parent && nodeMap[l3node.parent]) {
+    const pNode = nodeMap[l3node.parent];
+    const cNode = nodeMap[l3node.id];
+    if (Math.abs(pNode.cx - cNode.cx) > 5) {
+      svgHtml += `<path class="edge" d="M ${pNode.cx} ${pNode.bottom} L ${pNode.cx} ${y3_rect_top}" />`;
+    } else {
+      svgHtml += `<path class="edge" d="M ${pNode.cx} ${pNode.bottom} L ${pNode.cx} ${y3_rect_top}" />`;
+    }
+  }
+});
+
+// C. L3 的贯穿总线（上下两条）
+if (l3.length) {
+  const l3Nodes = l3.map(n => nodeMap[n.id]);
+  const l3MinX_all = Math.min(...l3Nodes.map(n => n.left));
+  const l3MaxX_all = Math.max(...l3Nodes.map(n => n.right));
+  svgHtml += `<path class="edge" d="M ${l3MinX_all} ${y3_rect_top} L ${l3MaxX_all} ${y3_rect_top}" />`;
+  svgHtml += `<path class="edge" d="M ${l3MinX_all} ${y3_rect_bottom} L ${l3MaxX_all} ${y3_rect_bottom}" />`;
+  l3Nodes.forEach(n => {
+    svgHtml += `<path class="edge" d="M ${n.cx} ${y3_rect_top} L ${n.cx} ${n.top}" marker-end="url(#arrow)" />`;
+    svgHtml += `<path class="edge" d="M ${n.cx} ${n.bottom} L ${n.cx} ${y3_rect_bottom}" marker-end="url(#arrow)" />`;
+  });
+}
+
+// D. L3 到 L4 的连线
+if (l4.length && l3.length) {
+  const l3Nodes = l3.map(n => nodeMap[n.id]);
+  const l3MinX_all = Math.min(...l3Nodes.map(n => n.left));
+  const l3MaxX_all = Math.max(...l3Nodes.map(n => n.right));
+  const l4Nodes = l4.map(n => nodeMap[n.id]);
+  l4Nodes.forEach(n => {
+    svgHtml += `<path class="edge" d="M ${n.cx} ${y3_rect_bottom} L ${n.cx} ${y4_rect_top}" />`;
+  });
+  const l4MinX = Math.min(...l4Nodes.map(n => n.cx));
+  const l4MaxX = Math.max(...l4Nodes.map(n => n.cx));
+  svgHtml += `<path class="edge" d="M ${l4MinX} ${y4_rect_top} L ${l4MaxX} ${y4_rect_top}" />`;
+  l4Nodes.forEach(n => {
+    svgHtml += `<path class="edge" d="M ${n.cx} ${y4_rect_top} L ${n.cx} ${n.top}" marker-end="url(#arrow)" />`;
+  });
+}
+
+svg.innerHTML = svgHtml;
+</script>
+
+</body>
+</html>

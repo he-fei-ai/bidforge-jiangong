@@ -177,7 +177,7 @@ class TestStoppedCheckpointGuard:
     async def test_first_write_fails_then_retry_succeeds(self, monkeypatch):
         calls: list[str] = []
 
-        async def _fake_save(task_id, payload):
+        async def _fake_save(task_id, payload, *_fs_args, **_fs_kwargs):
             calls.append(task_id)
             if len(calls) == 1:
                 raise RuntimeError("database is locked")
@@ -196,7 +196,7 @@ class TestStoppedCheckpointGuard:
 
     @pytest.mark.asyncio
     async def test_both_writes_fail_keep_outline_and_mark_payload(self, monkeypatch):
-        async def _fake_save(task_id, payload):
+        async def _fake_save(task_id, payload, *_fs_args, **_fs_kwargs):
             raise RuntimeError("disk full")
 
         async def _fake_finish(task_id, status, message):
@@ -214,7 +214,7 @@ class TestStoppedCheckpointGuard:
     async def test_self_proof_success_writes_once(self, monkeypatch):
         calls: list[int] = []
 
-        async def _fake_save(task_id, payload):
+        async def _fake_save(task_id, payload, *_fs_args, **_fs_kwargs):
             calls.append(1)
 
         async def _fake_finish(task_id, status, message):
@@ -386,7 +386,15 @@ class TestDesignRatchets:
         assert 'request_control(old_id, "stop")' in registry
         assert "请勿重复触发" in _src("routers/sse_handlers.py")
         outline_tab = _front("pages/schemeWorkbench/tabs/OutlineTab.tsx")
-        assert "disabled={generating}" in outline_tab
+        # ✅ R231 重锚（2026-11-13 · 意图保留、强度不减）：omp 目录生成旁路引入后，
+        #    前端写入口禁用判据从单一生成态扩展为 outlineBusy（主链路 generating
+        #    与 omp 旁路 generatingOmp 两态都禁用）——原字面量已被
+        #    ompOutlineEntry20261112.test.ts 反向禁止（not.toContain），本断言
+        #    同步锁新契约：outlineBusy 定义在位、≥5 处按钮接线、旧单态字面量
+        #    不得回流。
+        assert "const outlineBusy = generating || !!generatingOmp" in outline_tab
+        assert outline_tab.count("disabled={outlineBusy") >= 5
+        assert "disabled={generating}" not in outline_tab
 
     def test_l6_checkpoint_schema_has_no_chapter_set(self):
         """L6 当前态锁：白名单不含章节集合；方案登记在 R188 报告 §五。"""

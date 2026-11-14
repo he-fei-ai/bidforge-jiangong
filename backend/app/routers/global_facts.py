@@ -672,9 +672,18 @@ async def _assert_fact_in_scheme_scope(db, fact_id: str, scheme_id: str) -> dict
 
     scheme_id 为空时保留旧脚本/内部调用兼容；前端事实写接口全部传当前方案，
     防止路由切换竞态或旧弹窗误改其它方案数据。
+
+    ✅ R247（2026-11-14 · P3 · 稳定排序）：旧实现
+    ``WHERE id=? OR group_id=? LIMIT 1`` 无 ORDER BY —— 当 fact_id 同时命中
+    「本行 id」与「跨方案残留的同名 group 行」时（历史迁移/手工改库可能留下
+    group_id 悬空行），SQLite 取哪一行不确定 ⇒ 归属校验判定漂移（同一入参
+    时而 409 时而放行）。现加确定性排序：优先「本行 id 命中」，同优先级再按
+    scheme_id / id 升序，保证同一数据集判定唯一。命中语义不变（仍取第一行）。
     """
     cur = await db.execute(
-        "SELECT id, project_id, scheme_id FROM global_facts WHERE id=? OR group_id=? LIMIT 1", (fact_id, fact_id)
+        "SELECT id, project_id, scheme_id FROM global_facts WHERE id=? OR group_id=? "
+        "ORDER BY (CASE WHEN id=? THEN 0 ELSE 1 END), scheme_id, id LIMIT 1",
+        (fact_id, fact_id, fact_id),
     )
     _require_fact_cursor(cur, "作用域校验·事实归属")
     row = await cur.fetchone()
@@ -1662,7 +1671,15 @@ async def list_cross_conflicts(
     if not sid and not pid:
         raise HTTPException(400, "需要 scheme_id 或 project_id")
     if sid and not pid:
-        pid = await _scheme_project_id(db, sid) or ""
+        # ✅ R247（A7 · 只读诊断面也分清「无冲突」与「查无此方案」）：旧实现
+        #    `_scheme_project_id` 返回 None（方案不存在）时 `or ""` 吞成空 pid
+        #    ⇒ 返回空列表，调用方无法区分「该方案确实零冲突」与「scheme_id 写错」。
+        #    现方案不存在 → 404（与 _assert_fact_in_scheme_scope 同口径）；
+        #    方案存在但未绑定项目（pid="")→ 仍返回空列表（作用域退化为方案级，非错误）。
+        _resolved = await _scheme_project_id(db, sid)
+        if _resolved is None:
+            raise HTTPException(404, "方案不存在")
+        pid = _resolved
     conflicts = await load_cross_conflicts(db, pid, sid)
     return {"conflicts": conflicts, "total": len(conflicts)}
 
@@ -3972,6 +3989,13 @@ async def adjust_facts(data: AdjustRequest, db=Depends(get_db)):
     scheme_id = data.scheme_id if isinstance(data.scheme_id, str) else ""
     project_id = data.project_id if isinstance(data.project_id, str) else ""
     do_apply = bool(data.apply)
+    # ✅ R247（A9 · 越权面收口）：旧实现仅传 project_id（无 scheme_id）时，
+    #    _fact_scope_where 走「仅 pid」分支 = 该项目**全部**事实（含各方案私有行），
+    #    即一次调用可跨方案读取并改写其它方案的私有事实。前端始终带 scheme_id
+    #    （FactsAdjustPanel 以 schemeId 为 ready 前置），故本收窄对 UI 零影响；
+    #    仅脚本/直连 API 的 project 级批量调整需显式带 scheme_id。
+    if not (scheme_id.strip() if isinstance(scheme_id, str) else ""):
+        raise HTTPException(400, "AI 调整必须携带 scheme_id（按方案作用域，禁止跨方案批量改写）")
     real_pid = await _resolve_project_id(db, scheme_id, project_id)
     if not real_pid:
         raise HTTPException(400, "需要 scheme_id 或 project_id")

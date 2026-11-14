@@ -377,10 +377,17 @@ describe("normalizeChartYield", () => {
         { type: "gantt", reason: "scheme_type_limit" },
       ],
     };
+    // ✅ R233 重锚（意图保留、强度不减）：旧断言锁「恰好三键」；R233 ENH-1
+    //    （R228 遗留③收口）给 ChartYield 加法式扩展 semantic_notes /
+    //    semantic_notes_count 两个可选键（旧版后端缺键回 []/0）。三键稳定
+    //    归一的意图不变 —— 期望形状补齐语义键回退值，正向形态由 R233 专项
+    //    护栏 chartSemanticR233.test.ts 锁定。
     expect(normalizeChartYield(raw)).toEqual({
       chart_count: 1,
       charts_dropped_count: 2,
       charts_dropped: raw.charts_dropped,
+      semantic_notes: [],
+      semantic_notes_count: 0,
     });
   });
 
@@ -390,6 +397,8 @@ describe("normalizeChartYield", () => {
         chart_count: 0,
         charts_dropped_count: 0,
         charts_dropped: [],
+        semantic_notes: [],
+        semantic_notes_count: 0,
       });
     }
   });

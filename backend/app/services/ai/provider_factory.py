@@ -20,6 +20,7 @@ from app.services import activity_broadcaster as _ab
 from app.services.ai.json_mode_compat import json_mode_unsupported
 from app.services.ai.providers.anthropic_compatible import AnthropicCompatibleProvider
 from app.services.ai.providers.base import BaseProvider
+from app.services.ai.providers.omp_provider import OmpProvider
 from app.services.ai.providers.openai_compatible import OpenAICompatibleProvider
 from app.services.ai.usage_logging import log_usage_event as _log_ai_usage
 from app.services.ai.workflows_base import circuit_breaker, concurrency_controller
@@ -32,6 +33,21 @@ logger = logging.getLogger("provider_factory")
 _STATUS_429_RE = re.compile(r"\b429\b")
 
 PROVIDER_PRESETS = {
+    # ==================== 通用 Agent 运行时（阶段 1 集成，默认关闭） ====================
+    "omp": {
+        # omp 走本地 RPC，不消费 base_url；二进制路径由 settings.omp_binary_path 控制。
+        "base_url": "",
+        # 此 model 是「omp 自身使用的模型 id」，必须在 omp 的 models.yml 中已配置对应 provider。
+        "model": "openai/gpt-4o",
+        "type": "omp",
+        "label": "Oh My Pi (omp) Agent",
+        "models": [
+            {"value": "openai/gpt-4o", "label": "omp 代理模型（需在 omp 内配置 provider）"},
+        ],
+        "description": "通用 AI 编程 Agent（文件工作区多步推理）。作为降级链候选，默认关闭：需 "
+        "settings.omp_provider_enabled=True 且本机已安装 omp。纯对话/JSON 代理形态，不挂工具。",
+        "website": "https://github.com/can1357/oh-my-pi",
+    },
     # ==================== 国内 20 个平台 ====================
     "deepseek": {
         "base_url": "https://api.deepseek.com/v1",
@@ -418,7 +434,9 @@ for _preset in PROVIDER_PRESETS.values():
 def _build_provider(preset_name: str, api_key: str, base_url: str, model: str, **kw) -> BaseProvider:
     api_key = (api_key or "").strip()
     base_url = (base_url or "").strip()
-    if not api_key:
+    # omp 自身作为 Agent 运行时，其底层模型可能无需 API Key（如本地 vLLM），
+    # 故放行空 Key；其余厂商仍强制要求。
+    if not api_key and preset_name != "omp":
         raise ValueError("API Key 为空，无法构建 Provider")
     preset = PROVIDER_PRESETS.get(preset_name)
     if preset is None:
@@ -433,6 +451,11 @@ def _build_provider(preset_name: str, api_key: str, base_url: str, model: str, *
         # 已知预设：base_url 为空时回退到平台预设地址（仅适用于按量计费兜底）
         if not base_url:
             base_url = preset.get("base_url", "")
+    # ✅ 阶段 1（2026-11-12）：omp 作为降级链候选的对话模型代理。
+    #    默认关闭（settings.omp_provider_enabled），未启用时 chat() 会抛清晰错误，
+    #    降级链自动跳过，对现有链路零影响。omp 不使用 base_url（走本地 RPC）。
+    if t == "omp":
+        return OmpProvider(api_key=api_key, base_url=base_url, model=model or default_model, **kw)
     cls = AnthropicCompatibleProvider if t == "anthropic_compatible" else OpenAICompatibleProvider
     return cls(api_key=api_key, base_url=base_url, model=model or default_model, **kw)
 
@@ -1680,6 +1703,10 @@ KNOWN_SCENES: dict[str, str] = {
     #    「AI 定点编辑 + 唯一命中才替换」修复调用点（content_fact_autofix）。
     #    仅在检出冲突的章节触发（无冲突章节零调用），需可单独观测与指定模型。
     "content_fact_autofix": "正文事实冲突定点修复",
+    # —— omp 引擎层（阶段 3）——
+    # ✅ R236（2026-11-13）：omp 本地编排档执行器（路径 B：注入 executor_fn，
+    #    用平台 AI 链当「本地 LLM」，不依赖 omp 进程）—— 需可单独指定模型与观测。
+    "omp_local_executor": "omp 本地编排档执行",
     # —— 事实 / 项目信息 ——
     "facts_extract": "全局事实提取",
     # ✅ 2026-09-30 第十三轮：知识库补充 / 最终整理两个新增 AI 调用点。

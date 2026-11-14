@@ -44,6 +44,9 @@ export interface DefectItem {
   fingerprint: string;
   created_at: string;
   updated_at: string;
+  /** ✅ R227（D2）：指向的章节已被删除（保留账本留痕，显示层标「章节已删除」）。
+   * 后端 `_serialize` 经 `SELECT *` 透传；缺省 0 = 未失效（旧响应无此键）。 */
+  stale?: number;
 }
 
 export interface DefectSummary {
@@ -53,6 +56,8 @@ export interface DefectSummary {
   /** 检查器异常 / 未注册 —— 永不计入 passed */
   undetermined: number;
   pending: number;
+  /** ✅ R227（D2）：指向已删章节的失效账本行数（加法式，不影响上方计数语义） */
+  stale?: number;
   counts: Record<string, number>;
   pass_rule: string;
 }

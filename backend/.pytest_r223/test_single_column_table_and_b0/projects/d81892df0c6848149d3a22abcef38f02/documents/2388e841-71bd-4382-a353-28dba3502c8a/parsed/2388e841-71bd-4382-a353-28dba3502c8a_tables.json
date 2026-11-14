@@ -1,0 +1,35 @@
+{
+  "doc_id": "2388e841-71bd-4382-a353-28dba3502c8a",
+  "table_count": 1,
+  "tables": [
+    {
+      "table_id": "t1",
+      "page_num": 1,
+      "title": "正文说明：本跨中弯矩按下式计算。",
+      "headers": [
+        "工程材料"
+      ],
+      "rows": [
+        [
+          "钢筋 HRB400"
+        ],
+        [
+          "混凝土 C30"
+        ]
+      ],
+      "data": [
+        [
+          "工程材料"
+        ],
+        [
+          "钢筋 HRB400"
+        ],
+        [
+          "混凝土 C30"
+        ]
+      ],
+      "merged_cells": [],
+      "source_ref": "2388e841-71bd-4382-a353-28dba3502c8a#page:1#table:t1"
+    }
+  ]
+}

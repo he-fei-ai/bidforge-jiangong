@@ -560,6 +560,7 @@ async def _load_row(db):
 async def get_config(db=Depends(read_db)):
     cfg = await resolve_image_config(db, settings)
     has_key = bool(cfg.get("image_api_key_enc"))
+    cfg.pop("image_api_key_enc", None)  # 用户裁决(2026-11-13)：剥离敏感字段，不回传明文/密文
     # decision：协同决策流 + Prompt 模板说明（只读展示数据，不改判定逻辑）
     from app.services.ai.image_engine import parse_img_gen_prompt, route_visual_strategy
     return {
@@ -843,7 +844,7 @@ Expected: FAIL
 ```ts
 export interface ImageModelConfig {
   image_enabled: boolean;
-  image_api_key_enc: string;
+  image_api_key_enc?: string;  // 用户裁决(2026-11-13)：GET 不回传，可选
   image_base_url: string;
   image_model: string;
   image_default_size: string;

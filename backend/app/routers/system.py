@@ -626,6 +626,65 @@ async def governance_get():
     }
 
 
+@router.get("/feature-flags")
+async def feature_flags_get():
+    """轻量功能开关下发：前端据此预显隐受控功能（如 omp 文件工作区 Agent）。
+
+    当前仅暴露 ``omp_task_enabled``；后续受控功能可加法式追加，不影响既有契约。
+    未启用时返回 ``False``，前端对应入口保持隐藏；即便显示，点击后也由后端
+    ``sections.generate_outline_via_omp`` 的 409 闸门兜底提示回退主链路。
+    """
+    return {"omp_task_enabled": bool(getattr(settings, "omp_task_enabled", False))}
+
+
+@router.get("/omp-readiness")
+async def omp_readiness_get():
+    """omp Agent 工作流就绪诊断（阶段 3 遗留项收口）。
+
+    与 ``/feature-flags`` 分离：后者被既有测试锁定为**精确形状**，
+    不得加法式追加键。本端点只读诊断，供运维在灰度启用前确认
+    二进制 / 模型 / 工具白名单 / 原生 task 状态，并给出可执行缺口清单。
+    """
+    from app.services.ai.omp_rpc import binary_exists
+
+    binary = (getattr(settings, "omp_binary_path", "") or "omp").strip() or "omp"
+    model = (getattr(settings, "omp_task_model", "") or "").strip()
+    tools = (getattr(settings, "omp_task_tools", "") or "").strip()
+    tool_list = [t.strip() for t in tools.split(",") if t.strip()]
+    task_enabled = bool(getattr(settings, "omp_task_enabled", False))
+    workflow_enabled = bool(getattr(settings, "omp_workflow_enabled", False))
+    exists = binary_exists(binary)
+
+    gaps: list[str] = []
+    if not task_enabled:
+        gaps.append("omp_task_enabled=False（总开关未打开）")
+    if not workflow_enabled:
+        gaps.append("omp_workflow_enabled=False（阶段 3 工作流未打开）")
+    if not exists:
+        gaps.append(f"omp 二进制不存在：{binary}")
+    if not model:
+        gaps.append("omp_task_model 未配置（需指向 omp models.yml 中的真实 provider）")
+    for bad in ("bash", "exec"):
+        if bad in tool_list:
+            gaps.append(f"工具白名单含高危工具 {bad}，请立即收窄")
+    return {
+        "ready": not gaps,
+        "gaps": gaps,
+        "enabled": task_enabled,
+        "workflow_enabled": workflow_enabled,
+        "binary": binary,
+        "binary_exists": exists,
+        "model_configured": bool(model),
+        "tools": tools,
+        "native_task_enabled": "task" in tool_list,
+        "note": (
+            "此端点只做静态诊断，不发起模型调用；真实 e2e 需先消除 gaps，"
+            "再经 POST /api/v1/schemes/{sid}/sections/omp-workflow 灰度验证。"
+            "原生 task / LSP / browser 默认不启用（未实测、安全沙箱取舍）。"
+        ),
+    }
+
+
 @router.put("/governance")
 async def governance_put(body: GovernanceSettings):
     """写回提示词治理开关（PATCH 语义 + SQLite 持久化）。

@@ -989,6 +989,124 @@ def select_ai_image_codes(
     return {c["key"] for c in kept}
 
 
+# ============================================================================
+# 高保真图表规格 · 图片生成增强（文档 §8）
+# ----------------------------------------------------------------------------
+# ① 高保真渲染管线（§8.1）：多倍率 DPI 预设（screen / print / vector）
+# ② AI 配图与结构化图表分工协同（§8.2）：正文语义 → 结构化图表 / AI 配图 / 纯文字
+# ③ 工程配图 AI 生成 Prompt 模板（§8.3）：[IMG_GEN_PROMPT: ...] 解析
+#
+# 这些是**生成侧决策纯函数**（零 IO、零副作用），供正文编排 / 导出管线
+# 在「该出结构化图表还是文生图配图」处消费；不侵入既有生成链路行为。
+# ============================================================================
+
+# 多倍率 DPI（§8.1）：渲染超采样倍率 / 截图 device_scale_factor 预设。
+# 现有 PIL v2 商业级渲染器固定 2.5x 超采样（见 mermaid_common._render_hq），
+# 本表供高保真图表导出器按用途切换（screen 预览 / print 打印评审 / vector 矢量级）。
+IMAGE_SCALE_PRESETS: dict[str, int] = {
+    "screen": 2,
+    "print": 3,
+    "vector": 4,
+}
+
+
+def route_visual_strategy(text: str) -> dict:
+    """AI 配图与结构化图表的分工协同决策（§8.2）。
+
+    协同决策流：
+        正文段 → 含进度/组织/工艺关键词？
+          ├─ 是 → 结构化图表管线（route="structured"）
+          └─ 否 → 需要氛围/示意配图？
+                   ├─ 是 → AI 配图（route="illustration"）
+                   └─ 否 → 纯文字（route="none"）
+
+    Args:
+        text: 正文段落 / 章节文本。
+
+    Returns:
+        ``{"route": "structured"|"illustration"|"none",
+        "chart_type": str|None, "reason": str}`` —— ``chart_type`` 仅
+        structured 路由时非 None（gantt/architecture/flowchart）。
+    """
+    from app.services.chart_validators import detect_chart_type
+
+    t = text or ""
+    ctype = detect_chart_type(t)
+    if ctype:
+        return {
+            "route": "structured",
+            "chart_type": ctype,
+            "reason": "命中图表生成关键词，走结构化图表管线（七段式 Prompt → JSON → 渲染）",
+        }
+    if any(kw in t for kw in (
+        "效果图", "示意图", "三维", "实景", "渲染", "氛围", "鸟瞰", "透视", "封面",
+    )):
+        return {
+            "route": "illustration",
+            "chart_type": None,
+            "reason": "未命中结构化图表关键词，需氛围/示意配图，走 AI 文生图",
+        }
+    return {
+        "route": "none",
+        "chart_type": None,
+        "reason": "既无结构化图表关键词、也无配图需求，纯文字",
+    }
+
+
+def parse_img_gen_prompt(text: str) -> dict:
+    """解析工程配图 AI 生成 Prompt 模板（§8.3）。
+
+    模板形态：
+        [IMG_GEN_PROMPT: 主题=钢结构节点焊接工艺三维示意；风格=写实工程渲染、
+        蓝灰工业色调、浅景深；构图=等轴测视角、白底干净背景、无文字水印；
+        比例=16:9；负面词=手绘、卡通、模糊、文字]
+
+    Args:
+        text: 含 ``[IMG_GEN_PROMPT: ...]`` 模板的文本。
+
+    Returns:
+        命中：``{"ok": True, "subject":..., "style":..., "composition":...,
+        "ratio":..., "negative":..., "prompt": <已构建的完整文生图提示词>}``；
+        未命中：``{"ok": False, "reason": "未命中 [IMG_GEN_PROMPT: ...] 模板标记"}``。
+    """
+    m = re.search(r"\[\s*IMG_GEN_PROMPT\s*:\s*(.+?)\s*\]", text or "", re.S)
+    if not m:
+        return {"ok": False, "reason": "未命中 [IMG_GEN_PROMPT: ...] 模板标记"}
+    fields: dict[str, str] = {}
+    for part in re.split(r"[；;]", m.group(1)):
+        part = part.strip()
+        if not part:
+            continue
+        if "=" in part:
+            k, v = part.split("=", 1)
+            fields[k.strip()] = v.strip()
+    subject = fields.get("主题", "").strip()
+    style = fields.get("风格", "").strip()
+    composition = fields.get("构图", "").strip()
+    ratio = fields.get("比例", "16:9").strip()
+    negative = fields.get("负面词", "").strip()
+    seg = []
+    if subject:
+        seg.append(f"主题：{subject}")
+    if style:
+        seg.append(f"风格：{style}")
+    if composition:
+        seg.append(f"构图：{composition}")
+    if ratio:
+        seg.append(f"画面比例：{ratio}")
+    if negative:
+        seg.append(f"避免（负面词）：{negative}")
+    return {
+        "ok": True,
+        "subject": subject,
+        "style": style,
+        "composition": composition,
+        "ratio": ratio,
+        "negative": negative,
+        "prompt": "；".join(seg),
+    }
+
+
 async def resolve_image_config(db, settings) -> dict:
     """读取当前图像模型配置（DB 优先、settings 兜底）。
 

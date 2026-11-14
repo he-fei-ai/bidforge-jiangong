@@ -1,0 +1,837 @@
+{
+  "total": 148,
+  "zero": 83,
+  "mf_zero": 23,
+  "hits": [
+    {
+      "path": "middleware.py",
+      "line": 210,
+      "code": "raw = (message.get(\"body\") or b\"\")[:1024]",
+      "upper": "1024",
+      "ledgered": false,
+      "reason": "no-ledger-call-in-scope",
+      "model_facing": false,
+      "scope": "send_wrapper"
+    },
+    {
+      "path": "middleware.py",
+      "line": 212,
+      "code": "err_detail = raw.decode(\"utf-8\", \"replace\").replace(\"\\n\", \" \")[:300]",
+      "upper": "300",
+      "ledgered": false,
+      "reason": "no-ledger-call-in-scope",
+      "model_facing": false,
+      "scope": "send_wrapper"
+    },
+    {
+      "path": "routers/ai_config/models.py",
+      "line": 119,
+      "code": "_raw = redact_sensitive_text(resp.text)[:300]",
+      "upper": "300",
+      "ledgered": false,
+      "reason": "no-ledger-call-in-scope",
+      "model_facing": false,
+      "scope": "_fetch_models_list"
+    },
+    {
+      "path": "routers/bid_analysis.py",
+      "line": 1215,
+      "code": "evt[\"content_preview\"] = content[:200]",
+      "upper": "200",
+      "ledgered": false,
+      "reason": "no-ledger-call-in-scope",
+      "model_facing": false,
+      "scope": "progress_callback"
+    },
+    {
+      "path": "routers/bid_analysis.py",
+      "line": 2899,
+      "code": "msg += f\"（首个失败原因：{errors[0][:200]}）\"",
+      "upper": "200",
+      "ledgered": false,
+      "reason": "no-ledger-call-in-scope",
+      "model_facing": true,
+      "scope": "_missing_required_message"
+    },
+    {
+      "path": "routers/compliance.py",
+      "line": 569,
+      "code": "_err[:300],",
+      "upper": "300",
+      "ledgered": false,
+      "reason": "no-ledger-call-in-scope",
+      "model_facing": false,
+      "scope": "_record_batch_audit"
+    },
+    {
+      "path": "routers/doc_pipeline.py",
+      "line": 297,
+      "code": "d[\"text_preview\"] = text[:300]",
+      "upper": "300",
+      "ledgered": false,
+      "reason": "no-ledger-call-in-scope",
+      "model_facing": false,
+      "scope": "get_chunks"
+    },
+    {
+      "path": "routers/export.py",
+      "line": 5782,
+      "code": "return text[:limit]",
+      "upper": "limit",
+      "ledgered": false,
+      "reason": "no-ledger-call-in-scope",
+      "model_facing": false,
+      "scope": "_format_extract_data_for_appendix"
+    },
+    {
+      "path": "routers/export.py",
+      "line": 889,
+      "code": "\"section_ids\": [str(cf.get(\"section_id\") or \"\")][:_EXPORT_FINDING_SECTION_CAP],",
+      "upper": "_EXPORT_FINDING_SECTION_CAP",
+      "ledgered": false,
+      "reason": "no-ledger-call-in-scope",
+      "model_facing": false,
+      "scope": "collect_export_issues"
+    },
+    {
+      "path": "routers/export.py",
+      "line": 899,
+      "code": "\"section_ids\": [str(cp.get(\"section_id\") or \"\")][:_EXPORT_FINDING_SECTION_CAP],",
+      "upper": "_EXPORT_FINDING_SECTION_CAP",
+      "ledgered": false,
+      "reason": "no-ledger-call-in-scope",
+      "model_facing": false,
+      "scope": "collect_export_issues"
+    },
+    {
+      "path": "routers/export.py",
+      "line": 936,
+      "code": "\"section_ids\": review_pending_ids[:_EXPORT_FINDING_SECTION_CAP],",
+      "upper": "_EXPORT_FINDING_SECTION_CAP",
+      "ledgered": false,
+      "reason": "no-ledger-call-in-scope",
+      "model_facing": false,
+      "scope": "collect_export_issues"
+    },
+    {
+      "path": "routers/export.py",
+      "line": 945,
+      "code": "\"section_ids\": review_rejected_ids[:_EXPORT_FINDING_SECTION_CAP],",
+      "upper": "_EXPORT_FINDING_SECTION_CAP",
+      "ledgered": false,
+      "reason": "no-ledger-call-in-scope",
+      "model_facing": false,
+      "scope": "collect_export_issues"
+    },
+    {
+      "path": "routers/export.py",
+      "line": 954,
+      "code": "\"section_ids\": review_missing_ids[:_EXPORT_FINDING_SECTION_CAP],",
+      "upper": "_EXPORT_FINDING_SECTION_CAP",
+      "ledgered": false,
+      "reason": "no-ledger-call-in-scope",
+      "model_facing": false,
+      "scope": "collect_export_issues"
+    },
+    {
+      "path": "routers/export.py",
+      "line": 1530,
+      "code": "\"section_ids\": sections_hit[:_EXPORT_FINDING_SECTION_CAP],",
+      "upper": "_EXPORT_FINDING_SECTION_CAP",
+      "ledgered": false,
+      "reason": "no-ledger-call-in-scope",
+      "model_facing": false,
+      "scope": "export_issues_to_findings"
+    },
+    {
+      "path": "routers/export.py",
+      "line": 2794,
+      "code": "name = name[:max_base].rstrip(\" .\")",
+      "upper": "max_base",
+      "ledgered": false,
+      "reason": "no-ledger-call-in-scope",
+      "model_facing": false,
+      "scope": "_build_export_filename"
+    },
+    {
+      "path": "routers/export.py",
+      "line": 2748,
+      "code": "s = s[:max_base].rstrip(\" .\") or \"导出文档\"",
+      "upper": "max_base",
+      "ledgered": false,
+      "reason": "no-ledger-call-in-scope",
+      "model_facing": false,
+      "scope": "_safe_filename"
+    },
+    {
+      "path": "routers/global_facts.py",
+      "line": 3915,
+      "code": "clean.append({\"op\": \"delete\", \"fact_id\": fid, \"reason\": str(op.get(\"reason\") or \"\")[:200]})",
+      "upper": "200",
+      "ledgered": false,
+      "reason": "no-ledger-call-in-scope",
+      "model_facing": true,
+      "scope": "_validate_adjust_ops"
+    },
+    {
+      "path": "routers/global_facts_docs.py",
+      "line": 361,
+      "code": "head = text[:MAX_PARSED_CHARS]",
+      "upper": "MAX_PARSED_CHARS",
+      "ledgered": false,
+      "reason": "no-ledger-call-in-scope",
+      "model_facing": true,
+      "scope": "_truncate_for_storage"
+    },
+    {
+      "path": "routers/global_facts_docs.py",
+      "line": 594,
+      "code": "files = files[:max_files]",
+      "upper": "max_files",
+      "ledgered": false,
+      "reason": "no-ledger-call-in-scope",
+      "model_facing": true,
+      "scope": "upload_documents"
+    },
+    {
+      "path": "routers/global_facts_docs.py",
+      "line": 449,
+      "code": "name = name[:_MAX_SAFE_FILENAME_CHARS]",
+      "upper": "_MAX_SAFE_FILENAME_CHARS",
+      "ledgered": false,
+      "reason": "no-ledger-call-in-scope",
+      "model_facing": true,
+      "scope": "_safe_filename"
+    },
+    {
+      "path": "routers/review_autofix.py",
+      "line": 826,
+      "code": "{\"rule_id\": rid, \"section_id\": sid, \"status\": e.status_code, \"detail\": str(e.detail)[:200]}",
+      "upper": "200",
+      "ledgered": false,
+      "reason": "no-ledger-call-in-scope",
+      "model_facing": false,
+      "scope": "confirm"
+    },
+    {
+      "path": "routers/sections.py",
+      "line": 2270,
+      "code": "brief = brief[:8000]",
+      "upper": "8000",
+      "ledgered": false,
+      "reason": "no-ledger-call-in-scope",
+      "model_facing": true,
+      "scope": "generate_outline_via_omp"
+    },
+    {
+      "path": "routers/sections.py",
+      "line": 2429,
+      "code": "brief = brief[:8000]",
+      "upper": "8000",
+      "ledgered": false,
+      "reason": "no-ledger-call-in-scope",
+      "model_facing": false,
+      "scope": "run_omp_workflow"
+    },
+    {
+      "path": "routers/sse_handlers.py",
+      "line": 6170,
+      "code": "else str(last_err)[:200]",
+      "upper": "200",
+      "ledgered": false,
+      "reason": "no-ledger-call-in-scope",
+      "model_facing": false,
+      "scope": "gen_one"
+    },
+    {
+      "path": "routers/system.py",
+      "line": 177,
+      "code": "recent = tasks[:limit]",
+      "upper": "limit",
+      "ledgered": false,
+      "reason": "no-ledger-call-in-scope",
+      "model_facing": false,
+      "scope": "_build_activity_snapshot"
+    },
+    {
+      "path": "services/ai/agent_engine/executors.py",
+      "line": 332,
+      "code": "manual_review=(last_message or \"；\".join(errors[-3:]))[:_MANUAL_SNIPPET_CHARS],",
+      "upper": "_MANUAL_SNIPPET_CHARS",
+      "ledgered": false,
+      "reason": "no-ledger-call-in-scope",
+      "model_facing": false,
+      "scope": "execute"
+    },
+    {
+      "path": "services/ai/agent_engine/executors.py",
+      "line": 400,
+      "code": "manual_review=str(exc)[:_MANUAL_SNIPPET_CHARS],",
+      "upper": "_MANUAL_SNIPPET_CHARS",
+      "ledgered": false,
+      "reason": "no-ledger-call-in-scope",
+      "model_facing": false,
+      "scope": "execute"
+    },
+    {
+      "path": "services/ai/agent_engine/gateway.py",
+      "line": 342,
+      "code": "manual_review=(errors[-1] if errors else \"omp 执行失败\")[:500],",
+      "upper": "500",
+      "ledgered": false,
+      "reason": "no-ledger-call-in-scope",
+      "model_facing": false,
+      "scope": "_paused_result"
+    },
+    {
+      "path": "services/ai/image_engine.py",
+      "line": 958,
+      "code": "return chosen[:max_images]",
+      "upper": "max_images",
+      "ledgered": false,
+      "reason": "no-ledger-call-in-scope",
+      "model_facing": false,
+      "scope": "apply_image_budget"
+    },
+    {
+      "path": "services/ai/mermaid_common.py",
+      "line": 296,
+      "code": "return lines[:max_lines] if max_lines else lines",
+      "upper": "max_lines",
+      "ledgered": false,
+      "reason": "no-ledger-call-in-scope",
+      "model_facing": false,
+      "scope": "_wrap_text"
+    },
+    {
+      "path": "services/ai/mermaid_gantt.py",
+      "line": 250,
+      "code": "return raw_tasks[:_GANTT_MAX_TASKS]",
+      "upper": "_GANTT_MAX_TASKS",
+      "ledgered": false,
+      "reason": "no-ledger-call-in-scope",
+      "model_facing": false,
+      "scope": "_apply_gantt_task_budget"
+    },
+    {
+      "path": "services/ai/mermaid_service.py",
+      "line": 516,
+      "code": "code=code[:200],",
+      "upper": "200",
+      "ledgered": false,
+      "reason": "no-ledger-call-in-scope",
+      "model_facing": true,
+      "scope": "render_mermaid_via_http"
+    },
+    {
+      "path": "services/ai/mermaid_service.py",
+      "line": 541,
+      "code": "f\"Docker 服务返回 HTTP {resp.status_code}: {redact_sensitive_text(resp.text)[:200]}\",",
+      "upper": "200",
+      "ledgered": false,
+      "reason": "no-ledger-call-in-scope",
+      "model_facing": true,
+      "scope": "_render_via_docker"
+    },
+    {
+      "path": "services/ai/mermaid_service.py",
+      "line": 592,
+      "code": "f\"Railway 服务返回 HTTP {resp.status_code}: {redact_sensitive_text(resp.text)[:200]}\",",
+      "upper": "200",
+      "ledgered": false,
+      "reason": "no-ledger-call-in-scope",
+      "model_facing": true,
+      "scope": "_render_via_railway"
+    },
+    {
+      "path": "services/ai/omp_agent_roles.py",
+      "line": 193,
+      "code": "\"项目简报（完整版见 CONTEXT.md）：\" + brief[:2000],",
+      "upper": "2000",
+      "ledgered": false,
+      "reason": "no-ledger-call-in-scope",
+      "model_facing": true,
+      "scope": "build_outline_prompts"
+    },
+    {
+      "path": "services/ai/omp_agent_roles.py",
+      "line": 239,
+      "code": "\"目录树摘要：\" + outline_digest[:4000],",
+      "upper": "4000",
+      "ledgered": false,
+      "reason": "no-ledger-call-in-scope",
+      "model_facing": true,
+      "scope": "build_content_prompts"
+    },
+    {
+      "path": "services/ai/omp_diagnostics.py",
+      "line": 187,
+      "code": "\"message\": message[:500],",
+      "upper": "500",
+      "ledgered": false,
+      "reason": "no-ledger-call-in-scope",
+      "model_facing": false,
+      "scope": "serialize_error"
+    },
+    {
+      "path": "services/ai/omp_safety.py",
+      "line": 242,
+      "code": "secret_files = secret_like_paths(sorted(os.listdir(workspace_root))[:200])",
+      "upper": "200",
+      "ledgered": false,
+      "reason": "no-ledger-call-in-scope",
+      "model_facing": true,
+      "scope": "safety_summary"
+    },
+    {
+      "path": "services/ai/omp_task_agent.py",
+      "line": 276,
+      "code": "f\"omp 最终回复（截断）：{raw_text[:200]}\"",
+      "upper": "200",
+      "ledgered": false,
+      "reason": "no-ledger-call-in-scope",
+      "model_facing": true,
+      "scope": "generate_outline"
+    },
+    {
+      "path": "services/ai/omp_workflow.py",
+      "line": 168,
+      "code": "digest = text[:800]",
+      "upper": "800",
+      "ledgered": false,
+      "reason": "no-ledger-call-in-scope",
+      "model_facing": false,
+      "scope": "_compact_text"
+    },
+    {
+      "path": "services/ai/omp_workflow.py",
+      "line": 184,
+      "code": "\"完整约定见 CONTEXT.md，请用 read 分段读取。要点：\" + text[:400]",
+      "upper": "400",
+      "ledgered": false,
+      "reason": "no-ledger-call-in-scope",
+      "model_facing": false,
+      "scope": "_compact_text"
+    },
+    {
+      "path": "services/ai/omp_workflow.py",
+      "line": 594,
+      "code": "manual_review=(payload or \"；\".join(errors[-3:]))[:_MANUAL_SNIPPET_CHARS],",
+      "upper": "_MANUAL_SNIPPET_CHARS",
+      "ledgered": false,
+      "reason": "no-ledger-call-in-scope",
+      "model_facing": false,
+      "scope": "_run_one"
+    },
+    {
+      "path": "services/ai/omp_workflow.py",
+      "line": 376,
+      "code": "manual_review=str(item)[:_MANUAL_SNIPPET_CHARS],",
+      "upper": "_MANUAL_SNIPPET_CHARS",
+      "ledgered": false,
+      "reason": "no-ledger-call-in-scope",
+      "model_facing": false,
+      "scope": "run_batch"
+    },
+    {
+      "path": "services/ai/provider_factory.py",
+      "line": 2685,
+      "code": "return raw[:limit]",
+      "upper": "limit",
+      "ledgered": false,
+      "reason": "no-ledger-call-in-scope",
+      "model_facing": false,
+      "scope": "attempts_json"
+    },
+    {
+      "path": "services/ai/provider_factory.py",
+      "line": 2797,
+      "code": "(error or \"\")[:300],",
+      "upper": "300",
+      "ledgered": false,
+      "reason": "no-ledger-call-in-scope",
+      "model_facing": false,
+      "scope": "_build_audit_row"
+    },
+    {
+      "path": "services/ai/provider_factory.py",
+      "line": 2800,
+      "code": "(base_url or \"\")[:512],",
+      "upper": "512",
+      "ledgered": false,
+      "reason": "no-ledger-call-in-scope",
+      "model_facing": false,
+      "scope": "_build_audit_row"
+    },
+    {
+      "path": "services/ai/provider_factory.py",
+      "line": 2803,
+      "code": "(attempts_json or \"\")[:2000],",
+      "upper": "2000",
+      "ledgered": false,
+      "reason": "no-ledger-call-in-scope",
+      "model_facing": false,
+      "scope": "_build_audit_row"
+    },
+    {
+      "path": "services/ai/provider_factory.py",
+      "line": 3573,
+      "code": "return redact_sensitive_text(msg)[:300]",
+      "upper": "300",
+      "ledgered": false,
+      "reason": "no-ledger-call-in-scope",
+      "model_facing": true,
+      "scope": "_error_summary"
+    },
+    {
+      "path": "services/ai/provider_factory.py",
+      "line": 2659,
+      "code": "\"base_url\": (base_url or \"\")[:200],",
+      "upper": "200",
+      "ledgered": false,
+      "reason": "no-ledger-call-in-scope",
+      "model_facing": false,
+      "scope": "record"
+    },
+    {
+      "path": "services/ai/providers/anthropic_compatible.py",
+      "line": 130,
+      "code": "f\"Anthropic 流式返回错误：{redact_sensitive_text(str(evt.get('error'))[:200])}\"",
+      "upper": "200",
+      "ledgered": false,
+      "reason": "no-ledger-call-in-scope",
+      "model_facing": false,
+      "scope": "stream"
+    },
+    {
+      "path": "services/ai/providers/openai_compatible.py",
+      "line": 96,
+      "code": "raise RuntimeError(f\"厂商返回空 choices: {redact_sensitive_text(str(data))[:200]}\")",
+      "upper": "200",
+      "ledgered": false,
+      "reason": "no-ledger-call-in-scope",
+      "model_facing": false,
+      "scope": "chat"
+    },
+    {
+      "path": "services/ai/providers/openai_compatible.py",
+      "line": 118,
+      "code": "raise RuntimeError(f\"厂商返回空 content（finish_reason={_finish}）: {redact_sensitive_text(str(data))[:200]}\")",
+      "upper": "200",
+      "ledgered": false,
+      "reason": "no-ledger-call-in-scope",
+      "model_facing": false,
+      "scope": "chat"
+    },
+    {
+      "path": "services/audit_scoring.py",
+      "line": 318,
+      "code": "return \"|\".join(ev)[:240]",
+      "upper": "240",
+      "ledgered": false,
+      "reason": "no-ledger-call-in-scope",
+      "model_facing": false,
+      "scope": "_target_signature"
+    },
+    {
+      "path": "services/bid_section_context.py",
+      "line": 60,
+      "code": "kept = [item for item in cleaned if item][:_MAX_EVIDENCE]",
+      "upper": "_MAX_EVIDENCE",
+      "ledgered": false,
+      "reason": "no-ledger-call-in-scope",
+      "model_facing": true,
+      "scope": "_join_evidence"
+    },
+    {
+      "path": "services/clause_store.py",
+      "line": 408,
+      "code": "return tokens[:_MAX_LIKE_TOKENS]",
+      "upper": "_MAX_LIKE_TOKENS",
+      "ledgered": false,
+      "reason": "no-ledger-call-in-scope",
+      "model_facing": false,
+      "scope": "_like_tokens"
+    },
+    {
+      "path": "services/clause_store.py",
+      "line": 479,
+      "code": "return tuple(weighted[:_MAX_QUERY_TERMS])",
+      "upper": "_MAX_QUERY_TERMS",
+      "ledgered": false,
+      "reason": "no-ledger-call-in-scope",
+      "model_facing": false,
+      "scope": "build_query_terms"
+    },
+    {
+      "path": "services/consistency_edits.py",
+      "line": 131,
+      "code": "for raw in list(edits)[:MAX_EDITS]:",
+      "upper": "MAX_EDITS",
+      "ledgered": false,
+      "reason": "no-ledger-call-in-scope",
+      "model_facing": false,
+      "scope": "apply_unique_edits"
+    },
+    {
+      "path": "services/consistency_scanner.py",
+      "line": 518,
+      "code": "\"text\": str(r.get(\"text\") or \"\")[:300],",
+      "upper": "300",
+      "ledgered": false,
+      "reason": "no-ledger-call-in-scope",
+      "model_facing": false,
+      "scope": "normalize_scan_rows"
+    },
+    {
+      "path": "services/consistency_scanner.py",
+      "line": 524,
+      "code": "\"text\": str(r.get(\"text\") or \"\")[:300],",
+      "upper": "300",
+      "ledgered": false,
+      "reason": "no-ledger-call-in-scope",
+      "model_facing": false,
+      "scope": "normalize_scan_rows"
+    },
+    {
+      "path": "services/content_utils.py",
+      "line": 1469,
+      "code": "for s in siblings[:max_siblings]:",
+      "upper": "max_siblings",
+      "ledgered": false,
+      "reason": "no-ledger-call-in-scope",
+      "model_facing": true,
+      "scope": "build_sibling_context"
+    },
+    {
+      "path": "services/duplicate_detection.py",
+      "line": 788,
+      "code": "return result[:max_groups]",
+      "upper": "max_groups",
+      "ledgered": false,
+      "reason": "no-ledger-call-in-scope",
+      "model_facing": false,
+      "scope": "find_similar_titles"
+    },
+    {
+      "path": "services/facts_enrich.py",
+      "line": 110,
+      "code": "for it in (items or [])[:_MAX_PROMPT_FACTS]:",
+      "upper": "_MAX_PROMPT_FACTS",
+      "ledgered": false,
+      "reason": "no-ledger-call-in-scope",
+      "model_facing": true,
+      "scope": "items_to_prompt_json"
+    },
+    {
+      "path": "services/facts_enrich.py",
+      "line": 266,
+      "code": "for raw in obj[\"facts\"][:_MAX_FINALIZE_FACT]:",
+      "upper": "_MAX_FINALIZE_FACT",
+      "ledgered": false,
+      "reason": "no-ledger-call-in-scope",
+      "model_facing": true,
+      "scope": "apply_finalize_result"
+    },
+    {
+      "path": "services/facts_patches.py",
+      "line": 620,
+      "code": "return first_line[:_TITLE_MAX_CHARS] or f\"补充事实项{index + 1}\"",
+      "upper": "_TITLE_MAX_CHARS",
+      "ledgered": false,
+      "reason": "no-ledger-call-in-scope",
+      "model_facing": true,
+      "scope": "derive_title_from_content"
+    },
+    {
+      "path": "services/facts_patches.py",
+      "line": 619,
+      "code": "return head[:_TITLE_MAX_CHARS]",
+      "upper": "_TITLE_MAX_CHARS",
+      "ledgered": false,
+      "reason": "no-ledger-call-in-scope",
+      "model_facing": true,
+      "scope": "derive_title_from_content"
+    },
+    {
+      "path": "services/file_parser.py",
+      "line": 232,
+      "code": "head = content[:8192]",
+      "upper": "8192",
+      "ledgered": false,
+      "reason": "no-ledger-call-in-scope",
+      "model_facing": false,
+      "scope": "_looks_binary"
+    },
+    {
+      "path": "services/file_parser.py",
+      "line": 288,
+      "code": "sample = text[:4096]",
+      "upper": "4096",
+      "ledgered": false,
+      "reason": "no-ledger-call-in-scope",
+      "model_facing": false,
+      "scope": "_utf16_text_is_plausible"
+    },
+    {
+      "path": "services/file_parser.py",
+      "line": 2090,
+      "code": "sample = text[:8192]",
+      "upper": "8192",
+      "ledgered": false,
+      "reason": "no-ledger-call-in-scope",
+      "model_facing": false,
+      "scope": "_sniff_csv_delimiter"
+    },
+    {
+      "path": "services/legacy_office.py",
+      "line": 372,
+      "code": "detail = (proc.stderr or b\"\").decode(\"utf-8\", errors=\"replace\")[:200].strip()",
+      "upper": "200",
+      "ledgered": false,
+      "reason": "no-ledger-call-in-scope",
+      "model_facing": false,
+      "scope": "_run_com_convert"
+    },
+    {
+      "path": "services/mineru_client.py",
+      "line": 90,
+      "code": "raise ParseError(f\"MinerU 云端解析失败（{step}）：HTTP {resp.status_code}，\" f\"{resp.text[:200]}\")",
+      "upper": "200",
+      "ledgered": false,
+      "reason": "no-ledger-call-in-scope",
+      "model_facing": false,
+      "scope": "_raise_api_error"
+    },
+    {
+      "path": "services/numeric_lock.py",
+      "line": 156,
+      "code": "return \"、\".join(seen[:limit]) + f\" 等 {len(seen)} 项\"",
+      "upper": "limit",
+      "ledgered": false,
+      "reason": "no-ledger-call-in-scope",
+      "model_facing": false,
+      "scope": "display"
+    },
+    {
+      "path": "services/outline_integrity.py",
+      "line": 128,
+      "code": "for r in items[:_SAMPLE_LIMIT]",
+      "upper": "_SAMPLE_LIMIT",
+      "ledgered": false,
+      "reason": "no-ledger-call-in-scope",
+      "model_facing": true,
+      "scope": "_sample"
+    },
+    {
+      "path": "services/preflight_engine.py",
+      "line": 915,
+      "code": "candidates = candidates[:DUP_MAX_SECTIONS]",
+      "upper": "DUP_MAX_SECTIONS",
+      "ledgered": false,
+      "reason": "no-ledger-call-in-scope",
+      "model_facing": false,
+      "scope": "_find_duplicates"
+    },
+    {
+      "path": "services/preflight_engine.py",
+      "line": 1527,
+      "code": "\"detail\": str(exc)[:200],",
+      "upper": "200",
+      "ledgered": false,
+      "reason": "no-ledger-call-in-scope",
+      "model_facing": false,
+      "scope": "run_preflight"
+    },
+    {
+      "path": "services/repair_agent.py",
+      "line": 294,
+      "code": "return ranked[:max_sections], ranked[max_sections:]",
+      "upper": "max_sections",
+      "ledgered": false,
+      "reason": "no-ledger-call-in-scope",
+      "model_facing": false,
+      "scope": "limit_repair_sections"
+    },
+    {
+      "path": "services/review_autofix.py",
+      "line": 505,
+      "code": "for ev in (finding.get(\"evidence\") or [])[:MAX_TARGETS]:",
+      "upper": "MAX_TARGETS",
+      "ledgered": false,
+      "reason": "no-ledger-call-in-scope",
+      "model_facing": false,
+      "scope": "_locate_value"
+    },
+    {
+      "path": "services/review_autofix.py",
+      "line": 581,
+      "code": "for code in (finding.get(\"evidence\") or [])[:MAX_TARGETS]:",
+      "upper": "MAX_TARGETS",
+      "ledgered": false,
+      "reason": "no-ledger-call-in-scope",
+      "model_facing": true,
+      "scope": "_locate_standard"
+    },
+    {
+      "path": "services/review_autofix.py",
+      "line": 913,
+      "code": "by_section = dict(ranked[:AUTOFIX_MAX_SECTIONS])",
+      "upper": "AUTOFIX_MAX_SECTIONS",
+      "ledgered": false,
+      "reason": "no-ledger-call-in-scope",
+      "model_facing": false,
+      "scope": "_fix_each_section"
+    },
+    {
+      "path": "services/review_autofix.py",
+      "line": 719,
+      "code": "\"context\": content[:200],",
+      "upper": "200",
+      "ledgered": false,
+      "reason": "no-ledger-call-in-scope",
+      "model_facing": false,
+      "scope": "_locate_whole_section"
+    },
+    {
+      "path": "services/scoring_items.py",
+      "line": 274,
+      "code": "text = parsed[:_MAX_DOC_CHARS]",
+      "upper": "_MAX_DOC_CHARS",
+      "ledgered": false,
+      "reason": "no-ledger-call-in-scope",
+      "model_facing": false,
+      "scope": "select_scoring_sources"
+    },
+    {
+      "path": "services/standards_registry.py",
+      "line": 325,
+      "code": "hits = match_categories(scheme_name, scheme_type, section_title)[:max_categories]",
+      "upper": "max_categories",
+      "ledgered": false,
+      "reason": "no-ledger-call-in-scope",
+      "model_facing": true,
+      "scope": "get_standards_text"
+    },
+    {
+      "path": "utils/text_splitter.py",
+      "line": 54,
+      "code": "region = text[:max_len]  # 只在「允许长度内」寻找边界，限定扫描开销",
+      "upper": "max_len",
+      "ledgered": false,
+      "reason": "no-ledger-call-in-scope",
+      "model_facing": false,
+      "scope": "truncate_to_boundary"
+    },
+    {
+      "path": "utils/text_splitter.py",
+      "line": 62,
+      "code": "return text[:max_len]",
+      "upper": "max_len",
+      "ledgered": false,
+      "reason": "no-ledger-call-in-scope",
+      "model_facing": false,
+      "scope": "truncate_to_boundary"
+    }
+  ]
+}

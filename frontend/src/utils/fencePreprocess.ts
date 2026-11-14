@@ -239,3 +239,165 @@ export function replaceChartFences(
   const segs = parts.map(stripBlankEdges).filter((s) => s.length > 0);
   return { text: segs.join("\n\n"), count: blocks.length };
 }
+
+// ---------------------------------------------------------------------------
+// ✅ R230（2026-11-12 · F1 · R220b §七-1 承接）：AI 畸形图表围栏形态归一
+//   （与后端 content_blocks.normalize_chart_fence_shapes 同语义的 TS 移植）。
+//
+// 后端已在登记/解析/导出三入口修复两类畸形（护栏 test_chart_fence_shape_r220），
+// 但预览侧（MarkdownRenderer→marked）此前只做 normalizeFenceCloses/replaceChartFences，
+// 无形态归一 → 导出 DOCX 正常出图、预览却把 Mermaid 源码渲染成表格单元格/
+// 整段代码块 —— 预览与成稿反向分叉，且「AI 自动修复」按钮不出现（占位符提取
+// 不到块）。移植遵循后端同款硬约束：**只重写/置空标记、绝不增删行**、幂等。
+// ---------------------------------------------------------------------------
+
+/** 形态 A 开启行：管道前缀 + 图表家族围栏（``| ```mermaid``）。 */
+const FIG_TABLE_CHART_OPEN_RE =
+  /^[ \t]*\|[ \t]*(`{3,}|~{3,})[ \t]*(mermaid|chart-json|ai_image)[ \t]*\|?[ \t\r]*$/;
+/** 形态 A 闭合行：整行只有围栏标记（允许杂散的前导/尾随管道，无语言标签）。 */
+const FIG_TABLE_FENCE_CLOSE_RE = /^[ \t]*\|?[ \t]*(`{3,}|~{3,})[ \t]*\|?[ \t\r]*$/;
+// ✅ R241（2026-11-13 · CRLF 防御对齐）：行尾容许 `\r`。后端解析链
+//    normalize_raw_content 先把 \r\n 归一为 \n 再做形态归一（content_sanitize
+//    _RE_CR），预览侧把存储原文 split("\n") 后每行可能残留尾 `\r` —— 正则以
+//    `[ \t]*$` 收尾时 `\r` 挂尾即失配，形态 A 解包失败 → 预览按 GFM 表格渲染、
+//    导出正常出图（F1 要消除的反向分叉在 CRLF 场景复活）。生产库当前 0/262
+//    含 CR（落库链干净），本改动是防御性对齐后端解析链的同等鲁棒性。
+/** GFM 对齐分隔行（``| :---: |``）。 */
+const TABLE_SEP_RE = /^\|?[ \t]*:?-+:?[ \t]*(\|[ \t]*:?-+:?[ \t]*)*\|?$/;
+/** 图表家族围栏开启行（形态 B 的「确实嵌有图表」判据）。 */
+const CHART_FENCE_OPEN_LINE_RE = /^[ \t]*(?:`{3,}|~{3,})[ \t]*(?:mermaid|chart-json|ai_image)\b/;
+/** 文档型围栏语言标签（形态 B 判据，与后端 _DOC_FENCE_LANGS 同词表）。 */
+const DOC_FENCE_LANGS = new Set(["markdown", "md", "text", "txt", "plain"]);
+
+/**
+ * （原地）形态 A：图表被包进单列「图题假表格」→ 解包为正常图表围栏。
+ *
+ *   | 图 9-1 井道垂直度检测示意图 |   ← 图题行（单格）
+ *   | :---: |                        ← 分隔行
+ *   | ```mermaid                     ← 开启行（管道前缀 → 判非围栏）
+ *   flowchart TD
+ *    A[...] --> B[...]
+ *   ``` |                           ← 闭合行（信息串「|」非空 → lang="|" 围栏）
+ *
+ * 处理与后端逐行对齐：① 开启行剥前导管道；② 闭合行归一为裸围栏；
+ * ③ 图题行去管道还原为普通段落；④ 分隔行置空。找不到闭合行（形态不完整）
+ * 一律保持原样。行数不变、幂等。
+ */
+function unwrapFigureTableChart(lines: string[]): number {
+  let unwrapped = 0;
+  let i = 0;
+  while (i < lines.length) {
+    const m = FIG_TABLE_CHART_OPEN_RE.exec(lines[i]);
+    if (!m) {
+      i += 1;
+      continue;
+    }
+    const marker = m[1];
+    const lang = (m[2] || "").trim().toLowerCase();
+    let j = i + 1;
+    while (j < lines.length && !FIG_TABLE_FENCE_CLOSE_RE.test(lines[j])) j += 1;
+    if (j >= lines.length) {
+      i += 1;
+      continue;
+    }
+    lines[i] = lang ? `${marker}${lang}` : marker;
+    lines[j] = marker;
+    unwrapped += 1;
+    // ③ 向上回收图题行 + 分隔行（可选；两者形态齐备才动，避免误吞真实表格行）
+    const k = i - 1;
+    if (k >= 0 && TABLE_SEP_RE.test(lines[k].trim())) {
+      const cand = k - 1 >= 0 ? lines[k - 1].trim() : "";
+      if (cand.startsWith("|") && cand.endsWith("|") && !cand.includes("`")) {
+        const inner = cand
+          .replace(/^\|+/, "")
+          .replace(/\|+$/, "")
+          .trim();
+        if (inner.length > 0 && inner.length <= 60) {
+          lines[k - 1] = inner;
+          lines[k] = "";
+        }
+      }
+    } else if (k >= 0) {
+      const cand = lines[k].trim();
+      if (cand.startsWith("|") && cand.endsWith("|") && !cand.includes("`")) {
+        const inner = cand
+          .replace(/^\|+/, "")
+          .replace(/\|+$/, "")
+          .trim();
+        if (inner.length > 0 && inner.length <= 60) {
+          lines[k] = inner;
+        }
+      }
+    }
+    i = j + 1;
+  }
+  return unwrapped;
+}
+
+/**
+ * （原地）形态 B：文档型围栏（```` ```markdown ```` 等）包住正文并内嵌图表 → 解包。
+ *
+ * 刻意收窄（与后端一致）：仅当围栏体内确实嵌有图表家族开启行才解包 ——
+ * 纯 ```` ```markdown ```` 代码样例保持代码块渲染。解包只把外层开/闭围栏行
+ * **置空**；外层闭合定位带嵌套穿透（体内带标签围栏行深度 +1、裸围栏在嵌套层
+ * -1），深度归零的裸围栏才是外层闭合 —— 内嵌图表自己的闭合行不被误抹。
+ * 外层真未闭合（EOF）时只抹开启行。
+ */
+function unwrapDocFenceWrappingChart(lines: string[]): number {
+  let unwrapped = 0;
+  let i = 0;
+  while (i < lines.length) {
+    const pf = parseFenceLine(lines[i]);
+    if (!pf || !DOC_FENCE_LANGS.has(pf.info.trim().toLowerCase())) {
+      i += 1;
+      continue;
+    }
+    // 找外层闭合（嵌套穿透）
+    let outerClose = -1;
+    let depth = 0;
+    for (let j = i + 1; j < lines.length; j += 1) {
+      if (depth === 0 && isFenceClose(lines[j], pf)) {
+        outerClose = j;
+        break;
+      }
+      const pfj = parseFenceLine(lines[j]);
+      if (pfj) {
+        if (pfj.info.trim()) depth += 1;
+        else if (depth > 0) depth -= 1;
+      }
+    }
+    const bodyEnd = outerClose >= 0 ? outerClose : lines.length;
+    const body = lines.slice(i + 1, bodyEnd);
+    if (!body.some((ln) => CHART_FENCE_OPEN_LINE_RE.test(ln))) {
+      // 非图表场景：保持原样（文档围栏照旧按代码块渲染），整块跳过
+      i = outerClose >= 0 ? outerClose + 1 : lines.length;
+      continue;
+    }
+    lines[i] = "";
+    if (outerClose >= 0) lines[outerClose] = "";
+    unwrapped += 1;
+    i += 1;
+  }
+  return unwrapped;
+}
+
+export interface ChartFenceShapeResult {
+  /** 归一后的文本（行数不变） */
+  text: string;
+  /** 解包的畸形形态数（A/B 合计；0 = 无畸形，产物与输入逐字相同） */
+  unwrapped: number;
+}
+
+/**
+ * 畸形图表围栏形态归一唯一出口（与后端 normalize_chart_fence_shapes 同名同义）。
+ * 幂等、行数不变；文本不含围栏字符时零开销直返。
+ */
+export function normalizeChartFenceShapes(text: string): ChartFenceShapeResult {
+  if (!text || (!text.includes("`") && !text.includes("~"))) {
+    return { text, unwrapped: 0 };
+  }
+  const lines = text.split("\n");
+  const unwrapped =
+    unwrapFigureTableChart(lines) + unwrapDocFenceWrappingChart(lines);
+  return { text: lines.join("\n"), unwrapped };
+}

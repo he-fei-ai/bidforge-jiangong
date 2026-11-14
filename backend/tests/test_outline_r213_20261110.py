@@ -185,7 +185,7 @@ class TestPartialCheckpointSignals:
 
         captured = {}
 
-        async def fake_save(task_id, payload):
+        async def fake_save(task_id, payload, *_fs_args, **_fs_kwargs):
             captured.update(payload)
 
         monkeypatch.setattr(cp, "_save_outline_checkpoint", fake_save)
@@ -211,7 +211,7 @@ class TestPartialCheckpointSignals:
 
         captured = {}
 
-        async def fake_save(task_id, payload):
+        async def fake_save(task_id, payload, *_fs_args, **_fs_kwargs):
             captured.update(payload)
 
         monkeypatch.setattr(cp, "_save_outline_checkpoint", fake_save)
@@ -227,7 +227,7 @@ class TestPartialCheckpointSignals:
 
         captured = {}
 
-        async def fake_save(task_id, payload):
+        async def fake_save(task_id, payload, *_fs_args, **_fs_kwargs):
             captured["ckpt"] = dict(payload)
 
         async def fake_finish(task_id, status, message=""):

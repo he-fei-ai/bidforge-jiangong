@@ -1,0 +1,19 @@
+{
+  "doc_id": "6f48c217-acfc-4bd9-8f6b-8f64714ebec3",
+  "embedding_model": "",
+  "dimension": 0,
+  "chunk_count": 1,
+  "status": "index_ready",
+  "generated_at": "2026-11-14T05:17:43Z",
+  "chunks": [
+    {
+      "chunk_id": "6f48c217-acfc-4bd9-8f6b-8f64714ebec3_c0001",
+      "page_num": 1,
+      "source_ref": "6f48c217-acfc-4bd9-8f6b-8f64714ebec3#page:1#section:第一章 工程概况",
+      "text_offset": 0,
+      "text_length": 23,
+      "embedding_offset": null,
+      "embedding_length": 0
+    }
+  ]
+}

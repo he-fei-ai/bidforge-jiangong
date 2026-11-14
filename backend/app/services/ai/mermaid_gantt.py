@@ -301,7 +301,14 @@ def _build_gantt_tasks(raw_tasks: list, base_date) -> list[dict]:
         if auto_started:
             # 无开始日期：沿时间轴顺延，避免所有无名日期任务叠在第 1 天
             start_v = next_free_day
+        # ✅ R242（hifi 通道）：duration ≡ days 别名 —— 高保真甘特 spec
+        # （chart_gen_gantt_spec 契约，start/end 为 YYYY-MM-DD + duration 含首尾）
+        # 与主链 gantt 载荷（start 天数 + days）在此收口；hifi 渲染分发用原始
+        # 载荷走 ChartExporter 轨，本别名保证 PIL 降级轨不丢工期（duration
+        # 丢失会让每个任务退化为单日横道）。
         days = t.get("days")
+        if days is None:
+            days = t.get("duration")
         end_v = _gantt_value_to_day(t.get("end") or t.get("end_day") or t.get("to"), base_date)
         if end_v is None:
             if days is not None:

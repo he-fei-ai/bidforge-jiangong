@@ -304,7 +304,7 @@ class TestPartialCheckpoint:
 
         captured: list[dict] = []
 
-        async def _fake_save(task_id: str, payload: dict):
+        async def _fake_save(task_id: str, payload: dict, *, skip_terminal: bool = False):
             captured.append(dict(payload))
 
         monkeypatch.setattr(sc, "_save_outline_checkpoint", _fake_save)
@@ -318,7 +318,7 @@ class TestPartialCheckpoint:
 
         captured: list[dict] = []
 
-        async def _fake_save(task_id: str, payload: dict):
+        async def _fake_save(task_id: str, payload: dict, *, skip_terminal: bool = False):
             captured.append(dict(payload))
 
         monkeypatch.setattr(sc, "_save_outline_checkpoint", _fake_save)

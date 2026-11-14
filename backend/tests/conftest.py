@@ -48,7 +48,7 @@ def _reset_outline_quota_breaker():
 
 @pytest.fixture(autouse=True)
 def _reset_export_domain_globals():
-    """✅ R226（A10）：导出路由的进程级全局状态按用例隔离。
+    """✅ R230（A10）：导出路由的进程级全局状态按用例隔离。
 
     导出域有五张模块级表（读租约 TTL 600s / 取消事件 / 在飞产物 / 在飞路径 /
     ZIP 完整性记忆化），此前只有个别测试文件各自手工清理 —— 产物路径是

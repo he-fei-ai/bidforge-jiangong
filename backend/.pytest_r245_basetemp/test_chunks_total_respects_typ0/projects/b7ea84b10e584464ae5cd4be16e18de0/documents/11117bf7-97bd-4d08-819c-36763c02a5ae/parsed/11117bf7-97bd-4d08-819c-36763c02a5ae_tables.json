@@ -1,0 +1,33 @@
+{
+  "doc_id": "11117bf7-97bd-4d08-819c-36763c02a5ae",
+  "table_count": 1,
+  "tables": [
+    {
+      "table_id": "t1",
+      "page_num": 1,
+      "title": "工程规模表",
+      "headers": [
+        "项目",
+        "数值"
+      ],
+      "rows": [
+        [
+          "深度",
+          "12.5"
+        ]
+      ],
+      "data": [
+        [
+          "项目",
+          "数值"
+        ],
+        [
+          "深度",
+          "12.5"
+        ]
+      ],
+      "merged_cells": [],
+      "source_ref": "11117bf7-97bd-4d08-819c-36763c02a5ae#page:1#table:t1"
+    }
+  ]
+}

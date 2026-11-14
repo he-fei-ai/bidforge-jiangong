@@ -1,0 +1,37 @@
+{
+  "doc_id": "11117bf7-97bd-4d08-819c-36763c02a5ae",
+  "embedding_model": "",
+  "dimension": 0,
+  "chunk_count": 3,
+  "status": "index_ready",
+  "generated_at": "2026-11-14T05:17:46Z",
+  "chunks": [
+    {
+      "chunk_id": "11117bf7-97bd-4d08-819c-36763c02a5ae_c0001",
+      "page_num": 1,
+      "source_ref": "11117bf7-97bd-4d08-819c-36763c02a5ae#page:1#section:第一章 工程概况",
+      "text_offset": 0,
+      "text_length": 36,
+      "embedding_offset": null,
+      "embedding_length": 0
+    },
+    {
+      "chunk_id": "11117bf7-97bd-4d08-819c-36763c02a5ae_c0002",
+      "page_num": 1,
+      "source_ref": "11117bf7-97bd-4d08-819c-36763c02a5ae#page:1#section:第一章 工程概况",
+      "text_offset": 38,
+      "text_length": 44,
+      "embedding_offset": null,
+      "embedding_length": 0
+    },
+    {
+      "chunk_id": "11117bf7-97bd-4d08-819c-36763c02a5ae_c0003",
+      "page_num": 1,
+      "source_ref": "11117bf7-97bd-4d08-819c-36763c02a5ae#page:1#table:t1",
+      "text_offset": 84,
+      "text_length": 30,
+      "embedding_offset": null,
+      "embedding_length": 0
+    }
+  ]
+}

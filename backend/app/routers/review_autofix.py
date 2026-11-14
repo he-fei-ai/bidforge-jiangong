@@ -301,7 +301,13 @@ async def _persist_fixed(
         #    畸形正文永久留库（后续续写/压缩按「从围栏处截断」判定，整章字数虚低）。
         #    与正文链 R224 F8（续写/压缩跳过未闭合围栏）同口径：命中则**跳过本章
         #    修复**，保留原正文与旧审核态（content 未变，不触发 reset_review）。
-        if find_unclosed_fences(_persist_content):
+        # ✅ R243（2026-11-14 · 守卫收窄）：前缀式接受（_merged_after_if_prefix）是
+        #    定向部分修复，原正文可能本就含未闭合围栏（仍是待接受的 DLV-07 等
+        #    问题）。此时修复未引入新畸形，若仍整章跳过则用户对这类章节寸步难行
+        #    （confirm 恒 no_change）。故仅在「修复后含未闭合围栏 且 修复前正文本就
+        #    闭合」时跳过 —— 命中面=模型整章改写新引入的畸形，R227b 保护强度不减；
+        #    预存未闭合围栏的定向部分修复照常落库（内容未变不触发 reset）。
+        if find_unclosed_fences(_persist_content) and not find_unclosed_fences(_before):
             _skipped.append(
                 {
                     "rule_id": rule_id,

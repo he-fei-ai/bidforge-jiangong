@@ -263,6 +263,23 @@ def _norm_code(code: str) -> str:
     return " ".join(str(code).split())
 
 
+def _hifi_route_spec(code: str) -> tuple[str, dict] | None:
+    """✅ R242：主链载荷 → hifi 模板路由（薄包装，异常吞返 None 零干扰既有轨）。"""
+    try:
+        from app.services.ai.hifi_charts.exporter import route_hifi_spec
+
+        return route_hifi_spec(code)
+    except Exception:  # noqa: BLE001 - hifi 通道绝不影响既有渲染链
+        return None
+
+
+async def _hifi_render_png(route: str, payload: dict) -> bytes:
+    """✅ R242：hifi 模板轨渲染（薄包装；失败由调用方捕获降级既有轨）。"""
+    from app.services.ai.hifi_charts.exporter import render_hifi_png
+
+    return await render_hifi_png(route, payload)
+
+
 def _compute_doc_order_rank(roots: list, children_map: dict) -> dict[str, int]:
     """按**文档实际渲染顺序**（同级同键排序 + 深度优先）计算章节 rank。
 
@@ -2442,12 +2459,14 @@ def _docx_final_lint(doc) -> dict:
         _RE_ENTITY = re.compile(r"&(?:amp;)*(?:gt|lt|amp|nbsp);", re.I)
         #: 残留 LaTeX：命令名、行内/行间公式分隔符（成稿中不应出现任何 `\命令`）。
         _RE_LATEX = re.compile(r"\\[A-Za-z]+|\\\(|\\\[")
-        # ✅ R226（2026-11-12 · B16）：Windows 路径豁免。``C:\Users\new`` 形态的
+        # ✅ R230（2026-11-12 · B16）：Windows 路径豁免。``C:\Users\new`` 形态的
         #    真实路径会被 ``_RE_LATEX``（``\Users``/``\new``）判成残留 LaTeX →
         #    计数进 lint_residual_latex → 整次导出永久走 content-residue 降级、
         #    不写缓存。渲染层 _latex_to_plain 对未知命令**保留原文**（实测路径
         #    无损），只有检测层误报 —— 检测前先剥路径 token。
-        _RE_WIN_PATH = re.compile(r"[A-Za-z]:\\(?:[^\\/:*?\"<>|\r\n]+\\?)+")
+        # ✅ R230（B16 补口）：段必须以 ``\`` 收尾才延续 —— 最后的文件名段留在
+        #    文本里（无反斜杠、不触发 LaTeX 判定），且不把路径之后的正文误吞进豁免。
+        _RE_WIN_PATH = re.compile(r"[A-Za-z]:\\(?:[^\\/:*?\"<>|\r\n]+\\)+")
         #: 表号重复检测（`表4-1` / `表 4-1` 统一成无空格形态后比较）。
         _RE_TABLE_NO = re.compile(r"表\s*\d+\s*-\s*\d+")
 
@@ -2465,6 +2484,18 @@ def _docx_final_lint(doc) -> dict:
                     if not is_code and p_text.count("|") >= 2:
                         stats["lint_pipe_text"] += 1
 
+                # ✅ R241（2026-11-13 · 行为实证定罪）：代码段**整段豁免**改写。
+                #    R195 注释声称「配合 is_code 判据修复，代码段本已豁免」，实际只有
+                #    _RE_MD_HASH 一条带 `not is_code` 守卫 —— 字面 \n / 页面标记 /
+                #    HTML 标签 / 实体四类替换对 Consolas 代码 run 照样生效（探针实证：
+                #    `print("\n")` 被换成真换行、`<table>` 示例被删、`&amp;gt;` 被还原）；
+                #    且 `_RE_LATEX` 对代码段命中后计入 lint_latex_residue，第三遍残留
+                #    计数（同样无豁免）恒再命中 → lint_residual_total>0 → 整次导出
+                #    **假 content-residue 降级、永不写缓存**（`\d` 等未知命令保留原文，
+                #    两轮规范化永远消不掉）。代码段是用户源码原样展示区，一律不改写
+                #    （与 R195 意图一致，此处把承诺落地为全量守卫）。
+                if is_code:
+                    continue
                 for run in para.runs:
                     if any(run._r.find(tag) is not None for tag in _RUN_UNSAFE_CHILDREN):
                         continue
@@ -2481,7 +2512,7 @@ def _docx_final_lint(doc) -> dict:
                     if _RE_HTML_TAG.search(new):
                         new = _RE_HTML_TAG.sub("", new)
                         stats["lint_html_tag"] += 1
-                    if not is_code and _RE_MD_HASH.match(new):
+                    if _RE_MD_HASH.match(new):
                         new = _RE_MD_HASH.sub("", new, count=1)
                         stats["lint_md_residue"] += 1
                     if _RE_ENTITY.search(new):
@@ -2500,6 +2531,12 @@ def _docx_final_lint(doc) -> dict:
         table_nos: dict[str, int] = {}
         for para in _iter_doc_paragraphs(doc):
             is_code = _docx_para_is_code(para)
+            # ✅ R241：与改写轮同口径 —— 代码段不进残留计数（否则代码内正则示例
+            #    `\d+` / HTML 示例恒命中 `_RE_LATEX`/`_RE_HTML_TAG` → 假降级）。
+            #    段落级后续判据不受影响：pipe 统计本就有 not is_code 守卫；
+            #    表号重复检测要求居中段（代码段 alignment 非 CENTER，恒不参与）。
+            if is_code:
+                continue
             p_text = para.text or ""
             for run in para.runs:
                 t = run.text or ""
@@ -2513,7 +2550,7 @@ def _docx_final_lint(doc) -> dict:
                     stats["lint_residual_html"] += 1
                 if _RE_ENTITY.search(t):
                     stats["lint_residual_entity"] += 1
-                # ✅ R226（B16）：Windows 路径 token 先剥再判（见 _RE_WIN_PATH 注释）。
+                # ✅ R230（B16）：Windows 路径 token 先剥再判（见 _RE_WIN_PATH 注释）。
                 if _RE_LATEX.search(_RE_WIN_PATH.sub("", t)):
                     stats["lint_residual_latex"] += 1
             if not is_code and p_text.count("|") >= 2:
@@ -3323,7 +3360,7 @@ def _get_or_add_appendix_heading_style(doc):
 _RE_PIPE_ROW = re.compile(r"^\s*\|.*\|\s*$")
 _RE_PIPE_WITH_CAPTION = re.compile(r"^(?P<cap>[^|\n]{1,80}?)\s*\|(?P<rest>.+)\|\s*$")
 _RE_TABLE_CAPTION_LINE = re.compile(r"^\s*表\s*(?:[0-9０-９一二三四五六七八九十]+[0-9.\-–—]*|[：:])")
-# ✅ R226（B10）：重复单元最小 3 字 —— 旧 {2,14} 把正文副词叠用（"逐步逐步
+# ✅ R230（B10）：重复单元最小 3 字 —— 旧 {2,14} 把正文副词叠用（"逐步逐步
 #    实施…"）拆成标题"逐步"+正文段，凭空多出无编号裸标题；标题粘连形态的
 #    重复单元（"施工准备"）几乎总是 ≥3 字的名词短语，2 字单元（总则）粘连
 #    远比副词叠用罕见，漏拆仅是观感问题、误拆是结构破坏。
@@ -3363,7 +3400,7 @@ def _looks_like_table_caption(text: str) -> bool:
     if _RE_TABLE_CAPTION_LINE.match(t):
         return True
     if t.endswith("表") and len(t) <= 40:
-        # ✅ R226（2026-11-12 · B9）：「见/下/附 + 表」结尾的引导语（"详见下表"
+        # ✅ R230（2026-11-12 · B9）：「见/下/附 + 表」结尾的引导语（"详见下表"
         #   "质量控制要点详见附表"）不是表题 —— 旧宽分支会把表格上方的普通
         #    引导句整段吞进表题（成稿出现 "表 3-1 详见下表"）。带编号/冒号形态
         #    已由上方严格正则覆盖；此处只放行真正的无编号表题（"工种配置表"）。
@@ -3461,14 +3498,17 @@ def _normalize_render_blocks(blocks: list[dict]) -> list[dict]:
                             if len(old_hdr) == len(cells):
                                 merged = dict(nxt)
                                 sep = "| " + " | ".join(["---"] * len(cells)) + " |"
-                                # ✅ R226（B12）：粘连段 cells 本身就是表头（"表 6-1 …
-                                #    | 工种 | 人数 |"），规范表 nxt_lines[0] 是同一表头
-                                #    —— 旧合并把它再插一行，成稿表格出现重复表头数据行。
+                                # ✅ R230（B12）：仅当 nxt_lines[0] 与粘连段表头**逐格
+                                #    相同**（重复表头形态）才丢弃 —— 旧合并把它再插
+                                #    一行，成稿表格出现重复表头数据行。后随表可能是
+                                #    无表头形态（首行即数据行，R179 回归护栏实证），
+                                #    逐字不等必须原样保留：多一行表头只是观感问题，
+                                #    丢一行数据是内容丢失（宁多勿丢）。
+                                _dup_hdr = [c.strip() for c in old_hdr] == [c.strip() for c in cells]
                                 merged["lines"] = [
                                     "| " + " | ".join(cells) + " |",
                                     sep,
-                                    *nxt_lines[2:],
-                                ]
+                                ] + ([] if _dup_hdr else [nxt_lines[0]]) + list(nxt_lines[2:])
                                 merged["caption"] = cap or nxt.get("caption", "")
                                 out.append(merged)
                                 i += 2
@@ -3823,6 +3863,7 @@ def _build_docx_sync(
                 _fig_snap = dict(figure_counters)
                 _tbl_snap = dict(table_counters)
                 _dedup_snap = set(rendered_charts)
+                _dv_before = dict(_chart_delivery())  # ✅ R233：chart 块异常补记账的对照快照
                 try:
                     if block["type"] == "table":
                         # ✅ 新增：表格题注「表 {章号}-{序号} 表名」（表题在表格上方）
@@ -3881,12 +3922,12 @@ def _build_docx_sync(
                             #    同一章节内两张**不同**的同类图表（如两张不同的流程图）会被静默吞掉一张。
                             render_key = (sec_id, chart_type, _norm_code(mermaid_code))
                         else:
-                            # ✅ 修复（2026-09-20 深度审查）：兜底渲染去重键必须含章节维度与代码本体。
-                            #    旧键 ("fallback", chart_type, "") 与具体章节无关 —— 当两个及以上章节
-                            #    的同类型图表都无注册代码时，只有第一张被渲染，其余被 rendered_charts
-                            #    静默丢弃（图号直接缺失、无任何系统侧信号）。加 sec_id 后每章各自渲染；
-                            #    加代码本体避免同章节两张不同代码的兜底图互相吞并。
-                            render_key = (sec_id, "fallback", chart_type, _norm_code(mermaid_code))
+                            # ✅ CLEAN-1（R233）：无码分支的 render_key 恒不可达 —— 下方
+                            #    `if not mermaid_code` 立即 continue（且 no_code 已记账），
+                            #    此键从不进入 rendered_charts。旧 else 分支与 2026-09-20
+                            #    注释描述的「兜底键含章节维度与代码本体」早已失配
+                            #    （非空兜底码也走上方 3 元组键），删除以免误导维护者。
+                            pass
                         if borrowed_from:
                             # 跨章借图此前**零信号**（成稿里 B 章可能出现 A 章的流程图）。
                             # 此处按「每 (章节,类型) 只记一次」累加，供
@@ -3984,12 +4025,22 @@ def _build_docx_sync(
                         #    · 绝不写裸 JSON（旧实现把它当 code 块 → 提示词泄漏进成稿）；
                         #    · 不做红字占位（AI 配图失败/缺失时只保留图题的既有语义）；
                         #    · 不占用图号（否则出现「图 1-2」却无图，编号虚跳）。
-                        logger.warning(
-                            "章节 %s 存在未生成的 AI 配图占位（%s），本次导出已跳过且不占图号；"
-                            "请检查图像模型配置（导出期自动生成失败）",
-                            sec_id[:8],
-                            block.get("title") or "未命名",
-                        )
+                        # ✅ R233：预算裁剪块（`_budget_excluded`）文案分流 —— 裁剪是
+                        #    有意设计（G2 分段择优），按「生成失败」告警会误导排障方向。
+                        if block.get("_budget_excluded"):
+                            logger.info(
+                                "章节 %s 的 AI 配图占位（%s）因全局预算裁剪跳过"
+                                "（max_ai_images 分段择优，非生成失败），不占图号",
+                                sec_id[:8],
+                                block.get("title") or "未命名",
+                            )
+                        else:
+                            logger.warning(
+                                "章节 %s 存在未生成的 AI 配图占位（%s），本次导出已跳过且不占图号；"
+                                "请检查图像模型配置（导出期自动生成失败）",
+                                sec_id[:8],
+                                block.get("title") or "未命名",
+                            )
                         # ✅ 2026-09-25：AI 配图未生成 → 同样回收孤儿引导语
                         _pop_orphan_lead_in(doc)
                     elif block["type"] == "image":
@@ -4035,7 +4086,7 @@ def _build_docx_sync(
                             _pop_orphan_lead_in(doc)
                     elif block["type"] == "heading":
                         _h_text = _clamp_paragraph_text(str(block.get("_fixed_text", block.get("text", ""))))
-                        # ✅ R226（B14）：剥编号/字母前缀后为空的子标题（源行只有
+                        # ✅ R230（B14）：剥编号/字母前缀后为空的子标题（源行只有
                         #    "1.1" / "a、"）旧实现仍渲染空 Heading → 带 Heading 样式
                         #    与大纲级别的空段落被 ``TOC \o`` 收录为空目录条目。
                         #    文本为空 → 跳过整块（解析层「降级空标题仍返回样式」的
@@ -4131,6 +4182,20 @@ def _build_docx_sync(
                     table_counters.update(_tbl_snap)
                     rendered_charts.difference_update(rendered_charts - _dedup_snap)
                     _degrade_block_to_text(doc, block, font_name, font_size)
+                    # ✅ R233（2026-11-13 · 交付四键守恒）：chart 块在 expected+1 之后、
+                    #    任一 _note_chart_delivery 出口之前抛异常时，旧实现四键不守恒
+                    #    （expected>0 但 inserted/dropped/duplicate 全 0）——
+                    #    X-Chart-Render-Stats 显示 dropped=0 而成稿确缺图，且降级标签
+                    #    误归 section-dropped 而非 charts-dropped。现按快照对比补记
+                    #    一条 block_exception（保持 expected = inserted + dropped + duplicate）。
+                    _dv_after = _chart_delivery()
+                    if (
+                        _dv_after["expected"] > _dv_before["expected"]
+                        and _dv_after["inserted"] == _dv_before["inserted"]
+                        and _dv_after["dropped"] == _dv_before["dropped"]
+                        and _dv_after["duplicate_skipped"] == _dv_before["duplicate_skipped"]
+                    ):
+                        _note_chart_delivery("block_exception", sec_id, str(block.get("chart_type") or ""))
 
             # ✅ 修复（2026-09-20，第 8 轮交付文档取证）：内容子标题与 DB 子章节编号碰撞。
             # 现象：本节**内容**含 "## 项目概况 / ## 建筑概况" → 渲染为
@@ -4222,7 +4287,22 @@ def _build_docx_sync(
                 hc = tbl.rows[0].cells
                 _set_run_font(hc[0].paragraphs[0].add_run("名称"), font_name, 10.5, bold=True)
                 _set_run_font(hc[1].paragraphs[0].add_run("取值 / 内容"), font_name, 10.5, bold=True)
-                for f in items:
+                # ✅ R241（2026-11-13）：附录事实表补行数上限（与正文 GFM 表
+                #    _TABLE_MAX_ROWS 同源口径）。正文表有 400/12000 防「一张表把
+                #    导出线程占死」（R195 实测 200 列×40 行=39.5s），附录表此前
+                #    完全无界 —— 项目级 confirmed 事实累积到数千条时 O(rows×cells)
+                #    OXML 构造长期占用唯一构建线程。截断只计数告警不触发附录降级
+                #    （与 table_truncated 同款 fail-soft：附录仍在，只是行数截断）。
+                for _fi, f in enumerate(items):
+                    if _fi >= _TABLE_MAX_ROWS:
+                        _fix_stats()["facts_appendix_rows_capped"] = len(items) - _TABLE_MAX_ROWS
+                        logger.warning(
+                            "导出：附录「%s」事实行数 %d 超上限 %d，已截断（facts_appendix_rows_capped 见 X-Fix-Stats）",
+                            str(gt)[:40],
+                            len(items),
+                            _TABLE_MAX_ROWS,
+                        )
+                        break
                     rc = tbl.add_row().cells
                     _set_run_font(_safe_add_run(rc[0].paragraphs[0], str(f.get("title") or "")), font_name, 10.5)
                     _appendix_cell_paragraph(
@@ -4350,7 +4430,12 @@ def _build_docx_sync(
     #    日志记录，用户从日志中无法追溯成稿何时落盘、落在何处。现补 INFO 日志，
     #    含文件路径、大小与章节数，供运维与排障使用。
     try:
-        _fsize = out_path.stat().st_size if out_path.exists() else 0
+        # ✅ R241（2026-11-13 · 定罪实证）：out_path 契约是 **str**（`_build_docx_task`
+        #    显式 `str(out_path)` 后经 asyncio.to_thread 传入），旧实现直接对 str 调
+        #    `.stat()/.exists()` → AttributeError 恒抛 → 被 except 吞掉走 fallback
+        #    单行日志 —— P2-1 承诺的「大小/章节数/表/图数」观测日志自引入起从未打出。
+        _p = Path(out_path)
+        _fsize = _p.stat().st_size if _p.exists() else 0
         logger.info(
             "导出：DOCX 已落盘（路径=%s · 大小=%d bytes · 章节数=%d · 表=%d · 图=%d）",
             out_path,
@@ -4527,9 +4612,6 @@ async def _auto_generate_ai_image_blocks(
     sections: list[dict],
     blocks_cache: dict[str, list[dict]],
     config: dict,
-    # ✅ R238：DB 解析后的图像配置（Task 3 resolve_image_config 产物，DB 优先 settings 兜底）。
-    #    None → 直接调用方（未接 DB）回落 settings，行为与引入前逐字一致（零变化）。
-    image_config: dict | None = None,
     # ✅ R106 FIX-1：本次导出的取消事件（缺省 None = 无取消登记，行为逐字不变）。
     #    逐占位码检查：已取消 → 不再发起新的生图调用（在飞的一次跑完即止，
     #    协作式停止口径），由调用方在 gather 后统一抛 ExportCancelled。
@@ -4555,29 +4637,35 @@ async def _auto_generate_ai_image_blocks(
     Returns:
         成功改写为 image 块的数量。
     """
-    if not bool(config.get("ai_image_auto_generate", True)):
+    # ✅ R233（R230 A6 同款收尾）：显式 None 与「未传」必须同语义 —— 指纹归一
+    #    （_normalize_config）把 None 视同未传，而旧读取 `config.get(k, True)`
+    #    对「键存在值为 None」返回 None（falsy）→ 同一指纹两种行为（生图开/关）。
+    #    默认 True 的开关 None 必须归一为 True。
+    _aig = config.get("ai_image_auto_generate")
+    if not bool(True if _aig is None else _aig):
         return 0
     from app.config import settings as _settings
     from app.services.ai.image_engine import generate_illustration_image
 
-    # ✅ R238：优先使用 DB 解析后的配置（resolve_image_config 产物）；无则回落 settings
-    #    （逐字构造，行为与引入前一致）。_img_cfg 供 generate_illustration_image 透传；
-    #    provider / 预算 / 并发读取全部改走 _img_cfg（换库配置真实生效，零行为变化路径不变）。
-    _img_cfg = image_config if image_config is not None else {
+    _img_cfg = {
         "image_enabled": _settings.image_enabled,
         "image_api_key_enc": _settings.image_api_key,
         "image_base_url": _settings.image_base_url,
         "image_model": _settings.image_model,
         "image_default_size": _settings.image_default_size,
         "image_price_per_image": _settings.image_price_per_image,
-        "image_provider": _settings.image_provider,
-        "image_max_concurrency": int(getattr(_settings, "image_max_concurrency", 2) or 2),
-        "max_ai_images": int(getattr(_settings, "max_ai_images", 0) or 0),
     }
-    _provider = _img_cfg.get("image_provider") or _settings.image_provider
-    _max_ai = int(_img_cfg.get("max_ai_images", 0) or 0)  # 原 _settings.max_ai_images（换库预算生效）
     # 按占位码分组（同码多块共享一次生成，全部改写）；每组只生成一次
     groups: dict[str, list[dict]] = {}
+    # ✅ R242（2026-11-13 · 协同决策接线 · 观测不干预）：R237 落地的
+    #    route_visual_strategy 此前零消费（「服务层就绪 ≠ 功能可达」）。生图前
+    #    对每个 ai_image 块的宿主章节正文跑协同决策——章节语义命中结构化图表
+    #    关键词（gantt/architecture/flowchart 强/中触发）时说明该配图更应走
+    #    结构化图表管线，INFO 留痕供复核（不阻断生图、不改块——观测不干预，
+    #    R228 教训③；避免检测器误判造成假缺图）。
+    from app.services.ai.image_engine import route_visual_strategy
+
+    _structured_seen: set[str] = set()
     for sec in sections:
         for block in blocks_cache.get(sec["id"]) or []:
             if block["type"] != "ai_image":
@@ -4585,6 +4673,16 @@ async def _auto_generate_ai_image_blocks(
             code = str(block.get("code") or "")
             if not code:
                 continue
+            if code not in _structured_seen:
+                _structured_seen.add(code)
+                _strategy = route_visual_strategy(str(sec.get("content") or ""))
+                if _strategy.get("route") == "structured":
+                    logger.info(
+                        "AI 配图协同决策观测：章节 %s 语义命中结构化图表关键词（%s）——"
+                        "该配图更应走结构化图表管线（观测不干预，仍按 ai_image 生图）",
+                        str(sec.get("id") or "")[:8],
+                        _strategy.get("chart_type"),
+                    )
             groups.setdefault(code, []).append(block)
     if not groups:
         return 0
@@ -4594,6 +4692,7 @@ async def _auto_generate_ai_image_blocks(
     # 段内择优，全文累计生图数不超过该值，避免前面章节把额度全部用完。
     #   ⚠️ 分段依据的是「占位码首次出现的章节下标」（sections 已是文档顺序），
     #      这样 20 个候选、限 6 张时，6 张会均匀分布在全文各段，而不是前几章独占。
+    _max_ai = int(getattr(_settings, "max_ai_images", 0) or 0)
     if _max_ai > 0:
         from app.services.ai.image_engine import select_ai_image_codes
 
@@ -4614,12 +4713,34 @@ async def _auto_generate_ai_image_blocks(
                 _max_ai,
             )
         groups = {c: bs for c, bs in groups.items() if c in _keep}
+        # ✅ R233（2026-11-13 · 预算裁剪与坏缓存守卫互斥收口）：被预算排除的组
+        #    保持 ai_image 占位原样（不生图、不改写）。此前 `_ai_pending` 把
+        #    「预算排除」与「生成失败」混为一谈 —— 只要预算生效且候选超限，
+        #    每次导出 `ai_image_pending = M - N > 0` 恒触发 degraded：
+        #    `X-Export-Degraded` 长亮、产物永不写缓存，同内容每次全量重建
+        #    （G2 功能与其后引入的坏缓存守卫从未对齐）。现给被排除块打
+        #    `_budget_excluded` 标记：`_ai_pending` 统计与 write_section 的
+        #    「生成失败」WARNING 均豁免该标记 —— 预算裁剪是有意设计，不是故障。
+        #    （code 为空的坏块不打标记：那是生成失败语义，照常计入。）
+        _excluded_n = 0
+        for _sec in sections:
+            for _blk in blocks_cache.get(_sec["id"]) or []:
+                if _blk.get("type") != "ai_image":
+                    continue
+                _c = str(_blk.get("code") or "")
+                if _c and _c not in groups:
+                    _blk["_budget_excluded"] = True
+                    _excluded_n += 1
+        if _excluded_n:
+            logger.info(
+                "AI 配图预算排除 %d 个占位块（有意裁剪，不计入 ai_image_pending 降级统计）", _excluded_n
+            )
         if not groups:
             return 0
 
     # 并发上限由统一配置控制；默认值为 2，非法值收敛到全局 AI 并发安全范围。
     try:
-        _image_concurrency = int(_img_cfg.get("image_max_concurrency", 2) or 2)
+        _image_concurrency = int(_settings.image_max_concurrency)
     except (TypeError, ValueError):
         _image_concurrency = 2
     sem = asyncio.Semaphore(max(1, min(_image_concurrency, 5)))
@@ -4640,11 +4761,23 @@ async def _auto_generate_ai_image_blocks(
         if not prompt:
             logger.warning("AI 配图占位块缺少 prompt，导出时跳过")
             return
+        # ✅ R242：[IMG_GEN_PROMPT: 主题=…；风格=…] 模板前置解析（R237 §8.3
+        #    契约接线——parse_img_gen_prompt 此前零消费）。AI 在 ai_image 块的
+        #    prompt 字段按提示词约定输出模板形态时，用解析出的完整文生图提示词
+        #    生图；未命中原样（旧行为逐字不变）。
+        try:
+            from app.services.ai.image_engine import parse_img_gen_prompt as _parse_img_prompt
+
+            _imgtpl = _parse_img_prompt(prompt)
+            if _imgtpl.get("ok") and str(_imgtpl.get("prompt") or "").strip():
+                prompt = str(_imgtpl["prompt"]).strip()
+        except Exception as _tpl_err:  # noqa: BLE001 - 模板解析失败不阻断生图
+            logger.debug("AI 配图 IMG_GEN_PROMPT 模板解析失败（使用原始 prompt）: %s", _tpl_err)
         style = str(obj.get("style") or "engineering_diagram")
         title = str(obj.get("title") or blocks[0].get("title") or "AI 配图")
         async with sem:
             try:
-                url = await generate_illustration_image(None, prompt, style, "16:9", _provider, _img_cfg)
+                url = await generate_illustration_image(None, prompt, style, "16:9", _settings.image_provider, _img_cfg)
             except Exception as e:
                 logger.warning("AI 配图自动生成异常（导出降级跳过）: %s", e)
                 return
@@ -4705,7 +4838,7 @@ async def _query_global_facts(
 
 
 def _merge_chart_json_skip_stats(render_stats: dict, parse_diag: dict) -> None:
-    """把「解析期被跳过的 chart-json 块」并入 ``X-Chart-Render-Stats``。
+    """把「解析期被跳过的图表家族块」并入 ``X-Chart-Render-Stats``。
 
     ✅ 2026-11-05（第二轮日志驱动分析 P1）：旧实现里这些块只写一行 INFO，
     响应头 failed 仍为 0 —— 生成出来的 DOCX 确实缺图，统计却报「失败 0」，
@@ -4715,23 +4848,52 @@ def _merge_chart_json_skip_stats(render_stats: dict, parse_diag: dict) -> None:
       · 沿用既有坏缓存守卫：failed > 0 → 本次产物不写缓存（否则指纹不变时
         会一直命中这份缺图产物）。
     无跳过时**不新增任何键**，旧响应头形状逐字节不变（向后兼容）。
+
+    ✅ R233（2026-11-13 · 统计口径对称收口）：``chart_mermaid_skipped`` /
+    ``chart_ai_image_skipped``（content_blocks 同批新增的机器信号）一并计入
+    ``failed`` —— mermaid 未闭合/未知关键字、ai_image 占位未闭合此前与
+    chart-json 侧同族但零信号，缺图产物绕过全部降级判据被写进缓存永久命中。
+    既有键 ``chart_json_skipped`` 语义保持「只含 chart-json」不变（拆分统计），
+    新键加法式（0 时不挂键）。
     """
     skipped = int(parse_diag.get("chart_json_skipped") or 0)
-    if not skipped:
+    mermaid_skipped = int(parse_diag.get("chart_mermaid_skipped") or 0)
+    ai_image_skipped = int(parse_diag.get("chart_ai_image_skipped") or 0)
+    total = skipped + mermaid_skipped + ai_image_skipped
+    if not total:
         return
-    render_stats["chart_json_skipped"] = skipped
-    render_stats["failed"] = int(render_stats.get("failed") or 0) + skipped
+    if skipped:
+        render_stats["chart_json_skipped"] = skipped
+    if mermaid_skipped:
+        render_stats["chart_mermaid_skipped"] = mermaid_skipped
+    if ai_image_skipped:
+        render_stats["chart_ai_image_skipped"] = ai_image_skipped
+    render_stats["failed"] = int(render_stats.get("failed") or 0) + total
     unclosed = int(parse_diag.get("chart_json_skipped_unclosed") or 0)
     unrenderable = int(parse_diag.get("chart_json_skipped_unrenderable") or 0)
+    m_unclosed = int(parse_diag.get("chart_mermaid_skipped_unclosed") or 0)
+    m_unrenderable = int(parse_diag.get("chart_mermaid_skipped_unrenderable") or 0)
+    a_unclosed = int(parse_diag.get("chart_ai_image_skipped_unclosed") or 0)
     if unclosed:
         render_stats["chart_json_skipped_unclosed"] = unclosed
     if unrenderable:
         render_stats["chart_json_skipped_unrenderable"] = unrenderable
+    if m_unclosed:
+        render_stats["chart_mermaid_skipped_unclosed"] = m_unclosed
+    if m_unrenderable:
+        render_stats["chart_mermaid_skipped_unrenderable"] = m_unrenderable
+    if a_unclosed:
+        render_stats["chart_ai_image_skipped_unclosed"] = a_unclosed
     logger.warning(
-        "导出：%d 处 chart-json 块在解析期被跳过（未闭合 %d / 不可渲染 %d），" "已计入图表失败数（成稿缺图且不写缓存）",
-        skipped,
+        "导出：%d 处图表块在解析期被跳过（chart-json 未闭合 %d / 不可渲染 %d；"
+        "mermaid 未闭合 %d / 未知类型 %d；ai_image 未闭合 %d），"
+        "已计入图表失败数（成稿缺图且不写缓存）",
+        total,
         unclosed,
         unrenderable,
+        m_unclosed,
+        m_unrenderable,
+        a_unclosed,
     )
 
 
@@ -5027,8 +5189,10 @@ async def _prepare_export(
         "children_map": children_map,
         "fe_codes": fe_codes,
         "fe_images": fe_images,
-        "render_stats": {"fe": 0, "backend_ok": 0, "failed": 0, "fallback_borrowed": 0},
-        # ✅ R99：由 _prepare_export_render **就地填充**（同一 dict 对象）
+        # ✅ R231（R100 空壳移除）：旧实现预置全 0 壳，实际**零消费** —— 渲染段
+        #    ``_prepare_export_render`` 自建 dict（:5126）并在末尾整体重新赋值
+        #    （:5479），旁车写入只发生在渲染后的非命中分支；命中路径在读取点
+        #    之前 return。留着只会诱导后续代码把全 0 壳当真值消费（R100 登记）。
         "rendered_bytes": {},
         "image_bytes": {},
         "ai_image_pending": 0,
@@ -5071,12 +5235,6 @@ async def _prepare_export(
     # ✅ R106 FIX-1：取消事件入 plan —— 渲染段（含本函数内的慢路径直调）与
     #    构建线程（经 _build_docx_task 末尾透传）共用同一份登记。
     plan["_cancel_event"] = cancel_event
-    # ✅ R238：解析图像模型配置（DB 优先、settings 兜底）一次，供 _content_fingerprint
-    #    全键合并（换库配置自动失效缓存）与渲染段透传（无 DB 行 = settings 兜底，零行为变化）。
-    from app.config import settings as _settings
-    from app.services.ai.image_engine import resolve_image_config as _resolve_img
-
-    plan["image_config"] = await _resolve_img(db, _settings)
     if not _export_cache_fast_path_enabled():
         await _prepare_export_render(plan)
     return plan
@@ -5133,7 +5291,11 @@ async def _prepare_export_render(plan: dict) -> dict:
     #    必须计入统计（旧实现只写 INFO，响应头 failed 仍为 0 → 成稿缺图却报「失败 0」）。
     _parse_diag: dict = plan.setdefault("_parse_diagnostics", {})
     fe_images = plan.get("fe_images") or {}
-    allow_pil_fallback = bool(config.get("allow_pil_fallback", ALLOW_PIL_FALLBACK_DEFAULT))
+    # ✅ R233（R230 A6 同款收尾）：allow_pil_fallback 显式 None 归一默认 True ——
+    #    旧读取 `config.get(k, True)` 对「键存在值为 None」得 falsy（关掉兜底），
+    #    与指纹归一「None 视同未传」分叉 → 同一指纹两种渲染行为。
+    _apf = config.get("allow_pil_fallback")
+    allow_pil_fallback = bool(ALLOW_PIL_FALLBACK_DEFAULT if _apf is None else _apf)
     render_stats: dict = {
         "fe": 0,
         "backend_ok": 0,
@@ -5292,6 +5454,27 @@ async def _prepare_export_render(plan: dict) -> dict:
             rendered_bytes[(ct, code)] = fe
             render_stats["fe"] += 1
             return
+        # ✅ R242（hifi 通道）：载荷含无歧义 hifi 特征（level1 平铺 / YYYY-MM-DD
+        #    日期域 / 全节点数值坐标）时优先走 HTML 模板轨（ChartExporter，
+        #    Playwright）—— R237 落地的 hifi_charts 包此前零消费（「服务层就绪
+        #    ≠ 功能可达」）；本分支让 AI 按 chart_gen_* 契约产出的高保真载荷在
+        #    导出时真实出图。失败（Playwright 未装/元素缺失/空白截图）降级既有
+        #    get_or_render 轨（PIL 经 normalize 兼容可画普通形态）——与既有
+        #    「HTTP → PIL」降级链同向。fe PNG 优先级不变（所见即所得优先于 hifi）。
+        _hifi_route = _hifi_route_spec(code)
+        if _hifi_route is not None:
+            _hifi = None
+            try:
+                _hifi = await _hifi_render_png(*_hifi_route)
+            except Exception as _hifi_err:
+                logger.warning(
+                    "导出：图表 %s 的 hifi 模板轨渲染失败（降级既有渲染轨）: %s", ct, _hifi_err
+                )
+            if _hifi is not None:
+                rendered_bytes[(ct, code)] = BytesIO(_hifi)
+                render_stats["hifi_ok"] = render_stats.get("hifi_ok", 0) + 1
+                return
+            render_stats["hifi_failed"] = render_stats.get("hifi_failed", 0) + 1
         try:
             from app.services.ai.mermaid_renderer import _chart_cache
 
@@ -5395,9 +5578,7 @@ async def _prepare_export_render(plan: dict) -> dict:
     #    就地改写为 image 块 —— 随后下面的 URL 收集/下载循环会一并取回位图，
     #    write_section 走既有 image 分支插图与编号。生成失败的块保持占位、
     #    整块跳过（不占图号、无红字）。
-    _ai_converted = await _auto_generate_ai_image_blocks(
-        sections, _blocks_cache, config, image_config=plan.get("image_config"), cancel_event=_cancel_ev
-    )
+    _ai_converted = await _auto_generate_ai_image_blocks(sections, _blocks_cache, config, cancel_event=_cancel_ev)
     # ✅ R106 FIX-1：AI 配图段后的取消检查点（在飞生图跑完即止，不再下载/构建）。
     _check_export_cancelled(_cancel_ev)
     # ✅ P1 修复（2026-09-27 · 残缺文档被写入缓存 → 永久缺图）：
@@ -5410,13 +5591,17 @@ async def _prepare_export_render(plan: dict) -> dict:
     #   修复：以「仍残留 ai_image 占位块」为判据（生成失败的块保持占位），
     #   计入同一个守卫，使缺图产物与缺图渲染一样不入缓存。
     _ai_pending = 0
-    if bool(config.get("ai_image_auto_generate", True)):
+    # ✅ R233：与 _auto_generate_ai_image_blocks 入口的 None 归一同一判据（单一口径）
+    _aig2 = config.get("ai_image_auto_generate")
+    if bool(True if _aig2 is None else _aig2):
         # 仅在「本应自动生图」时才把残留占位视为异常：用户显式关闭
         # ai_image_auto_generate 时占位块整块跳过是**既定行为**（旧行为），
         # 此时若也判 degraded 会让该方案的导出缓存永久失效 —— 那是回归。
+        # ✅ R233：G2 预算裁剪的占位块（`_budget_excluded` 标记，见
+        #    _auto_generate_ai_image_blocks）是有意设计，不计入「生成失败」。
         for _sec in sections:
             for _blk in _get_cached_blocks(_sec["id"], _sec.get("content") or ""):
-                if _blk["type"] == "ai_image":
+                if _blk["type"] == "ai_image" and not _blk.get("_budget_excluded"):
                     _ai_pending += 1
     if _ai_pending:
         logger.warning(
@@ -5500,7 +5685,7 @@ async def _prepare_export_render(plan: dict) -> dict:
 
 def _build_docx_options(config: dict, _float, _int) -> dict:
     """导出版式选项（``_prepare_export`` 与缓存命中路径共用的唯一构造出口）。"""
-    # ✅ R226（A6）：显式 None 与「未传」必须在产物侧同语义。指纹归一
+    # ✅ R230（A6）：显式 None 与「未传」必须在产物侧同语义。指纹归一
     #    （_normalize_config）把 None/空串丢弃 = 视同未传，而旧读取端
     #    ``config.get(key, True)`` 对「键存在值为 None」返回 None（falsy）
     #    → 同一指纹两种产物（页码/分章页一开一关），跨变体错误命中缓存。
@@ -6208,7 +6393,7 @@ async def export_docx(scheme_id: str, body: dict, db=Depends(get_db)):
     _inflight_final = None
     try:
         _lk = await _export_dedup_acquire(("docx", scheme_id, _export_config_hash(body)))
-        # ✅ R226（A4）：锁内复查生成互斥守卫。守卫本体在锁外（内存判定，让注定
+        # ✅ R230（A4）：锁内复查生成互斥守卫。守卫本体在锁外（内存判定，让注定
         #    409 的请求不白等）；但本请求可能在去重锁上排队数分钟，此窗口内
         #    用户发起正文/目录生成时，锁外那一次判定已过期 —— 取数段将读到
         #    生成到一半的章节（部分空章不触发 empty_sections 降级），半成品
@@ -6250,7 +6435,7 @@ async def export_docx(scheme_id: str, body: dict, db=Depends(get_db)):
         #    判据与记忆化逻辑一字未改（_cache_row_viable 本体保持原样），
         #    「坏产物绝不复用」不变；仅首次命中付一次线程切换成本。
         if cached and cached[0] and await asyncio.to_thread(_cache_row_viable, cached[0]):
-            # ✅ R226（A5）：租约登记**提前到 viable 判定通过后立即**。旧实现登记点
+            # ✅ R230（A5）：租约登记**提前到 viable 判定通过后立即**。旧实现登记点
             #    在 _resolve_content_audit（线程池体检）与 _bump_export_round_and_trace
             #    （DB 事务）之后 —— 中间两个 await 的窗口内，另一配置指纹的并发导出
             #    INSERT 新行可使本行跌出保留 top-5，_prune_export_cache 因「租约未
@@ -6337,7 +6522,7 @@ async def export_docx(scheme_id: str, body: dict, db=Depends(get_db)):
         # ✅ 资源守卫：构建异常时必须清理临时文件，否则数十 MB 的 tmp.docx 永久残留。
         try:
             fix_stats = await asyncio.to_thread(_build_docx_sync, *_build_docx_task(tmp_out_path, prep))
-            # ✅ R226（2026-11-12 · A9）：构建完成后的取消检查点。旧实现最后
+            # ✅ R230（2026-11-12 · A9）：构建完成后的取消检查点。旧实现最后
             #    一个检查点在章节写入循环内（_build_docx_sync 内部），构建线程
             #    收尾之后到 os.replace / 写缓存行之间的窗口里置位的取消事件
             #    从不生效 —— /cancel 晚了一步的产物照样 replace + 写缓存行，
@@ -6361,7 +6546,7 @@ async def export_docx(scheme_id: str, body: dict, db=Depends(get_db)):
             #    （集合随失败次数缓慢膨胀 + GC 盲区）。
             _export_inflight_unregister(_inflight_final)
             raise
-        # ✅ R226（2026-11-12 · A1 · P1）：坏缓存守卫判定**前移到 os.replace 之前**。
+        # ✅ R230（2026-11-12 · A1 · P1）：坏缓存守卫判定**前移到 os.replace 之前**。
         #    旧实现先 os.replace 再判降级：降级产物（缺图/空章/残留）已经把
         #    out_path 上「历史成功导出」的产物**原地覆盖成残缺版**，而 DB 缓存行
         #    仍指向该确定性路径、_cache_row_viable 只查 ZIP 结构照常放行 →
@@ -6443,7 +6628,7 @@ async def export_docx(scheme_id: str, body: dict, db=Depends(get_db)):
                 _sig = headers.get("X-Export-Degraded")
                 headers["X-Export-Degraded"] = f"{_sig},charts-dropped" if _sig else "charts-dropped"
             if fix_stats:
-                # ✅ R226（B1 · R180 同族收口）：X-Fix-Stats 可能含中文
+                # ✅ R230（B1 · R180 同族收口）：X-Fix-Stats 可能含中文
                 #    `chart_delivery_dropped_details[].chart_type`（围栏标记允许
                 #    Unicode 词字符），`ensure_ascii=False` 会让已构建完成的成稿
                 #    在交付阶段死于 latin-1 编码错误。三处（DOCX 降级/成功、PDF）
@@ -6497,7 +6682,7 @@ async def export_docx(scheme_id: str, body: dict, db=Depends(get_db)):
                 EXPORTS_DIR.name,
             )
 
-        # ✅ 坏缓存守卫（R226·A1）：降级判定已前移到 os.replace 之前 ——
+        # ✅ 坏缓存守卫（R230·A1）：降级判定已前移到 os.replace 之前 ——
         #    能走到这里即产物完好，replace 到确定性路径 + 写缓存行均安全。
 
 
@@ -6545,7 +6730,7 @@ async def export_docx(scheme_id: str, body: dict, db=Depends(get_db)):
         # ✅ R111（P2-5）：缓存未命中日志埋点（纯可观测）。
         logger.info("导出缓存未命中（scheme=%s · docx · 本轮全量渲染，产物已写缓存）", scheme_id[:8])
         if fix_stats:
-            # ✅ R226（B1 · R180 同族收口）：fix_stats 可含中文（chart_delivery_
+            # ✅ R230（B1 · R180 同族收口）：fix_stats 可含中文（chart_delivery_
             #    dropped_details[].chart_type 走 Unicode \w+ 放行），header 值必须
             #    latin-1 可编码 → ensure_ascii=True（JSON.parse 后原文不变）。
             headers["X-Fix-Stats"] = json.dumps(fix_stats, ensure_ascii=True)
@@ -6841,7 +7026,7 @@ async def export_pdf(scheme_id: str, body: dict, db=Depends(get_db)):
     _inflight_final = None
     try:
         _lk = await _export_dedup_acquire(("pdf", scheme_id, _export_config_hash(body)))
-        # ✅ R226（A4）：锁内复查生成互斥守卫（与 DOCX 链同口径，见该处注释）。
+        # ✅ R230（A4）：锁内复查生成互斥守卫（与 DOCX 链同口径，见该处注释）。
         _ensure_no_generation_on_export(scheme_id, "pdf")
         # ✅ B-15（R182 · 2026-11-06）：与 DOCX 同一 high 级问题闸门（同位置：
         #    守卫/去重锁之后、_prepare_export 之前）。
@@ -6877,7 +7062,7 @@ async def export_pdf(scheme_id: str, body: dict, db=Depends(get_db)):
         # ✅ R176 补漏（2026-11-04）：同 DOCX —— PDF 头尾校验同样下沉线程，
         #    判据不减（%PDF- 与 %%EOF 都必须满足），坏产物仍不复用。
         if cached and cached[0] and await asyncio.to_thread(_cache_row_viable, cached[0]):
-            # ✅ R226（A5）：与 DOCX 命中路径同口径 —— 租约登记提前到 viable 通过后立即，
+            # ✅ R230（A5）：与 DOCX 命中路径同口径 —— 租约登记提前到 viable 通过后立即，
             #    闭合「判据通过 → 登记」之间的并发 prune 删文件窗口。
             _export_read_lease_register(cached[0])
             # ✅ R111（P2-5）：PDF 缓存命中日志埋点（纯可观测，与 DOCX 同口径）。
@@ -6972,7 +7157,7 @@ async def export_pdf(scheme_id: str, body: dict, db=Depends(get_db)):
                 raise HTTPException(501, str(e))
 
             # 读取 PDF 内容返回（临时目录会被清理，所以必须读入内存）
-            # ✅ R226（A9）：转换完成后的取消检查点 —— Word COM 转换可达分钟级，
+            # ✅ R230（A9）：转换完成后的取消检查点 —— Word COM 转换可达分钟级，
             #    其间置位的取消事件原要到「写缓存行前」才被间接触发（甚至不触发）；
             #    此处命中即 499 退出，不再读取/交付/落盘（TemporaryDirectory 退出自动清理）。
             _check_export_cancelled(cancel_ev)
@@ -6984,7 +7169,7 @@ async def export_pdf(scheme_id: str, body: dict, db=Depends(get_db)):
             #    _pdf_integrity_ok 相同的结构判据（%PDF- 头 + %%EOF 尾）：
             #    结构不完整的产物不得作为交付物（502 可行动失败，不静默给坏文件）。
             if not (b"%PDF-" in pdf_bytes[:1024] and b"%%EOF" in pdf_bytes[-2048:]):
-                # ✅ R226（A3）：tmp_pdf 是 str（str(Path(tmpdir)/...)），旧实现取
+                # ✅ R230（A3）：tmp_pdf 是 str（str(Path(tmpdir)/...)），旧实现取
                 #    `.name` 必抛 AttributeError → 预定的 502 可行动失败被 500 顶替，
                 #    「产物不完整」的 ERROR 文案也从未出现在日志里。
                 logger.error("PDF 产物完整性判据未通过（scheme=%s），拒绝交付: %s", scheme_id[:8], tmp_pdf)
@@ -7139,15 +7324,21 @@ async def export_pdf(scheme_id: str, body: dict, db=Depends(get_db)):
             **name_headers,
         }
         if fix_stats:
-            # ✅ R226（B1 · R180 同族收口）：与 DOCX 两分支同口径，header 必须 latin-1 可编码。
+            # ✅ R230（B1 · R180 同族收口）：与 DOCX 两分支同口径，header 必须 latin-1 可编码。
             headers["X-Fix-Stats"] = json.dumps(fix_stats, ensure_ascii=True)
-        # ✅ R226（A8）：空章导出的 PDF 与 DOCX 同口径补 empty-sections 细分信号
+        # ✅ R230（A8）：空章导出的 PDF 与 DOCX 同口径补 empty-sections 细分信号
         #    （旧实现 degraded 判定含空章，响应头却没有该键 —— 前端降级提示条分类缺失）。
         if bool(prep.get("empty_sections")):
             _sig = headers.get("X-Export-Degraded")
             headers["X-Export-Degraded"] = f"{_sig},empty-sections" if _sig else "empty-sections"
         if _facts_query_failed:
-            headers["X-Export-Degraded"] = "global-facts-query-failed"
+            # ✅ R241（2026-11-13）：与 DOCX 链（降级分支 global-facts-query-failed
+            #    同名分支）同口径改**拼接** —— 旧实现直接赋值会覆盖先设置的
+            #    empty-sections 信号（空章 + 事实查询失败并发时细分只剩后者）。
+            _sig = headers.get("X-Export-Degraded")
+            headers["X-Export-Degraded"] = (
+                f"{_sig},global-facts-query-failed" if _sig else "global-facts-query-failed"
+            )
         if _content_residue > 0:
             _sig = headers.get("X-Export-Degraded")
             headers["X-Export-Degraded"] = f"{_sig},content-residue" if _sig else "content-residue"

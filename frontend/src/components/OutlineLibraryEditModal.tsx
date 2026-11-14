@@ -1,4 +1,4 @@
-import { useState, useEffect, useCallback } from "react";
+import { useState, useEffect, useCallback, useRef } from "react";
 import {
   App,
   Modal,
@@ -157,7 +157,13 @@ export default function OutlineLibraryEditModal({
       .catch(() => setTypeOptions(DEFAULT_TYPES));
   }, [open]);
 
+  // ✅ R227（F11 · 2026-11-13 · 目录库 UI 族）：编辑弹窗详情请求无序守卫
+  //    （快速切换 libraryId（如列表双击连续打开不同目录库）时，旧响应后至
+  //    覆盖新记录的表单/树数据）。seq 单调递增，非最新即丢弃。
+  const detailSeqRef = useRef(0);
+
   const loadDetail = useCallback(async () => {
+    const seq = ++detailSeqRef.current;
     if (!libraryId) {
       form.resetFields();
       setTree([]);
@@ -169,6 +175,7 @@ export default function OutlineLibraryEditModal({
     setLoading(true);
     try {
       const { data } = await outlineLibraryApi.get(libraryId);
+      if (seq !== detailSeqRef.current) return; // 已有更新的请求发出，丢弃旧响应
       form.setFieldsValue({
         name: data.name,
         type: data.type,
@@ -187,10 +194,12 @@ export default function OutlineLibraryEditModal({
       setTree(outline);
       setExpandedKeys(collectAllKeys(outline));
     } catch (e: unknown) {
+      if (seq !== detailSeqRef.current) return;
       const err = e as { message?: string };
       msg.error(err.message || "加载失败");
+    } finally {
+      if (seq === detailSeqRef.current) setLoading(false);
     }
-    setLoading(false);
   }, [libraryId, form]);
 
   useEffect(() => {
@@ -564,6 +573,23 @@ export default function OutlineLibraryEditModal({
         msg.warning(summary.message);
         return;
       }
+      // ✅ R227（F10 · 2026-11-13 · 目录库 UI 族）：导入识别结果会**静默替换**
+      //    当前编辑树（旧实现无覆盖确认，用户已编辑的目录被无声覆盖）。当前树
+      //    非空时先确认；空树（首次导入）无损失，直接替换。
+      if (tree.length) {
+        const confirmed = await new Promise<boolean>((resolve) => {
+          modal.confirm({
+            title: "导入将替换当前目录",
+            content: `导入的识别结果将替换当前已编辑的 ${countNodes(tree)} 个章节节点。确定继续？`,
+            okButtonProps: { danger: true },
+            okText: "仍要替换",
+            cancelText: "取消",
+            onOk: () => resolve(true),
+            onCancel: () => resolve(false),
+          });
+        });
+        if (!confirmed) return;
+      }
       const imported = importToTree(summary.outline);
       setTree(imported);
       setExpandedKeys(collectAllKeys(imported));
@@ -618,6 +644,23 @@ export default function OutlineLibraryEditModal({
     try {
       const { data } = await outlineLibraryApi.template(key);
       const nodes = importToTree(data.outline || []);
+      // ✅ R227（F10 · 2026-11-13 · 目录库 UI 族）：套用标准模板会**静默替换**
+      //    当前编辑树（旧实现无覆盖确认）。当前树非空时先确认；空树（新建首次
+      //    套模板）无损失，直接替换。
+      if (tree.length) {
+        const confirmed = await new Promise<boolean>((resolve) => {
+          modal.confirm({
+            title: "套用模板将替换当前目录",
+            content: `模板目录将替换当前已编辑的 ${countNodes(tree)} 个章节节点。确定继续？`,
+            okButtonProps: { danger: true },
+            okText: "仍要替换",
+            cancelText: "取消",
+            onOk: () => resolve(true),
+            onCancel: () => resolve(false),
+          });
+        });
+        if (!confirmed) return;
+      }
       setTree(nodes);
       setExpandedKeys(collectAllKeys(nodes));
       setSelectedKey(null);

@@ -1,0 +1,1 @@
+{"audit": {"counts": {}, "items": []}, "audit_fp": "36eba563cf1162ff", "chart_delivery": {"backend_ok": 2, "chart_dropped": 1, "chart_expected": 3, "chart_inserted": 2, "failed": 0}, "content_hash": "hash-222", "fences_fixed": 0, "sections": 0, "v": 1}

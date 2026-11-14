@@ -394,12 +394,17 @@ class TestDbReadStrictMode:
         """DOCX 有两条交付路径（degraded 提前返回 + 正常返回），两条都必须走统一收尾。
 
         ✅ 2026-10-14 收口后：GC + protect 透传在 _finalize_export_delivery 内，
-        路由两条路径各调一次且都带 gc_protect={out_path}。
+        路由两条路径各调一次且都带 gc_protect。
+        ✅ R230（2026-11-12 · A1）重锚：degraded 分支**前移**到 os.replace 之前，
+        降级产物只交付本次临时文件（绝不覆盖 out_path 上的历史产物）⇒
+        该路径 protect 的是 ``tmp_out_path``；正常分支 protect ``out_path``。
+        意图不变、强度不减：每条交付路径都必须 protect 自己交付的文件。
         """
         src = inspect.getsource(E.export_docx)
         calls = re.findall(r"_finalize_export_delivery\(", src)
         assert len(calls) == 2, "degraded 分支与正常分支必须各调用一次统一收尾"
-        assert src.count("gc_protect={out_path}") == 2, "两条路径都必须 protect 本次产物（避免被 GC 当孤儿删）"
+        assert src.count("gc_protect={tmp_out_path}") == 1, "degraded 路径必须 protect 本次临时产物（防被 GC 当孤儿删）"
+        assert src.count("gc_protect={out_path}") == 1, "正常路径必须 protect 本次产物（防被 GC 当孤儿删）"
         # helper 内部确实调用 GC（防未来把 GC 从收尾里摘掉）
         assert "_gc_orphan_exports(" in inspect.getsource(E._finalize_export_delivery)
 

@@ -1,0 +1,33 @@
+{
+  "doc_id": "cb95de45-eaea-4801-9093-6a07721b42da",
+  "project_id": "9a3219d368ce4e65a423903c15a70757",
+  "file_name": "设计说明.txt",
+  "file_type": "txt",
+  "file_size": 48,
+  "file_hash_md5": "12c5e271a044ccc26c4226558d8c84f1",
+  "file_hash_sha256": "8aa58a0f1fdf95ad71c95ef9a212787e1d5cfd01e1329c365900b71eb59504f7",
+  "upload_time": "2026-11-13T16:01:24Z",
+  "doc_type": "",
+  "doc_category": "设计文件",
+  "doc_version": "v1",
+  "page_count": 1,
+  "language": "zh-CN",
+  "parse_status": "success",
+  "parse_version": "v1",
+  "parse_time": "2026-11-13T16:01:24Z",
+  "parse_duration_ms": 0,
+  "parse_engine": "txt+parser-v3",
+  "parse_warnings": [],
+  "extract_status": "success",
+  "extract_time": "2026-11-13T16:01:24Z",
+  "quality_score": null,
+  "expires_at": "2027-11-13T16:01:24Z",
+  "tags": [],
+  "related_docs": [],
+  "supersedes": null,
+  "superseded_by": null,
+  "extracted_types": [
+    "project_info",
+    "global_facts"
+  ]
+}

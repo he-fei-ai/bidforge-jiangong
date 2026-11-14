@@ -35,6 +35,11 @@ export interface OutlineEditTreeRenderDeps {
   renamingValue: string;
   setRenamingKey: Dispatch<SetStateAction<string | null>>;
   setRenamingValue: Dispatch<SetStateAction<string>>;
+  /** ✅ R231（2026-11-13）：omp 目录生成期间禁用双击改名——改名落库
+   *  （update_section title）与 omp 结束后的整表重建互踩（改后的标题
+   *  匹配不到旧路径 ⇒ 正文丢失面），后端双 409 感知不到 omp 旁路
+   *  （可行性报告 §11.4 局限 B）；缺省 false，既有调用行为逐字不变。 */
+  ompBusy?: boolean;
 }
 
 export function useOutlineEditTreeRender(deps: OutlineEditTreeRenderDeps) {
@@ -46,6 +51,7 @@ export function useOutlineEditTreeRender(deps: OutlineEditTreeRenderDeps) {
     renamingKey,
     setRenamingKey,
     setRenamingValue,
+    ompBusy = false,
   } = deps;
 
   // 预计算每个节点是否可上移/下移（同级首/尾禁用），供目录树行内按钮使用
@@ -127,6 +133,8 @@ export function useOutlineEditTreeRender(deps: OutlineEditTreeRenderDeps) {
               background: rowBg,
             }}
             onDoubleClick={() => {
+              // ✅ R231（2026-11-13）：omp 生成期禁用改名入口（见 deps.ompBusy 注释）
+              if (ompBusy) return;
               setRenameDraft(node.title);
               setRenamingKey(node.key);
               setRenamingValue(node.title);
@@ -212,7 +220,7 @@ export function useOutlineEditTreeRender(deps: OutlineEditTreeRenderDeps) {
                     type="text"
                     size="small"
                     tabIndex={-1}
-                    disabled={!moveFlags[node.key]?.up}
+                    disabled={ompBusy || !moveFlags[node.key]?.up}
                     icon={<ArrowUpOutlined />}
                     title="上移"
                     onClick={(e) => {
@@ -224,7 +232,7 @@ export function useOutlineEditTreeRender(deps: OutlineEditTreeRenderDeps) {
                     type="text"
                     size="small"
                     tabIndex={-1}
-                    disabled={!moveFlags[node.key]?.down}
+                    disabled={ompBusy || !moveFlags[node.key]?.down}
                     icon={<ArrowDownOutlined />}
                     title="下移"
                     onClick={(e) => {
@@ -243,7 +251,10 @@ export function useOutlineEditTreeRender(deps: OutlineEditTreeRenderDeps) {
     // ✅ 2026-11-11 性能：renamingValue 已移出依赖。逐字符输入只更新
     //    renameDraftStore（订阅者仅重命名 Input），不再让 300 节点编辑树
     //    随每次按键全量重建；renamingKey 变化（低频，切换重命名节点）仍会重建。
-    [moveFlags, moveNode, renameNode, failedOutlineChapters, renamingKey],
+    // ✅ R231（2026-11-13）：ompBusy 进 deps —— 它在 onDoubleClick 与行内
+    //    上/下移按钮的 disabled 判据里被闭包引用，漏进 deps 会捕获初值
+    //    （stale closure：omp 结束后门禁不解除）。
+    [moveFlags, moveNode, renameNode, failedOutlineChapters, renamingKey, ompBusy],
   );
 
   // ✅ 性能优化：编辑树数据 useMemo 化。旧实现在组件顶层无条件 `tree.map(...)` ——

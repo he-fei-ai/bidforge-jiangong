@@ -1109,6 +1109,15 @@ def _parse_content_blocks(content: str, diagnostics: dict | None = None) -> list
     INFO（生产日志里 2 处「跳过不可渲染的 chart-json 块」），而导出响应头
     ``X-Chart-Render-Stats`` 的 failed 仍是 0 —— 成稿缺图却报「失败 0」，
     用户与排障者都看不到。
+
+    ✅ R233（2026-11-13 · 统计口径对称收口）：mermaid / ai_image 两个图表家族
+    分支的解析期跳过此前**零机器信号**（只有 WARNING/INFO + 引导语回收），
+    而这两个分支同样是「成稿缺图」：未闭合块（max_tokens 截断，注释自证高频）
+    与首关键字不在映射表内的 mermaid 块整块消失、ai_image 占位块整块消失。
+    该缺口使这类缺图绕过全部降级判据 → 缺图产物照常写 export_cache 永久命中
+    （R222/R181 已对 chart-json 侧闭合同一缺口，本侧漏网）。现补：
+    ``chart_mermaid_skipped`` / ``chart_ai_image_skipped`` 总数与按形态细分键，
+    由 export._merge_chart_json_skip_stats 统一并入 failed（坏缓存守卫随之生效）。
     """
     if not content:
         return []
@@ -1117,6 +1126,18 @@ def _parse_content_blocks(content: str, diagnostics: dict | None = None) -> list
         if diagnostics is None:
             return
         diagnostics["chart_json_skipped"] = int(diagnostics.get("chart_json_skipped") or 0) + 1
+        diagnostics[reason] = int(diagnostics.get(reason) or 0) + 1
+
+    def _note_chart_mermaid_skip(total_key: str, reason: str) -> None:
+        """mermaid / ai_image 家族解析期跳过的诊断（键族独立于 chart_json_skipped，
+        既有键语义保持「只含 chart-json」不变，由消费侧合并计入 failed）。
+
+        total_key / reason 分离：mermaid 与 ai_image 各有独立总数键
+        （chart_mermaid_skipped / chart_ai_image_skipped），细分键挂具体形态。
+        """
+        if diagnostics is None:
+            return
+        diagnostics[total_key] = int(diagnostics.get(total_key) or 0) + 1
         diagnostics[reason] = int(diagnostics.get(reason) or 0) + 1
 
     # ✅ 2026-11-05（防回归第一道闸）：解析前统一归一化 —— 字面 \n 粘行 /
@@ -1146,7 +1167,11 @@ def _parse_content_blocks(content: str, diagnostics: dict | None = None) -> list
         if not stripped:
             i += 1
             continue
-        indent = len(line) - len(line.lstrip())
+        # ✅ R231（B8）：视觉缩进（tab 折算 4 空格）—— 列表项层级与续行合并判据
+        #    的**单一口径**（旧双口径已收口：list_item.indent 曾记原始字符数
+        #    （tab=1）、被导出侧 ``// 2`` 换算把 tab 缩进的嵌套列表拍平到 0 级；
+        #    原始字符口径 ``indent`` 变量随之无消费方，已删除）。
+        _vis_indent = len(line.expandtabs(4)) - len(line.expandtabs(4).lstrip())
         # Markdown 标题 # ~ ######（允许最多 3 个前导空格，与 GFM 一致）
         m_h = _RE_MD_HEADING.match(stripped)
         if m_h:
@@ -1254,6 +1279,8 @@ def _parse_content_blocks(content: str, diagnostics: dict | None = None) -> list
                         len(code_lines),
                     )
                     _pop_orphan_lead_in_block(blocks)
+                    # ✅ R233：解析期跳过补机器信号（成稿缺图 → failed → 不写缓存）
+                    _note_chart_mermaid_skip("chart_mermaid_skipped", "chart_mermaid_skipped_unclosed")
                     continue
                 code_text = "\n".join(code_lines).strip()
                 # ✅ 修复 P0：首行为空行时 "".split() 为空列表，[0] 抛 IndexError 导致导出 500
@@ -1283,6 +1310,8 @@ def _parse_content_blocks(content: str, diagnostics: dict | None = None) -> list
                         "与登记侧同口径，避免幽灵图绕过配图上限"
                     )
                     _pop_orphan_lead_in_block(blocks)
+                    # ✅ R233：解析期跳过补机器信号（成稿缺图 → failed → 不写缓存）
+                    _note_chart_mermaid_skip("chart_mermaid_skipped", "chart_mermaid_skipped_unrenderable")
                     continue
                 # ✅ 图表同步生成：内联块自带代码，直接携带（不再依赖 chart_predictions 查码）
                 # ✅ 图题优先级（v16，对齐图表需求规格「载荷 title > Mermaid title >
@@ -1388,6 +1417,8 @@ def _parse_content_blocks(content: str, diagnostics: dict | None = None) -> list
                         _fence_state,
                     )
                     _pop_orphan_lead_in_block(blocks)
+                    # ✅ R233：解析期跳过补机器信号（成稿缺配图 → failed → 不写缓存）
+                    _note_chart_mermaid_skip("chart_ai_image_skipped", "chart_ai_image_skipped_unclosed")
                     continue
                 ai_title = ""
                 try:
@@ -1547,6 +1578,13 @@ def _parse_content_blocks(content: str, diagnostics: dict | None = None) -> list
             continue
         # 列表项
         # 无序列表: - * • ·
+        # ✅ R231（2026-11-12 · B8）：列表项缩进记录**视觉缩进**（tab 折算 4 空格，
+        #    与下方 :1588 续行合并判据同一折算）—— 旧实现记录原始字符数（tab=1），
+        #    解析层内部两口径分叉且导出侧 ``// 2`` 换算把 **tab 缩进的嵌套列表
+        #    拍平到 0 级**（indent=1 → 0，与父级同级、编号序列错乱）。视觉折算后
+        #    2 空格→1 级、1 个 tab→2 级、4 空格→2 级（保序保嵌套；4 空格比
+        #    Markdown 常规深一级属保序代价，混用 2/4 空格的 CommonMark 宽度
+        #    算法与 numPr 语义列表一并归版式专项，见 R230 §九 B8）。
         m_ul = _RE_UL_BULLET.match(stripped) or _RE_UL_BULLET_TIGHT.match(stripped)
         if m_ul:
             blocks.append(
@@ -1554,7 +1592,7 @@ def _parse_content_blocks(content: str, diagnostics: dict | None = None) -> list
                     "type": "list_item",
                     "ordered": False,
                     "text": m_ul.group(1).strip(),
-                    "indent": indent,
+                    "indent": _vis_indent,
                 }
             )
             i += 1
@@ -1572,7 +1610,7 @@ def _parse_content_blocks(content: str, diagnostics: dict | None = None) -> list
                     "ordered": True,
                     "num": num,
                     "text": text,
-                    "indent": indent,
+                    "indent": _vis_indent,
                     "marker": marker,
                 }
             )
@@ -1585,7 +1623,6 @@ def _parse_content_blocks(content: str, diagnostics: dict | None = None) -> list
         #    · 仅当续行视觉缩进（tab=4）≥2 且比上一列表项更深时合并，避免误吞
         #      与列表无关的正文段；
         #    · 表格行/标题/围栏在上方分支已先行识别，不会进入本分支。
-        _vis_indent = len(line.expandtabs(4)) - len(line.expandtabs(4).lstrip())
         if _vis_indent >= 2 and blocks and blocks[-1].get("type") == "list_item":
             _prev_indent = int(blocks[-1].get("indent") or 0)
             if _vis_indent > _prev_indent:
@@ -1630,7 +1667,7 @@ def _norm_heading_text(text: str) -> str:
 # ✅ R181（2026-11-06）：正则由单字母放宽到 1~2 个字母，并循环剥离重复前缀，
 #    与导出侧原有循环行为对齐后**下沉为唯一实现**（导出不再保留第二套正则）。
 _RE_SUBITEM_ORD_PREFIX = re.compile(r"^\s*[a-zA-Z]{1,2}\s*[、.．)）]\s*")
-# ✅ R226（2026-11-12 · B3）：剥后剩余若以「字母+分隔符」形态之外的字母开头
+# ✅ R230（2026-11-12 · B3）：剥后剩余若以「字母+分隔符」形态之外的字母开头
 #    （"A、B 两案对比" → "B 两案对比" / "a. Basic" → "Basic"），视为正文并列
 #    枚举/英文实词，停止剥离。预编译为模块级常量（R227 修复：原内联
 #    re.match 破坏 test_no_inline_re_calls_in_module，且每次调用重复编译）。
@@ -1652,7 +1689,7 @@ def strip_subitem_ordinal_prefix(text: str) -> str:
         rest = _RE_SUBITEM_ORD_PREFIX.sub("", stripped, count=1).strip()
         if not rest:
             break
-        # ✅ R226（2026-11-12 · B3）：剥后剩余若以「字母+分隔符」形态之外的
+        # ✅ R230（2026-11-12 · B3）：剥后剩余若以「字母+分隔符」形态之外的
         #    字母开头（"A、B 两案对比" → "B 两案对比" / "a. Basic" → "Basic"），
         #    视为正文并列枚举/英文实词，**停止剥离** —— 旧实现无条件循环剥离，
         #    把枚举首字母当残留编号静默删掉（内容篡改）。而「字母+分隔符」

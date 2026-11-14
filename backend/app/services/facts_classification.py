@@ -111,6 +111,7 @@ FACT_TYPE_TO_CHAPTER: dict[str, str] = {
     "process_flow": "technique",
     "tech_param": "overview",
     "design_param": "technique",
+    "scale": "overview",
     "safety": "safety",
     "risk": "safety",
     "monitoring": "safety",

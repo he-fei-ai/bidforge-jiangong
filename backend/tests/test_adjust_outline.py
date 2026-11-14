@@ -318,3 +318,66 @@ class TestAdjustThenSavePreservesContent:
         assert len(rows) == 1
         assert rows[0]["id"] == "R1"
         assert rows[0]["content"] == "原有正文"
+
+
+# ============================================================
+# ✅ R229 · 遗留①收口：AI 调整口补齐 validate_outline_numbering fail-closed 闸门
+# ------------------------------------------------------------
+# 本端点此前是目录四个写路径中**唯一**漏接编号合法性闸门的：
+#   save_outline / save_as_outline / normalize_outline_for_library 都在落库口判红，
+#   唯独 adjust_outline 没有。normalize_outline 内部 renumber 失败被 try/except
+#   吞掉（仅留 ERROR 日志）后返回「已裁剪但未编号」树，旧实现直接 ok:True 交前端
+#   「待确认」—— 前端展示双重编号、确认后 save_outline 才被拦（体验割裂），
+#   且脚本直连 API 时无人拦截。现补齐同一判据（与 R187 落库口同口径）。
+#   本端点不落库、400 无数据风险；编号正常时逐字不变（问题列表为空即不 400）。
+# ============================================================
+
+
+async def test_adjust_outline_rejects_broken_numbering(db_conn, monkeypatch):
+    """编号校验判红时，AI 调整结果必须以 400 拒绝（不得把脏树交前端待确认）。"""
+    sid = await _seed_scheme(db_conn)
+    await _seed_section(db_conn, sid, "R1", "工程概况", level=1, sort=0)
+    await db_conn.commit()
+
+    _patch_ai(
+        monkeypatch,
+        {"outline": [{"title": "合格章", "children": []}], "summary": "ok"},
+    )
+    # 制造「编号不合法」：validate_outline_numbering 返回非空问题列表
+    monkeypatch.setattr(
+        sec, "validate_outline_numbering", lambda outline: ["1/空编号：编号格式非法"]
+    )
+    with pytest.raises(HTTPException) as ei:
+        await sec.adjust_outline(sid, {"instruction": "改标题"}, db=db_conn)
+    assert ei.value.status_code == 400
+    assert "编号校验未通过" in str(ei.value.detail)
+
+
+async def test_adjust_outline_numbering_clean_passes(db_conn, monkeypatch):
+    """编号正常时闸门不 400（问题列表为空即放行，既有行为不变）。"""
+    sid = await _seed_scheme(db_conn)
+    await _seed_section(db_conn, sid, "R1", "工程概况", level=1, sort=0)
+    await db_conn.commit()
+
+    _patch_ai(
+        monkeypatch,
+        {"outline": [{"title": "合格章", "children": []}], "summary": "ok"},
+    )
+    res = await sec.adjust_outline(sid, {"instruction": "改标题"}, db=db_conn)
+    assert res["ok"] is True
+
+
+def test_adjust_outline_numbering_gate_uses_single_source():
+    """源码棘轮：adjust_outline 必须经 numbering 的 validate_outline_numbering 判红，
+    且判红时走 400（不得改回「静默 ok:True 交脏树」形态）。"""
+    import inspect
+
+    src = inspect.getsource(sec.adjust_outline)
+    assert "validate_outline_numbering(" in src, "adjust_outline 未接编号合法性闸门"
+    # 判红分支必须 raise 400（fail-closed），不得仅记录/静默放行
+    assert "_adj_numbering_problems" in src, "闸门局部判据缺失（形态被改）"
+    # 反向锁：不得改回「无条件 ok:True 不带判据」的旧形态
+    ok_block = src.split('"ok": True', 1)
+    assert len(ok_block) == 2, "adjust_outline 缺少正常分支 ok:True"
+    before_ok = ok_block[0]
+    assert "if _adj_numbering_problems:" in before_ok, "闸门判据未置于 ok 分支之前"

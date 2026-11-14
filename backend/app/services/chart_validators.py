@@ -99,6 +99,69 @@ def _coerce_arch_children(node: dict, _seen: set | None = None, _depth: int = 0)
     return {**node, "children": new_children}
 
 
+def _normalize_org_matrix_tree(data: dict) -> dict | None:
+    """✅ R242（hifi 通道）：矩阵总线组织图（``nodes.level1-4`` 平铺 + parent 引用）
+    归一为 root/children 树（PIL architecture 渲染轨的降级形态）。
+
+    hifi 视觉（总线连线 / parent:null 穿越直连）由渲染分发层在**原始载荷**上
+    走 ChartExporter org_matrix 模板轨保证；本归一只保证「该载荷在主链
+    登记→校验→PIL 降级渲染」全链可达（校验放行 ⇔ 必出图闭环）。
+    parent 语义：level2/level4 挂根（level1[0]）；level3 按其 ``parent`` 挂
+    对应 level2 节点，``parent`` 为 null/缺失/未知 = 直连顶部总线 → 挂根。
+    """
+    nodes_obj = data.get("nodes")
+    if not isinstance(nodes_obj, dict):
+        return None
+
+    def _nodes_of(key: str) -> list[dict]:
+        arr = nodes_obj.get(key)
+        if not isinstance(arr, list):
+            return []
+        out: list[dict] = []
+        for n in arr:
+            if isinstance(n, dict) and str(n.get("label") or "").strip():
+                parent = n.get("parent")
+                out.append(
+                    {
+                        "id": str(n.get("id") or "").strip(),
+                        "label": str(n.get("label")).strip(),
+                        "parent": str(parent).strip() if parent is not None else "",
+                    }
+                )
+        return out
+
+    l1 = _nodes_of("level1")
+    if not l1:
+        return None
+    root_label = l1[0]["label"]
+    root_id = l1[0]["id"] or root_label
+    tree_by_id: dict[str, dict] = {}
+
+    def _node_ref(n: dict) -> tuple[str, dict]:
+        nid = n["id"] or n["label"]
+        ref = tree_by_id.setdefault(nid, {"label": n["label"], "children": []})
+        return nid, ref
+
+    _, root_ref = _node_ref({"id": root_id, "label": root_label, "parent": ""})
+    for key in ("level2", "level4"):
+        for n in _nodes_of(key):
+            _, ref = _node_ref(n)
+            if ref is not root_ref and ref not in root_ref["children"]:
+                root_ref["children"].append(ref)
+    # level3 原始数组顺序取 parent（_nodes_of 已保留）
+    for n in _nodes_of("level3"):
+        _, ref = _node_ref(n)
+        if ref is root_ref:
+            continue
+        parent_ref = tree_by_id.get(n["parent"]) if n["parent"] else None
+        target = parent_ref if parent_ref is not None else root_ref
+        if ref not in target["children"]:
+            target["children"].append(ref)
+    if not root_ref["children"]:
+        return None
+    return root_ref
+
+
 def normalize_architecture_tree(data: Any) -> dict | None:
     """把各种 architecture 载荷形态归一为「带标签的根节点树」。
 
@@ -118,9 +181,19 @@ def normalize_architecture_tree(data: Any) -> dict | None:
 
     Returns:
         归一后的根节点 dict；无法识别时返回 None。
+
+    ✅ R242（hifi 通道）：入口先识别矩阵总线组织图形态（``nodes`` 为 dict 且含
+    level1-4 平铺层级）→ 委派 :func:`_normalize_org_matrix_tree` 归一为树。
+    既有形态（label/root/children 树、字符串根+nodes 列表）行为逐字不变。
     """
     if not isinstance(data, dict):
         return None
+    _nodes_probe = data.get("nodes")
+    if isinstance(_nodes_probe, dict) and any(
+        isinstance(_nodes_probe.get(k), list) and _nodes_probe.get(k)
+        for k in ("level1", "level2", "level3", "level4")
+    ):
+        return _normalize_org_matrix_tree(data)
     root = data
     if not (data.get("label") or data.get("name") or data.get("children")):
         for key in ("root", "tree", "data", "node"):
@@ -2166,6 +2239,16 @@ def infer_chart_type_from_payload(payload) -> str:
 
     if _has("root") or _has("children"):
         return "architecture"
+    # ✅ R242（hifi 通道）：矩阵总线组织图形态 —— nodes 为 **dict** 且含
+    #    level1-4 平铺层级（hifi org_matrix spec）。必须放在下方
+    #    ``_has("nodes") → flowchart`` 之前：org 的 nodes 是 dict（层级桶），
+    #    flowchart 的 nodes 是 list（节点数组），互斥可辨。
+    _nodes_obj = payload.get("nodes")
+    if isinstance(_nodes_obj, dict) and any(
+        isinstance(_nodes_obj.get(k), list) and _nodes_obj.get(k)
+        for k in ("level1", "level2", "level3", "level4")
+    ):
+        return "architecture"
     if _has("zones"):
         return "layout"
     if _has("steps") or _has("nodes") or _has("edges"):
@@ -2225,3 +2308,111 @@ def infer_chart_type(text: str) -> str:
     if any(k in t for k in ("里程碑", "时间轴", "时间线", "关键节点", "时间节点", "工期节点", "节点控制", "验收节点")):
         return "timeline"
     return "flowchart"
+
+
+# ============================================================
+# 图表生成关键词触发体系（增强 · 高保真图表规格 §7）
+# ------------------------------------------------------------
+# 把「正文 → 图表类型」的识别从「粗粒度兜底（infer_chart_type）」升级为
+# 「全局路由表 + 强/中触发 + 负向排除」三层判定。路由表是单一事实源，
+# `detect_chart_type` 与其消费方共用，避免两份词表漂移。
+#
+# 语义意图 → 内部图表类型（与现有 7 类同源，不另立第三套词汇）：
+#   进度/工期      → gantt
+#   组织架构/矩阵  → architecture
+#   工艺流程/支线  → flowchart
+#
+# ⚠️ 本表只做「生成侧」路由判定（正文语义 → 该出哪种图），不改动既有
+#    `infer_chart_type` 的兜底行为（其零消费，保留为旧接口）。
+# ============================================================
+CHART_KEYWORD_ROUTES: dict[str, dict] = {
+    "gantt": {
+        "label": "进度/工期",
+        "strong": (
+            "横道图", "施工进度计划", "总工期", "里程碑节点", "流水施工",
+            "搭接", "形象进度", "关键线路", "甘特图",
+        ),
+        "medium": (
+            "工期安排", "形象进度表", "阶段性节点", "施工进度", "施工组织",
+        ),
+        "negative": (
+            "工作分解", "施工顺序", "工序名称", "施工步骤",
+        ),
+    },
+    "architecture": {
+        "label": "组织架构",
+        "strong": (
+            "组织机构图", "项目部", "矩阵式", "管理架构", "部门职责",
+            "直线职能制", "项目总工", "副经理", "强管控",
+        ),
+        "medium": (
+            "管理机构", "岗位设置", "隶属关系", "组织架构", "职责分工",
+        ),
+        "negative": (
+            "人员名单", "管理人员名单", "部门职责表",
+        ),
+    },
+    "flowchart": {
+        "label": "工艺流程",
+        "strong": (
+            "工艺流程图", "加工工艺", "施工工艺", "工序", "支线", "合流",
+            "放样", "节点板", "杆件装焊", "钢结构加工",
+        ),
+        "medium": (
+            "工艺流程", "物料流转", "并行工序", "深化设计", "加工流程",
+        ),
+        "negative": (
+            "施工步骤", "工艺要点", "步骤说明",
+        ),
+    },
+}
+
+
+def detect_chart_type(text: str) -> str | None:
+    """扫描正文 → 命中「强触发」即返回图表类型；全部未命中返回 None。
+
+    对应高保真图表规格 §7.3 的解析器识别规则。判定顺序：
+    强触发优先，其次中触发；返回现有 7 类中的 3 类
+    （gantt/architecture/flowchart），与既有类型集合同源。
+
+    Args:
+        text: 待扫描的正文/标题/编排理由文本。
+
+    Returns:
+        命中 → "gantt"|"architecture"|"flowchart"；未命中 → None
+        （由调用方按正文语义兜底推理或放弃配图）。
+    """
+    t = text or ""
+    for ctype, rules in CHART_KEYWORD_ROUTES.items():
+        if any(kw in t for kw in rules["strong"]):
+            return ctype
+    for ctype, rules in CHART_KEYWORD_ROUTES.items():
+        if any(kw in t for kw in rules["medium"]):
+            return ctype
+    return None
+
+
+def detect_chart_type_with_rules(text: str) -> dict:
+    """含负向排除的路由判定（§7.2「防误触发」）。
+
+    负向排除优先：正文命中排除词（如「仅需工作分解文字」「纯人员名单」）
+    时，宁可不出图也不硬配（防误触发）。判定顺序：negative → strong →
+    medium → 未命中。
+
+    Returns:
+        ``{"type": str|None, "trigger": "negative"|"strong"|"medium"|None,
+        "negative_hit": str|None}`` —— 命中负向排除时 ``type`` 置 None，
+        ``negative_hit`` 为命中的排除词。
+    """
+    t = text or ""
+    for ctype, rules in CHART_KEYWORD_ROUTES.items():
+        for neg in rules["negative"]:
+            if neg in t:
+                return {"type": None, "trigger": "negative", "negative_hit": neg}
+    for ctype, rules in CHART_KEYWORD_ROUTES.items():
+        if any(kw in t for kw in rules["strong"]):
+            return {"type": ctype, "trigger": "strong", "negative_hit": None}
+    for ctype, rules in CHART_KEYWORD_ROUTES.items():
+        if any(kw in t for kw in rules["medium"]):
+            return {"type": ctype, "trigger": "medium", "negative_hit": None}
+    return {"type": None, "trigger": None, "negative_hit": None}

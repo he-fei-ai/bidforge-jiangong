@@ -802,7 +802,27 @@ def _chart_semantic_context(content: str, ordinal: int, max_paras: int = 3) -> s
         if chart_ord == ordinal:
             collected: list[str] = []
             j = start_idx - 1
+            # ✅ R233（2026-11-13 · 观测质量）：前一围栏块（含闭合行、内部代码行、
+            #    开启行）不得混入语义上下文 —— 图表块紧邻前一图表块（中间只有
+            #    引导语）时，旧实现把前一块的闭合 ``` 行占一个段落槽位（探针
+            #    实证：上下文以 ``` 开头）；首版「只滤围栏行」仍会把前一块的
+            #    内部代码行（如 `任务 :t1, 1, 3d`）当正文段落收进来。现用
+            #    「围栏行开关状态机」跳过整块区域，且**在上一块开启行处终止**
+            #    （R228 意图保留、强度不减：本块上下文止步于前一图表块边界，
+            #    绝不跨块穿透 —— 上一块的引导语属上一块语境，穿透收集会制造
+            #    「本块上下文含另一块主题」的假观测）。
+            in_fence = False
             while j >= 0 and len(collected) < max_paras:
+                is_fence = parse_fence_line(lines[j]) is not None
+                if in_fence:
+                    if is_fence:
+                        break  # 到达上一块开启行：语境边界，停止收集
+                    j -= 1
+                    continue
+                if is_fence:
+                    in_fence = True  # 进入上一围栏块区域（闭合行或未闭合开启行）
+                    j -= 1
+                    continue
                 seg = lines[j].strip()
                 if seg:
                     collected.append(seg)

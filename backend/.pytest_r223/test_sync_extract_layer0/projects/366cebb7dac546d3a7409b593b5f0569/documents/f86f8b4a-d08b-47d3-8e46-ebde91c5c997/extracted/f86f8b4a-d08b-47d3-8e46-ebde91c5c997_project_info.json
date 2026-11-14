@@ -1,0 +1,22 @@
+{
+  "doc_id": "f86f8b4a-d08b-47d3-8e46-ebde91c5c997",
+  "extract_time": "2026-11-12 03:09:31",
+  "extract_schema_version": "extract-v1",
+  "project_info": {
+    "project_name": {
+      "value": "某某工程",
+      "confidence": 0.98,
+      "source": "f86f8b4a-d08b-47d3-8e46-ebde91c5c997#page:1#para:3"
+    },
+    "location": {
+      "value": "上海市嘉定区"
+    }
+  },
+  "source_items": [
+    {
+      "item_id": "projectBasicInfo",
+      "label": "项目级基本信息",
+      "output_type": "json"
+    }
+  ]
+}

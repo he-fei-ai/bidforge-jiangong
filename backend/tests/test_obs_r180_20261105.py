@@ -128,11 +128,22 @@ def test_render_stats_header_is_latin1_safe():
         nxt = re.search(r'"X-[A-Za-z-]+":', EXPORT_SRC[st + 25 :])
         end = st + 25 + nxt.start() if nxt else len(EXPORT_SRC)
         block = EXPORT_SRC[st:end]
-        # 缓存命中分支是纯 ASCII 字面量（`{"cached":true}`），其余必须 ensure_ascii=True
+        # ✅ R230 重锚（2026-11-12）：R222 命中路径把该头改为 `_hit_stats_header`
+        #    组装变量（JSON 载荷分支 / 纯 ASCII 字面量分支）——块级判据放行变量
+        #    形态，变量本体的两支构造由下方专属源码锁兜底（意图不变、强度不减：
+        #    每一处该头都必须 ASCII 安全）。
         assert (
-            "ensure_ascii=True" in block or "'{\"cached\":true}'" in block
+            "ensure_ascii=True" in block
+            or "'{\"cached\":true}'" in block
+            or "_hit_stats_header" in block
         ), f"X-Chart-Render-Stats 第 {i + 1} 处未使用 ASCII 安全序列化"
         assert "ensure_ascii=False" not in block, f"X-Chart-Render-Stats 第 {i + 1} 处写入了非 ASCII 原文"
+
+    # `_hit_stats_header` 两支构造的 ASCII 安全兜底锁
+    assert re.search(
+        r'_hit_stats_header = json\.dumps\([^)]*ensure_ascii=True', EXPORT_SRC
+    ), "_hit_stats_header 的 JSON 载荷分支必须 ensure_ascii=True"
+    assert "'{\"cached\":true}'" in EXPORT_SRC, "_hit_stats_header 的字面量分支必须保持纯 ASCII"
 
     # 真实可编码性：同一份含中文明细的统计可被 latin-1 编码且 JSON 回读无损
     stats = {

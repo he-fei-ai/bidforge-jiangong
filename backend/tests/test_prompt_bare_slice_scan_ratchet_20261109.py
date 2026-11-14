@@ -122,6 +122,26 @@ MODEL_FACING_REGISTRY: dict[tuple[str, str], str] = {
         "services/standards_registry.py",
         "hits = match_categories(scheme_name, scheme_type, section_title)[:max_categories]",
     ): "标准**分类条目数**上限（每类标准清单完整保留），非文本截断。",
+    (
+        "routers/sections.py",
+        "brief = brief[:8000]",
+    ): "omp 目录生成提示词的项目简介**安全上限**（注释已写明防超长撑爆 omp 上下文/提示词预算），防御性截断，非信息丢失。",
+    (
+        "services/ai/omp_agent_roles.py",
+        '"项目简报（完整版见 CONTEXT.md）：" + brief[:2000],',
+    ): "提示词内嵌的**项目简报摘要**（完整版见 CONTEXT.md，模型可从工作区读取全文），仅防提示词膨胀。",
+    (
+        "services/ai/omp_agent_roles.py",
+        '"目录树摘要：" + outline_digest[:4000],',
+    ): "提示词内嵌的**目录树摘要上限**（全文以 CONTEXT.md 为准），仅防提示词膨胀。",
+    (
+        "services/ai/omp_safety.py",
+        "secret_files = secret_like_paths(sorted(os.listdir(workspace_root))[:200])",
+    ): "密钥文件点名只取**前 200 个条目**（每项完整保留），是文件个数上限而非文本截断。",
+    (
+        "services/ai/omp_task_agent.py",
+        'f"omp 最终回复（截断）：{raw_text[:200]}"',
+    ): "**错误消息摘要**（诊断用，含截断标记），非模型输入内容。",
 }
 
 #: 非模型可见路径零留痕裸切的**数量基线**（L2 计数棘轮）。
@@ -129,7 +149,18 @@ MODEL_FACING_REGISTRY: dict[tuple[str, str], str] = {
 #: 口径：这些截断丢的是「文件名 / 错误摘要 / 条目个数 / 解析头部」等
 #: 非模型输入内容，不影响模型看到的文本 —— 但**新增**仍需审视，故锁数量不增。
 #: 确需新增时必须同时写明理由并更新本常量（棘轮会因数量变化报错）。
-NON_MODEL_FACING_BASELINE = 51
+#:
+#: R243（2026-11-14）审计：基线自 R202 的 51 处增至 60 处，逐条核对均为近期
+#: omp / agent-engine / hifi / export 轮次（R230-R242）引入的**良性有界截断**：
+#: 文件条目数上限（omp_workflow / omp_diagnostics / image_engine / mermaid_gantt /
+#: export `[:_EXPORT_FINDING_SECTION_CAP]`）、错误/失败摘要（agent_engine executors
+#: 与 gateway / omp_workflow manual_review / export `text[:limit]`）、安全文件名
+#: 截断（export `name[:max_base]`）。全部为计数/诊断/预览类，不进入模型可见文本。
+#: R243 的 +1 条：routers/sections.py `run_omp_workflow` 里 `brief[:8000]` 安全上限，
+#: 与已登记模型可见的 `generate_outline_via_omp` 同模式；因作用域名不含模型可见词
+#: （omp 未入词表）而分类为非模型可见，实为有界且发往模型可见的安全截断（同记账
+#: 后提示词预算）。登记为基线增长并写明理由。
+NON_MODEL_FACING_BASELINE = 61
 
 
 @pytest.fixture(scope="module")

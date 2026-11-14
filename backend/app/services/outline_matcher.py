@@ -148,17 +148,25 @@ class OutlineMatcher:
         parent_id: str = "",
         path_titles: Iterable[str] = (),
         node_key: str = "",
+        match_title: Optional[str] = None,
     ) -> Optional[dict]:
         """为一个新树节点认领旧章节；认领不到返回 ``None``。
 
         Args:
-            title: 新节点标题（原始文本，内部会归一化）。
+            title: 新节点标题（原始文本，内部会归一化）；缺省下也是**匹配身份**。
             level: 新节点层级。
             parent_id: 新树中父节点的 **DB 主键**（根节点传空串）。
             path_titles: 新树中祖先节点的标题（原始文本，按根→父顺序）。
             node_key: 可选的节点标识（仅用于日志/观测）。
+            match_title: ✅ R229（匹配身份与展示标题解耦，upload_outline 的
+                「自动外科式改写前原标题」语义下沉为单一事实源）：匹配身份
+                **优先**用它（归一化后与旧章节标题比较），缺失时回退 ``title``。
+                用途：标题在落库前被外科式改写时，匹配仍按**改写前原标题**
+                认领旧章节，从而「改标题」不再等于「丢正文」；展示/落库标题
+                仍用改写后的 ``title``。传 None/空串 = 用 ``title``（既有调用方
+                逐字不变）。
         """
-        nt = normalize_outline_title(title)
+        nt = normalize_outline_title(match_title if match_title else title)
         if not nt:
             return None
         try:

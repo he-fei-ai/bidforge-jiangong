@@ -1,0 +1,28 @@
+{
+  "doc_id": "528f7fe2-c3a6-4cfa-afda-46a1f0a6b8f4",
+  "embedding_model": "",
+  "dimension": 0,
+  "chunk_count": 2,
+  "status": "index_ready",
+  "generated_at": "2026-11-13T16:01:24Z",
+  "chunks": [
+    {
+      "chunk_id": "528f7fe2-c3a6-4cfa-afda-46a1f0a6b8f4_c0001",
+      "page_num": 1,
+      "source_ref": "528f7fe2-c3a6-4cfa-afda-46a1f0a6b8f4#page:1#section:untitled",
+      "text_offset": 0,
+      "text_length": 91,
+      "embedding_offset": null,
+      "embedding_length": 0
+    },
+    {
+      "chunk_id": "528f7fe2-c3a6-4cfa-afda-46a1f0a6b8f4_c0002",
+      "page_num": 1,
+      "source_ref": "528f7fe2-c3a6-4cfa-afda-46a1f0a6b8f4#page:1#table:t1",
+      "text_offset": 93,
+      "text_length": 39,
+      "embedding_offset": null,
+      "embedding_length": 0
+    }
+  ]
+}

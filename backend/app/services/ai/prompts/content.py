@@ -251,7 +251,13 @@ _reg(
   结束天（允许合理搭接体现流水作业）；总工期闭环——最大结束天 ≤ 项目总工期；
   末行为竣工验收里程碑（形如 `竣工验收 :milestone, m1, after task9, 0d`，after 引用
   前序任务 id）；任务名必须与项目具体分项对齐（如"外墙保温装饰一体板安装"），
-  严禁"阶段一""前期工作"等空洞名称
+  严禁"阶段一""前期工作"等空洞名称严禁"阶段一""前期工作"等空洞名称；
+  需要日期刻度与搭接语义时可用**日期域形态**（chart-json，走日期横道模板轨）：
+  {"type":"gantt","start_date":"2026-03-01","end_date":"2026-04-14","total_days":45,
+   "tasks":[{"id":"T1","name":"拆除","start":"2026-03-01","end":"2026-03-06","duration":6}],
+   "dependencies":[{"from":"T1","to":"T2","lag":1,"label":"搭接1天"}]}；
+  硬规则：duration=(end-start)+1 含首尾、total_days=(end_date-start_date)+1 自洽、
+  所有任务落在 [start_date,end_date] 区间、dependencies 的 from/to 必须引用已有 id
 - 架构图：**不用 Mermaid**，改用下方「格式 B」的 chart-json 数据块（后端树形渲染器按
   统一样张配色出图，预览与导出一致），结构见格式 B 的 architecture 条目
 - 比选占比：`pie title 各项占比` + `标签 : 数值`（各项之和约 100，每项 ≥3）
@@ -273,7 +279,11 @@ _reg(
   steps 3-15 个、id 唯一（ASCII 字母数字下划线）；
   variant 只能取 start/process/highlight/decision/end（首节点 start、末节点 end、
   质量判定 decision、关键工序 highlight，其余 process）；edges 的 from/to 必须引用已有 id，
-  分支边必须带 label（如"通过"/"不通过"），分支最终汇合不留死路；节点标签为具体工序
+  分支边必须带 label（如"通过"/"不通过"），分支最终汇合不留死路；节点标签为具体工序分支最终汇合不留死路；节点标签为具体工序；
+  复杂多支线工艺流程（并行支线/物料流转）可用**坐标化形态**（走直角布线高保真模板轨）：
+  steps 每项附加数值 "x"/"y"（画布 640×680，X∈[40,600]、Y∈[20,660]，主干 X≈260、
+  左支线 X≈80、右支线 X≈440，Y 按工序先后递增步长约 50）、edges 每项可附加
+  "path":"h-v-h"|"v-h-v"|"h"（直角布线提示）；带坐标时所有 steps 均须带 x/y
   （≤20 字，严禁"步骤一"等空洞名称）
 - architecture（组织架构图，统一树形样式渲染，严禁写成 Mermaid）：
   `{"type":"architecture","title":"项目管理组织机构图","fig_no":"","root":{"label":"项目经理部","children":[{"label":"技术负责人","children":[{"label":"技术部","highlight":true},{"label":"质量部"}]},{"label":"生产负责人","children":[{"label":"施工部"},{"label":"安全部"}]},{"label":"商务负责人","children":[{"label":"成本部"},{"label":"物资部"}]}]}}`
@@ -281,7 +291,12 @@ _reg(
   WBS 类按"单位工程 → 分部工程 → 分项工程"展开，体系类按"体系目标 → 责任层级 → 管理动作"展开）；
   同级节点不得重名；节点总数 4~20 个，标签为具体岗位/部门/分部分项名称（严禁"部门A""节点1"）；
   对本方案履约最核心的**且仅 1 个**节点加 `"highlight":true`（渲染为琥珀金高亮，通常是承担
-  本方案核心职责的部门/岗位，如技术部、监测组）
+  本方案核心职责的部门/岗位，如技术部、监测组）如技术部、监测组）；
+  矩阵式强管控组织可用**平铺形态**（走矩阵总线模板轨，parent:null 表示直连顶部总线）：
+  {"type":"architecture","title":"项目组织管理结构图","nodes":{"level1":[{"id":"pm","label":"项目经理"}],
+   "level2":[{"id":"chief","label":"项目总工"}],"level3":[{"id":"tech","label":"技术部","parent":"chief"},
+   {"id":"office","label":"综合办公室","parent":null}]}}；
+  硬规则：level1 恰 1 个根、所有 id 全局唯一、level3[].parent 为 null（直连顶部总线）或引用 level2.id
 - labor（劳动力四合一图：工种柱状 + 时段投入曲线 + 堆叠柱状 + 工种占比饼图）：
   labor 矩阵要求：data 行数=phases 数、列数=categories 数；phases 按总工期与主要工程内容划分 3-6 个
   施工阶段（阶段名含具体分部，严禁"阶段一"）；categories 从工程内容推导 4-8 个具体

@@ -153,7 +153,7 @@ export function useExportPresets(deps: ExportPresetsDeps) {
     modal,
   } = deps;
   const fetchExportPresets = useCallback(
-    async (sid: string) => {
+    async (sid: string, opts?: { applyDefault?: boolean }) => {
       presetListAbortRef.current?.abort();
       const controller = new AbortController();
       presetListAbortRef.current = controller;
@@ -167,15 +167,29 @@ export function useExportPresets(deps: ExportPresetsDeps) {
           return;
         const presets: ExportPresetItem[] = data.presets || [];
         setExportPresets(presets);
+        // ✅ R241（2026-11-13 · 契约矛盾修复）：「回填默认预设配置 + 下拉指向默认」
+        //    只在**初始化路径**执行（effect 调用传 applyDefault:true）。旧实现所有
+        //    fetch 后都无条件回填 —— workflowDerived.findDefaultExportPreset 注释
+        //    明文契约「默认预设仅作为首次进入导出页的初始配置，用户随后仍可手动修改」
+        //    被直接违反：保存预设/删除预设/设默认/手动刷新四个动作之后，用户未保存的
+        //    表单编辑（页边距/页眉/标题样式）都被静默重置为默认预设值，「保存当前为
+        //    预设」的结果反而是表单变回别的预设。CRUD 刷新路径只更新列表，不动
+        //    下拉选中与表单值（保存成功后由调用方显式选中新预设）。
         const defaultPreset = findDefaultExportPreset(presets);
-        if (defaultPreset) {
-          setSelectedPresetId(defaultPreset.id);
-          exportForm.setFieldsValue(defaultPreset.config || {});
-        } else {
-          setSelectedPresetId("");
+        if (opts?.applyDefault) {
+          if (defaultPreset) {
+            setSelectedPresetId(defaultPreset.id);
+            exportForm.setFieldsValue(defaultPreset.config || {});
+          } else {
+            setSelectedPresetId("");
+          }
         }
-      } catch {
-        // 非致命：预设缺失不影响导出；切方案产生的取消不提示错误。
+      } catch (e: unknown) {
+        // ✅ R230（F11）：加载失败不再全静默 —— 旧 catch{} 只考虑了「切方案取消」，
+        //    真实 500/网络错误时预设列表空且零提示（与本仓「不静默」原则相悖；
+        //    loadCacheStatus 已示范区分取消的写法）。取消（AbortError）仍静默。
+        if (controller.signal.aborted) return;
+        msg.warning("导出预设加载失败，已显示内置默认配置（可点「刷新」重试）");
       } finally {
         if (presetListAbortRef.current === controller) presetListAbortRef.current = null;
       }
@@ -204,7 +218,8 @@ export function useExportPresets(deps: ExportPresetsDeps) {
     setPlaceholderReport(null);
     setRerunPlan(null);
     setCacheStatus(null);
-    if (id) fetchExportPresets(id);
+    // ✅ R241：初始化路径显式声明回填语义（CRUD 刷新不再回填，见 fetchExportPresets 注释）。
+    if (id) fetchExportPresets(id, { applyDefault: true });
   }, [id, fetchExportPresets]);
   const handleSavePreset = async () => {
     // ✅ BUG 修复：id 来自 useParams（string | undefined），旧实现未判空，
@@ -251,10 +266,15 @@ export function useExportPresets(deps: ExportPresetsDeps) {
             msg.warning("请输入格式预设名称");
             return Promise.reject(new Error("empty name"));
           }
-          await exportApi.presets.create(sid, name, config);
+          const created = await exportApi.presets.create(sid, name, config);
           if (currentSchemeIdRef.current === sid) {
             msg.success("已保存为格式预设");
             await fetchExportPresets(sid);
+            // ✅ R241：新建预设自动选中 —— 表单当前值就是刚保存的 config，
+            //    下拉指向新预设才是真实的对应关系（旧实现 fetch 后指向默认预设，
+            //    下拉显示与表单内容不一致）。
+            const createdId = (created as { data?: { id?: string } } | undefined)?.data?.id;
+            if (createdId) setSelectedPresetId(createdId);
           }
         } catch (e: unknown) {
           // 结构化窄断言：仅读取错误对象上真实存在的 message

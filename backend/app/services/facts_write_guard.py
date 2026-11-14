@@ -36,8 +36,14 @@ logger = logging.getLogger(__name__)
 LOCK_WAIT_SECONDS = 20.0
 #: 数据库租约有效期（秒）。进程崩溃/连接中断后，过期租约可被抢占。
 LEASE_TTL_SECONDS = 300
+#: ``_LOCKS`` 规模上限。超限即触发一次「未持有且无等待者」条目的清理，
+#: 避免长期运行进程里 per-(loop, project) 键无界增长（R247 · A6）。
+_LOCKS_MAX = 512
 
 _LOCKS: dict[tuple[int, str], asyncio.Lock] = {}
+#: 每个 key 上「正要 / 正在 acquire」的协程数。只有计数归零且锁未持有时才允许
+#: 驱逐 —— 否则会把别的协程刚拿到手的 lock 对象从映射里摘掉，破坏互斥。
+_LOCKS_WAITERS: dict[tuple[int, str], int] = {}
 _LOCKS_GUARD = threading.Lock()
 
 
@@ -61,7 +67,47 @@ def _lock_for(project_id: str) -> asyncio.Lock:
         if lock is None:
             lock = asyncio.Lock()
             _LOCKS[key] = lock
+        _LOCKS_WAITERS[key] = _LOCKS_WAITERS.get(key, 0) + 1
         return lock
+
+
+def _release_lock_ref(project_id: str) -> None:
+    """配对 :func:`_lock_for` 的取锁引用计数（异常路径也必须调用）。
+
+    ✅ R247（A6 · 锁映射无界增长收口）：``_LOCKS`` 按 ``(id(loop), project_id)``
+    累积，旧实现永不清理 ⇒ 长期运行进程访问过多少个项目就沉淀多少个
+    ``asyncio.Lock`` 条目（弱内存增长，本项目常驻后端进程）。现取锁时计数 +1、
+    用完（含超时 / 异常 / 提前 return）计数 -1；归零且锁未被持有即从映射驱逐。
+    计数保证「别的协程已从映射拿到 lock 对象、正要 acquire」时绝不驱逐。
+    """
+    loop = asyncio.get_running_loop()
+    key = (id(loop), str(project_id or ""))
+    with _LOCKS_GUARD:
+        remaining = _LOCKS_WAITERS.get(key, 0) - 1
+        if remaining > 0:
+            _LOCKS_WAITERS[key] = remaining
+            return
+        _LOCKS_WAITERS.pop(key, None)
+        lock = _LOCKS.get(key)
+        if lock is not None and not lock.locked():
+            _LOCKS.pop(key, None)
+
+
+def _evict_idle_locks_locked() -> int:
+    """清理「未被持有且无等待者」的锁条目，返回驱逐数。
+
+    调用方必须已持有 :data:`_LOCKS_GUARD`。规模超 :data:`_LOCKS_MAX` 时触发一次，
+    纯防御：正常路径下 ``_release_lock_ref`` 已逐条驱逐，这里只兜住「取了锁却
+    从未走到 release」（如进程内 guard 等待超时的降级分支遗留）的沉淀。
+    """
+    if len(_LOCKS) <= _LOCKS_MAX:
+        return 0
+    evicted = 0
+    for key in [k for k, lk in _LOCKS.items() if not lk.locked() and _LOCKS_WAITERS.get(k, 0) <= 0]:
+        _LOCKS.pop(key, None)
+        _LOCKS_WAITERS.pop(key, None)
+        evicted += 1
+    return evicted
 
 
 def _now() -> str:
@@ -115,16 +161,20 @@ async def acquire_project_facts_write(db, project_id: str, *, holder: str = "") 
     pid = str(project_id or "")
     if not pid:
         return ""
+    with _LOCKS_GUARD:
+        _evict_idle_locks_locked()
     lock = _lock_for(pid)
     try:
         await asyncio.wait_for(lock.acquire(), timeout=LOCK_WAIT_SECONDS)
     except asyncio.TimeoutError as e:
+        _release_lock_ref(pid)
         raise FactsWriteConflict(pid, holder, "lock_wait_timeout") from e
     token = uuid.uuid4().hex
     try:
         await _acquire_lease(db, pid, token, holder)
     except Exception:
         lock.release()
+        _release_lock_ref(pid)
         raise
     return token
 
@@ -137,12 +187,17 @@ async def release_project_facts_write(db, project_id: str, token: str) -> None:
     if token:
         await _release_lease(db, pid, token)
     lock = _lock_for(pid)
-    if lock.locked():
-        try:
-            lock.release()
-        except RuntimeError:
-            # 锁不属于当前任务或已释放 —— 不影响业务结果
-            pass
+    try:
+        if lock.locked():
+            try:
+                lock.release()
+            except RuntimeError:
+                # 锁不属于当前任务或已释放 —— 不影响业务结果
+                pass
+    finally:
+        _release_lock_ref(pid)
+        with _LOCKS_GUARD:
+            _evict_idle_locks_locked()
 
 
 @asynccontextmanager
@@ -177,6 +232,8 @@ async def project_facts_inproc_guard(project_id: str, *, holder: str = "") -> As
     if not pid:
         yield True
         return
+    with _LOCKS_GUARD:
+        _evict_idle_locks_locked()
     lock = _lock_for(pid)
     acquired = False
     try:
@@ -191,5 +248,10 @@ async def project_facts_inproc_guard(project_id: str, *, holder: str = "") -> As
     try:
         yield acquired
     finally:
-        if acquired and lock.locked():
-            lock.release()
+        try:
+            if acquired and lock.locked():
+                lock.release()
+        finally:
+            _release_lock_ref(pid)
+            with _LOCKS_GUARD:
+                _evict_idle_locks_locked()

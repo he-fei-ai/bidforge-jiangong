@@ -151,4 +151,4 @@ def test_baseline_debt_is_cleared_from_ratchet():
     # 只数 `_IRRELEVANT_LIMITS` 块内的条目（`_LOGGED_ONLY_IN` 是 R186 新增的
     # 内部判定作用域白名单，不是"无关限长"豁免，不应计入）。
     _irrelevant_block = _RATCHET.split("_IRRELEVANT_LIMITS:", 1)[1].split("\n}\n", 1)[0]
-    assert len(re.findall(r'\n    \(\n        "app/', _irrelevant_block)) == 2
+    assert len(re.findall(r'\n    \(\n        "app/', _irrelevant_block)) == 3

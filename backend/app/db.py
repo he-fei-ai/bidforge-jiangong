@@ -1131,6 +1131,10 @@ async def _migrate(conn: aiosqlite.Connection):
         #     历史行空串 = 从未手动重试；读侧/退避判定完全不看该列，
         #     旧库补列后行为与升级前完全一致（零迁移、零语义变化）。
         ("facts_chunk_failures", "last_manual_retry_at", "TEXT DEFAULT ''"),
+        # ✅ R227（D2 · 2026-11-13 · 产品裁决「标记 stale 保留账本留痕」）：
+        #    章节被删除后，指向该章节的缺陷账本行保留、置 stale=1（显示层标
+        #    「章节已删除」）。历史行默认 0 = 未失效（零迁移、零语义变化）。
+        ("scheme_defects", "stale", "INTEGER DEFAULT 0"),
     ]
     for table, column, definition in migrations:
         try:

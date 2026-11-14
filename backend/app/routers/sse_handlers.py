@@ -1840,6 +1840,10 @@ async def generate_outline(scheme_id: str, request: Request, db=Depends(get_db))
                             _l3_res["after"]["l3_total"],
                             _l3_res["after"]["max_depth"],
                         )
+                    # ✅ R231（2026-11-13 · P3）：converge 只减不增节点，其后不重算
+                    #    _prog["nodes"] ⇒ oneshot 终态 stats 快照节点数偏大（同分步）。
+                    if _l3_res.get("folded") or _l3_res.get("merged"):
+                        _prog["nodes"] = _count_nodes(outline)
                     # ✅ 生成后自动校验（要求三/四）：连续性 + 全面性 + 冗余，
                     #    结果进日志与 review 载荷，前端"审核结论"可见。
                     _attach_quality_report(outline, basis, review_obj)
@@ -1910,6 +1914,10 @@ async def generate_outline(scheme_id: str, request: Request, db=Depends(get_db))
                     _short_ckpt_ok = True
                     try:
                         await _save_outline_checkpoint(task_id, _short_payload)
+                        # ✅ R231（2026-11-13 · P2-1）：completed 成果已落库标记 ——
+                        #    迟到取消/断线兜底的 partial 写（R226 守卫 + 写层
+                        #    skip_terminal + 本标记三层）不得覆盖。
+                        _partial_holder["terminal_ckpt"] = True
                     except Exception:
                         _short_ckpt_ok = False
                         logger.warning(
@@ -2243,6 +2251,17 @@ async def generate_outline(scheme_id: str, request: Request, db=Depends(get_db))
                             #    全量重算悄悄纠正。现预填充完成即重算，账实同步。
                             _prog["nodes"] = _count_nodes(level1)
                 except Exception:  # noqa: BLE001 - 续跑失败回退全量生成
+                    # ✅ R231（2026-11-13 · P3 · 防御性）：预填充中途异常时，已挂上
+                    #    复用子树的 level1 章不被还原——回退只重置了三个累加器，
+                    #    批循环视全部章为未续跑再次发 AI 调用并被
+                    #    _merge_unit_results 二次 append（deepcopy 已切断别名，
+                    #    残留 children 不会被去重）⇒ full_outline 重复章、编号
+                    #    按位置连续合法、validate_outline_numbering 不拦 ⇒
+                    #    静默交付重复章节。预填充阶段 level1 的 children 只可能
+                    #    来自复用挂载（AI 生成尚未开始），统一剥除即完整还原。
+                    for _n_prefill in level1:
+                        if isinstance(_n_prefill, dict) and isinstance(_n_prefill.get("children"), list):
+                            _n_prefill["children"] = []
                     _resumed_indices = set()
                     full_outline = []
                     prior_l2 = []
@@ -2613,7 +2632,11 @@ async def generate_outline(scheme_id: str, request: Request, db=Depends(get_db))
                         if _v5:
                             _fail_payload[_k5] = _v5
                     try:
-                        await _save_outline_checkpoint(task_id, _fail_payload)
+                        # ✅ R231（2026-11-13 · P2-1）：失败形态 checkpoint 同属
+                        #    「非 completed 成果」写——任务行若已进入终态（同
+                        #    task_id 不可能既 completed 又 failed，出现即竞态窗口）
+                        #    必须让位，不得覆盖已完成成果。
+                        await _save_outline_checkpoint(task_id, _fail_payload, skip_terminal=True)
                     except Exception:
                         logger.warning(
                             "检查点写入失败（task=%s · 目录生成 · 全章失败时的部分成果）", task_id, exc_info=True
@@ -2699,6 +2722,12 @@ async def generate_outline(scheme_id: str, request: Request, db=Depends(get_db))
                                 _l3_res["after"]["l3_total"],
                                 _l3_res["after"]["max_depth"],
                             )
+                        # ✅ R231（2026-11-13 · P3）：converge 只减不增节点，其后
+                        #    不重算 _prog["nodes"] ⇒ completed/degraded 终态的
+                        #    stats 快照节点数系统性偏大（前端「已生成节点数」与
+                        #    实际树不符）。converge 实际生效时重算一次。
+                        if _l3_res.get("folded") or _l3_res.get("merged"):
+                            _prog["nodes"] = _count_nodes(full_outline)
                     if full_outline and isinstance(review_obj, dict):
                         _attach_quality_report(full_outline, basis, review_obj)
                     # ✅ R223（2026-11-12 · P2 · SSE-1）：审核/修复成果回写 _partial_holder。
@@ -2774,24 +2803,41 @@ async def generate_outline(scheme_id: str, request: Request, db=Depends(get_db))
                 # ✅ R179 N1（2026-11-05）：自动确认硬前置判定 —— 纯函数，只回传
                 #    `auto_confirm{ready, blockers}`（加法式键，旧客户端忽略）。
                 #    是否真正启动 8 秒倒计时由前端治理开关决定；M1 undetermined 不阻塞。
-                try:
-                    from app.services.outline_auto_confirm import evaluate as _evaluate_auto
-                    from app.services.outline_auto_confirm import scheme_has_content as _has_content
+                # ✅ R231（2026-11-13 · P1-1）：stopped 出口**不再喂 evaluate** ——
+                #    evaluate 的硬前置只覆盖「完整目录的质量缺陷」，「未生成的章
+                #    根本不在树里」不构成 blocker：干净的部分树（无占位、编号
+                #    合法、failed_chapters 空、审核报告缺省为空 dict 连
+                #    review_skipped 都不触发）可判 ready=True，经刷新接管 /
+                #    未知态接管两条不分 status 的前端路径 8 秒倒计时**自动保存
+                #    半份目录**（用户停止意图被自动保存覆盖）。改用显式
+                #    partial_outline_block（fail-closed），与显式停止出口
+                #    _finish_stopped_with_partial（不带 auto_confirm）收敛为
+                #    「部分成果永不自动确认」单一语义；对照同出口 degraded：
+                #    失败章必产生空壳父章/failed_sections blocker，evaluate
+                #    天然拦得住，维持原判定。
+                if stopped:
+                    from app.services.outline_auto_confirm import partial_outline_block as _partial_block
 
-                    payload["auto_confirm"] = _evaluate_auto(
-                        full_outline,
-                        review_obj if isinstance(review_obj, dict) else {},
-                        failed_chapters,
-                        has_content=await _has_content(db, scheme_id),
-                    )
-                except Exception as _e:
-                    logger.warning("N1 自动确认判定失败（回落人工确认）: %s", _e)
-                    # ✅ R208：与短方案出口同口径，显式回传 blocker 让前端
-                    #    describeAutoConfirmBlockers 给出可见原因，而非静默降级。
-                    payload["auto_confirm"] = {
-                        "ready": False,
-                        "blockers": [{"code": "evaluate_failed", "message": "自动确认前置判定异常"}],
-                    }
+                    payload["auto_confirm"] = _partial_block()
+                else:
+                    try:
+                        from app.services.outline_auto_confirm import evaluate as _evaluate_auto
+                        from app.services.outline_auto_confirm import scheme_has_content as _has_content
+
+                        payload["auto_confirm"] = _evaluate_auto(
+                            full_outline,
+                            review_obj if isinstance(review_obj, dict) else {},
+                            failed_chapters,
+                            has_content=await _has_content(db, scheme_id),
+                        )
+                    except Exception as _e:
+                        logger.warning("N1 自动确认判定失败（回落人工确认）: %s", _e)
+                        # ✅ R208：与短方案出口同口径，显式回传 blocker 让前端
+                        #    describeAutoConfirmBlockers 给出可见原因，而非静默降级。
+                        payload["auto_confirm"] = {
+                            "ready": False,
+                            "blockers": [{"code": "evaluate_failed", "message": "自动确认前置判定异常"}],
+                        }
 
                 # ✅ 成果可恢复 + 收尾顺序（2026-09-16 修复）：
                 #    先落 checkpoint → 再置终态 → 最后 yield 事件。
@@ -2824,6 +2870,10 @@ async def generate_outline(scheme_id: str, request: Request, db=Depends(get_db))
                     if _outline_fp:
                         _ckpt_payload["input_fingerprint"] = _outline_fp
                     await _save_outline_checkpoint(task_id, _ckpt_payload)
+                    # ✅ R231（2026-11-13 · P2-1）：completed 成果已落库标记 ——
+                    #    迟到取消/断线兜底的 partial 写（R226 守卫 + 写层
+                    #    skip_terminal + 本标记三层）不得覆盖。
+                    _partial_holder["terminal_ckpt"] = True
                 except Exception:
                     _ckpt_ok = False
                     logger.warning(
@@ -2891,7 +2941,11 @@ async def generate_outline(scheme_id: str, request: Request, db=Depends(get_db))
                         _v = _partial_holder.get(_k)
                         if _v:
                             _err_ckpt[_k] = _v
-                    await _save_outline_checkpoint(task_id, _err_ckpt)
+                    # ✅ R231（2026-11-13 · P2-1/疑点3）：异常终止 checkpoint 同属
+                    #    「非 completed 成果」写，任务行已终态时让位（completed
+                    #    成果落库后 finish_task 前的非取消异常窗口，error/partial
+                    #    不得覆盖完整成果）。
+                    await _save_outline_checkpoint(task_id, _err_ckpt, skip_terminal=True)
                 except Exception:
                     logger.warning("检查点写入失败（task=%s · 目录生成 · 异常终止的部分成果）", task_id, exc_info=True)
             await finish_task(task_id, "failed", str(e))
@@ -2921,6 +2975,10 @@ async def generate_outline(scheme_id: str, request: Request, db=Depends(get_db))
                         resumed_chapters=int(_partial_holder.get("resumed_chapters") or 0),
                         level1_truncated=int(_partial_holder.get("level1_truncated") or 0),
                         level1_total=int(_partial_holder.get("level1_total") or 0),
+                        # ✅ R231（2026-11-13 · P2-1）：completed 成果已落库时
+                        #    兜底 partial 不得覆盖（holder 标记，见分步/短方案
+                        #    completed 写成功处）。
+                        terminal_ckpt_marked=bool(_partial_holder.get("terminal_ckpt")),
                     )
                 except asyncio.CancelledError:
                     # 任务被取消时该 await 也可能被取消 —— 必须让位给下面的
@@ -6375,6 +6433,11 @@ async def generate_content(scheme_id: str, request: Request, db=Depends(get_db))
                             "chart_count": int(_std_rep.get("chart_count") or 0),
                             "charts_dropped_count": int(_std_rep.get("charts_dropped_count") or 0),
                             "charts_dropped": _std_rep.get("charts_dropped") or [],
+                            # ✅ R228（2026-11-12）· 语义交叉校验观测随 section_done 实时下发：
+                            #    与 charts_dropped 同姿态（同名同值 _std_rep，断线重挂后一致）。
+                            #    前端可即时发现「AI 选型 ≠ 附近正文语义」的配图质量线索。
+                            "charts_semantic_notes_count": int(_std_rep.get("charts_semantic_notes_count") or 0),
+                            "charts_semantic_notes": _std_rep.get("charts_semantic_notes") or [],
                             # F-CONTENT-STANDARD(2026-09-26 · B2): 本章生效标准 + 完整校验报告
                             # （含 issues 明细供前端 Popover 展示；扁平计数保留便于告警 Tag）
                             "generation_standard": _eff_std or "",

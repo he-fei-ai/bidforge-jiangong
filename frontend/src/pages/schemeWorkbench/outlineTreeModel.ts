@@ -669,12 +669,18 @@ export type PartialOutlineHint = {
   cancelText: string;
   /** 弹窗视觉基调：warning = 异常中断，info = 用户主动停止 */
   tone: "warning" | "info";
+  /** ✅ R227（F5）：保存可能删除已有正文（hasContent）或异常中断 → okButton danger。
+   *  加法式（缺省 false）：既有消费分支不传 hasContent 时行为不变。 */
+  danger?: boolean;
 };
 
 export function buildPartialOutlineHint(opts: {
   event?: string;
   partial?: boolean;
   nodeCount?: number;
+  /** ✅ R227（F5）：方案已有正文（保存部分成果会按新目录重建，可能删正文）。
+   *  纯函数统一生成警告变体（content/okText/danger），消除消费分支手拼文案漂移。 */
+  hasContent?: boolean;
 }): PartialOutlineHint {
   const isErr = opts.event === "error" || opts.event === "failed";
   const n = Math.max(0, Number(opts.nodeCount) || 0);
@@ -682,12 +688,17 @@ export function buildPartialOutlineHint(opts: {
   const cause = isErr
     ? "本次生成因 AI 服务异常中断，成果可能不完整：建议先按需补齐缺失章节，再考虑重试整章。"
     : "本次生成由用户主动停止或连接中断，已生成部分结果可直接使用：按需补齐后保存即可。";
+  const hasContent = opts.hasContent === true;
+  const content = hasContent
+    ? `${prefix}${cause} 保存会按新目录重建章节结构，当前已有正文可能因章节无法匹配而被删除，且不可恢复。`
+    : `${prefix}${cause}`;
   return {
     title: isErr ? "目录生成中断，但有部分成果" : "目录生成已停止，但有部分成果",
-    content: `${prefix}${cause}`,
-    okText: "保存已生成部分",
+    content,
+    okText: hasContent ? "仍要保存（可能删除正文）" : "保存已生成部分",
     cancelText: "不保存",
     tone: isErr ? "warning" : "info",
+    danger: hasContent,
   };
 }
 

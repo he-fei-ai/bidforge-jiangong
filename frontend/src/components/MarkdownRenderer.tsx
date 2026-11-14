@@ -8,6 +8,7 @@ import { CHART_TITLE_FALLBACK, RENDERABLE_CHART_TYPES } from "../utils/chartType
 // ✅ R76（2026-10-13）：围栏判据唯一事实源（前端侧），与后端
 //   services/fence_common.py 同一语义。行锚定 + 同种字符 + 信息串必须为空 + 长度容错。
 import {
+  normalizeChartFenceShapes,
   normalizeFenceCloses,
   replaceChartFences,
   scanFenceBlocks,
@@ -67,6 +68,22 @@ function _svgCacheSet(code: string, svg: string) {
     _svgCache.delete(oldest);
   }
   _svgCacheBytes = Math.max(0, _svgCacheBytes);
+}
+
+/**
+ * ✅ R233（2026-11-13 · 属性上下文注入修复）：HTML **属性值**转义。
+ * DOMPurify.sanitize 面向「标签内容」位置（文本节点序列化不转义 `"`），
+ * 直接拼进 `alt="${...}"` 时，载荷 title 含 `图1" onload="alert(1)` 形态
+ * 即闭合引号逃逸出真实的事件属性（chart-json 的 title 来自 AI 产出/用户
+ * 手贴正文，属不受控输入）。凡拼入属性上下文的动态值必须经本函数；
+ * 标签间内容位置仍用 DOMPurify.sanitize（剥标签后安全）。
+ */
+function escapeHtmlAttr(v: string): string {
+  return String(v)
+    .replace(/&/g, "&amp;")
+    .replace(/"/g, "&quot;")
+    .replace(/</g, "&lt;")
+    .replace(/>/g, "&gt;");
 }
 
 interface Placeholder {
@@ -134,7 +151,16 @@ function MarkdownRenderer({ content, sectionId, onContentReplaced }: MarkdownRen
     //        ````mermaid 与 ~~~mermaid 在预览里整块不识别、源码直接印在页面上，
     //        而后端登记/导出都认 —— 预览与导出反向分叉）；
     //      · 「4 开 + 3 闭」的闭合行标记补齐到开围栏长度（与落库防线同一个动作）。
-    const _norm = normalizeFenceCloses(debouncedContent);
+    // ✅ R230（F1 · R220b §七-1 承接）：畸形图表围栏形态归一（与后端
+    //    normalize_chart_fence_shapes 同语义）—— 图题假表格包裹 / 文档围栏
+    //    包裹正文+内嵌图表。后端已在导出侧修复（R220），预览侧不同步则
+    //    「导出正常出图、预览显示源码」反向分叉。置于 normalizeFenceCloses
+    //    之前：先解包成正常围栏形态，后续补齐/占位替换才能看到这些块。
+    const _shape = normalizeChartFenceShapes(debouncedContent);
+    if (_shape.unwrapped > 0) {
+      console.warn("MarkdownRenderer: 畸形图表围栏归一 %d 处", _shape.unwrapped);
+    }
+    const _norm = normalizeFenceCloses(_shape.text);
     if (_norm.repairs.length > 0) {
       console.warn(
         "MarkdownRenderer: 围栏预处理归一 %d 处：%s",
@@ -377,7 +403,10 @@ function MarkdownRenderer({ content, sectionId, onContentReplaced }: MarkdownRen
         }
 
         // ✅ P1-6：全部 mermaid 块命中 SVG 缓存时，无需加载渲染引擎
-        const chartPhs = parsed.placeholders.filter((p) => !p.json && !p.math);
+        // ✅ R233：排除 ai_image 占位 —— 其 code 是 JSON 串、永不命中 _svgCache，
+        //    只含 ai_image 块的正文也会因此白白动态加载整个 mermaid 库
+        //    （主循环本就 `if (ph.aiImage) continue` 跳过它们）。
+        const chartPhs = parsed.placeholders.filter((p) => !p.json && !p.math && !p.aiImage);
         const needEngine = chartPhs.length > 0 && chartPhs.some((p) => !_svgCache.has(p.code));
         const mermaid = needEngine ? await ensureMermaid() : null;
         if (needEngine && (cancelled || !ref.current)) return;
@@ -415,7 +444,9 @@ function MarkdownRenderer({ content, sectionId, onContentReplaced }: MarkdownRen
                 const blob = new Blob([resp.data], { type: "image/png" });
                 const url = URL.createObjectURL(blob);
                 objectUrls.push(url);
-                div.innerHTML = `<img src="${url}" alt="${DOMPurify.sanitize(ph.json!.title)}" style="max-width:100%" />`;
+                // ✅ R233：alt 是**属性上下文**，DOMPurify（标签内容闸）不转义引号，
+                //    title 含 `图1" onload="…` 可逃逸出事件属性 —— 改用属性转义。
+                div.innerHTML = `<img src="${url}" alt="${escapeHtmlAttr(ph.json!.title)}" style="max-width:100%" />`;
                 div.classList.remove("mmd-ph");
                 div.classList.add("mmd-rendered");
               } catch {
@@ -450,7 +481,12 @@ function MarkdownRenderer({ content, sectionId, onContentReplaced }: MarkdownRen
               // ✅ 命中即刷新 LRU 位置（热点图表不被误淘汰）
               let svg = _svgCacheGet(ph.code) || "";
               if (!svg) {
-                if (!mermaid) return;
+                // ✅ R233：缓存 miss 且 needEngine=false（同屏其他实例在 effect 计算
+                //    与渲染之间淘汰了该条目，窄窗口竞态）时，旧实现 `return` 直接退出
+                //    整个 worker 循环 —— 后续所有 job 不再处理，该块与后续块全部
+                //    静默留白（违反「失败必有占位」纪律）。改为按当前 job 抛错走
+                //    既有错误占位通道（代码 + AI 修复按钮），其余 job 照常继续。
+                if (!mermaid) throw new Error("图表渲染引擎未就绪（SVG 缓存已被淘汰），请稍后重试");
                 const { svg: _svg } = await mermaid.render(ph.id, ph.code);
                 if (cancelled) return;
                 svg = _svg;

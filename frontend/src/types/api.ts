@@ -97,6 +97,21 @@ export interface OutlineSavePayload {
   snapshot_before?: string;
 }
 
+/** ✅ 阶段 2 旁路：POST /schemes/{id}/sections/generate-outline-omp 请求体（全部可选）。
+ *  brief 缺省由后端从方案名/类型/专业派生；project_type/industry 缺省也从方案取。 */
+export interface GenerateOutlineOmpPayload {
+  brief?: string;
+  project_type?: string;
+  industry?: string;
+  extra_instructions?: string;
+  allow_empty_chapters?: boolean;
+}
+
+/** ✅ 阶段 2：GET /system/feature-flags 响应（受控功能开关；后续加法式扩展） */
+export interface FeatureFlags {
+  omp_task_enabled: boolean;
+}
+
 /** POST /outline-library/{id}/review 请求体 */
 export interface OutlineReviewPayload {
   status: string;

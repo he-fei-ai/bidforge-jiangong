@@ -108,6 +108,12 @@ def test_chapter_fact_type_as_second_signal():
     assert fc.classify_chapter_from_text("某参数", "v", category="other", fact_type="material") == "technique"
 
 
+def test_scale_fact_type_classifies_overview():
+    """R245：scale fact_type 与 category 同源归位到第一章工程概况。"""
+    assert fc.FACT_TYPE_TO_CHAPTER["scale"] == "overview"
+    assert fc.classify_chapter_from_text("工程规模", "大型", category="scale", fact_type="scale") == "overview"
+
+
 def test_chapter_concrete_examples():
     cases = {
         "施工工艺流程": "technique",

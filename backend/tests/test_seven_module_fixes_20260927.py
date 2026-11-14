@@ -244,8 +244,10 @@ class TestReviewRecordOnPending:
         """from_status 必须取旧值，不能恒为 \"\"（否则审计链断裂）。"""
         src = inspect.getsource(sse_handlers.generate_content)
         i = src.find("_prior: dict = {}")
-        window = src[i : i + 2600]
+        window = src[i : i + 4000]
         assert "COALESCE(review_status,'')" in window, "必须先读旧状态再置位"
+        # ⚠️ 窗口放大到 4000：R224（F15）重写后 _mark_pending_once 内嵌
+        #    retry_db_op，从 _prior 标记到 _write_record 调用跨越超过 2600 字符。
         assert re.search(r'_old,\s*"pending"', window), "from_status 必须传真实旧状态"
 
     def test_review_module_exposes_writer(self):

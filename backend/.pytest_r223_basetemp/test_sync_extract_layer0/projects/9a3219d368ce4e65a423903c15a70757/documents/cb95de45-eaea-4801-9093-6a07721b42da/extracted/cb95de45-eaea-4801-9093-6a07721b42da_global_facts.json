@@ -1,0 +1,17 @@
+{
+  "doc_id": "cb95de45-eaea-4801-9093-6a07721b42da",
+  "extract_time": "2026-11-13T16:01:24Z",
+  "extract_schema_version": "extract-v1",
+  "global_facts": [
+    {
+      "group_id": "project_team",
+      "title": "项目角色变量",
+      "content": "- **项目经理**: 张伟",
+      "confidence": 0.9,
+      "is_simulated": false,
+      "is_resolved": true,
+      "has_conflict": false,
+      "source": "[{\"file\": \"\\u8bbe\\u8ba1\\u8bf4\\u660e.txt\", \"quote\": \"page:8#para:3\"}]"
+    }
+  ]
+}

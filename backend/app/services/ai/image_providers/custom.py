@@ -92,6 +92,6 @@ class CustomAdapter(ImageProviderAdapter):
                     if resp.status == 200:
                         data = await resp.json()
                         return [m.get("id") for m in (data.get("data") or []) if m.get("id")]
-        except Exception:
+        except Exception:  # noqa: BLE001 - 网络/模型列表失败被有意吞掉，回退默认模型
             pass
         return [self.default_model] if self.default_model else []

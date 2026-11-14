@@ -1,0 +1,28 @@
+{
+  "doc_id": "bf96cfb8-9617-40ac-a7a2-f63e138bdddc",
+  "embedding_model": "",
+  "dimension": 0,
+  "chunk_count": 2,
+  "status": "index_ready",
+  "generated_at": "2026-11-14T05:17:42Z",
+  "chunks": [
+    {
+      "chunk_id": "bf96cfb8-9617-40ac-a7a2-f63e138bdddc_c0001",
+      "page_num": 1,
+      "source_ref": "bf96cfb8-9617-40ac-a7a2-f63e138bdddc#page:1#section:untitled",
+      "text_offset": 0,
+      "text_length": 91,
+      "embedding_offset": null,
+      "embedding_length": 0
+    },
+    {
+      "chunk_id": "bf96cfb8-9617-40ac-a7a2-f63e138bdddc_c0002",
+      "page_num": 1,
+      "source_ref": "bf96cfb8-9617-40ac-a7a2-f63e138bdddc#page:1#table:t1",
+      "text_offset": 93,
+      "text_length": 39,
+      "embedding_offset": null,
+      "embedding_length": 0
+    }
+  ]
+}

@@ -160,7 +160,16 @@ export function ExportTab({
             onChange={(pid: string) => {
               setSelectedPresetId(pid);
               const p = exportPresets.find((x) => x.id === pid);
-              if (p) exportForm.setFieldsValue(p.config);
+              // ✅ R241（2026-11-13）：预设切换 = **替换**语义 —— antd setFieldsValue
+              //    是合并语义，旧预设/手动遗留字段（page_header / scheme_forms /
+              //    cover_info 等）会残留，混出「A 的页眉 + B 的版式」缝合配置。
+              //    先 resetFields 回内置默认（initialValues），再整体套用预设配置；
+              //    预设未覆盖的键回到内置默认（预设是完整配置快照的语义）。
+              //    `|| {}` 与 useExportPresets 回填处同款防护（config_json 可空）。
+              if (p) {
+                exportForm.resetFields();
+                exportForm.setFieldsValue(p.config || {});
+              }
             }}
             options={exportPresets.map((p) => ({
               value: p.id,

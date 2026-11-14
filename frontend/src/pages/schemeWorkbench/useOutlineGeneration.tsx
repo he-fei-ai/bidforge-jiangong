@@ -189,22 +189,21 @@ export function useOutlineGeneration(deps: OutlineGenerationDeps) {
           if (evt.outline && Array.isArray(evt.outline) && evt.outline.length > 0) {
             const partialCount = countOutline(evt.outline);
             const hasContent = hasAnyContent(tree);
+            // ✅ R227（F5）：文案收口到 buildPartialOutlineHint（旧实现手拼，且
+            //    hasContent 警告变体/okText/danger 与已收口分支漂移）。传 evt.event
+            //    （"error"）→ isErr 判据自动命中。
+            const hint = buildPartialOutlineHint({
+              event: evt.event,
+              partial: evt.partial === true,
+              nodeCount: partialCount,
+              hasContent,
+            });
             modal.confirm({
-              title: "目录生成失败，但有部分成果",
-              okButtonProps: hasContent ? { danger: true } : undefined,
-              content: hasContent ? (
-                <div>
-                  已生成 {partialCount} 个章节节点尚未保存。
-                  <b style={{ color: "#cf1322" }}>
-                    保存会按新目录重建章节结构，当前已有正文可能因章节无法匹配而被删除
-                  </b>
-                  ，且不可恢复。确定保存吗？
-                </div>
-              ) : (
-                `已生成 ${partialCount} 个章节节点尚未保存到数据库。是否保存这部分已生成的目录？`
-              ),
-              okText: hasContent ? "仍要保存（可能删除正文）" : "保存已生成部分",
-              cancelText: "不保存",
+              title: hint.title,
+              okButtonProps: hint.danger ? { danger: true } : undefined,
+              content: hint.content,
+              okText: hint.okText,
+              cancelText: hint.cancelText,
               onOk: async () => {
                 try {
                   const { data } = await sectionsApi.saveOutline(id, {
@@ -348,22 +347,21 @@ export function useOutlineGeneration(deps: OutlineGenerationDeps) {
           if (evt.outline && Array.isArray(evt.outline) && evt.outline.length > 0) {
             const partialCount = countOutline(evt.outline);
             const hasContent = hasAnyContent(tree);
+            // ✅ R227（F5）：文案收口到 buildPartialOutlineHint（旧实现手拼「任务已停止」，
+            //    hasContent 警告变体/okText/danger 与已收口分支漂移）。传 evt.event
+            //    （"stopped"）→ isErr 判据自动命中（False → info 基调）。
+            const hint = buildPartialOutlineHint({
+              event: evt.event,
+              partial: evt.partial === true,
+              nodeCount: partialCount,
+              hasContent,
+            });
             modal.confirm({
-              title: "任务已停止",
-              okButtonProps: hasContent ? { danger: true } : undefined,
-              content: hasContent ? (
-                <div>
-                  已生成 {partialCount} 个章节的目录尚未保存。
-                  <b style={{ color: "#cf1322" }}>
-                    保存会按新目录重建章节结构，当前已有正文可能因章节无法匹配而被删除
-                  </b>
-                  ，且不可恢复。确定保存吗？
-                </div>
-              ) : (
-                `已生成 ${partialCount} 个章节的目录尚未保存到数据库。是否保存这部分已生成的目录？`
-              ),
-              okText: hasContent ? "仍要保存（可能删除正文）" : "保存已生成部分",
-              cancelText: "不保存",
+              title: hint.title,
+              okButtonProps: hint.danger ? { danger: true } : undefined,
+              content: hint.content,
+              okText: hint.okText,
+              cancelText: hint.cancelText,
               onOk: async () => {
                 try {
                   const { data } = await sectionsApi.saveOutline(id, {

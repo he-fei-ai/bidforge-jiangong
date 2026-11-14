@@ -103,7 +103,18 @@ async function svgToPng(svg: string, scale = 2.5, signal?: AbortSignal): Promise
   let h = parseAbsoluteLength(el.getAttribute("height"));
   if (!w || !h) {
     const vb = (el.getAttribute("viewBox") || "").split(/[\s,]+/).map(Number);
-    if (vb.length === 4 && vb.every((n) => !Number.isNaN(n) && n > 0)) {
+    // ✅ R233（2026-11-13 · letterbox 静默失真修复）：旧谓词 `every(n => n > 0)`
+    //    要求 viewBox **四个分量全部 > 0**，但 mermaid v11（setupGraphViewbox，
+    //    node_modules 实测 11.17.2）输出 `${svgBounds.x - padding} ${svgBounds.y - padding} W H`
+    //    —— minX/minY 被减去 padding 后通常为 0 或负值（如 "0 0 875 332"、
+    //    "-15 -15 905 362"），0 不满足 > 0，谓词恒假。而 useMaxWidth:true
+    //    （mermaidRuntime 配置）下 svg 无 height 属性、width="100%"，
+    //    parseAbsoluteLength 两路全 NaN → 必然进 viewBox 分支 → 恒走
+    //    1200×800 兜底：成稿 PNG 被 letterbox（宽扁甘特图上下大留白、竖高图
+    //    左右大留白），与预览「所见即所得」承诺失真，且完全静默。
+    //    修法：viewBox 语义 = "minX minY W H"，映射到图像视口的只需**宽高**
+    //    两个分量有效（minX/minY 决定内容在视口内的映射起点，允许 0/负值）。
+    if (vb.length === 4 && Number.isFinite(vb[2]) && vb[2] > 0 && Number.isFinite(vb[3]) && vb[3] > 0) {
       w = vb[2];
       h = vb[3];
     } else {
@@ -174,6 +185,20 @@ export async function renderChartsForExport(
   items: ExportChartItem[],
   onProgress?: (done: number, total: number) => void,
   signal?: AbortSignal,
+  /**
+   * ✅ R230（F8 · R175 BUG-4 残余收口）：可选统计出口 —— 单图渲染失败旧实现
+   *    `catch {}` 静默吞掉且不计任何数，「渲染 3/5」与设计跳过（JSON 载荷走
+   *    后端兜底）不可区分，坏图无任何告警。传入后累计 `failed`（设计跳过不
+   *    计入），调用方据此区分提示。缺省不传 = 旧行为逐字不变。
+   * ✅ R233：`skipped_json`（可选）= 设计跳过的 JSON 载荷数 —— 「渲染 X/Y」的
+   *    Y 含 JSON 载荷与重复码条目，去重后 X < Y 的差值若不拆分，用户会误读
+   *    为「Y-X 张失败」（提示口径失真）。
+   * ✅ R241：`dedup_skipped`（可选）= 同码去重跳过的条目数 —— R233 注释自认
+   *    Y 的两半缺口（JSON 载荷 + 重复码条目）但只修了 JSON 一半；多章共用
+   *    同图（exportResponse D1 明文合理场景）时「渲染 1/10」误读为 9 张失败。
+   *    调用方分母应剔除 skipped_json + dedup_skipped 两项。
+   */
+  stats?: { failed: number; skipped_json?: number; dedup_skipped?: number },
 ): Promise<ExportChartImage[]> {
   throwIfExportAborted(signal);
   // ✅ 优化（2026-09-30）：无图表时不加载 mermaid.js。旧实现即使 items 为空也会
@@ -193,9 +218,18 @@ export async function renderChartsForExport(
   const renderOne = async (it: ExportChartItem): Promise<void> => {
     throwIfExportAborted(signal);
     const code = (it.mermaid_code || "").trim();
-    if (!code || code.startsWith("{")) return; // JSON 数据载荷 → 后端 PIL 兜底
+    if (!code || code.startsWith("{")) {
+      // JSON 数据载荷 → 后端 PIL 兜底（设计跳过，计入 skipped_json 口径）
+      if (stats) stats.skipped_json = (stats.skipped_json || 0) + 1;
+      return;
+    }
     const cacheKey = `${it.chart_type}\u0000${code}`;
-    if (attempted.has(cacheKey)) return; // 同 key 已渲染（成功或失败），跳过
+    if (attempted.has(cacheKey)) {
+      // ✅ R241：同 key 已渲染（成功或失败）—— 跳过但**计数**（多章共用同图是
+      //    明文合理场景，分母不剔除会把去重缩水误读成渲染失败）。
+      if (stats) stats.dedup_skipped = (stats.dedup_skipped || 0) + 1;
+      return;
+    }
     attempted.add(cacheKey); // 同步段无 await，并发安全
     try {
       let png = pngCache.get(cacheKey) || "";
@@ -219,7 +253,10 @@ export async function renderChartsForExport(
       if (png) out.push({ chart_type: it.chart_type, mermaid_code: it.mermaid_code, png });
     } catch (e) {
       throwIfExportAborted(signal);
-      // 单图失败不阻塞导出
+      // 单图失败不阻塞导出；✅ R230（F8）：不再静默 —— console.warn 留痕 +
+      // failed 计数（设计跳过的 JSON 载荷不在此列，不含误导）。
+      console.warn("exportCharts: 单图渲染失败（交后端兜底渲染轨）:", e);
+      if (stats) stats.failed += 1;
     }
   };
 

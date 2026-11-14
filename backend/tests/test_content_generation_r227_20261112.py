@@ -200,9 +200,14 @@ class TestLegacyCloseoutR227b:
         raf = Path(__file__).resolve().parents[1] / "app" / "routers" / "review_autofix.py"
         src = raf.read_text(encoding="utf-8")
         assert "from app.services.content_utils import find_unclosed_fences" in src
-        assert "if find_unclosed_fences(_persist_content):" in src
+        # ✅ R243：守卫收窄为「仅当修复**新引入**未闭合围栏（修复前正文本就闭合）时跳过」，
+        #    预存未闭合围栏的定向部分修复（前缀式接受）照常落库。断言改为**细化后**的守卫，
+        #    保护面不变：仍必须位于正文 UPDATE 之前。
+        assert "if find_unclosed_fences(_persist_content) and not find_unclosed_fences(_before):" in src
         assert '"unclosed_fence"' in src
         # 守卫必须位于该函数正文 UPDATE 之前（跳过则不落库）
-        assert src.index("if find_unclosed_fences(_persist_content):") < src.index(
+        assert src.index(
+            "if find_unclosed_fences(_persist_content) and not find_unclosed_fences(_before):"
+        ) < src.index(
             '"UPDATE sections SET content=?, word_count=?, word_status=?,"'
         )

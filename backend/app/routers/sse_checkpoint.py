@@ -14,7 +14,7 @@ import logging
 import sqlite3
 from datetime import datetime
 
-from app.db import get_conn, get_read_conn, release_read_conn
+from app.db import get_conn, get_read_conn, release_read_conn, safe_rowcount
 from app.services.checkpoint_schema import (
     FACTS_CHECKPOINT_FIELDS as SCHEMA_FACTS_CHECKPOINT_FIELDS,
 )
@@ -87,13 +87,38 @@ async def _retry_db_locked(factory, max_retries: int = 3, base_delay: float = 0.
     )
 
 
-async def _write_task_checkpoint_db(task_id: str, kind: str, payload: dict) -> None:
+async def _write_task_checkpoint_db(
+    task_id: str, kind: str, payload: dict, *, skip_terminal: bool = False
+) -> None:
     """把 checkpoint 真正写入 task_registry.checkpoint_json。
 
     独立成函数是为了让 `_save_task_checkpoint` 能整体重试（单测可 monkeypatch
     本函数注入"首次 locked、次次成功"来验证重试链路）。
+
+    ✅ R231（2026-11-13 · P2-1）：``skip_terminal=True`` 的写（partial 成果专用）
+    带终态守卫——``AND status NOT IN ('completed','degraded')``，rowcount=0
+    即放弃。R226 DAT-6′ 守卫（读 DB 行状态后早退）与本次写之间隔着
+    ``finish_task`` 的 shield 内层落库（R177）：读时还是 running、写时
+    completed 已落库的窄竞态窗，partial UPDATE（无条件 WHERE）会覆盖
+    completed 成果。守卫下沉到写库层获得单语句原子性，彻底关窗。
     """
     conn = await get_conn()
+    if skip_terminal:
+        cur = await conn.execute(
+            "UPDATE task_registry SET checkpoint_json=?, updated_at=? "
+            "WHERE id=? AND status NOT IN ('completed','degraded')",
+            (json.dumps({"kind": kind, **(payload or {})}, ensure_ascii=False), datetime.now().isoformat(), task_id),
+        )
+        await conn.commit()
+        # ✅ R232（2026-11-13）：R13 判据单一出口——裸 ``.rowcount`` 回归归零，
+        #    改走 ``safe_rowcount``（cursor 为 None 时兜 0 并告警，语义同向：
+        #    None 也进「放弃写」分支，fail-closed 方向不变）。
+        if safe_rowcount(cur, what="partial checkpoint 终态守卫写入") == 0:
+            logger.info(
+                "迟到 partial checkpoint 被放弃（task=%s · kind=%s · 任务已进入终态，保留成果）",
+                task_id, kind,
+            )
+        return
     await conn.execute(
         "UPDATE task_registry SET checkpoint_json=?, updated_at=? WHERE id=?",
         (json.dumps({"kind": kind, **(payload or {})}, ensure_ascii=False), datetime.now().isoformat(), task_id),
@@ -101,7 +126,7 @@ async def _write_task_checkpoint_db(task_id: str, kind: str, payload: dict) -> N
     await conn.commit()
 
 
-async def _save_task_checkpoint(task_id: str, kind: str, payload: dict):
+async def _save_task_checkpoint(task_id: str, kind: str, payload: dict, *, skip_terminal: bool = False):
     """把任务终态成果写入 task_registry.checkpoint_json（kind 区分任务类型）。
 
     payload 统一带 `event` 字段（completed/stopped/error），便于前端判断来源。
@@ -113,19 +138,22 @@ async def _save_task_checkpoint(task_id: str, kind: str, payload: dict):
     ✅ 通过 sse_handlers 命名空间调用 _write_task_checkpoint_db（延迟 import 避免
     循环依赖），这样测试 monkeypatch ``sse_handlers._write_task_checkpoint_db``
     时本函数会拿到 mock 版本，保持与拆分前的测试兼容。
+    ⚠️ skip_terminal 仅在 True 时透传（False 不带形参）——3 参 mock
+    （test_content_deep_audit 的 flaky 注入）保持逐字兼容。
     """
     from app.routers import sse_handlers  # 延迟 import：避免循环依赖
 
+    _extra = {"skip_terminal": True} if skip_terminal else {}
     await _retry_db_locked(
-        lambda: sse_handlers._write_task_checkpoint_db(task_id, kind, payload),
+        lambda: sse_handlers._write_task_checkpoint_db(task_id, kind, payload, **_extra),
         max_retries=CHECKPOINT_WRITE_RETRIES,
         base_delay=CHECKPOINT_WRITE_BASE_DELAY,
     )
 
 
-async def _save_outline_checkpoint(task_id: str, payload: dict):
+async def _save_outline_checkpoint(task_id: str, payload: dict, *, skip_terminal: bool = False):
     """把目录生成终态成果（outline/review/failed_chapters）写入 checkpoint_json。"""
-    await _save_task_checkpoint(task_id, "outline_result", payload)
+    await _save_task_checkpoint(task_id, "outline_result", payload, skip_terminal=skip_terminal)
 
 
 async def _save_content_checkpoint(task_id: str, payload: dict):
@@ -204,6 +232,7 @@ async def _checkpoint_partial_outline(
     resumed_chapters: int = 0,
     level1_truncated: int = 0,
     level1_total: int = 0,
+    terminal_ckpt_marked: bool = False,
 ) -> bool:
     """落库「部分成果」checkpoint（客户端断开/用户停止时的兜底）。
 
@@ -216,6 +245,16 @@ async def _checkpoint_partial_outline(
     """
     outline = outline or []
     if not outline and not failed_chapters:
+        return False
+    # ✅ R231（2026-11-13 · P2-1）：completed checkpoint 已成功落库后（生成器在
+    #    holder 上打 terminal_ckpt 标记），迟到断线兜底不得用 partial 覆盖 ——
+    #    与下方写层 skip_terminal 守卫（DB 行状态）双层：标记覆盖「finish_task
+    #    尚未把终态提交」的窄窗，写层守卫覆盖其余全部窗口。
+    if terminal_ckpt_marked:
+        logger.info(
+            "断线兜底 partial checkpoint 被放弃（task=%s · completed 成果已落库，保留）",
+            task_id,
+        )
         return False
     payload = {"event": event, "task_id": task_id, "outline": outline}
     if input_fingerprint:
@@ -237,7 +276,7 @@ async def _checkpoint_partial_outline(
         payload["failed_chapters"] = list(failed_chapters)
         payload["failed_count"] = len(failed_chapters)
     try:
-        await _save_outline_checkpoint(task_id, payload)
+        await _save_outline_checkpoint(task_id, payload, skip_terminal=True)
         return True
     except Exception:
         logger.warning("检查点写入失败（task=%s · 目录生成 · 部分成果）", task_id, exc_info=True)
@@ -319,6 +358,18 @@ async def _load_resumable_outline_checkpoint(scheme_id: str, *, exclude_task_id:
             )
             continue
         if not isinstance(data, dict) or data.get("kind") != "outline_result":
+            continue
+        # ✅ R231（2026-11-13 · 疑点2 防御）：status=stopped 行 + event=completed/
+        #    degraded 完整成果 = 「停止指令直写 DB 终态后生成器仍以 completed
+        #    收尾」的三方矛盾组合（P2-2 窗口产物）。completed/degraded 不参与
+        #    续跑是 R209 明文意图（「跑完后重新生成」必须全量重算）——该组合行
+        #    按事件语义跳过，防止下次生成零 AI 调用静默复用完整旧目录。
+        if data.get("event") in ("completed", "degraded"):
+            logger.info(
+                "续跑取数跳过完整成果行（task 行 status=stopped 但 checkpoint event=%s，"
+                "按 R209 语义全量重算）",
+                data.get("event"),
+            )
             continue
         outline = data.get("outline")
         if not isinstance(outline, list) or not outline:

@@ -1,4 +1,4 @@
-import { useCallback, useEffect, useMemo, useState } from "react";
+import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import type { CSSProperties } from "react";
 import {
   App,
@@ -265,7 +265,14 @@ export default function OutlineLibraryPage() {
   const [historyData, setHistoryData] = useState<OutlineLibraryItem | null>(null);
   const [historyLoading, setHistoryLoading] = useState(false);
 
+  // ✅ R227（F11 · 2026-11-13 · 目录库 UI 族）：列表请求无序守卫。
+  //    旧实现无 seq 校验：快速改筛选/翻页/关键词时，先发的慢请求后至会覆盖
+  //    新结果（列表短暂显示旧筛选的数据）。seq 单调递增，响应时非最新即丢弃
+  //    （与 ProjectDetailPage loadSeqRef 同型）。
+  const loadSeqRef = useRef(0);
+
   const load = useCallback(async () => {
+    const seq = ++loadSeqRef.current;
     setLoading(true);
     try {
       const params: Record<string, string> = { sort_by: sortBy, order: "desc" };
@@ -278,13 +285,16 @@ export default function OutlineLibraryPage() {
       params.page = String(page);
       params.page_size = String(pageSize);
       const { data } = await outlineLibraryApi.list(params);
+      if (seq !== loadSeqRef.current) return; // 已有更新的请求发出，丢弃旧响应
       setItems(data.items || []);
       setTotal(data.total || 0);
     } catch (e: unknown) {
+      if (seq !== loadSeqRef.current) return;
       const err = e as { message?: string };
       msg.error(err.message || "加载失败");
+    } finally {
+      if (seq === loadSeqRef.current) setLoading(false);
     }
-    setLoading(false);
   }, [keyword, fType, fEng, fProf, fStatus, fSource, sortBy, page, pageSize]);
 
   const loadMeta = useCallback(async () => {
@@ -421,23 +431,37 @@ export default function OutlineLibraryPage() {
   const previewOutline = useMemo(() => parseOutline(previewData?.outline_json), [previewData]);
 
   // ---------------- 版本历史 ----------------
+  // ✅ R227（F11 · 2026-11-13 · 目录库 UI 族）：版本历史详情请求无序守卫
+  //    （快速切换不同目录库记录时，旧响应后至覆盖新记录的历史数据）。
+  const historySeqRef = useRef(0);
   const openHistory = async (record: OutlineLibraryItem) => {
+    const seq = ++historySeqRef.current;
     setHistoryOpen(true);
     setHistoryLoading(true);
     setHistoryData(null);
     try {
       const { data } = await outlineLibraryApi.get(record.id);
+      if (seq !== historySeqRef.current) return;
       setHistoryData(data);
     } catch (e: unknown) {
+      if (seq !== historySeqRef.current) return;
       const err = e as { message?: string };
       msg.error(err.message || "读取版本历史失败");
     } finally {
-      setHistoryLoading(false);
+      if (seq === historySeqRef.current) setHistoryLoading(false);
     }
   };
 
+  // ✅ R227（F12 · 2026-11-13 · 目录库 UI 族）：版本回滚确认弹窗防双击。
+  //    旧实现双击「回滚」按钮弹两个 modal.confirm，用户快速确认两次 → 两次
+  //    restoreVersion → 每次回滚先归档当前版本，产生**双 undo 快照**。ref 锁
+  //    在**弹窗入口**置位（state 异步更新拦不住同帧双击），onOk finally /
+  //    onCancel 重置（与 useReviewAudit crRollbackInFlightRef 同型）。
+  const restoreConfirmOpenRef = useRef(false);
+
   const handleRestore = (versionId: string, version?: string | null) => {
-    if (!historyData) return;
+    if (!historyData || restoreConfirmOpenRef.current) return;
+    restoreConfirmOpenRef.current = true;
     modal.confirm({
       title: `确认回滚到 ${version}？`,
       content: "当前版本会先归档保存，回滚后该目录回到「待审核」状态。",
@@ -452,7 +476,12 @@ export default function OutlineLibraryPage() {
         } catch (e: unknown) {
           const err = e as { message?: string };
           msg.error(err.message || "回滚失败");
+        } finally {
+          restoreConfirmOpenRef.current = false;
         }
+      },
+      onCancel: () => {
+        restoreConfirmOpenRef.current = false;
       },
     });
   };

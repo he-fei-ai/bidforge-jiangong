@@ -1,0 +1,164 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+<meta charset="UTF-8">
+<style>
+  body {
+    margin: 0; padding: 30px 40px; background: #ffffff;
+    font-family: 'Microsoft YaHei', 'CJK', sans-serif;
+    font-smooth: always;
+    -webkit-font-smoothing: antialiased;
+  }
+  .flow-container {
+    position: relative;
+    width: 720px;
+    margin: 0 auto;
+  }
+
+  /* 顶部标题区 */
+  .header {
+    text-align: center;
+    margin-bottom: 20px;
+  }
+  .header .title {
+    font-size: 26px;
+    font-weight: bold;
+    color: #1f3a63;
+    letter-spacing: 2px;
+  }
+
+  /* 画布（基准 640×680） */
+  .flow-canvas {
+    position: relative;
+    width: 640px;
+    height: 680px;
+    margin: 0 auto;
+    background: #ffffff;
+  }
+
+  /* 节点块：黑边 + 3D 硬阴影（文档 §3.4.2：box-shadow:4px 4px 0 #a0a0a0） */
+  .flow-node {
+    position: absolute;
+    display: flex; align-items: center; justify-content: center;
+    border: 2px solid #000000;
+    box-shadow: 4px 4px 0 #a0a0a0;
+    color: #000000;
+    font-size: 14px;
+    font-weight: bold;
+    box-sizing: border-box;
+    z-index: 2;
+    padding: 0 8px;
+  }
+  /* type 枚举锁 → 纯色块映射（§3.4.2） */
+  .flow-node.t-primary { background: #00ffff; }  /* 核心生产/青色 */
+  .flow-node.t-warning { background: #fce4d6; }  /* 辅助准备/浅橙 */
+  .flow-node.t-success { background: #e2f0d9; }  /* 终点输出/浅绿 */
+
+  /* SVG 连线层（直角布线） */
+  svg.edges {
+    position: absolute; top: 0; left: 0;
+    width: 100%; height: 100%; z-index: 1;
+    pointer-events: none;
+  }
+  .edge {
+    fill: none; stroke: #444444; stroke-width: 1.8;
+  }
+</style>
+</head>
+<body>
+
+<div class="flow-container" id="chartArea">
+  <div class="header">
+    <div class="title" id="flowTitle">工艺流程图</div>
+  </div>
+  <div class="flow-canvas" id="flowCanvas">
+    <svg class="edges" id="svgCanvas"></svg>
+  </div>
+</div>
+
+<script>
+// 数据由后端注入：const data = {...};
+const data = {...};
+
+const canvas = document.getElementById('flowCanvas');
+const svg = document.getElementById('svgCanvas');
+
+// 标题
+if (data.title) {
+  document.getElementById('flowTitle').innerText = data.title;
+}
+
+const nodes = data.nodes || [];
+const links = data.links || [];
+
+// 节点尺寸：按标签长度自适应
+function nodeSize(label) {
+  const len = String(label || '').length;
+  const w = Math.max(len * 14 + 24, 90);
+  return { w, h: 44 };
+}
+
+// --- 1. 渲染节点 ---
+const nodeMap = {};
+nodes.forEach(n => {
+  const { w, h } = nodeSize(n.label);
+  const div = document.createElement('div');
+  div.className = `flow-node t-${n.type || 'primary'}`;
+  div.innerText = n.label;
+  div.style.left = `${n.x - w / 2}px`;
+  div.style.top = `${n.y - h / 2}px`;
+  div.style.width = `${w}px`;
+  div.style.height = `${h}px`;
+  canvas.appendChild(div);
+  nodeMap[n.id] = {
+    cx: n.x, cy: n.y,
+    left: n.x - w / 2, right: n.x + w / 2,
+    top: n.y - h / 2, bottom: n.y + h / 2,
+  };
+});
+
+// --- 2. 直角布线路径生成 ---
+// path 提示：h-v-h / v-h-v / h；缺省按节点相对位置自动求最短直角路径。
+function routePath(from, to, hint) {
+  const fx = from.cx, fy = from.cy, tx = to.cx, ty = to.cy;
+  const gap = 22;
+  if (hint === 'h') {
+    return `M ${fx + gap} ${fy} L ${tx - gap} ${ty}`;
+  }
+  if (hint === 'v-h-v') {
+    const midY = (fy + ty) / 2;
+    return `M ${fx} ${fy + gap} L ${fx} ${midY} L ${tx} ${midY} L ${tx} ${ty - gap}`;
+  }
+  if (hint === 'h-v-h') {
+    const midX = (fx + tx) / 2;
+    return `M ${fx + gap} ${fy} L ${midX} ${fy} L ${midX} ${ty} L ${tx - gap} ${ty}`;
+  }
+  // 自动：同一行 → 水平；否则按相对位置选最短直角
+  if (Math.abs(fy - ty) < 12) {
+    return `M ${fx + gap} ${fy} L ${tx - gap} ${ty}`;
+  }
+  const midX = (fx + tx) / 2;
+  return `M ${fx + gap} ${fy} L ${midX} ${fy} L ${midX} ${ty} L ${tx - gap} ${ty}`;
+}
+
+// --- 3. 渲染连线 ---
+let svgHtml = '';
+svgHtml += `
+  <defs>
+    <marker id="arrow" viewBox="0 0 10 10" refX="8" refY="5" markerWidth="6" markerHeight="6" orient="auto-start-reverse">
+      <path d="M 0 0 L 10 5 L 0 10 z" fill="#444444" />
+    </marker>
+  </defs>
+`;
+links.forEach(l => {
+  const f = nodeMap[l.from];
+  const t = nodeMap[l.to];
+  if (!f || !t) return;
+  const d = routePath(f, t, l.path);
+  svgHtml += `<path class="edge" d="${d}" marker-end="url(#arrow)" />`;
+});
+svg.innerHTML = svgHtml;
+</script>
+
+</body>
+</html>

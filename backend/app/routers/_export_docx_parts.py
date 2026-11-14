@@ -789,7 +789,7 @@ def _add_table_from_markup(doc, tbl_lines: list[str], font_name: str = "宋体")
             p.alignment = WD_ALIGN_PARAGRAPH.CENTER
             p.paragraph_format.first_line_indent = Pt(0)
             if cell_text:
-                # ✅ R226（B13）：单格 10 万字符截断出口 —— 旧实现只在普通段落与
+                # ✅ R230（B13）：单格 10 万字符截断出口 —— 旧实现只在普通段落与
                 #    引用行截断（R195 ⑥-2），AI 把整章灌进一个单元格时绕过上限，
                 #    构建/Word 解析承受超大节点。``_clamp_paragraph_text`` 为本模块
                 #    既有纯函数，直接复用。
@@ -1258,9 +1258,16 @@ def _set_margins(section, margins: dict) -> None:
 
     def _cm(key, default):
         try:
-            return Cm(float(margins.get(key, default)))
+            v = float(margins.get(key, default))
         except (TypeError, ValueError):
             return Cm(default)
+        # ✅ R241（2026-11-13）：负值/超大值钳制 —— 负页边距在 OOXML 里是合法 twips
+        #    但 Word/WPS 呈现未定义（可能重排版异常）；本模块对 font_size/line_spacing
+        #    均有值域钳制（_clamp_font_size 等），margins 是唯一只查类型不查值域的口。
+        #    正常边距 0~10cm，超出按同侧缺省回退（不静默改值）。
+        if not (0.0 <= v <= 10.0):
+            return Cm(default)
+        return Cm(v)
 
     section.left_margin = _cm("left", 2.5)
     section.right_margin = _cm("right", 2.5)
@@ -1569,12 +1576,14 @@ class _DocxBodyRollback:
     恒返回同一代理对象，故 ``is`` 比较可靠）。
     """
 
-    __slots__ = ("_body", "_seen")
+    __slots__ = ("_body", "_seen", "_doc_part")
 
     def __init__(self, doc):
         self._body = doc.element.body
         # 持有强引用：lxml 只在无引用时重建代理对象，持有后 ``is`` 比较才稳定
         self._seen = list(self._body)
+        # ✅ R231（B7）：rels 宿主 —— rollback 连带删除本次新增元素引用的图片关系
+        self._doc_part = doc.part
 
     def rollback(self) -> int:
         """删除本次调用新增的 body 子元素（跳过节属性 sectPr），返回删除数。"""
@@ -1589,6 +1598,20 @@ class _DocxBodyRollback:
                     continue  # 节属性是文档骨架，绝不可删
                 self._body.remove(el)
                 removed += 1
+                # ✅ R231（2026-11-12 · B7 · R175 T9 承接）：连带删除被删元素
+                #    引用的图片关系。python-docx 保存按 rels 图遍历序列化部件
+                #    （实测：删 rel 后 media part 不再写入产物），不删则每次
+                #    插入失败残留一个孤儿 PNG + 悬空 rel，产物体积随失败次数
+                #    膨胀，且与「返回 False ⇒ 未写入任何东西」的原子性契约
+                #    不完全等价。只删「本次新增元素」引用的 rel —— 既有图的
+                #    rel 不在遍历范围内，绝不受影响。
+                for _blip in el.iter(qn("a:blip")):
+                    _rid = _blip.get(qn("r:embed"))
+                    if _rid and _rid in self._doc_part.rels:
+                        try:
+                            del self._doc_part.rels[_rid]
+                        except Exception:  # pragma: no cover - 清理失败不掩盖原异常
+                            _sh.logger.warning("导出：回滚时清理图片关系失败（rId=%s）", _rid)
         except Exception as e:  # pragma: no cover - 回滚失败不应掩盖原异常
             _sh.logger.warning("导出：图片插入失败后回滚文档元素失败（可能有残留元素）: %s", e)
         return removed

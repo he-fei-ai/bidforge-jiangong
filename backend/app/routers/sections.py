@@ -7,7 +7,7 @@ import time
 import uuid
 from datetime import datetime
 
-from fastapi import APIRouter, Depends, HTTPException
+from fastapi import APIRouter, Depends, HTTPException, Query
 
 from app.config import settings
 from app.db import get_db, retry_db_op, safe_rowcount
@@ -851,7 +851,9 @@ async def create_section(scheme_id: str, data: SectionCreate, db=Depends(get_db)
 
 
 @router.patch("/{section_id}")
-async def update_section(scheme_id: str, section_id: str, data: SectionUpdate, db=Depends(get_db)):
+async def update_section(
+    scheme_id: str, section_id: str, data: SectionUpdate, db=Depends(get_db), force: bool = Query(False)
+):
     # ✅ BUG 修复（2026-09-23 · 守卫缺口）：目录生成运行中手工编辑章节会被
     #    AI 确认闸门的整表重建静默覆盖（丢失更新）。save-outline / apply-and-save
     #    已有 outline_generation_in_progress 守卫，唯独此路径漏接 —— 现补齐，
@@ -864,7 +866,7 @@ async def update_section(scheme_id: str, section_id: str, data: SectionUpdate, d
     #    自引用子标题行（AI 常写）在改名后不再命中当前标题排除名单，
     #    旧实现会让它从「不占号」翻转为占号 → 其后子标题编号整体错位一格，
     #    且该行被写上新编号（成稿出现「新编号+旧标题」）。
-    cur = await db.execute("SELECT id, title FROM sections WHERE id=? AND scheme_id=?", (section_id, scheme_id))
+    cur = await db.execute("SELECT id, title, locked FROM sections WHERE id=? AND scheme_id=?", (section_id, scheme_id))
     _existing = await cur.fetchone()
     if not _existing:
         raise HTTPException(404, "章节不存在")
@@ -900,6 +902,26 @@ async def update_section(scheme_id: str, section_id: str, data: SectionUpdate, d
             409,
             "本方案正文正在后台生成中，改名/移动章节会与生成结果互相覆盖（或破坏编号一致性），"
             "请等待生成完成后再操作",
+        )
+
+    # ✅ R227（D6 · 2026-11-13 · 产品裁决「只拦结构变更」）：一级章锁定
+    #    （lock_roots=true 置 locked=1）的执行点此前全仓零消费（仅写 :2012 + 回显
+    #    :2085）。现补：只拦结构变更（parent_id/level/sort_order），正文/标题/审核
+    #    编辑豁免（用户已确认一级结构，这些不属结构）。显式解锁（locked=0，`locked`
+    #    是 SectionUpdate 字段）与 force 逃生门放行。
+    if (
+        {"parent_id", "level", "sort_order"} & set(fields)
+        and not force
+        and int(_existing["locked"] or 0) == 1
+        and fields.get("locked") != 0
+    ):
+        logger.warning(
+            "update_section 409 锁定冲突：scheme_id=%s section=%s 已锁定一级章，禁止结构变更",
+            scheme_id, section_id,
+        )
+        raise HTTPException(
+            409,
+            "该一级章节已锁定（已确认一级结构）。如需调整层级/顺序，请先解锁该章节或使用 force 强制修改",
         )
 
     # ✅ BUG 修复（2026-09-22 · 双重编号）：改名 PATCH 必须剥离标题内嵌编号 ——
@@ -1305,7 +1327,9 @@ async def update_section(scheme_id: str, section_id: str, data: SectionUpdate, d
 
 
 @router.delete("/{section_id}")
-async def delete_section(scheme_id: str, section_id: str, db=Depends(get_db)):
+async def delete_section(
+    scheme_id: str, section_id: str, db=Depends(get_db), force: bool = Query(False)
+):
     # ✅ BUG 修复（2026-09-23 · 守卫缺口）：目录生成运行中删章与 AI 确认闸门
     #    的整表重建直接写写竞态（删了又被重建回来，或闸门落库时章节已消失）。
     #    补齐守卫，与 save-outline 同口径。
@@ -1320,9 +1344,23 @@ async def delete_section(scheme_id: str, section_id: str, db=Depends(get_db)):
         logger.warning("delete_section 409 冲突：scheme_id=%s 正文正在生成中", scheme_id)
         raise HTTPException(409, "本方案正文正在后台生成中，请等待生成完成（或先停止任务）后再删除章节")
     # ✅ 修复：校验章节归属该方案（防止跨方案删除）
-    cur = await db.execute("SELECT id FROM sections WHERE id=? AND scheme_id=?", (section_id, scheme_id))
-    if not await cur.fetchone():
+    cur = await db.execute("SELECT id, locked FROM sections WHERE id=? AND scheme_id=?", (section_id, scheme_id))
+    _del_row = await cur.fetchone()
+    if not _del_row:
         raise HTTPException(404, "章节不存在")
+    # ✅ R227（D6 · 产品裁决「只拦结构变更」）：锁定一级章禁止删除（属结构变更）。
+    #    正文/标题编辑不属此处；force 逃生门放行。内部生成链路（save-outline 整表
+    #    重建 / AI 确认闸门 / 快照回退）不走本端点，不受影响（该等链路重建结构时
+    #    会按 lock_roots 重新置锁，见 :2012）。
+    if not force and int(_del_row["locked"] or 0) == 1:
+        logger.warning(
+            "delete_section 409 锁定冲突：scheme_id=%s section=%s 已锁定一级章，禁止删除",
+            scheme_id, section_id,
+        )
+        raise HTTPException(
+            409,
+            "该一级章节已锁定（已确认一级结构）。如需删除请先解锁该章节或使用 force 强制删除",
+        )
     # 批量收集所有后代 ID 后一次性删除
     # ✅ BUG 修复（2026-10-03 · 环形脏数据 → 无限循环挂起）：旧实现的后代遍历
     #    `while pending` 没有 visited 去重 —— 库内若存在环形 parent_id 脏数据
@@ -1355,6 +1393,15 @@ async def delete_section(scheme_id: str, section_id: str, db=Depends(get_db)):
     await db.execute(f"DELETE FROM sections WHERE id IN ({placeholders}) AND scheme_id=?", all_ids + [scheme_id])
     # ✅ 修复：同步清理 chart_predictions 残留（否则导出 fallback 会挂上已删章节旧图）
     await db.execute(f"DELETE FROM chart_predictions WHERE section_id IN ({placeholders})", all_ids)
+    # ✅ R227（D2 · 产品裁决「标记 stale 保留账本留痕」）：指向已删章节（含后代）的
+    #    缺陷账本行保留、置 stale=1（显示层标「章节已删除」），不物理删除——缺陷的
+    #    before/after_text/suggestion 是 Phase C 账本留痕，删章不丢账。scheme 级缺陷
+    #    （section_id=''）不受影响。
+    await db.execute(
+        f"UPDATE scheme_defects SET stale=1, updated_at=datetime('now','localtime') "
+        f"WHERE section_id IN ({placeholders})",
+        all_ids,
+    )
     # ✅ BUG 修复（2026-09-22 · 删除后编号断号）：旧实现删除后不重排剩余章节的
     #    outline_json.id —— 删掉 "2" 后目录编号变成 1/3/4 断号，前端树与
     #    正文提示词「当前章节编号」错乱，后续新增/拖拽才被动纠正。
@@ -2113,6 +2160,323 @@ async def _save_outline_to_db(
     return result
 
 
+# ✅ 阶段 2 旁路：per-scheme in-flight 集合（同型 omp 目录生成防重入）。
+#    omp 是同步长任务且不注册到 task_registry，主链路的
+#    outline_generation_in_progress 感知不到它 —— 两个并发 omp 请求会各自
+#    _save_outline_to_db 整表重建 sections 相互覆盖。本集合只服务本端点，
+#    绝不反向改写主链路判据（不碰 sse_handlers）。单进程内有效；多 worker
+#    部署需换成分布式锁，见可行性报告 11.4 遗留登记。
+_OMP_OUTLINE_INFLIGHT: set[str] = set()
+
+
+@router.post("/generate-outline-omp")
+async def generate_outline_via_omp(scheme_id: str, body: dict, db=Depends(get_db)):
+    """阶段 2 旁路：用 omp 文件工作区 Agent 生成目录并整表写入 sections。
+
+    ⚠️ 这是**独立于 SSE 主链路**的旁路入口（不触碰 sse_handlers 硬化流程）：
+      - 仅当 ``settings.omp_task_enabled=True`` 时可用，否则 409 提示回退主链路；
+      - 复用与 save-outline 完全相同的整表重建机器 ``_save_outline_to_db``；
+      - 同样受 content / outline 生成互斥 409 守卫保护（避免与在跑主链路互踩）。
+
+    请求体（全部可选；缺 ``brief`` 时从方案名 / 类型 / 专业 / config_json 自动派生）：
+      - ``brief``：项目简报（缺省自动派生）；
+      - ``project_type`` / ``industry`` / ``extra_instructions``：补充约束（缺省从方案派生）；
+      - ``allow_empty_chapters``：是否允许「空壳一级章」（默认 False）。
+    """
+    import json
+
+    from app.config import settings
+    from app.services.ai.omp_engine_router import (
+        EngineChoice,
+        annotate_result,
+        parse_overrides,
+        resolve_engine,
+    )
+    from app.services.ai.omp_outline_bridge import generate_outline_tree
+
+    # ✅ R239（2026-11-13 · 用户裁决「omp 为主路径，其它为降级路径，可双轨」）：
+    #    撤销 R238 的 422 单轨闸门，恢复 auto/main 双轨。omp（缺省）为主路径，
+    #    逐字节保持既有显式闸门行为；main 档显式委托平台主链路（降级路径）。
+    engine = str(
+        (body or {}).get("engine") or getattr(settings, "omp_engine_default", "omp")
+    ).strip().lower()
+    if engine not in ("auto", "omp", "main"):
+        raise HTTPException(422, "engine 只能是 auto / omp / main")
+    if engine in ("auto", "main"):
+        choice = resolve_engine(
+            scheme_id=scheme_id,
+            task_type="outline",
+            prefer=engine,
+            overrides=parse_overrides(getattr(settings, "omp_engine_overrides", "")),
+            whitelist=getattr(settings, "omp_gray_scheme_ids", ""),
+        )
+        if choice.engine == "main":
+            return annotate_result(
+                {"ok": False, "delegate_to": "主目录生成链路（SSE generate-outline）"},
+                choice,
+            )
+
+    if not getattr(settings, "omp_task_enabled", False):
+        raise HTTPException(
+            409,
+            "OmpTaskAgent 未启用（settings.omp_task_enabled=False）；请使用主目录生成链路",
+        )
+    # ✅ 与 save-outline 同口径：整表重建会与在跑的正文 / 目录生成互踩。
+    if content_generation_in_progress(scheme_id):
+        raise HTTPException(
+            409, "本方案正文正在后台生成中，请等待生成完成（或先停止任务）后再保存目录——"
+            "整表重建会与生成结果互相覆盖"
+        )
+    if outline_generation_in_progress(scheme_id):
+        raise HTTPException(
+            409, "本方案目录正在后台生成中，请等待生成完成（或先停止任务）后再保存目录"
+        )
+
+    # ✅ 方案存在性 + brief 派生（缺省时从方案名 / 类型 / 专业 / config_json 抽取，
+    #    回应用户「把 brief 从方案名 / 项目画像派生」诉求）。
+    cur = await db.execute(
+        "SELECT name, type, profession, word_budget, config_json FROM schemes WHERE id=?",
+        (scheme_id,),
+    )
+    row = await cur.fetchone()
+    if row is None:
+        raise HTTPException(404, "方案不存在")
+
+    brief = (body.get("brief") or "").strip()
+    if not brief:
+        parts = [f"方案名称：{row['name'] or ''}"]
+        if row["type"]:
+            parts.append(f"类型：{row['type']}")
+        if row["profession"]:
+            parts.append(f"专业：{row['profession']}")
+        cfg: dict = {}
+        if row["config_json"]:
+            try:
+                _parsed = json.loads(row["config_json"])
+                # config_json 可能是合法 JSON 但非 dict（list / str / int），
+                # 直接 .get 会抛 AttributeError；非 dict 一律按空配置降级。
+                cfg = _parsed if isinstance(_parsed, dict) else {}
+            except (ValueError, TypeError):
+                cfg = {}
+        profile = cfg.get("project_profile") or cfg.get("industry") or cfg.get("project_type")
+        if profile:
+            parts.append(f"项目概况：{profile}")
+        if row["word_budget"]:
+            parts.append(f"目标总字数约 {row['word_budget']} 字")
+        brief = "；".join(parts)
+
+    # 安全上限，避免超长简报撑爆 omp 上下文 / 提示词预算
+    if len(brief) > 8000:
+        brief = brief[:8000]
+
+    # ✅ `db` 行是 aiosqlite.Row，只支持 row["col"] / row[0]，**没有 .get()**；
+    #    上方 SELECT 已显式列出两列，键恒存在。
+    project_type = (body.get("project_type") or row["type"] or "").strip()
+    industry = (body.get("industry") or row["profession"] or "").strip()
+    extra = (body.get("extra_instructions") or "").strip()
+    allow_empty_chapters = bool(body.get("allow_empty_chapters"))
+
+    # ✅ 同型防重入：覆盖耗时最长的「omp 多步生成 + 整表重建」段。
+    #    检查与 add 之间无 await（单事件循环内原子）；finally 保证任何异常 /
+    #    502 / 中断都释放标记，不会退化成僵尸任务那样永久 409。
+    if scheme_id in _OMP_OUTLINE_INFLIGHT:
+        logger.warning(
+            "generate-outline-omp 409 冲突：scheme_id=%s 已有 omp 目录生成任务在跑", scheme_id
+        )
+        raise HTTPException(409, "本方案已有 omp 目录生成任务在跑，请勿重复触发（请等待当前生成完成）")
+    _OMP_OUTLINE_INFLIGHT.add(scheme_id)
+    try:
+        tree = await generate_outline_tree(
+            brief=brief,
+            project_type=project_type,
+            industry=industry,
+            extra_instructions=extra,
+        )
+        if not tree:
+            raise HTTPException(502, "omp 未生成任何目录节点，请回退到主目录生成链路")
+        result = await _save_outline_to_db(
+            db,
+            scheme_id,
+            tree,
+            source="omp_task",
+            allow_empty_chapters=allow_empty_chapters,
+        )
+        return annotate_result(
+            result,
+            EngineChoice(engine="omp", degraded=False, reason="显式/自动路由至 omp"),
+        )
+    finally:
+        _OMP_OUTLINE_INFLIGHT.discard(scheme_id)
+
+
+# ✅ 阶段 3 旁路：三环节全自动工作流（目录 → 正文 → 审核修复）同型防重入。
+#    与 _OMP_OUTLINE_INFLIGHT 同口径，单进程内有效；多 worker 需分布式锁（已登记）。
+_OMP_WORKFLOW_INFLIGHT: set[str] = set()
+
+
+@router.post("/omp-workflow")
+async def run_omp_workflow(scheme_id: str, body: dict | None = None, db=Depends(get_db)):
+    """阶段 3 旁路：用 omp Agent 编排「目录生成 → 正文生成 → 审核修复」。
+
+    ⚠️ 独立于 SSE 硬化主链路：**不落库、不碰 sse_handlers、不改既有 /repair**。
+      产物为结构化数据（目录树 / 正文文件集 / 修复报告），落库与导出仍由
+      既有 ``_save_outline_to_db`` / ``update_section`` / ``export/docx`` 单一持有。
+
+    门控：需同时 ``omp_task_enabled=True`` 且 ``omp_workflow_enabled=True``，
+    禁用 → 409 提示回退主链路；另有生成中互斥 409 与 per-scheme 防重入。
+
+    请求体：``stage``(outline/content/audit/full) / ``brief`` / ``project_type`` /
+    ``industry`` / ``facts`` / ``tier`` / ``documents`` / ``leaves`` /
+    ``outline_tree`` / ``apply_audit``。提供 ``brief`` + ``documents`` 时可完全
+    不查库（便于脚本与离线回归）。
+    """
+    import app.config as _cfg
+    from app.services.ai.omp_engine_router import (
+        annotate_result,
+        parse_overrides,
+        resolve_engine,
+    )
+
+    body = body or {}
+    engine = str(
+        (body or {}).get("engine") or getattr(_cfg.settings, "omp_engine_default", "omp")
+    ).strip().lower()
+    if engine not in ("auto", "omp", "main"):
+        raise HTTPException(422, "engine 只能是 auto / omp / main")
+    # ✅ R239（2026-11-13 · 可双轨）：撤销 R238 的 422 单轨闸门；omp 为主路径，
+    #    auto/main 经灰度 + 可用性综合判定，main 档显式委托平台主链路（降级路径）。
+    # ✅ 引擎路由（加法式）：auto/main 经灰度 + 可用性综合判定；omp（缺省）保持既有闸门。
+    if engine in ("auto", "main"):
+        choice = resolve_engine(
+            scheme_id=scheme_id,
+            task_type=str(body.get("stage") or "full"),
+            prefer=engine,
+            overrides=parse_overrides(getattr(_cfg.settings, "omp_engine_overrides", "")),
+            whitelist=getattr(_cfg.settings, "omp_gray_scheme_ids", ""),
+        )
+        if choice.engine == "main":
+            return annotate_result(
+                {"ok": False, "delegate_to": "平台既有主链路（SSE 目录/正文生成）"},
+                choice,
+            )
+
+    if not bool(getattr(_cfg.settings, "omp_task_enabled", False)) or not bool(
+        getattr(_cfg.settings, "omp_workflow_enabled", False)
+    ):
+        raise HTTPException(
+            409,
+            "omp 三环节工作流未启用（需 omp_task_enabled=True 且 "
+            "omp_workflow_enabled=True）；请使用平台既有主链路",
+        )
+    # ✅ 配置预检（preflight）：二进制 / 模型 / 工具白名单缺失必须在进入编排链**之前**
+    #    转成 422。否则会被编排器的「重试 → paused」吞成「completed 但任务全暂停」的假成功。
+    #    判据复用 OmpTaskAgent.check_ready 单一事实源（preflight 内部调用）。
+    from app.services.ai.omp_diagnostics import preflight
+
+    _rep = preflight()
+    if not _rep.ok:
+        raise HTTPException(422, f"omp 全自动工作流配置不完整：{'; '.join(_rep.problems)}")
+
+    # ✅ R98 单一事实源：生成中不得改写目录 / 正文。
+    ensure_no_generation_write(scheme_id, "omp 全自动工作流")
+    if content_generation_in_progress(scheme_id):
+        raise HTTPException(409, "本方案正文正在后台生成中，请等待生成完成后再触发 omp 工作流")
+    if outline_generation_in_progress(scheme_id):
+        raise HTTPException(409, "本方案目录正在后台生成中，请等待生成完成后再触发 omp 工作流")
+
+    if scheme_id in _OMP_WORKFLOW_INFLIGHT:
+        raise HTTPException(409, "本方案已有 omp 全自动工作流任务在跑，请勿重复触发")
+
+    # ✅ 跨 worker 租约：进程内 set 只挡同进程并发，多 uvicorn worker 需
+    #    文件系统级互斥。unavailable（目录不可写）时 fail-open 并留 WARNING，
+    #    仍由进程内 set 兜底，不把锁基建故障变成全站 409。
+    from app.services.ai.omp_lease import OmpWorkflowLease
+
+    lease = OmpWorkflowLease(scheme_id)
+    lease_result = lease.acquire()
+    if lease_result.status == "conflict":
+        raise HTTPException(409, "另一个进程正在为本方案执行 omp 全自动工作流，请勿重复触发")
+    if lease_result.status == "unavailable":
+        logger.warning("omp 工作流跨 worker 租约不可用：%s", lease_result.reason)
+    _OMP_WORKFLOW_INFLIGHT.add(scheme_id)
+    try:
+        stage = str(body.get("stage") or "full").strip().lower()
+        if stage not in ("outline", "content", "audit", "full"):
+            raise HTTPException(422, "stage 只能是 outline / content / audit / full")
+
+        brief = str(body.get("brief") or "").strip()
+        project_type = str(body.get("project_type") or "").strip()
+        industry = str(body.get("industry") or "").strip()
+        if not brief:
+            cur = await db.execute(
+                "SELECT name, type, profession, word_budget FROM schemes WHERE id=?",
+                (scheme_id,),
+            )
+            row = await cur.fetchone()
+            if row is None:
+                raise HTTPException(404, "方案不存在")
+            parts = [f"方案名称：{row['name'] or ''}"]
+            if row["type"]:
+                parts.append(f"类型：{row['type']}")
+            if row["profession"]:
+                parts.append(f"专业：{row['profession']}")
+            if row["word_budget"]:
+                parts.append(f"目标总字数约 {row['word_budget']} 字")
+            brief = "；".join(parts)
+            project_type = project_type or (row["type"] or "")
+            industry = industry or (row["profession"] or "")
+        if len(brief) > 8000:
+            brief = brief[:8000]
+
+        documents = body.get("documents") or None
+        if documents is None:
+            cur = await db.execute(
+                "SELECT id, content FROM sections WHERE scheme_id=? "
+                "AND content IS NOT NULL AND content<>''",
+                (scheme_id,),
+            )
+            rows = await cur.fetchall()
+            documents = {str(r["id"]): str(r["content"] or "") for r in rows}
+
+        from app.services.ai.omp_pipeline import run_full_chain
+
+        try:
+            result = await run_full_chain(
+                stage=stage,
+                brief=brief,
+                project_type=project_type,
+                industry=industry,
+                facts=str(body.get("facts") or ""),
+                tier=str(body.get("tier") or "standard"),
+                documents=documents,
+                leaves=body.get("leaves"),
+                outline_tree=body.get("outline_tree"),
+                apply_audit=bool(body.get("apply_audit", True)),
+            )
+        except ValueError as e:
+            raise HTTPException(422, str(e))
+        # ✅ 复用既有单一事实源：内容体检由 routers 层
+        #    ``_export_issue_scan.audit_content`` 承担（services 层禁止 import
+        #    routers），不在 omp 链路里造第二份「可导出性」判据。
+        #    真正的 high 级阻断与 DOCX 渲染仍由既有 export.py 单一持有。
+        from app.routers._export_issue_scan import audit_content
+
+        audit_sections = [
+            {"title": sid, "content": text}
+            for sid, text in (result.get("documents") or {}).items()
+        ]
+        result["export_gate"] = {
+            "delegate_checked": True,
+            "content_audit": audit_content(audit_sections),
+            "note": "真正的可导出性闸门与 DOCX 渲染由既有 export.py 单一持有",
+        }
+        result["scheme_id"] = scheme_id
+        return result
+    finally:
+        lease.release(lease_result.token)
+        _OMP_WORKFLOW_INFLIGHT.discard(scheme_id)
+
+
 @router.post("/save-outline")
 async def save_outline(scheme_id: str, body: dict, db=Depends(get_db)):
     """保存目录树（AI 生成 / 上传识别 / 手动编辑后）
@@ -2518,6 +2882,26 @@ async def adjust_outline(scheme_id: str, body: dict, db=Depends(get_db)):
     new_outline = obj.get("outline") or []
     _relink_adjusted_original_ids(new_outline, valid_ids)
     normalized = normalize_outline(new_outline)
+    # ✅ R229（遗留①收口 · 同族漏改第三处）：本端点此前是**唯一**漏接
+    #    validate_outline_numbering fail-closed 闸门的目录写路径 —— save_outline /
+    #    save_as_outline / normalize_outline_for_library 三口都在落库口判红，
+    #    唯独 AI 调整口没有。normalize_outline 内部 renumber 失败会被 try/except
+    #    吞掉（仅留 ERROR 日志）而返回「已裁剪但未编号」树，旧实现直接以
+    #    ok:True 把脏/未编号树交给前端「待确认」：前端展示双重编号、用户确认后
+    #    才在 save_outline 被拦（体验割裂，且脚本直连 API 时无人拦截）。现补齐
+    #    同一判据（numbering.validate 单一事实源，与 R187 落库口同口径）。
+    #    本端点不落库、400 无数据风险；编号正常时逐字不变（问题列表为空即不 400）。
+    _adj_numbering_problems = validate_outline_numbering(normalized)
+    if _adj_numbering_problems:
+        logger.warning(
+            "目录 AI 调整拒绝：编号/标题校验未通过（scheme=%s · %d 项）: %s",
+            scheme_id[:8], len(_adj_numbering_problems), "；".join(_adj_numbering_problems[:5]),
+        )
+        raise HTTPException(
+            400,
+            "目录调整结果编号校验未通过（自动重排可能失败），请重新调整或刷新目录："
+            + "；".join(_adj_numbering_problems[:3]),
+        )
     result = {
         "ok": True,
         "outline": normalized,
@@ -3009,7 +3393,7 @@ async def rollback_numbering_version(scheme_id: str, snapshot_id: str, db=Depend
 
 
 @router.post("/reorder")
-async def reorder_sections(scheme_id: str, body: dict, db=Depends(get_db)):
+async def reorder_sections(scheme_id: str, body: dict, db=Depends(get_db), force: bool = Query(False)):
     """拖拽排序后统一重排 sort_order 与编号"""
     # ✅ BUG 修复（2026-09-23 · 守卫缺口）：目录生成运行中拖拽改 sort_order，
     #    与 AI 确认闸门的整表重建 + 编号重排交叉执行会互相覆盖（编号双轨漂移）。
@@ -3044,7 +3428,9 @@ async def reorder_sections(scheme_id: str, body: dict, db=Depends(get_db)):
     #    的隐式假设，部分提交时未列入的章节保留旧 sort_order，与按 order 折算的
     #    局部序号混存（兄弟顺序可能与预期不符，且没有任何提示）。现要求传入集合
     #    与本方案现有章节集合**严格相等**：缺失 / 多余 / 重复 id 一律 400。
-    cur = await db.execute("SELECT id, parent_id, title FROM sections WHERE scheme_id=?", (scheme_id,))
+    cur = await db.execute(
+        "SELECT id, parent_id, title, level, sort_order, locked FROM sections WHERE scheme_id=?", (scheme_id,)
+    )
     _rows = await cur.fetchall()
     parent_of = {r["id"]: (r["parent_id"] or "") for r in _rows}
     _titles = {r["id"]: str(r["title"] or "") for r in _rows}
@@ -3076,6 +3462,36 @@ async def reorder_sections(scheme_id: str, body: dict, db=Depends(get_db)):
             f"order 必须包含本方案全部 {len(_mounted_ids)} 个章节（缺少 {len(_missing)} 个："
             f"{_names}{'等' if len(_missing) > 5 else ''}）",
         )
+    # ✅ R227（D6 · 产品裁决「只拦结构变更」）：重排改写全部章节 sort_order。
+    #    若任一 locked 一级章的新同级序号与其当前 sort_order 不同，即其相对
+    #    位置改变（结构变更）→ 409（force 逃生门放行）。正文/标题编辑不属此处；
+    #    同级子章节重排不改一级章位置，不触发（仅 locked=1 且 level=1 的行参与）。
+    if not force:
+        _level_of = {r["id"]: int(r["level"] or 1) for r in _rows}
+        _locked_l1_cur = {
+            r["id"]: int(r["sort_order"] or 0)
+            for r in _rows
+            if int(r["locked"] or 0) == 1 and int(r["level"] or 1) == 1
+        }
+        if _locked_l1_cur:
+            _l1_new_idx: dict[str, int] = {}
+            _l1_cnt = 0
+            for sid in order:
+                if _level_of.get(sid, 2) == 1:
+                    _l1_new_idx[sid] = _l1_cnt
+                    _l1_cnt += 1
+            _l1_moved = [sid for sid, cur_so in _locked_l1_cur.items() if _l1_new_idx.get(sid) != cur_so]
+            if _l1_moved:
+                _lnames = "、".join(f"「{_titles.get(mid, '') or mid[:8]}」" for mid in _l1_moved[:5])
+                logger.warning(
+                    "reorder_sections 409 锁定冲突：scheme_id=%s 已锁定一级章被重排（%s）",
+                    scheme_id, _lnames,
+                )
+                raise HTTPException(
+                    409,
+                    f"{len(_l1_moved)} 个已锁定一级章节被重排（{_lnames}{'等' if len(_l1_moved) > 5 else ''}）。"
+                    "如需调整顺序请先解锁或使用 force 强制重排",
+                )
     local_counters: dict[str, int] = {}
     order_rows: list[tuple] = []
     for sid in order:
