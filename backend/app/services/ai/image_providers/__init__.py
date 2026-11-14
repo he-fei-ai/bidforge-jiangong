@@ -18,6 +18,7 @@
 from .agnes import AgnesAdapter
 from .baidu import BaiduAdapter
 from .base import ImageProviderAdapter
+from .custom import CustomAdapter
 from .dashscope import DashScopeAdapter
 from .hunyuan import HunyuanAdapter
 from .registry import ProviderRegistry
@@ -36,6 +37,7 @@ def initialize_registry() -> None:
     ProviderRegistry.register("zhipu", ZhipuAdapter)
     ProviderRegistry.register("stepfun", StepFunAdapter)
     ProviderRegistry.register("baidu", BaiduAdapter)
+    ProviderRegistry.register("custom", CustomAdapter)
 
 
 # 在模块加载时自动初始化
@@ -51,4 +53,5 @@ __all__ = [
     "ZhipuAdapter",
     "StepFunAdapter",
     "BaiduAdapter",
+    "CustomAdapter",
 ]
