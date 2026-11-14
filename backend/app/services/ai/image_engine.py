@@ -987,3 +987,66 @@ def select_ai_image_codes(
     candidates = [{"key": code, "order": _ord(code), "priority": 0} for code in groups]
     kept = apply_image_budget(candidates, max_ai_images)
     return {c["key"] for c in kept}
+
+
+async def resolve_image_config(db, settings) -> dict:
+    """读取当前图像模型配置（DB 优先、settings 兜底）。
+
+    Args:
+        db: aiosqlite 连接（可为 None，此时直接回落 settings）。
+        settings: ``app.config.settings``（env 兜底）。
+
+    Returns:
+        dict，键 = image_enabled / image_api_key_enc / image_base_url / image_model /
+        image_default_size / image_price_per_image / image_provider /
+        image_max_concurrency / max_ai_images。
+        无 DB 行时逐字段回落 settings，**默认行为与引入前完全一致**（零变化）。
+    """
+    def _get(name: str, default=""):
+        return getattr(settings, name, default) if settings is not None else default
+
+    row = None
+    if db is not None:
+        try:
+            cur = await db.execute(
+                "SELECT provider, model, base_url, api_key_encrypted, enabled, "
+                "default_size, concurrency, price_per_image, max_ai_images "
+                "FROM image_model_config WHERE id = 'primary'"
+            )
+            row = await cur.fetchone()
+        except Exception as e:
+            logger.warning("resolve_image_config: 读 image_model_config 失败，回落 settings: %s", e)
+            row = None
+
+    if row is None:
+        return {
+            "image_enabled": bool(_get("image_enabled", True)),
+            "image_api_key_enc": _get("image_api_key", ""),
+            "image_base_url": _get("image_base_url", ""),
+            "image_model": _get("image_model", ""),
+            "image_default_size": _get("image_default_size", "2K"),
+            "image_price_per_image": float(_get("image_price_per_image", 0.0) or 0.0),
+            "image_provider": _get("image_provider", "agnes"),
+            "image_max_concurrency": int(_get("image_max_concurrency", 2) or 2),
+            "max_ai_images": int(_get("max_ai_images", 0) or 0),
+        }
+
+    # aiosqlite Row 支持 keys()；兼容 tuple 形态用索引
+    if hasattr(row, "keys"):
+        _k = lambda key: row[key]  # noqa: E731
+    else:
+        _k = lambda key: row[("provider", "model", "base_url", "api_key_encrypted",
+                              "enabled", "default_size", "concurrency",
+                              "price_per_image", "max_ai_images").index(key)]  # noqa: E731
+
+    return {
+        "image_enabled": bool(_k("enabled")),
+        "image_api_key_enc": _k("api_key_encrypted") or "",
+        "image_base_url": _k("base_url") or "",
+        "image_model": _k("model") or "",
+        "image_default_size": _k("default_size") or "2K",
+        "image_price_per_image": float(_k("price_per_image") or 0.0),
+        "image_provider": _k("provider") or "custom",
+        "image_max_concurrency": int(_k("concurrency") or 2),
+        "max_ai_images": int(_k("max_ai_images") or 0),
+    }
