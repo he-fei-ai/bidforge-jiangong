@@ -24,3 +24,18 @@ export interface ImageConfigResponse {
   decision: ImageDecisionInfo;
 }
 export interface ImageTestResult { ok: boolean; message: string }
+// ✅ N1 契约修复（2026-11-14 · SDD Task 6 审查）：PUT /api/v1/image-config 载荷必须用
+//    **裸字段**与后端 ImageConfigIn（backend/app/routers/image_config.py:37-46）对齐 ——
+//    image_* 前缀字段（ImageModelConfig）是 GET 响应形态，不能用作保存载荷，
+//    否则 Task 7 消费端按裸字段调用会 tsc 报错或静默保存默认配置。
+export interface ImageConfigSavePayload {
+  provider: string;
+  model: string;
+  base_url: string;
+  api_key: string;
+  enabled: boolean;
+  default_size: string;
+  concurrency: number;
+  price_per_image: number;
+  max_ai_images: number;
+}

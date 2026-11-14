@@ -99,6 +99,7 @@ import type {
 // ✅ R238（2026-11-13）：图像模型配置契约类型（imageApi / 消费端组件共用）
 import type {
   ImageConfigResponse,
+  ImageConfigSavePayload,
   ImageModelConfig,
   ImageTestResult,
 } from "../types/imageConfig";
@@ -1387,7 +1388,7 @@ export const aiApi = {
 export const imageApi: {
   getConfig: () => Promise<AxiosResponse<ImageConfigResponse>>;
   saveConfig: (
-    data: Partial<ImageModelConfig>,
+    data: ImageConfigSavePayload,
   ) => Promise<AxiosResponse<{ ok: boolean; warnings: string[] }>>;
   testConnection: (data: {
     provider: string;
