@@ -56,6 +56,7 @@ class ImageTestIn(BaseModel):
 async def get_config(db=Depends(read_db)):
     cfg = await resolve_image_config(db, settings)
     has_key = bool(cfg.get("image_api_key_enc"))
+    cfg.pop("image_api_key_enc", None)  # 用户裁决：剥离敏感字段
     # decision：协同决策流 + Prompt 模板说明（只读展示数据，不改判定逻辑）
     return {
         "config": {**cfg, "has_key": has_key, "api_key": ""},

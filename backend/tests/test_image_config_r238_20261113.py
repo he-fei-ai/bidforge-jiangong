@@ -198,6 +198,8 @@ async def test_image_config_get_returns_contract(monkeypatch):
     # GET 不回传明文密钥（api_key 恒空 + has_key 反映是否已配置）
     assert body["config"].get("api_key") == ""
     assert body["config"].get("has_key") is True
+    # 用户裁决：不回传敏感字段（image_api_key_enc 不得出现在 config 层）
+    assert "image_api_key_enc" not in body["config"]
 
 
 @pytest.mark.asyncio
