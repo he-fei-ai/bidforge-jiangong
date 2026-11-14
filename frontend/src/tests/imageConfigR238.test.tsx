@@ -62,3 +62,21 @@ describe("R238 · 图像模型配置页", () => {
     expect(PAGE!).toMatch(/Object\.entries\(d\.presets\)\.find\(\(\[, preset\]\) => preset\.provider === d\.config\.image_provider\)/);
   });
 });
+
+const APP = RAW["App.tsx"];
+const LAYOUT = RAW["components/Layout.tsx"];
+
+describe("R238 · 路由与菜单", () => {
+  it("App.tsx 注册 /settings/ai-image 懒加载页", () => {
+    expect(APP!, "App.tsx 应在 glob 覆盖内").toBeTruthy();
+    expect(APP!).toContain('path="/settings/ai-image"');
+    expect(APP!).toContain("AIImageConfigPage");
+  });
+  it("Layout.tsx 侧边菜单含 图像模型配置 于 文本模型配置 之后", () => {
+    expect(LAYOUT!, "components/Layout.tsx 应在 glob 覆盖内").toBeTruthy();
+    const aiPos = LAYOUT!.indexOf("文本模型配置");
+    const imgPos = LAYOUT!.indexOf("图像模型配置");
+    expect(aiPos, "找不到文本模型配置菜单").toBeGreaterThan(-1);
+    expect(imgPos, "找不到图像模型配置菜单").toBeGreaterThan(aiPos);
+  });
+});
