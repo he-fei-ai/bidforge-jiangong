@@ -1,4 +1,5 @@
 import axios from "axios";
+import type { AxiosResponse } from "axios";
 
 // ✅ D7（2026-09-23）：文本模型配置模块的显式类型契约（替代此前的 any）
 import type {
@@ -95,6 +96,12 @@ import type {
   DefectSummary,
   DefectSyncResult,
 } from "../types/defect";
+// ✅ R238（2026-11-13）：图像模型配置契约类型（imageApi / 消费端组件共用）
+import type {
+  ImageConfigResponse,
+  ImageModelConfig,
+  ImageTestResult,
+} from "../types/imageConfig";
 
 /**
  * ✅ R14 修复（2026-09-22）：全局 401 短路保护。
@@ -1370,6 +1377,27 @@ export const aiApi = {
    */
   rotateKey: (body: AIKeyRotationRequest) =>
     api.post<AIKeyRotationResponse>("/ai/key-rotation", body),
+};
+
+// 图像模型配置（菜单「图像模型配置」）
+// ✅ R238（2026-11-13）：端点 GET/PUT /api/v1/image-config、POST /api/v1/image-config/test，
+//    契约见 backend/app/routers/image_config.py。
+//    方法体保持无泛型 / 无参数标注（源码锁断言），响应 / 载荷契约经下方对象类型注解
+//    锁定 —— strict 模式下 (data) 由注解上下文推断类型，避免隐式 any。
+export const imageApi: {
+  getConfig: () => Promise<AxiosResponse<ImageConfigResponse>>;
+  saveConfig: (
+    data: Partial<ImageModelConfig>,
+  ) => Promise<AxiosResponse<{ ok: boolean; warnings: string[] }>>;
+  testConnection: (data: {
+    provider: string;
+    base_url: string;
+    api_key: string;
+  }) => Promise<AxiosResponse<ImageTestResult>>;
+} = {
+  getConfig: () => api.get("/image-config"),
+  saveConfig: (data) => api.put("/image-config", data),
+  testConnection: (data) => api.post("/image-config/test", data),
 };
 
 // 提示词
