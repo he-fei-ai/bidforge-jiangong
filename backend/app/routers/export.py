@@ -4527,6 +4527,9 @@ async def _auto_generate_ai_image_blocks(
     sections: list[dict],
     blocks_cache: dict[str, list[dict]],
     config: dict,
+    # ✅ R238：DB 解析后的图像配置（Task 3 resolve_image_config 产物，DB 优先 settings 兜底）。
+    #    None → 直接调用方（未接 DB）回落 settings，行为与引入前逐字一致（零变化）。
+    image_config: dict | None = None,
     # ✅ R106 FIX-1：本次导出的取消事件（缺省 None = 无取消登记，行为逐字不变）。
     #    逐占位码检查：已取消 → 不再发起新的生图调用（在飞的一次跑完即止，
     #    协作式停止口径），由调用方在 gather 后统一抛 ExportCancelled。
@@ -4557,14 +4560,22 @@ async def _auto_generate_ai_image_blocks(
     from app.config import settings as _settings
     from app.services.ai.image_engine import generate_illustration_image
 
-    _img_cfg = {
+    # ✅ R238：优先使用 DB 解析后的配置（resolve_image_config 产物）；无则回落 settings
+    #    （逐字构造，行为与引入前一致）。_img_cfg 供 generate_illustration_image 透传；
+    #    provider / 预算 / 并发读取全部改走 _img_cfg（换库配置真实生效，零行为变化路径不变）。
+    _img_cfg = image_config if image_config is not None else {
         "image_enabled": _settings.image_enabled,
         "image_api_key_enc": _settings.image_api_key,
         "image_base_url": _settings.image_base_url,
         "image_model": _settings.image_model,
         "image_default_size": _settings.image_default_size,
         "image_price_per_image": _settings.image_price_per_image,
+        "image_provider": _settings.image_provider,
+        "image_max_concurrency": int(getattr(_settings, "image_max_concurrency", 2) or 2),
+        "max_ai_images": int(getattr(_settings, "max_ai_images", 0) or 0),
     }
+    _provider = _img_cfg.get("image_provider") or _settings.image_provider
+    _max_ai = int(_img_cfg.get("max_ai_images", 0) or 0)  # 原 _settings.max_ai_images（换库预算生效）
     # 按占位码分组（同码多块共享一次生成，全部改写）；每组只生成一次
     groups: dict[str, list[dict]] = {}
     for sec in sections:
@@ -4583,7 +4594,6 @@ async def _auto_generate_ai_image_blocks(
     # 段内择优，全文累计生图数不超过该值，避免前面章节把额度全部用完。
     #   ⚠️ 分段依据的是「占位码首次出现的章节下标」（sections 已是文档顺序），
     #      这样 20 个候选、限 6 张时，6 张会均匀分布在全文各段，而不是前几章独占。
-    _max_ai = int(getattr(_settings, "max_ai_images", 0) or 0)
     if _max_ai > 0:
         from app.services.ai.image_engine import select_ai_image_codes
 
@@ -4609,7 +4619,7 @@ async def _auto_generate_ai_image_blocks(
 
     # 并发上限由统一配置控制；默认值为 2，非法值收敛到全局 AI 并发安全范围。
     try:
-        _image_concurrency = int(_settings.image_max_concurrency)
+        _image_concurrency = int(_img_cfg.get("image_max_concurrency", 2) or 2)
     except (TypeError, ValueError):
         _image_concurrency = 2
     sem = asyncio.Semaphore(max(1, min(_image_concurrency, 5)))
@@ -4634,7 +4644,7 @@ async def _auto_generate_ai_image_blocks(
         title = str(obj.get("title") or blocks[0].get("title") or "AI 配图")
         async with sem:
             try:
-                url = await generate_illustration_image(None, prompt, style, "16:9", _settings.image_provider, _img_cfg)
+                url = await generate_illustration_image(None, prompt, style, "16:9", _provider, _img_cfg)
             except Exception as e:
                 logger.warning("AI 配图自动生成异常（导出降级跳过）: %s", e)
                 return
@@ -5061,6 +5071,12 @@ async def _prepare_export(
     # ✅ R106 FIX-1：取消事件入 plan —— 渲染段（含本函数内的慢路径直调）与
     #    构建线程（经 _build_docx_task 末尾透传）共用同一份登记。
     plan["_cancel_event"] = cancel_event
+    # ✅ R238：解析图像模型配置（DB 优先、settings 兜底）一次，供 _content_fingerprint
+    #    全键合并（换库配置自动失效缓存）与渲染段透传（无 DB 行 = settings 兜底，零行为变化）。
+    from app.config import settings as _settings
+    from app.services.ai.image_engine import resolve_image_config as _resolve_img
+
+    plan["image_config"] = await _resolve_img(db, _settings)
     if not _export_cache_fast_path_enabled():
         await _prepare_export_render(plan)
     return plan
@@ -5379,7 +5395,9 @@ async def _prepare_export_render(plan: dict) -> dict:
     #    就地改写为 image 块 —— 随后下面的 URL 收集/下载循环会一并取回位图，
     #    write_section 走既有 image 分支插图与编号。生成失败的块保持占位、
     #    整块跳过（不占图号、无红字）。
-    _ai_converted = await _auto_generate_ai_image_blocks(sections, _blocks_cache, config, cancel_event=_cancel_ev)
+    _ai_converted = await _auto_generate_ai_image_blocks(
+        sections, _blocks_cache, config, image_config=plan.get("image_config"), cancel_event=_cancel_ev
+    )
     # ✅ R106 FIX-1：AI 配图段后的取消检查点（在飞生图跑完即止，不再下载/构建）。
     _check_export_cancelled(_cancel_ev)
     # ✅ P1 修复（2026-09-27 · 残缺文档被写入缓存 → 永久缺图）：

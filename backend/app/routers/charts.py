@@ -857,16 +857,11 @@ async def generate_ai_image(body: dict, db=Depends(get_db)):
         raise HTTPException(404, "本章节正文无 AI 配图（ai_image）块")
 
     from app.config import settings
+    from app.services.ai.image_engine import generate_illustration_image, resolve_image_config
 
-    image_config = {
-        "image_enabled": settings.image_enabled,
-        "image_api_key_enc": settings.image_api_key,
-        "image_base_url": settings.image_base_url,
-        "image_model": settings.image_model,
-        "image_default_size": settings.image_default_size,
-        "image_price_per_image": settings.image_price_per_image,
-    }
-    from app.services.ai.image_engine import generate_illustration_image
+    # ✅ R238：改用 resolve_image_config（DB 优先、settings 兜底）—— 手动重试端点与
+    #    导出链路同源配置（换库后此处也生效，避免「导出用新配置、重试用旧配置」分叉）。
+    image_config = await resolve_image_config(db, settings)
 
     new_content = content
     generated = 0

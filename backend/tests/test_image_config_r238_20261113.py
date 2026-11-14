@@ -215,3 +215,30 @@ async def test_image_config_put_validates_provider(monkeypatch):
             json={"provider": "not_a_provider", "default_size": "2K"},
         )
     assert r.status_code == 400
+
+
+# ---------------------------------------------------------------------------
+# F. 消费点同源：export.py / charts.py 接入 resolve_image_config；_export_cache 指纹全键合并
+# ---------------------------------------------------------------------------
+from pathlib import Path
+
+
+def _src(p):
+    return Path(__file__).parent.parent / p
+
+
+def test_consumption_points_use_resolve_image_config():
+    """export.py / charts.py 均调用 resolve_image_config。"""
+    for rel, marker in (
+        ("app/routers/export.py", "resolve_image_config"),
+        ("app/routers/charts.py", "resolve_image_config"),
+    ):
+        txt = _src(rel).read_text(encoding="utf-8")
+        assert marker in txt, f"{rel} 未接入 resolve_image_config"
+
+
+def test_fingerprint_merge_covers_provider_and_budget():
+    """_export_cache.py R-2 合并扩展：provider / base_url / max_ai_images 亦纳入指纹。"""
+    txt = _src("app/routers/_export_cache.py").read_text(encoding="utf-8")
+    for key in ("image_provider", "image_base_url", "max_ai_images"):
+        assert key in txt, f"_export_cache.py 指纹合并缺 {key}"

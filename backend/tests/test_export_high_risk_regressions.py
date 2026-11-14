@@ -219,6 +219,11 @@ async def test_auto_image_passes_runtime_image_config(monkeypatch):
         "image_model": "image-model-x",
         "image_default_size": "4K",
         "image_price_per_image": 0.25,
+        # ✅ R238：fallback 全键构造（provider/预算/并发亦入 _img_cfg —— 换库配置
+        #    经 resolve_image_config 产物透传时真实生效；None 路径仍是 settings 值）。
+        "image_provider": settings.image_provider,
+        "image_max_concurrency": int(getattr(settings, "image_max_concurrency", 2) or 2),
+        "max_ai_images": int(getattr(settings, "max_ai_images", 0) or 0),
     }
 
 
@@ -486,3 +491,17 @@ def test_find_fallback_code_call_sites_match_signature():
             if kw.arg is not None and kw.arg not in allowed:
                 offenders.append((node.lineno, kw.arg))
     assert not offenders, f"_find_fallback_code 调用点存在签名未声明的关键字实参（将抛 TypeError）: " f"{offenders}"
+
+
+# ---------------------------------------------------------------------------
+# R238：图像模型配置（DB 行）接入导出指纹 —— 换 provider / max_ai_images 必须失效缓存
+# ---------------------------------------------------------------------------
+
+
+def test_image_config_provider_and_budget_change_fingerprint():
+    """换 provider / max_ai_images（DB 配置）必须使导出缓存失效（防命中旧图）。"""
+    first = _prep()
+    second = _prep()
+    first["image_config"] = {"image_model": "m", "image_provider": "custom", "max_ai_images": 0}
+    second["image_config"] = {"image_model": "m", "image_provider": "dashscope", "max_ai_images": 0}
+    assert export_mod._content_fingerprint(first)[1] != export_mod._content_fingerprint(second)[1]
