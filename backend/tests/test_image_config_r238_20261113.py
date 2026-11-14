@@ -242,3 +242,31 @@ def test_fingerprint_merge_covers_provider_and_budget():
     txt = _src("app/routers/_export_cache.py").read_text(encoding="utf-8")
     for key in ("image_provider", "image_base_url", "max_ai_images"):
         assert key in txt, f"_export_cache.py 指纹合并缺 {key}"
+
+
+def test_charts_provider_passes_db_config():
+    """charts.py generate_ai_image 第 5 位置 provider 走 DB 配置（image_config 优先、settings 兜底）。
+
+    FIND-1：此前第 5 位置直接传 settings.image_provider（env），而 image_engine 的
+    _provider_queue 仅以 provider_name 为首、image_config["image_provider"] 从不参与路由
+    → DB 配 custom 而 env=agnes 时错配。修复后与 export.py
+    `_img_cfg.get("image_provider") or _settings.image_provider` 同口径。
+    """
+    txt = _src("app/routers/charts.py").read_text(encoding="utf-8")
+    fn_start = txt.index("async def generate_ai_image")
+    fn_body = txt[fn_start:]
+    # provider 透传窗口：_provider 赋值行 + generate_illustration_image 调用
+    prov_idx = fn_body.index(
+        '_provider = image_config.get("image_provider") or settings.image_provider'
+    )
+    call_idx = fn_body.index("generate_illustration_image(", prov_idx)
+    window = fn_body[prov_idx : call_idx + 200]
+    assert 'image_config.get("image_provider") or settings.image_provider' in window, (
+        "charts.py 未把 provider 透传为 DB 配置优先"
+    )
+    # 调用第 5 位置传 _provider（不再直接传 settings.image_provider）
+    call_args = fn_body[call_idx : call_idx + 200]
+    assert "_provider" in call_args, "调用未使用 _provider 变量"
+    assert "settings.image_provider" not in call_args, (
+        "调用仍直接传 settings.image_provider（错配未修复）"
+    )

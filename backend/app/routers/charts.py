@@ -860,7 +860,9 @@ async def generate_ai_image(body: dict, db=Depends(get_db)):
     from app.services.ai.image_engine import generate_illustration_image, resolve_image_config
 
     # ✅ R238：改用 resolve_image_config（DB 优先、settings 兜底）—— 手动重试端点与
-    #    导出链路同源配置（换库后此处也生效，避免「导出用新配置、重试用旧配置」分叉）。
+    #    导出链路同源配置（避免「导出用新配置、重试用旧配置」分叉）。
+    #    provider 维度同样走 DB：image_config["image_provider"] 优先、settings 兜底，
+    #    与 export.py `_img_cfg.get("image_provider") or _settings.image_provider` 同口径。
     image_config = await resolve_image_config(db, settings)
 
     new_content = content
@@ -899,8 +901,10 @@ async def generate_ai_image(body: dict, db=Depends(get_db)):
         except Exception as e:
             logger.warning("配图提示词优化失败（使用原始提示词，章节 %s）: %s", section_id[:8], e)
         try:
+            # ✅ R238：provider 走 DB 配置（image_provider 优先、settings 兜底），与 export.py 同口径
+            _provider = image_config.get("image_provider") or settings.image_provider
             _url = await generate_illustration_image(
-                None, _prompt, _style, "16:9", settings.image_provider, image_config
+                None, _prompt, _style, "16:9", _provider, image_config
             )
         except Exception as e:
             logger.warning("ai_image 生成异常（章节 %s）: %s", section_id[:8], e)
