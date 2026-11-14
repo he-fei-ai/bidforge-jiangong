@@ -51,8 +51,13 @@ export default function AIImageConfigPage() {
     try {
       const { data: d } = await imageApi.getConfig();
       setData(d);
+      // 反推 display_provider：以 DB 实际 provider 匹配预设表取展示键；未命中 → "custom"。
+      // 同时回填隐藏 provider 字段，避免「下拉显示自定义但持有非 custom 厂商 URL」的错误组合。
+      const displayProvider =
+        Object.entries(d.presets).find(([, p]) => p.provider === d.config.image_provider)?.[0] ?? "custom";
       form.setFieldsValue({
-        display_provider: "custom",
+        display_provider: displayProvider,
+        provider: d.config.image_provider,
         enabled: d.config.image_enabled,
         base_url: d.config.image_base_url,
         model: d.config.image_model,

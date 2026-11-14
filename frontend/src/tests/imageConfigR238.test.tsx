@@ -41,4 +41,11 @@ describe("R238 · 图像模型配置页", () => {
     expect(PAGE!).toContain("none");
     expect(PAGE!).toContain("max_ai_images");
   });
+  it("load() 反推 display_provider 并回填隐藏 provider（R238 页面正确性修复）", () => {
+    // 反推：以 DB 实际 provider 匹配 presets 取展示键；未命中 → "custom"
+    expect(PAGE!).toMatch(/Object\.entries\(d\.presets\)\.find/);
+    expect(PAGE!).toContain("provider: d.config.image_provider");
+    // 硬编码 display_provider: "custom" 必须已移除
+    expect(PAGE!).not.toContain('display_provider: "custom",');
+  });
 });
