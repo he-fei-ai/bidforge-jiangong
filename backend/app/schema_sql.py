@@ -835,6 +835,23 @@ CREATE TABLE IF NOT EXISTS placeholder_baselines (
 );
 CREATE INDEX IF NOT EXISTS idx_placeholder_baselines_scheme
     ON placeholder_baselines(scheme_id, created_at);
+
+-- ✅ R238（2026-11-13）：图像模型配置（AI 配图协同）。单条活动配置（固定 id='primary'）。
+--    语义：enabled=1 开启生图（image_enabled）；max_ai_images=0 关闭全局配图预算；
+--    api_key_encrypted 只存 ENC: 加密前缀；provider 为既有 8 类厂商词汇（不另立词汇）。
+CREATE TABLE IF NOT EXISTS image_model_config (
+    id TEXT PRIMARY KEY,              -- 固定 'primary'（单条活动配置）
+    provider TEXT DEFAULT 'custom',   -- custom / dashscope / volcengine / hunyuan / zhipu / stepfun / baidu / agnes
+    model TEXT DEFAULT '',            -- 留空用厂商默认模型
+    base_url TEXT DEFAULT '',         -- 留空用厂商默认端点
+    api_key_encrypted TEXT DEFAULT '',-- ENC: 加密前缀
+    enabled INTEGER DEFAULT 1,        -- 1 = 开启生图（image_enabled 语义）
+    default_size TEXT DEFAULT '2K',   -- 1K/2K/3K/4K
+    concurrency INTEGER DEFAULT 2,    -- image_max_concurrency
+    price_per_image REAL DEFAULT 0.0, -- 单张成本
+    max_ai_images INTEGER DEFAULT 0,  -- 全局配图预算（0 = 关闭）
+    updated_at TEXT DEFAULT (datetime('now','localtime'))
+);
 """
 
 # ✅ R179 M1（2026-11-05）：评分项 → 目录映射校验。
