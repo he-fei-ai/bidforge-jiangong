@@ -53,8 +53,19 @@ export default function AIImageConfigPage() {
       setData(d);
       // 反推 display_provider：以 DB 实际 provider 匹配预设表取展示键；未命中 → "custom"。
       // 同时回填隐藏 provider 字段，避免「下拉显示自定义但持有非 custom 厂商 URL」的错误组合。
-      const displayProvider =
-        Object.entries(d.presets).find(([, p]) => p.provider === d.config.image_provider)?.[0] ?? "custom";
+      // P2 消歧（2026-11-14）：dalle3 与 custom 共享 provider="custom"，若按 provider 直接匹配，
+      // find 恒取首个（dalle3）→「自定义厂商 + 自定义 URL」被显示为 DALL-E-3（显示回归）。
+      // 仅当 base_url+model 与 dalle3 预设完全一致才取 dalle3，否则取 custom；非 custom provider 按 provider 匹配。
+      let displayProvider = "custom";
+      if (d.config.image_provider === "custom") {
+        const d3 = d.presets["dalle3"];
+        if (d3 && d.config.image_base_url === d3.base_url && d.config.image_model === d3.model) {
+          displayProvider = "dalle3";
+        }
+      } else {
+        const hit = Object.entries(d.presets).find(([, preset]) => preset.provider === d.config.image_provider);
+        displayProvider = hit?.[0] ?? "custom";
+      }
       form.setFieldsValue({
         display_provider: displayProvider,
         provider: d.config.image_provider,

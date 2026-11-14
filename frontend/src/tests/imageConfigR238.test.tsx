@@ -48,4 +48,17 @@ describe("R238 · 图像模型配置页", () => {
     // 硬编码 display_provider: "custom" 必须已移除
     expect(PAGE!).not.toContain('display_provider: "custom",');
   });
+  it("load() 反推 custom/dalle3 共享 provider 消歧（P2 显示回归修复）", () => {
+    // provider=custom 时不得仅按 provider 匹配（find 恒取首个 dalle3）→ 自定义厂商被误显示为 DALL-E-3。
+    // 消歧：仅当 base_url+model 与 dalle3 预设完全一致才取 dalle3，否则取 custom。
+    expect(PAGE!).toContain("d.config.image_provider === \"custom\"");
+    expect(PAGE!).toContain('d.presets["dalle3"]');
+    // 与 dalle3 预设 base_url/model 逐字段比较（完全匹配判据在场）
+    expect(PAGE!).toMatch(/d\.config\.image_base_url === d3\.base_url/);
+    expect(PAGE!).toMatch(/d\.config\.image_model === d3\.model/);
+    expect(PAGE!).toContain('displayProvider = "dalle3"');
+    expect(PAGE!).toContain('displayProvider = "custom"');
+    // 非 custom provider 仍按 provider 匹配取键；未命中 → "custom"
+    expect(PAGE!).toMatch(/Object\.entries\(d\.presets\)\.find\(\(\[, preset\]\) => preset\.provider === d\.config\.image_provider\)/);
+  });
 });
