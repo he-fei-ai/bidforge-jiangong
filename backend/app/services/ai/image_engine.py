@@ -1,4 +1,5 @@
 import hashlib
+import json
 import logging
 import re
 import threading
@@ -226,9 +227,13 @@ def validate_mermaid(code: str) -> tuple[bool, str]:
     #    写法里，`graph/flowchart` 所在行被整体跳过 → 节点数算成 0 →
     #    判「节点数不足（0<3）」→ 正则修复也救不回 → **正文里的合法流程图被整块
     #    删除**（实测 2 例；渲染侧本来就能正常出图 → ❗删块型错配）。
-    from app.services.chart_validators import normalize_mermaid_statements
+    from app.services.chart_validators import ensure_gantt_declaration, normalize_mermaid_statements
 
     code = normalize_mermaid_statements(code)
+    # ✅ R253：补缺首行 `gantt` 声明（R252 已让三侧识别出 title-first 甘特载荷，
+    #    但校验此前仍按首行 `gantt` 分流 → 判「不支持的 Mermaid 类型」→ 正文删块）。
+    #    只影响校验函数内的局部 code，不改正文；幂等。
+    code = ensure_gantt_declaration(code)
 
     # Try to detect if it's a flowchart without explicit graph prefix
     # If it contains arrows but no graph/flowchart prefix, treat as simple flowchart
@@ -510,7 +515,7 @@ def repair_mermaid(code: str) -> str:
     if not code:
         return ""
 
-    from app.services.chart_validators import normalize_mermaid_statements
+    from app.services.chart_validators import ensure_gantt_declaration, normalize_mermaid_statements
 
     code = code.strip()
 
@@ -535,6 +540,9 @@ def repair_mermaid(code: str) -> str:
     #    仍是单行 → 校验依旧按行解析失败 → 合法流程图被整块删除。
     #    归一为换行后行末分号自然消失，且产物是"按行"的（下游解析器全部按行工作）。
     code = normalize_mermaid_statements(code)
+    # ✅ R253：补缺首行 `gantt`，使下方 ⑥ 的 dateFormat/axisFormat 确定性修复
+    #    对 title-first 甘特载荷真正生效（与 validate_mermaid 同一归一入口）。
+    code = ensure_gantt_declaration(code)
 
     # ✅ ④：甘特图 status 标签（done/active/crit 渲染器兼容性差）
     code = re.sub(r":\s*(done|active|crit)\s*,", ":", code, flags=re.IGNORECASE)
@@ -603,6 +611,7 @@ async def generate_illustration_image(
     section_size: str = "16:9",
     provider_name: str = "volcengine",
     image_config: dict | None = None,
+    scene: str = "",
 ) -> str | None:
     """使用配置的图像模型提供商生成实际图片
 
@@ -621,6 +630,8 @@ async def generate_illustration_image(
         image_config: 图像模型配置（model_configs 表 image_* 字段），
                       优先于此处的 provider 实例；应包含 image_api_key_enc /
                       image_base_url / image_model / image_default_size 等
+        scene: 业务场景（engineering_diagram / realistic_photo / technical_drawing /
+               custom）。传入时纳入缓存键（同 Prompt 不同场景不互串）。
 
     Returns:
         生成的图片 URL，失败返回 None
@@ -628,7 +639,9 @@ async def generate_illustration_image(
     from .image_providers.registry import ProviderRegistry
 
     # ---- 图片生成缓存（基于 MD5，含 provider_name 避免切换 provider 后误命中） ----
-    _cache_key = hashlib.md5(f"{prompt}|{style}|{section_size}|{provider_name}".encode()).hexdigest()
+    _cache_key = hashlib.md5(
+        f"{prompt}|{style}|{section_size}|{provider_name}|{scene}".encode()
+    ).hexdigest()
     with _image_cache_lock:
         _cached_entry = _IMAGE_CACHE.get(_cache_key)
         if _cached_entry is not None:
@@ -738,6 +751,24 @@ async def generate_illustration_image(
     }
     _pixel_size = _size_map.get(section_size, "1024x1024")
 
+    # ✅ R252（2026-11-16 · IM-5）：参数模板 —— 从 image_config.default_params 解析
+    #    自定义生图参数（分辨率/采样步数/CFG/负面词/风格等），经 **kwargs 注入适配器。
+    #    仅放行白名单键，避免任意 JSON 键注入适配器签名导致 TypeError。
+    _default_params: dict = {}
+    if image_config:
+        _raw_params = image_config.get("image_default_params") or {}
+        if isinstance(_raw_params, str):
+            try:
+                _raw_params = json.loads(_raw_params) if _raw_params.strip() else {}
+            except Exception:
+                _raw_params = {}
+        if isinstance(_raw_params, dict):
+            _DEFAULT_PARAM_KEYS = {
+                "resolution", "steps", "cfg", "negative_prompt", "style",
+                "quality", "seed", "aspect_ratio", "sampler",
+            }
+            _default_params = {k: v for k, v in _raw_params.items() if k in _DEFAULT_PARAM_KEYS}
+
     # 注入风格约束
     _final_prompt = prompt
     if style != "custom":
@@ -813,6 +844,7 @@ async def generate_illustration_image(
                 model=_adapter_config.get("model", ""),
                 size=_size_arg,
                 ratio=_ratio_arg,
+                **_default_params,
             )
 
             # 提取图片 URL
@@ -1168,3 +1200,101 @@ async def resolve_image_config(db, settings) -> dict:
         "image_max_concurrency": int(_k("concurrency") or 2),
         "max_ai_images": int(_k("max_ai_images") or 0),
     }
+
+
+# ✅ R252（2026-11-16 · IM-2）：图像业务场景白名单（场景模型路由的合法键）。
+#    语义与文本模型模块 KNOWN_SCENES 同口径：未登记场景调用仍可用（只是无法
+#    单独指定模型），resolve_scene_image_config 只查路由表、不校验白名单。
+IMAGE_SCENES: dict[str, str] = {
+    "engineering_diagram": "工程图示（精准线条/结构）",
+    "realistic_photo": "实景示意图（真实感渲染）",
+    "technical_drawing": "工程技术图纸（线条清晰/标注规范）",
+    "custom": "自定义场景",
+}
+
+
+#: image_config 行 → resolve_image_config 形态的键映射（避免两处字面量漂移）。
+_IMG_ROW_KEYS = (
+    "id", "provider", "model", "base_url", "api_key_encrypted", "enabled",
+    "default_size", "concurrency", "price_per_image", "max_ai_images",
+    "is_default", "status", "env", "priority", "remark", "default_params",
+    "config_version",
+)
+
+
+def _image_row_to_config(row) -> dict | None:
+    """把 image_config 行转换为引擎使用的 image_* 形态（含解析后的参数模板）。"""
+    if row is None:
+        return None
+    if hasattr(row, "keys"):
+        _k = lambda key: row[key]  # noqa: E731
+    else:
+        _k = lambda key: row[_IMG_ROW_KEYS.index(key)]  # noqa: E731
+    raw_params = _k("default_params") or "{}"
+    if isinstance(raw_params, str):
+        try:
+            raw_params = json.loads(raw_params) if raw_params.strip() else {}
+        except Exception:
+            raw_params = {}
+    if not isinstance(raw_params, dict):
+        raw_params = {}
+    return {
+        "image_config_id": _k("id") or "",
+        "image_enabled": bool(_k("enabled")),
+        "image_api_key_enc": _k("api_key_encrypted") or "",
+        "image_base_url": _k("base_url") or "",
+        "image_model": _k("model") or "",
+        "image_default_size": _k("default_size") or "2K",
+        "image_price_per_image": float(_k("price_per_image") or 0.0),
+        "image_provider": _k("provider") or "custom",
+        "image_max_concurrency": int(_k("concurrency") or 2),
+        "max_ai_images": int(_k("max_ai_images") or 0),
+        "image_env": _k("env") or "",
+        "image_default_params": raw_params,
+    }
+
+
+async def resolve_scene_image_config(db, settings, scene: str) -> dict | None:
+    """按业务场景解析图像模型配置（场景路由；未命中返回 None）。
+
+    与 :func:`resolve_image_config` 的形态一致（image_* 键），额外携带
+    ``image_config_id`` / ``image_env`` / ``image_default_params``。
+
+    规则：
+      - 路由表无该 scene 行，或 config_id 为空 → None（运行时回落主配置）；
+      - 目标配置已删除 / status='disabled' / enabled=0 → None；
+      - 命中 → 返回该配置（调用方据此优先于主配置）。
+
+    Args:
+        db: aiosqlite 连接（可为 None）。
+        settings: ``app.config.settings``（占位，保持一致签名）。
+        scene: 业务场景键（IMAGE_SCENES 白名单）。
+
+    Returns:
+        配置 dict 或 None。
+    """
+    if db is None or not scene:
+        return None
+    try:
+        cur = await db.execute(
+            "SELECT config_id FROM image_scene_routes WHERE scene = ?",
+            (scene,),
+        )
+        r = await cur.fetchone()
+        if r is None:
+            return None
+        config_id = r["config_id"] if hasattr(r, "keys") else r[0]
+        if not config_id:
+            return None
+        cur2 = await db.execute(
+            "SELECT * FROM image_config WHERE id = ? AND status = 'active'",
+            (config_id,),
+        )
+        row = await cur2.fetchone()
+        cfg = _image_row_to_config(row)
+        if cfg is None or not cfg.get("image_enabled"):
+            return None
+        return cfg
+    except Exception as e:
+        logger.warning("resolve_scene_image_config: 读取场景路由失败（回落主配置）: %s", e)
+        return None

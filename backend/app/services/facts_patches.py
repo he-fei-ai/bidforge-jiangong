@@ -116,6 +116,46 @@ _COMPLETENESS_TEMPLATE = """事实补全规则（{label}）：
 7. 工期、运维期或交货时间等事项若正文需要统一口径，必须保留为事实项；材料没有具体值时不要编造日期或周期，也不要因此省略该项。"""
 
 
+# ✅ 提示词注册表收口（2026-11-16）：完整性规则骨架此前是纯字面量 + ``.format``，
+#    绕过统一注册表（不能后台编辑 / 不能 DB 定制 / 不进审计与指标）。现按 R39 · T1
+#    同构模式注册：字面量留本模块作出厂默认，消费点改「DB 优先 → 出厂骨架回退」。
+#    唯一占位符是 ``{label}`` / ``{missing_note}``，由本函数在运行时填入 —— 与 bid 域的
+#    ``__CONTEXT__`` 同族（注入方即调用方，故登记进契约表让漂移可被启动期校验发现）。
+from app.services.ai.prompts._registry import _reg as _fact_reg
+
+#: 完整性规则骨架是否已完成注册（幂等锁）。
+_COMPLETENESS_PROMPT_REGISTERED = False
+
+
+def _reg_completeness_prompt() -> None:
+    """把事实补全规则骨架登记进统一注册表（出厂默认 = `_COMPLETENESS_TEMPLATE`）。"""
+    global _COMPLETENESS_PROMPT_REGISTERED
+    if _COMPLETENESS_PROMPT_REGISTERED:
+        return
+    _fact_reg(
+        "facts_completeness_rules",
+        "facts",
+        "事实补全 · 完整性规则骨架",
+        _COMPLETENESS_TEMPLATE,
+        requires=["label", "missing_note"],
+    )
+    _COMPLETENESS_PROMPT_REGISTERED = True
+
+
+_reg_completeness_prompt()
+
+
+def _completeness_skeleton() -> str:
+    """事实补全规则骨架（DB 定制优先 → 出厂字面量回退，任何异常 fail-soft）。"""
+    try:
+        from app.services.ai.prompts._cache import get_prompt
+
+        text = get_prompt("facts_completeness_rules")
+    except Exception:  # noqa: BLE001 - 事实提取主链不得因读模板失败中断
+        return _COMPLETENESS_TEMPLATE
+    return text if isinstance(text, str) and text.strip() else _COMPLETENESS_TEMPLATE
+
+
 def build_completeness_rules(mode: str) -> str:
     """按缺值模式产出「事实补全规则」全文（fabricate 模式不注入，返回空串）。
 
@@ -126,7 +166,12 @@ def build_completeness_rules(mode: str) -> str:
     label = _COMPLETENESS_LABELS.get(mode)
     if not label:
         return ""
-    return _COMPLETENESS_TEMPLATE.format(label=label, missing_note=_COMPLETENESS_MISSING_NOTES[mode])
+    skeleton = _completeness_skeleton()
+    try:
+        return skeleton.format(label=label, missing_note=_COMPLETENESS_MISSING_NOTES[mode])
+    except (KeyError, IndexError, ValueError):
+        # DB 定制误删 / 改坏占位符时回退出厂骨架，绝不让事实提取整链崩掉。
+        return _COMPLETENESS_TEMPLATE.format(label=label, missing_note=_COMPLETENESS_MISSING_NOTES[mode])
 
 
 # =========================================================================

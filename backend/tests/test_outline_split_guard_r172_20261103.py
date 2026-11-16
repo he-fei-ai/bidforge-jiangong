@@ -110,5 +110,8 @@ class TestSplitIntegrity:
             cwd=str(BACKEND),
             capture_output=True,
             text=True,
+            # Windows cp936 严格解码会在 reader 线程抛 UnicodeDecodeError
+            encoding="utf-8",
+            errors="replace",
         )
         assert proc.returncode == 0, proc.stderr

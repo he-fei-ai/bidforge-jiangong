@@ -1974,6 +1974,54 @@ def _norm_value(v) -> str:
     return re.sub(r"\s+", "", _as_text(v).replace("：", ":"))
 
 
+# ✅ R248（2026-11-14 · C11 收口）：值内嵌单位的「同数值同量纲」折叠。
+#   病灶：merge_and_deduplicate 的簇内去重键只走 _norm_value（去空白 + 全角
+#   冒号），"150 天" 与 "150 日历天" 被判为异值 → 凭空造出一条假矛盾让用户
+#   裁决（值域语义完全相同）。而本仓另两处判据早已把 天/日历天 列为确定等价
+#   （facts_cross_validators._UNIT_SPEC 两者同为 duration 基准 1.0；
+#   content_standard._UNIT_ALIASES 两者同映射 "day"），只有提取合并这一处
+#   漏了单位换算。现对「纯数字 + 单位」形态按量纲折叠：同数值且同量纲同基准
+#   → 同一去重键（不产生假矛盾）；量纲不同（m vs cm）或基准系数不同（天 vs 月）
+#   → 仍异值（真矛盾照报）；纯数字、非「数字+单位」形态、清单型并存键
+#   （basis_scoped_key 另有 _norm_value md5 口径）一律原样，逐字不折叠。
+#   ⚠️ 折叠只用于 merge 簇内**比较键**：对外展示的 value/value_unit 原样保留
+#   （best 取排序最优条，不把 "150 日历天" 改写成 "150 天"）。
+_NUM_UNIT_RE = re.compile(r"^([+-]?\d+(?:\.\d+)?)\s*(\S+)$")
+
+# ✅ R248（2026-11-14 · C11 续）：day 变体别名链（判据同源：_norm_dicts.UNIT_ALIASES
+#   把 日→天、日历日→日历天、昼夜→天 列为确定等价；content_data_contract 把 自然天
+#   与 日历天/天 并列）。查量纲表前先归一单位 → 日历日/昼夜/自然天 与 天 同键。
+#   工作日不入表（content_standard：工作日→workday ≠ day），与 天 保持独立。
+_DAY_VARIANT_ALIASES = {"日": "天", "日历日": "天", "自然天": "天", "昼夜": "天"}
+
+
+def _norm_unit_aware_key(v) -> str:
+    """去重/矛盾比较键：_norm_value 基础上对「数字+单位」做同量纲折叠。
+
+    判据单一事实源 = facts_cross_validators 的量纲表（_UNIT_DIM / _UNIT_TO_BASE）：
+    两侧都能解析出「数字 + 单位」、数值相等、单位同量纲且基准换算系数相同
+    （天/日历天 同为 duration 基准 1.0）→ 折叠成同一键；任一条件不满足 →
+    回落 _norm_value 原样（绝不误吞 cm↔m 记法变体、天↔月跨系数、纯数字裸值）。
+    工作日不在量纲表内 → 与天不折叠（content_standard 同口径：工作日≠日历天）。
+    """
+    s = _norm_value(v)
+    m = _NUM_UNIT_RE.match(s)
+    if not m:
+        return s
+    try:
+        from app.services.facts_cross_validators import _UNIT_DIM, _UNIT_TO_BASE
+
+        num = float(m.group(1))
+        unit = m.group(2)
+        unit = _DAY_VARIANT_ALIASES.get(unit, unit)
+        dim = _UNIT_DIM.get(unit)
+        if dim is None or dim in ("temperature",):
+            return s
+        return f"{num:g}|{dim}|{_UNIT_TO_BASE.get(unit, 1.0):g}"
+    except Exception:  # noqa: BLE001 - 量纲表判据自身故障时回落原样，不阻断去重
+        return s
+
+
 # ---------------------------------------------------------------------------
 # 编制依据「多值并存」清单型事实（✅ R93 · 2026-10-17）
 # ---------------------------------------------------------------------------
@@ -2097,10 +2145,12 @@ def merge_and_deduplicate(all_items: list[FactItem]) -> list[FactItem]:
         group.sort(key=lambda x: (x.is_simulated, -x.confidence))
 
         # ✅ 增强：按归一化 value 去重（空白/全角差异不算矛盾）
+        # ✅ R248（C11 收口）：改用单位量纲感知键 —— "150 天" 与 "150 日历天"
+        #    同数值同量纲，折叠成同一键不再判假矛盾；量纲/系数不同的真矛盾照报。
         seen_values = set()
         unique = []
         for it in group:
-            nv = _norm_value(it.value)
+            nv = _norm_unit_aware_key(it.value)
             if nv and nv not in seen_values:
                 seen_values.add(nv)
                 unique.append(it)

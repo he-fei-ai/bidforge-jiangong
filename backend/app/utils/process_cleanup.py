@@ -217,6 +217,14 @@ def _pid_alive(pid: int) -> bool:
                     ["tasklist", "/FI", f"PID eq {pid}", "/NH"],
                     capture_output=True,
                     text=True,
+                    # ✅ R249（2026-11-15 · 漏网面收口）：Windows 中文宿主默认按
+                    #    cp936/GBK 解码 tasklist 输出，进程名或表头含非 GBK 字节时
+                    #    subprocess 的 reader 线程抛 UnicodeDecodeError，stdout 被吞
+                    #    ⇒ 探活失真并产生 PytestUnhandledThreadExceptionWarning。
+                    #    与 export.py(soffice) / mermaid_service.py(mmdc) 同口径：
+                    #    显式 utf-8 + errors="replace"，任何编码都不抛错。
+                    encoding="utf-8",
+                    errors="replace",
                     timeout=5,
                     creationflags=_no_window_flags(),
                 ).stdout

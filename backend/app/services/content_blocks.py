@@ -51,6 +51,9 @@ from app.services.content_sanitize import normalize_raw_content
 #    裸围栏行变成新开围栏、把其后正文整段吞进代码块（state=eof），而前端 marked
 #    （CommonMark）判该行为正文保留 —— 预览与导出反向分叉（BUG-F2）。
 from app.services.fence_common import (  # noqa: E402
+    canonical_chart_fence_lang as _canonical_chart_fence_lang,
+)
+from app.services.fence_common import (  # noqa: E402
     is_fence_close as _fence_is_close,
 )
 from app.services.fence_common import (
@@ -1067,11 +1070,47 @@ def _unwrap_doc_fence_wrapping_chart(lines: list[str]) -> None:
         i += 1
 
 
+def _normalize_chart_fence_lang_alias(lines: list[str]) -> int:
+    """R252：就地改写「图表类型名被误当围栏语言标签」的开启行（幂等，行数不变）。
+
+    生产实证（截图第 33 页）：AI 将进度计划甘特图写成 ````` ```gantt ````` 而非
+    ````` ```mermaid `````，三侧白名单都不认 `gantt` → 当普通代码块 → 源码原样
+    印进 DOCX。这里把围栏信息串首词经 ``canonical_chart_fence_lang`` 归一：
+    `gantt`/`flowchart`/`pie`/... → `mermaid`；`mermaid`/`chart-json`/`ai_image`
+    及真实代码标签（`python`/`js`/`markdown` 等）保持原样。
+
+    只改信息串首词、保留围栏字符/长度/其余信息串与缩进，行数不变 —— 保住
+    numbering 侧 ``src_line`` 契约（R192 FIX-R1 家族）。
+    """
+    changed = 0
+    for idx, line in enumerate(lines):
+        pf = _fence_parse_line(line)
+        if pf is None:
+            continue
+        char, length, info = pf
+        if not info:
+            continue
+        canon = _canonical_chart_fence_lang(info)
+        first = info.split()[0].lower()
+        if canon == first or canon not in ("mermaid", "chart-json", "ai_image"):
+            # 非别名 / 非图表标签：原样（含真实代码围栏、已规范的图表围栏）
+            continue
+        # 用规范标签替换信息串首词，保留其后的其余信息串（罕见，如 ```gantt foo）
+        rest = info[len(info.split()[0]) :]
+        # 保留原始前导空白（FENCE_LINE_RE 允许 ≤3 空格）
+        leading = line[: len(line) - len(line.lstrip(" \t"))]
+        lines[idx] = f"{leading}{char * length}{canon}{rest}"
+        changed += 1
+    return changed
+
+
 def normalize_chart_fence_shapes(content: str) -> str:
-    """R220：修复两类 AI 畸形图表围栏形态的**唯一出口**（幂等，行数不变）。
+    """R220/R252：修复 AI 畸形图表围栏形态的**唯一出口**（幂等，行数不变）。
 
     - 形态 A（图题假表格包裹图表）→ :func:`_unwrap_figure_table_chart`
     - 形态 B（文档围栏包裹正文+内嵌图表）→ :func:`_unwrap_doc_fence_wrapping_chart`
+    - 形态 C（R252：图表类型名误当语言标签，如 ````` ```gantt `````）
+      → :func:`_normalize_chart_fence_lang_alias`
 
     消费方（三类一致，杜绝「登记侧修了、导出侧没修」的口径分叉）：
       - 导出/预览解析：``_parse_content_blocks``（本模块，在 normalize_raw_content
@@ -1090,6 +1129,7 @@ def normalize_chart_fence_shapes(content: str) -> str:
     lines = content.split("\n")
     _unwrap_figure_table_chart(lines)
     _unwrap_doc_fence_wrapping_chart(lines)
+    _normalize_chart_fence_lang_alias(lines)
     return "\n".join(lines)
 
 

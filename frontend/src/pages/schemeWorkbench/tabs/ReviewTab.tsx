@@ -45,6 +45,8 @@ import type {
   ExpertReviewResult,
 } from "../useReviewAudit";
 import type { PlaceholderReport } from "../../../utils/placeholderReport";
+// ✅ 可拖拽分隔（2026-11-16）：审核与预检 Tab 顶部总检（就绪度/文种/编号一致性）↔ 分项检查之间可拖拽调整高度
+import { SplitPane } from "../../../components/SplitPane";
 
 const { Text } = Typography;
 
@@ -164,11 +166,22 @@ export function ReviewTab({
   const qTotal = qualityResult?.summary?.section_total;
   const qTotalSuffix = qTotal != null ? ` / 共 ${qTotal} 章` : "";
   return (
-    // ✅ 修复：审核与预检内容（两张大卡片 + 检查结果表格 + 历史记录）较长，
-    //    容器必须可滚动，避免低视口下底部内容被裁剪
+    // ✅ 2026-11-16 可拖拽上下分隔：顶部总检（交付就绪度 / 文种标签 / 编号一致性）
+    //    与下方分项检查（规范符合性 / 专家论证 / 一致性 / 占位符 / 质量自检 / 历史）之间
+    //    可拖拽调整高度，各自独立滚动。原整块 scroll-area 改为 SplitPane 纵向双窗格。
+    <SplitPane
+      orientation="vertical"
+      storageKey="swb-split-review-top-height"
+      defaultSize={360}
+      minSize={160}
+      maxSize={820}
+      handleMargin={4}
+      ariaLabel="拖拽调整审核与预检顶部总检与分项检查的大小"
+      style={{ flex: 1, minHeight: 0, paddingRight: 4 }}
+      first={
     <div
-      className="scroll-area"
-      style={{ flex: 1, minHeight: 0, overflowY: "auto", paddingRight: 4 }}
+      className="swb-pane-scroll"
+      style={{ height: "100%", minHeight: 0, overflowY: "auto" }}
     >
       {/* ===== ✅ 交付就绪度总检（六维加权评分 + 阻断项 + 放行结论）=====
                放在最上方：用户进入本页首先要的是"能不能交付"这一个答案，
@@ -192,7 +205,10 @@ export function ReviewTab({
               后端 4 端点 + api 封装早已存在但界面零入口（审计 R173 · D1/F1），
               现接线于审核 Tab —— 导出前可发现并修复「正文编号与目录漂移」。 */}
       <NumberingConsistencyPanel schemeId={id || ""} />
-
+    </div>
+    }
+    second={
+      <div className="swb-pane-scroll" style={{ height: "100%", minHeight: 0, overflowY: "auto" }}>
       {/* ===== ✅ 规范符合性检查（complianceApi.check）===== */}
       <Card
         size="small"
@@ -1077,6 +1093,8 @@ export function ReviewTab({
           setReviewTick((v) => v + 1);
         }}
       />
-    </div>
+      </div>
+    }
+    />
   );
 }

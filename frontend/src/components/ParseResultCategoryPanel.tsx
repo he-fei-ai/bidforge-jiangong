@@ -548,7 +548,7 @@ export default function ParseResultCategoryPanel({
             </Space>
           </div>
           <div
-            className="parse-cat-detail-body"
+            className="swb-pane-scroll parse-cat-detail-body"
             style={{ flex: 1, minHeight: 0, overflow: "auto", padding: 12 }}
           >
             <BidAnalysisItemBody item={selectedItem} />
@@ -572,7 +572,7 @@ export default function ParseResultCategoryPanel({
           >
             {activeGroup.label}（{activeGroup.items.length} 项，点击查看详情）
           </div>
-          <div style={{ flex: 1, minHeight: 0, overflow: "auto" }}>
+          <div className="swb-pane-scroll" style={{ flex: 1, minHeight: 0, overflow: "auto" }}>
             {activeGroup.items.map((def) => {
               const stored = storedMap.get(def.item_id);
               const content = stored?.content || "";
@@ -652,7 +652,11 @@ export default function ParseResultCategoryPanel({
     const body = () => {
       if (variant === "list-only") {
         // 分类栏自身已处理 loading / error / empty，这里直接给容器做滚动即可
-        return <div style={{ flex: 1, minHeight: 0, overflow: "auto" }}>{renderCategoryBar()}</div>;
+        return (
+          <div className="swb-pane-scroll" style={{ flex: 1, minHeight: 0, overflow: "auto" }}>
+            {renderCategoryBar()}
+          </div>
+        );
       }
       // detail-only
       if (loading && (groups || []).length === 0 && !error) {
@@ -773,7 +777,7 @@ export default function ParseResultCategoryPanel({
             </Tooltip>
           )}
         </div>
-        <div style={{ maxHeight: 560, overflow: "auto" }}>{renderCategoryBar()}</div>
+        <div className="swb-pane-scroll" style={{ maxHeight: 560, overflow: "auto" }}>{renderCategoryBar()}</div>
       </div>
       <div
         className="parse-cat-content"

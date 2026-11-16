@@ -23,6 +23,8 @@ import {
 import { useBreakpoint } from "../utils/ui";
 // F-CONTENT-STANDARD(2026-09-26): 方案默认标准文案（与后端值域同源）
 import { sectionStandardOptionLabel } from "../utils/contentStandard";
+// ✅ 2026-11-16 可拖拽上下分隔：操作与参数配置区 ↔ 章节正文编辑区
+import { SplitPane } from "./SplitPane";
 import {
   ArrowRightOutlined,
   CaretRightOutlined,
@@ -127,12 +129,25 @@ export function ContentGenerationTab(p: ContentGenerationTabProps) {
   // 方案默认标准的展示文案（空值/脏数据统一按精准兜底，与后端默认一致）
   const schemeDefaultLabel = sectionStandardOptionLabel("", p.schemeDefault);
   return (
+    // ✅ 2026-11-16 可拖拽上下分隔：上半「操作按钮 + 字数/并发/一致性/压缩参数 + 生成标准」
+    //    ↔ 下半「章节正文编辑区（children = SectionContentCard）」。两区独立滚动、
+    //    可拖拽调高、双击分隔条复位。窄屏（<1024px）由 CSS 自动堆叠为单列。
+    <SplitPane
+      orientation="vertical"
+      storageKey="swb-split-content-config-height"
+      defaultSize={340}
+      minSize={180}
+      maxSize={720}
+      handleMargin={4}
+      ariaLabel="拖拽调整操作配置区与章节正文编辑区的大小"
+      style={{ flex: 1, minHeight: 0 }}
+      first={
     // 与 UploadParseTab 同一模式：作为 flex Tab 面板内的可滚动内容区，
     // 必须 flex:1 + minHeight:0 + overflowY:auto，否则长内容会被父容器的
     // overflow:hidden 裁掉，底部「章节正文卡片」无法滚动查看。
     <div
-      className="scroll-area"
-      style={{ flex: 1, minHeight: 0, overflowY: "auto", paddingRight: 4 }}
+      className="swb-pane-scroll"
+      style={{ height: "100%", minHeight: 0, overflowY: "auto", paddingRight: 4 }}
     >
       {/* 第一行：主要操作按钮 */}
       <Space style={{ marginBottom: 8 }} wrap>
@@ -497,9 +512,17 @@ export function ContentGenerationTab(p: ContentGenerationTabProps) {
               : `本次生成按章节设置逐章回落（方案默认：${schemeDefaultLabel}）`}
         </Text>
       </div>
-
+    </div>
+    }
+    second={
+    <div
+      className="swb-pane-scroll"
+      style={{ height: "100%", minHeight: 0, overflowY: "auto", paddingRight: 4 }}
+    >
       {p.children}
     </div>
+    }
+  />
   );
 }
 

@@ -214,8 +214,14 @@ def is_fence_line(line: str) -> bool:
 
 
 def is_chart_fence_lang(lang: str) -> bool:
-    """该围栏语言标签是否属于图表家族（mermaid / chart-json / ai_image）。"""
-    return lang.strip().lower() in INLINE_CHART_FENCE_LANGS
+    """该围栏语言标签是否属于图表家族（mermaid / chart-json / ai_image）。
+
+    ✅ R252：经 fence_common 别名归一判据 —— 即使调用方绕过正文归一，
+    `gantt`/`flowchart` 等被误当语言标签时仍判为图表家族，杜绝登记侧漏图。
+    """
+    from app.services.fence_common import is_chart_fence_lang as _is_chart_lang
+
+    return _is_chart_lang(lang)
 
 
 def iter_inline_chart_fences(content: str) -> list[tuple[str, str, str, int]]:

@@ -47,14 +47,33 @@ $ProtectedPids = @(0, 4)
 
 function Get-PortOwnerPids {
     param([int] $Port)
-    $pids = @()
-    $conns = Get-NetTCPConnection -LocalPort $Port -State Listen
-    if ($conns) {
-        $pids = @($conns | ForEach-Object { $_.OwningProcess })
+    # Fast pre-check: .NET GetActiveTcpListeners is ~370x faster than
+    # Get-NetTCPConnection (19ms vs 7000ms).  If the port is not listening
+    # at all, there is no owner PID to find — skip the expensive CIM query.
+    $listeners = [System.Net.NetworkInformation.IPGlobalProperties]::GetIPGlobalProperties().GetActiveTcpListeners()
+    $isListening = $false
+    foreach ($ep in $listeners) {
+        if ($ep.Port -eq $Port) { $isListening = $true; break }
     }
-    if ($pids.Count -eq 0) {
-        # Fallback: netstat works even when the CIM/GetNetTCPConnection stack
-        # is unavailable or blocked on older systems.
+    if (-not $isListening) { return @() }
+
+    # Port is busy — resolve the owner PID via Get-NetTCPConnection (CIM).
+    $pids = @()
+    $netErr = $false
+    try {
+        $conns = Get-NetTCPConnection -LocalPort $Port -State Listen -ErrorAction Stop
+        if ($conns) {
+            $pids = @($conns | ForEach-Object { $_.OwningProcess })
+        }
+    } catch {
+        # Get-NetTCPConnection is unavailable or blocked (older systems / WMI
+        # service down).  Fall back to netstat -ano which is slower but works.
+        $netErr = $true
+    }
+    # Only run the netstat fallback when the cmdlet actually ERRORED.
+    # When it returned empty (port is free) there is nothing to find —
+    # running netstat -ano here wasted ~8s per port on a free port.
+    if ($pids.Count -eq 0 -and $netErr) {
         $needle = ":$Port "
         $lines = & netstat -ano | Select-String -SimpleMatch $needle |
                  Select-String -Pattern 'LISTENING'

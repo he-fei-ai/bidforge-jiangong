@@ -361,8 +361,11 @@ describe("BidAnalysisTab", () => {
           '{"project_name":"上海市某工程","contractor":"某建工集团","chief_supervision_engineer":"张三"}',
       },
     });
+    // ✅ R251 加固：改用**语义钩子**取字段名（data-ba-field-label），
+    //    不再依赖 `.ba-item-body > div > div > div:first-child` 的层级位置 ——
+    //    阅读区被可拖拽面板包一层后 DOM 深度 +1，层级选择器会假红。
     const labels = Array.from(
-      container.querySelectorAll(".ba-item-body > div > div > div:first-child"),
+      container.querySelectorAll(".ba-item-body [data-ba-field-label]"),
     )
       .map((el) => (el.textContent || "").trim())
       .filter(Boolean);

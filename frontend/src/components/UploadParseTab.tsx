@@ -40,6 +40,8 @@ import ParseResultCategoryPanel, { type ParsePanelSharedState } from "./ParseRes
 import { computeDocStats, type WorkflowTabKey } from "../utils/workflowDerived";
 import { MAX_UPLOAD_BYTES, UPLOAD_FILE_ACCEPT, partitionUploadFiles, resolveMaxUploadBytes } from "../utils/uploadAccept";
 import type { BaGroup, BaStoredItem } from "../utils/bidAnalysis";
+// ✅ 2026-11-16 可拖拽左右分隔：文件列表/上传区 ↔ 解析结果详情区
+import { SplitPane } from "./SplitPane";
 
 const { Text } = Typography;
 
@@ -189,9 +191,22 @@ export default function UploadParseTab({
   const maxMb = formatMb(effectiveMaxBytes);
 
   return (
+    // ✅ 2026-11-16 可拖拽左右分隔：左侧「上传区 + 资料与解析列表」↔ 右侧「解析结果详情区
+    //    （信息显示窗口）」。首窗格承载文件操作（上传/解析/列表），次窗格承载详情阅读
+    //    （分类 → 解析项 → 原文对照），两者独立滚动、可拖拽调整宽度、双击分隔条复位。
+    <SplitPane
+      orientation="horizontal"
+      storageKey="swb-split-import-files-width"
+      defaultSize={560}
+      minSize={320}
+      maxSize={960}
+      handleMargin={4}
+      ariaLabel="拖拽调整文件列表/上传区与解析结果详情区的大小"
+      style={{ flex: 1, minHeight: 0 }}
+      first={
     <div
-      className="scroll-area"
-      style={{ flex: 1, minHeight: 0, overflowY: "auto", paddingRight: 4 }}
+      className="swb-pane-scroll"
+      style={{ height: "100%", minHeight: 0, overflowY: "auto", paddingRight: 4 }}
     >
       {/* ===== 上传区（版式对齐「目录生成」的编制要求卡：浅灰底 + 图标标题 + 右侧主操作） ===== */}
       <Card
@@ -467,7 +482,13 @@ export default function UploadParseTab({
           defaultVisibleCount={2}
         />
       </Card>
-
+    </div>
+    }
+    second={
+    <div
+      className="swb-pane-scroll"
+      style={{ height: "100%", minHeight: 0, overflowY: "auto", paddingRight: 4 }}
+    >
       {/* ===== 信息显示窗口（2026-09-23 更名：原「解析信息分类显示栏」）=====
           按解析结果类别（后端 13 分组）分组展示；点击分类查看其下解析项，
           右侧显示详情，支持 查看/编辑（人工校正）/复制。仅在页面注入
@@ -530,5 +551,7 @@ export default function UploadParseTab({
         )}
       </Space>
     </div>
+    }
+  />
   );
 }

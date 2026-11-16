@@ -98,9 +98,14 @@ import type {
 } from "../types/defect";
 // ✅ R238（2026-11-13）：图像模型配置契约类型（imageApi / 消费端组件共用）
 import type {
+  ImageAuditResponse,
   ImageConfigResponse,
   ImageConfigSavePayload,
   ImageModelConfig,
+  ImageModelListResponse,
+  ImageModelMutationResponse,
+  ImageModelSavePayload,
+  ImageSceneRoutesResponse,
   ImageTestResult,
 } from "../types/imageConfig";
 
@@ -1411,10 +1416,38 @@ export const imageApi: {
     base_url: string;
     api_key: string;
   }) => Promise<AxiosResponse<ImageTestResult>>;
+  // ✅ R252（2026-11-16）：多模型多配置 / 场景路由 / 审计（/api/v1/image-models）
+  listModels: () => Promise<AxiosResponse<ImageModelListResponse>>;
+  createModel: (data: ImageModelSavePayload) => Promise<AxiosResponse<ImageModelMutationResponse>>;
+  updateModel: (
+    id: string,
+    data: ImageModelSavePayload,
+  ) => Promise<AxiosResponse<ImageModelMutationResponse>>;
+  deleteModel: (id: string) => Promise<AxiosResponse<ImageModelMutationResponse>>;
+  setDefaultModel: (id: string) => Promise<AxiosResponse<ImageModelMutationResponse>>;
+  testModelConnection: (data: {
+    provider: string;
+    base_url: string;
+    api_key: string;
+  }) => Promise<AxiosResponse<ImageTestResult>>;
+  listSceneRoutes: () => Promise<AxiosResponse<ImageSceneRoutesResponse>>;
+  saveSceneRoutes: (routes: { scene: string; config_id: string }[]) =>
+    Promise<AxiosResponse<ImageModelMutationResponse>>;
+  listAuditLogs: (limit?: number, offset?: number) => Promise<AxiosResponse<ImageAuditResponse>>;
 } = {
   getConfig: () => api.get("/image-config"),
   saveConfig: (data) => api.put("/image-config", data),
   testConnection: (data) => api.post("/image-config/test", data),
+  listModels: () => api.get("/image-models"),
+  createModel: (data) => api.post("/image-models", data),
+  updateModel: (id, data) => api.put(`/image-models/${id}`, data),
+  deleteModel: (id) => api.delete(`/image-models/${id}`),
+  setDefaultModel: (id) => api.post(`/image-models/${id}/set-default`),
+  testModelConnection: (data) => api.post("/image-models/test", data),
+  listSceneRoutes: () => api.get("/image-models/scene-routes"),
+  saveSceneRoutes: (routes) => api.put("/image-models/scene-routes", { routes }),
+  listAuditLogs: (limit = 50, offset = 0) =>
+    api.get("/image-models/audit-logs", { params: { limit, offset } }),
 };
 
 // 提示词

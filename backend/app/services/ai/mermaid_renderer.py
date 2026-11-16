@@ -367,11 +367,16 @@ def render_mermaid_to_bytes(
     #    ⚠️ JSON 载荷（`{`/`[` 开头）不做归一：字符串内的分号会被插入换行破坏 JSON。
     if code and not code.lstrip().startswith(("{", "[")):
         from app.services.chart_validators import (
+            ensure_gantt_declaration,
             normalize_mermaid_statements,
             strip_leading_mermaid_comments,
         )
 
         code = normalize_mermaid_statements(strip_leading_mermaid_comments(code))
+        # ✅ R253：补缺首行 `gantt`（R252 识别出的 title-first 载荷此前因无字面
+        #    "gantt" 落到宽松兜底分支，丢失 section 阶段带）。归一后走主分支，
+        #    plan 透传 section；幂等、不改正文；JSON 载荷在上方已排除。
+        code = ensure_gantt_declaration(code)
         if not code:
             logger.warning("[渲染] 归一化后为空载荷（chart_type=%s），返回 None", chart_type)
             _record_render_strategy(strategy_out, "none")

@@ -310,14 +310,20 @@ class AdaptiveConcurrencyController:
     # 相对目标档位最多下调的档数（防止一次抖动把并发打到 1）
     MAX_DOWNGRADE_FROM_TARGET = 2
 
-    def __init__(self, initial: int = 3, min_c: int = 1, max_c: int | None = None):
+    def __init__(self, initial: int | None = None, min_c: int = 1, max_c: int | None = None):
         # ✅ A5（2026-10-05）：max_c 单一源来自 settings.max_concurrency（默认 5）。
         #    避免与 provider_factory._MAX_CONCURRENCY / facts_extractor.FACTS_MAX_CONCURRENCY
         #    出现「三处 5 各说各话」的漂移；调用方显式传 max_c 仍然优先。
-        if max_c is None:
-            from app.config import settings as _settings
+        from app.config import settings as _settings
 
+        if max_c is None:
             max_c = max(1, int(getattr(_settings, "max_concurrency", 5) or 5))
+        # ✅ R249 续（2026-11-16）：default_concurrency（默认 3）此前在 config.py /
+        #    .env.example 声明却零消费，控制器初始档位由字面量 3 承担 —— 运维设
+        #    DEFAULT_CONCURRENCY 静默失效。现改读 settings；调用方显式 initial 仍优先。
+        if initial is None:
+            initial = max(1, int(getattr(_settings, "default_concurrency", 3) or 3))
+        initial = max(min_c, min(max_c, int(initial)))
         self._sem = ResizableSemaphore(initial)
         self.current = initial
         self.target = initial  # 目标档位（配置值 / 用户档位），自适应围绕它波动

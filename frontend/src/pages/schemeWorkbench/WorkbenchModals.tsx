@@ -362,7 +362,7 @@ export function WorkbenchModals(props: WorkbenchModalsProps) {
         )}
 
         <Spin spinning={libLoading || libApplying}>
-          <div style={{ maxHeight: 380, overflowY: "auto" }}>
+          <div className="swb-pane-scroll" style={{ maxHeight: 380, overflowY: "auto" }}>
             {libItems.length === 0 && !libLoading ? (
               <Empty description="暂无可套用的目录库" image={Empty.PRESENTED_IMAGE_SIMPLE} />
             ) : (
@@ -450,7 +450,7 @@ export function WorkbenchModals(props: WorkbenchModalsProps) {
           </div>
           {previewText ? (
             <div
-              className="markdown-body"
+              className="markdown-body swb-pane-scroll"
               style={{ maxHeight: "60vh", overflowY: "auto", whiteSpace: "pre-wrap", fontSize: 13 }}
             >
               {previewText}
@@ -494,6 +494,7 @@ export function WorkbenchModals(props: WorkbenchModalsProps) {
           </div>
           {baModeOpt === "custom" && (
             <div
+              className="swb-pane-scroll"
               style={{
                 maxHeight: 320,
                 overflowY: "auto",
@@ -542,7 +543,7 @@ export function WorkbenchModals(props: WorkbenchModalsProps) {
         width={820}
       >
         {baFullItem && (
-          <div style={{ maxHeight: "65vh", overflowY: "auto" }}>
+          <div className="swb-pane-scroll" style={{ maxHeight: "65vh", overflowY: "auto" }}>
             <BidAnalysisItemBody item={baFullItem} />
           </div>
         )}

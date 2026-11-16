@@ -384,12 +384,89 @@ def looks_like_prose(line: str) -> bool:
 _CJK_TAIL_RE = re.compile(r"[，。；：！？…]\s*$")
 
 
+# ---------------------------------------------------------------------------
+# R252（2026-11-16 · 甘特图源码泄漏进导出 DOCX 根因修复）：图表围栏**语言标签别名归一**。
+#
+# 生产实证：AI 生成正文时偶发把「图表类型名」误当成围栏语言标签，写成
+#   ```gantt / ```flowchart / ```pie / ```timeline ...
+# 而全仓三侧（后端登记/导出、前端预览）的图表围栏白名单都只有
+#   mermaid / chart-json / ai_image
+# ⇒ ```gantt 被当作**普通代码块**：前端走 marked `<pre><code>`、后端走
+#   _add_code_block 把 Mermaid 源码**原样印进交付 DOCX**（截图："title 机电安装
+#   施工进度计划 / dateFormat / axisFormat / section …" 纯文本，无渲染、无图号、
+#   无 AI 修复按钮）。该畸形无需语言标签合法 —— 只要围栏体内是图表代码即可救回。
+#
+# 这里只做**围栏信息串首词的一对一归一**（行数不变、幂等），不碰块内代码：
+#   · 7 类内部图表类型名（gantt/flowchart/...）与 mermaid 原生图关键字
+#     （graph/pie/timeline/sequenceDiagram/...）→ `mermaid`；
+#   · `mermaid`/`chart-json`/`ai_image` 原样保留；
+#   · 其余（js/python/markdown 等真实代码/文档围栏）原样返回 → 不被误当图表。
+#
+# 判据与前端 `fencePreprocess.CHART_FENCE_LANG_ALIASES` 同源（parity 护栏锁）。
+# ---------------------------------------------------------------------------
+#: 图表家族围栏语言标签（归一后的规范值，唯一事实源）。
+CHART_FENCE_LANGS: frozenset[str] = frozenset({"mermaid", "chart-json", "ai_image"})
+
+#: AI 高频误用的「图表类型名 / mermaid 图关键字」→ 规范围栏标签 `mermaid`。
+#: 与 MERMAID_KEYWORD_TO_CHART_TYPE 的键集合同源，另补常见变体（pie 等）。
+_CHART_FENCE_LANG_ALIASES: frozenset[str] = frozenset(
+    {
+        "gantt",
+        "flowchart",
+        "graph",
+        "pie",
+        "xychart",
+        "xychart-beta",
+        "timeline",
+        "architecture",
+        "architecture-beta",
+        "labor",
+        "comparison",
+        "layout",
+        "sequencediagram",
+        "classdiagram",
+        "statediagram",
+        "statediagram-v2",
+        "erdiagram",
+        "journey",
+        "mindmap",
+        "quadrantchart",
+        "gitgraph",
+        "sankey",
+        "sankey-beta",
+        "block",
+        "block-beta",
+        "kanban",
+    }
+)
+
+
+def canonical_chart_fence_lang(info: str) -> str:
+    """围栏信息串 → 规范图表标签；非图表标签返回其小写首词（原样语义）。
+
+    例：``"gantt"``→``"mermaid"``；``"mermaid title"``→``"mermaid"``；
+    ``"chart-json"``→``"chart-json"``；``"python"``→``"python"``。
+    """
+    lang = (info or "").strip().lower().split()[0] if (info or "").strip() else ""
+    if lang in _CHART_FENCE_LANG_ALIASES:
+        return "mermaid"
+    return lang
+
+
+def is_chart_fence_lang(info: str) -> bool:
+    """归一后是否属于图表家族围栏语言（供登记/导出/预览共用判据）。"""
+    return canonical_chart_fence_lang(info) in CHART_FENCE_LANGS
+
+
 __all__ = [
+    "CHART_FENCE_LANGS",
+    "canonical_chart_fence_lang",
     "FENCE_LINE_RE",
     "append_missing_closes",
     "classify_fence_defects",
     "fence_char_ranges",
     "find_unclosed",
+    "is_chart_fence_lang",
     "is_fence_close",
     "iter_all_blocks",
     "iter_closed_blocks",

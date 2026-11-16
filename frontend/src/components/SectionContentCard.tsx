@@ -328,10 +328,14 @@ function SectionContentCard({
         </>
       ) : (
         <div
-          className="scroll-area"
+          className="swb-pane-scroll"
           style={{
             minHeight: 200,
-            maxHeight: "calc(100vh - 420px)",
+            /* ✅ R251：删掉写死的 calc(100vh - 420px)。
+               该值隐含「上半区固定 420px」假设，而正文生成的上半区自 2026-11-16
+               起可拖拽（180~720px）⇒ 拖高后本区被裁切、底部正文看不到。
+               现交由父级 .swb-pane-scroll 统一滚动，高度随 flex 链路自适应。 */
+            maxHeight: "none",
             overflow: "auto",
             paddingRight: 8,
           }}

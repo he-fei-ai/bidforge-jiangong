@@ -445,7 +445,14 @@ def get_gateway() -> OmpAgentGateway:
 
 
 def public_config() -> dict[str, Any]:
-    """只读、脱敏的引擎配置快照（供诊断端点与前端 Feature Flag 消费）。"""
+    """只读、脱敏的引擎配置快照（供诊断端点与前端 Feature Flag 消费）。
+
+    ⚠️ R239 语义澄清（防误读）：``fallback`` / ``engine_order`` 是**引擎层**
+    （``omp_engine_router.ENGINE_ORDER``，R236 落地的 omp → local → main 三档降级链）
+    的档位清单；**不是** ``agent_engine`` 的执行回退面 —— 本包单轨封装 omp，
+    执行失败一律挂起（``paused``）并保留现场，**绝不**改走 local / main。
+    二者层级不同，消费方不得据此认为 agent_engine 会自动降级。
+    """
     cfg = load_agent_engine_config()
     policy = engine_policy()
     return {

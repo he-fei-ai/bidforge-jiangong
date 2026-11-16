@@ -138,7 +138,7 @@ export default function SecuritySettingsPage() {
         accent={<SafetyCertificateOutlined style={{ fontSize: 28, opacity: 0.6 }} />}
       />
 
-      <div style={{ overflow: "auto", paddingRight: 4 }}>
+      <div className="scroll-area" style={{ paddingRight: 4 }}>
         {BUILD_TOKEN && (
           <Alert
             type="warning"

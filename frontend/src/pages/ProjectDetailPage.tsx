@@ -541,8 +541,8 @@ export default function ProjectDetailPage() {
           flexDirection: "column",
           flex: 1,
           minHeight: 0,
-          overflow: "auto",
         }}
+        className="scroll-area"
       >
         <Descriptions
           title={project?.name || "项目详情"}
@@ -765,7 +765,7 @@ export default function ProjectDetailPage() {
                     )}
 
                     <Spin spinning={catalogLoading}>
-                      <div style={{ maxHeight: 320, overflowY: "auto", paddingRight: 8 }}>
+                      <div className="scroll-area" style={{ maxHeight: 320, paddingRight: 8 }}>
                         {Object.entries(catalogData).map(
                           ([category, items]) =>
                             items.length > 0 && (
@@ -821,6 +821,7 @@ export default function ProjectDetailPage() {
                             treeData={outlineToTreeData(outlinePreview)}
                             defaultExpandAll
                             selectable={false}
+                            className="swb-pane-scroll"
                             style={{ maxHeight: 200, overflowY: "auto" }}
                           />
                         </Spin>

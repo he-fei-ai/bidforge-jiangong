@@ -538,5 +538,8 @@ class TestSelfProofR208:
             [sys.executable, "-m", "py_compile", str(p)],
             capture_output=True,
             text=True,
+            # Windows cp936 严格解码会在 reader 线程抛 UnicodeDecodeError
+            encoding="utf-8",
+            errors="replace",
         )
         assert r.returncode == 0, r.stderr

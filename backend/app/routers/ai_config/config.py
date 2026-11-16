@@ -277,6 +277,10 @@ async def duplicate_config(body: DuplicateConfigIn, request: Request = None, db=
     )
     # ✅ 关键：审计与 INSERT 同属路由连接事务，统一提交（避免 P1 回滚丢失）
     await db.commit()
+    # ✅ R248（2026-11-15 · 热更新缺口）：复制体是新降级候选（is_active=0 且有
+    #    Key），若提交后不失效 ``_fallback_chain`` 缓存，用户复制后最长 5 分钟
+    #    运行时仍看不到新候选（同族「配置写进库 ≠ 生效」静默失效）。
+    invalidate_config_cache()
     return {
         "id": new_id,
         "ok": True,

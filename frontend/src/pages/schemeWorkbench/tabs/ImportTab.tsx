@@ -267,9 +267,18 @@ export function ImportTab(props: ImportTabProps) {
       </div>
       <div style={{ flex: 1, minHeight: 0, minWidth: 0, display: "flex", flexDirection: "column" }}>
         {importSubTab === "docs" ? (
+          /* ✅ R251：外层不再自带滚动容器 —— 内部 UploadParseTab 已是 SplitPane
+             纵向双窗格（上传区 / 信息显示窗口）各自独立滚动，外层再包一层滚动
+             会形成三重滚动条、且与「防止全局滚动条出现」的契约相悖。
+             此处只做 flex 容器，让内部 SplitPane 吃满可用高度。 */
           <div
-            className="scroll-area"
-            style={{ height: "100%", minHeight: 0, overflowY: "auto", paddingRight: 4 }}
+            style={{
+              height: "100%",
+              minHeight: 0,
+              display: "flex",
+              flexDirection: "column",
+              overflow: "hidden",
+            }}
           >
             {/* 上传解析主体（含上传区、资料与解析列表、下一步等） */}
             <UploadParseTab

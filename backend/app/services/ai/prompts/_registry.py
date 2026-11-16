@@ -280,6 +280,16 @@ def register_lazy_prompts() -> None:
         return
     try:
         from app.services import bid_analysis_service  # noqa: F401
+
+        # ✅ 提示词注册表收口（2026-11-16）：正文生成标准 8 条 + 文种识别 system
+        #    此前绕过注册表，现与投标分析域同构 —— 字面量留在原模块作出厂默认、
+        #    本模块 import 时自注册，这里补「只跑提示词护栏 / 没导入那些模块」场景。
+        #    两模块顶层均不反向 import prompts 包（已实测无循环导入）。
+        from app.services import content_standard as _content_standard  # noqa: F401
+
+        # 事实补全规则骨架（facts_patches，参数化 {label}/{missing_note}）。
+        from app.services import facts_patches as _facts_patches  # noqa: F401
+        from app.services import genre_assist as _genre_assist  # noqa: F401
     except Exception as e:  # noqa: BLE001
         import logging
 
@@ -1018,6 +1028,22 @@ PROMPT_VARIABLE_CONTRACTS: dict[str, list[str]] = {
     # --- M1（2026-11-05）：评分项提取模板（services/scoring_items.py 调用点逐项核过）---
     # 唯一占位符 ``{scoring_text}`` 由 ``render("scoring_items_extract", scoring_text=text)`` 注入。
     "scoring_items_extract": ["scoring_text"],
+    # --- ✅ R252（2026-11-16）：提示词注册表收口 · 9 条接入契约表 ---
+    # 正文生成标准 8 条片段（content_standard.py）+ 文种识别 system（genre_assist.py）
+    # 均为「完整文案块」、无 ``{var}`` 调用方变量 → 空契约 = 显式声明「不接受任何
+    # 外部插值」，今后若被加占位符会在启动期报 used_not_declared。
+    "content_standard_system_precise": [],
+    "content_standard_system_fuzzy": [],
+    "content_standard_user_precise": [],
+    "content_standard_user_fuzzy": [],
+    "content_standard_facts_header_precise": [],
+    "content_standard_facts_header_fuzzy": [],
+    "content_standard_continue_hint_precise": [],
+    "content_standard_continue_hint_fuzzy": [],
+    "genre_assist_system": [],
+    # 事实补全规则骨架（facts_patches）：唯一占位符 {label}/{missing_note} 由
+    # build_completeness_rules 运行时填入 —— 注入方即调用方，登记让漂移可被校验发现。
+    "facts_completeness_rules": ["label", "missing_note"],
 }
 
 

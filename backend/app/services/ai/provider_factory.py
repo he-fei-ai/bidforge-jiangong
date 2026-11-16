@@ -462,37 +462,6 @@ def _build_provider(preset_name: str, api_key: str, base_url: str, model: str, *
 
 # 允许的 API 地址协议（白名单，避免 file:// / ftp:// 等被写入配置后由 httpx 发起）
 _ALLOWED_URL_SCHEMES = ("http", "https")
-# 数值字段合法区间（超界静默收敛，避免前端绕过 / 旧数据导致运行时异常）
-# ✅ 并发上限改为读取 settings.max_concurrency（默认 5，与既有硬编码一致）：
-#    此前 `_RANGE["concurrency"]` 与 apply_config_concurrency 的 `1<=c<=5`
-#    两处各自硬编码，放宽上限需要同步改两处（漏改即静默钳制）。默认零变化。
-_MAX_CONCURRENCY = max(1, int(getattr(settings, "max_concurrency", 5) or 5))
-_RANGE = {
-    "max_tokens": (256, 200000),
-    "temperature": (0.0, 2.0),
-    "timeout": (10, 3600),
-    "concurrency": (1, _MAX_CONCURRENCY),
-}
-
-# ✅ 数值字段缺省值单一出口：schema_sql 表默认 / AIConfigIn 默认 / 前端表单默认
-#    与运行时候选 fallback（_build_candidates / _fallback_chain /
-#    _candidate_timeout / _attempt_candidate）此前各写一份，
-#    timeout 曾出现「声明 900、运行时兜底 60」的口径漂移（配置行缺该字段或
-#    为 0 时，主候选超时静默缩水到 60s，长正文生成必超时）。现统一引用本表。
-DEFAULT_CONFIG_NUMBERS: dict = {
-    "max_tokens": 8192,
-    "temperature": 0.7,
-    "timeout": 900,
-    "concurrency": 4,
-}
-
-
-def _clamp(value, lo, hi, fallback):
-    try:
-        v = float(value)
-    except (TypeError, ValueError):
-        return fallback
-    return max(lo, min(hi, v))
 
 
 def _setting_num(name: str, default: float, *, lo: float | None = None, hi: float | None = None) -> float:
@@ -523,6 +492,61 @@ def _setting_num(name: str, default: float, *, lo: float | None = None, hi: floa
     if hi is not None:
         val = min(hi, val)
     return val
+
+
+# 数值字段合法区间（超界静默收敛，避免前端绕过 / 旧数据导致运行时异常）
+# ✅ 并发上限改为读取 settings.max_concurrency（默认 5，与既有硬编码一致）：
+#    此前 `_RANGE["concurrency"]` 与 apply_config_concurrency 的 `1<=c<=5`
+#    两处各自硬编码，放宽上限需要同步改两处（漏改即静默钳制）。默认零变化。
+_MAX_CONCURRENCY = max(1, int(getattr(settings, "max_concurrency", 5) or 5))
+_RANGE = {
+    "max_tokens": (256, 200000),
+    "temperature": (0.0, 2.0),
+    "timeout": (10, 3600),
+    "concurrency": (1, _MAX_CONCURRENCY),
+}
+
+# ✅ 数值字段缺省值单一出口：schema_sql 表默认 / AIConfigIn 默认 / 前端表单默认
+#    与运行时候选 fallback（_build_candidates / _fallback_chain /
+#    _candidate_timeout / _attempt_candidate）此前各写一份，
+#    timeout 曾出现「声明 900、运行时兜底 60」的口径漂移（配置行缺该字段或
+#    为 0 时，主候选超时静默缩水到 60s，长正文生成必超时）。现统一引用本表。
+#
+# ✅ R248（2026-11-15 · 配置收敛）：``settings.ai_request_timeout``（config.py
+#    声明 900）此前**全库零消费** —— 实际缺省硬编码在本表，操作员显式设置
+#    ``AI_REQUEST_TIMEOUT`` 环境变量后完全无效（静默失效）。现本表读取
+#    settings 并按 _RANGE 钳制，默认 900 与既有行为逐字节一致；显式设置
+#    AI_REQUEST_TIMEOUT 即时生效，收敛为单一运行时来源（不再双写两处 900）。
+_DEFAULT_TIMEOUT = max(
+    _RANGE["timeout"][0],
+    min(_RANGE["timeout"][1], int(getattr(settings, "ai_request_timeout", 900) or 900)),
+)
+# ✅ R249 续（2026-11-16 · 数值默认单一事实源）：max_tokens/temperature/concurrency
+#    不再写死字面量，改读取 config.py 新声明（AI_DEFAULT_MAX_TOKENS /
+#    AI_DEFAULT_TEMPERATURE / AI_DEFAULT_CONCURRENCY），默认值与 schema_sql 和
+#    前端表单逐字一致；显式设置按 _RANGE 钳制。temperature 用 _setting_num，
+#    显式 0 是合法值，不得被 ``or default`` 吞掉。
+_DEFAULT_MAX_TOKENS = int(
+    _setting_num("ai_default_max_tokens", 8192, lo=_RANGE["max_tokens"][0], hi=_RANGE["max_tokens"][1])
+)
+_DEFAULT_TEMPERATURE = _setting_num("ai_default_temperature", 0.7, lo=_RANGE["temperature"][0], hi=_RANGE["temperature"][1])
+_DEFAULT_CONFIG_CONCURRENCY = int(
+    _setting_num("ai_default_concurrency", 4, lo=_RANGE["concurrency"][0], hi=_RANGE["concurrency"][1])
+)
+DEFAULT_CONFIG_NUMBERS: dict = {
+    "max_tokens": _DEFAULT_MAX_TOKENS,
+    "temperature": _DEFAULT_TEMPERATURE,
+    "timeout": _DEFAULT_TIMEOUT,
+    "concurrency": _DEFAULT_CONFIG_CONCURRENCY,
+}
+
+
+def _clamp(value, lo, hi, fallback):
+    try:
+        v = float(value)
+    except (TypeError, ValueError):
+        return fallback
+    return max(lo, min(hi, v))
 
 
 #: 合法计费方式（白名单）。脏值（拼错/旧版本导入数据）此前会原样入库，
@@ -4145,7 +4169,35 @@ async def _build_candidates(cfg: dict | None) -> list[dict]:
         primary_id = str(cfg.get("id") or "").strip()
         if primary_id:
             seen_config_ids.add(primary_id)
-    for c in await _fallback_chain():
+    chain = await _fallback_chain()
+    # ✅ R248（2026-11-15 · 场景路由降级链缺口）：``_fallback_chain`` 固定排除
+    #    「全局 is_active=1 主配置」。当本调用的主候选是**场景路由指定**（或调用方
+    #    显式 ai_config）且与全局主配置不同时，全局主配置被静默排除在降级链外 ——
+    #    场景模型失败后用户配的主模型完全不被尝试（行为实证：attempted=['fast','other']，
+    #    缺 'main'）。现按「有效主候选」补回全局主配置（不加入 seen_config_ids，
+    #    由下方循环统一去重，避免 prepend 后被自己 skip）。
+    if cfg:
+        effective_id = str(cfg.get("id") or "").strip()
+        if effective_id:
+            active = await _load_active_config()
+            active_id = str(active.get("id") or "").strip() if active else ""
+            if active_id and active_id != effective_id:
+                _pk = _primary_api_key(active)
+                if _pk:
+                    chain = [
+                        {
+                            "config_id": active_id,
+                            "provider_name": active.get("provider_name", "openai"),
+                            "api_key": _pk,
+                            "base_url": active.get("base_url", ""),
+                            "model": active.get("model", ""),
+                            "max_tokens": active.get("max_tokens", DEFAULT_CONFIG_NUMBERS["max_tokens"]),
+                            "temperature": active.get("temperature", DEFAULT_CONFIG_NUMBERS["temperature"]),
+                            "timeout": active.get("timeout", DEFAULT_CONFIG_NUMBERS["timeout"]),
+                            "request_mode": normalize_request_mode(active.get("request_mode")),
+                        }
+                    ] + list(chain)
+    for c in chain:
         cid = str(c.get("config_id") or "").strip()
         if cid and cid in seen_config_ids:
             continue

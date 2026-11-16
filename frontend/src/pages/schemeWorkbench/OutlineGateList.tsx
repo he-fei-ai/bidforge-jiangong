@@ -29,6 +29,7 @@ export function OutlineGateList({
         </Text>
       </div>
       <div
+        className="swb-pane-scroll"
         style={{
           maxHeight: 320,
           overflow: "auto",

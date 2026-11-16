@@ -50,6 +50,8 @@ import type { FactsCategoryEntry } from "../factsShared";
 import type { FactsLogItem } from "../logTypes";
 import type { FactsSegmentStats } from "../workbenchTypes";
 import { FactsAdjustPanel } from "../FactsAdjustPanel";
+// ✅ 可拖拽分隔（2026-11-16）：全局事实 Tab 顶部（统计/操作/筛选/资料）↔ 分组事实列表之间可拖拽调整高度
+import { SplitPane } from "../../../components/SplitPane";
 import { FactsChapterCoveragePanel } from "../FactsChapterCoveragePanel";
 import { FactsDiagnosticsPanel } from "../FactsDiagnosticsPanel";
 import { FactsExtractProgressCard } from "../FactsExtractProgressCard";
@@ -207,11 +209,22 @@ export function FactsTab({
   //    （R191 C-F3 → R203 FE-5 → 本轮），故两侧口径必须一致。
   const docParseDisabled = parsingDocs || !!parsingDocId || uploadingFacts;
   return (
-    // ✅ 修复：全局事实内容可能很长（资料列表 + 分组事实 Collapse），
-    //    容器必须可滚动，否则超出视口的内容被外层 overflow:hidden 裁剪，无法查看/点击
+    // ✅ 2026-11-16 可拖拽上下分隔：顶部（统计面板 / 操作按钮 / 进度 / 筛选器 / 资料列表）
+    //    与下方「分组事实列表」之间可拖拽调整高度，各自独立滚动。原整块 scroll-area 改为
+    //    SplitPane 纵向双窗格。
+    <SplitPane
+      orientation="vertical"
+      storageKey="swb-split-facts-top-height"
+      defaultSize={320}
+      minSize={140}
+      maxSize={760}
+      handleMargin={4}
+      ariaLabel="拖拽调整全局事实顶部信息区与分组事实列表的大小"
+      style={{ flex: 1, minHeight: 0, paddingRight: 4 }}
+      first={
     <div
-      className="scroll-area"
-      style={{ flex: 1, minHeight: 0, overflowY: "auto", paddingRight: 4 }}
+      className="swb-pane-scroll"
+      style={{ height: "100%", minHeight: 0, overflowY: "auto" }}
     >
       {/* ===== 顶部：统计面板 + 告警 ===== */}
       {factsSummary && factsSummary.total > 0 && (
@@ -804,7 +817,10 @@ export function FactsTab({
           />
         )}
       </Card>
-
+    </div>
+    }
+    second={
+      <div className="swb-pane-scroll" style={{ height: "100%", minHeight: 0, overflowY: "auto" }}>
       {/* ===== 全局事实分组列表（增强版：带模拟值/矛盾/置信度标记）=====
                ✅ 2026-09-23 改版：展示左侧分类面板选中的分类详情（项目资料下方），
                组合筛选器（模拟/矛盾/待审核）仍然生效 */}
@@ -895,6 +911,8 @@ export function FactsTab({
             </div>
           );
         })()}
-    </div>
+      </div>
+      }
+    />
   );
 }

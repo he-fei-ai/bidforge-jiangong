@@ -309,7 +309,7 @@ function BatchFixModal({ schemeId, open, onClose, onFixed }: BatchFixModalProps)
                 message={"共 " + collectFixable.length + " 项阻断问题支持自动修复"}
                 description="点击下方「生成修复预览」将逐条做最小必要改写并展示前后对比，你可逐项决定是否接受。"
               />
-              <div style={{ maxHeight: 320, overflowY: "auto" }}>
+              <div className="swb-pane-scroll" style={{ maxHeight: 320, overflowY: "auto" }}>
                 {collectFixable.map((f: CollectFinding, i) => (
                   <div
                     key={`${f.rule_id}-${i}`}
@@ -390,7 +390,7 @@ function BatchFixModal({ schemeId, open, onClose, onFixed }: BatchFixModalProps)
               }
             />
           )}
-          <div style={{ maxHeight: 360, overflowY: "auto" }}>
+          <div className="swb-pane-scroll" style={{ maxHeight: 360, overflowY: "auto" }}>
             {stageData.items.map((it, i) => {
               const key = itemKey(it);
               const fixable = it.status === "repaired";
@@ -443,6 +443,7 @@ function BatchFixModal({ schemeId, open, onClose, onFixed }: BatchFixModalProps)
                     <div style={{ fontSize: 11, marginLeft: 4 }}>
                       <Text type="secondary">修复前：</Text>
                       <pre
+                        className="swb-pane-scroll"
                         style={{
                           margin: "2px 0",
                           fontSize: 11,
@@ -457,6 +458,7 @@ function BatchFixModal({ schemeId, open, onClose, onFixed }: BatchFixModalProps)
                       </pre>
                       <Text type="secondary">修复后：</Text>
                       <pre
+                        className="swb-pane-scroll"
                         style={{
                           margin: "2px 0 0",
                           fontSize: 11,

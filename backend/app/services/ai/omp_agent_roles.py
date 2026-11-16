@@ -15,6 +15,8 @@
 
 ⚠️ 与 omp 上游能力的对应关系见 ``docs/集成oh-my-pi_OMP_AGENT可行性报告_20261112.md``：
    ``--tools`` 白名单、RPC NDJSON、``maxFrameBytes=1MB``（故长文本一律走工作区文件）。
+   ⚠️ 该报告为历史归档件（已从工作树清理，仍可用 ``git show`` 从历史取回），
+      非运行时依赖；上述协议事实已内联本文件，缺失该文件不影响任何链路。
 """
 
 from __future__ import annotations

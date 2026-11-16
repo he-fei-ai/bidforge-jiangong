@@ -76,6 +76,9 @@ import {
   BarChartOutlined,
 } from "@ant-design/icons";
 import { useParams } from "react-router-dom";
+import { SplitPane } from "../components/SplitPane";
+// ✅ 可拖拽面板「重置布局」按钮（2026-11-16）：放在顶部工具栏右侧，一键清空各模块拖拽记忆
+import { ResetLayoutButton } from "../components/resizable/ResetLayoutButton";
 import {
   sectionsApi,
   schemesApi,
@@ -4359,6 +4362,9 @@ export default function SchemeWorkbenchPage() {
           >
             目标字数：{scheme.word_budget || 0} · 当前字数：{scheme.word_count || 0}
           </Text>
+          {/* ✅ 可拖拽面板「重置布局」按钮（2026-11-16）：清空全部 SplitPane 的 localStorage
+               记忆并广播复位事件，各分隔条复位到 defaultSize。 */}
+          <ResetLayoutButton size="small" type="text" showText />
         </div>
       )}
 
@@ -4392,82 +4398,96 @@ export default function SchemeWorkbenchPage() {
       {/* 2026-09-23：import（解析提取）模块隐藏目录树——此时还没生成目录，章节树无意义；
           全局事实（facts）模块同样隐藏目录树，改为左侧「事实分类」面板（点击分类
           在右侧项目资料下方显示该分类提取结果） */}
-      <div className="swb-workbench-main" style={{ display: "flex", gap: 12, flex: 1, minHeight: 0 }}>
-        {/* 左侧固定目录树（P0-5 memo 组件）—— 仅在有目录依赖的模块显示，import/facts 模块隐藏 */}
-        {activeTab !== "import" && activeTab !== "facts" && (
-          <SchemeTreePanel
-            tree={tree}
-            treeData={treeData}
-            expandedKeys={expandedKeys}
-            selectedSectionKey={selectedSection ? selectedSection.key : undefined}
-            loading={loading}
-            generating={generating}
-            onRefresh={load}
-            onToggleExpand={handleToggleExpand}
-            onGoToOutline={handleGoToOutline}
-            onSelectSection={handleTreeSelect}
-            onExpand={handleTreeExpand}
-            moveFlags={moveFlags}
-            onMoveNode={moveNode}
-            onRenameNode={renameNode}
-            onDeleteNode={deleteNode}
-            onAddChildNode={addChildNode}
-            onAddSiblingNode={addSiblingNode}
-            onSaveOutline={saveOutlineTree}
-            renamingKey={renamingKey}
-            renamingValue={renamingValue}
-            setRenamingKey={setRenamingKey}
-            setRenamingValue={setRenamingValue}
-            scrollRef={leftTreeScrollRef}
-          />
-        )}
+      {/* ✅ 可拖拽分隔（2026-11-16）：左侧导航面板 ↔ 右侧 Tab 内容区之间可拖拽调整宽度。
+          SplitPane 首窗格=左栏（宽受控、localStorage 记忆），次窗格=右侧 Tab 区（flex:1）。
+          原 swb-workbench-main 的 gap:12 由 SplitPane 手柄 margin 补回，视觉不变。 */}
+      <SplitPane
+        orientation="horizontal"
+        storageKey="swb-split-left-panel-width"
+        defaultSize={300}
+        minSize={220}
+        maxSize={640}
+        handleMargin={6}
+        ariaLabel="拖拽调整左侧面板与右侧内容区的大小"
+        style={{ flex: 1, minHeight: 0 }}
+        first={
+          <>
+            {/* 左侧固定目录树（P0-5 memo 组件）—— 仅在有目录依赖的模块显示，import/facts 模块隐藏 */}
+            {activeTab !== "import" && activeTab !== "facts" && (
+              <SchemeTreePanel
+                tree={tree}
+                treeData={treeData}
+                expandedKeys={expandedKeys}
+                selectedSectionKey={selectedSection ? selectedSection.key : undefined}
+                loading={loading}
+                generating={generating}
+                onRefresh={load}
+                onToggleExpand={handleToggleExpand}
+                onGoToOutline={handleGoToOutline}
+                onSelectSection={handleTreeSelect}
+                onExpand={handleTreeExpand}
+                moveFlags={moveFlags}
+                onMoveNode={moveNode}
+                onRenameNode={renameNode}
+                onDeleteNode={deleteNode}
+                onAddChildNode={addChildNode}
+                onAddSiblingNode={addSiblingNode}
+                onSaveOutline={saveOutlineTree}
+                renamingKey={renamingKey}
+                renamingValue={renamingValue}
+                setRenamingKey={setRenamingKey}
+                setRenamingValue={setRenamingValue}
+                scrollRef={leftTreeScrollRef}
+              />
+            )}
 
-        {/* 2026-11-04：解析提取 Tab 的左侧分类 / 提取清单面板提升到页面级左栏，
-            与目录树 / 事实分类面板同级，顶部与右侧步骤 Tab 栏齐平；右侧步骤 Tab
-            （解析提取 / 目录生成 …）随之右移，与子 Tab「文档解析」左对齐。 */}
-        {activeTab === "import" && (
-          <ImportSidePanel
-            importSubTab={importSubTab}
-            baGroups={baGroups}
-            baItems={baItems}
-            baDefs={baDefs}
-            baDefsError={baDefsError}
-            baLoading={baLoading}
-            baError={baError}
-            selectedBaItem={selectedBaItem}
-            sharedParseState={sharedParseState}
-            baRefreshResults={baRefreshResults}
-            onSelectItem={setSelectedBaItem}
-            onEditItem={openBaEdit}
-            onOpenFullView={setBaFullItem}
-          />
-        )}
+            {/* 2026-11-04：解析提取 Tab 的左侧分类 / 提取清单面板提升到页面级左栏，
+                与目录树 / 事实分类面板同级，顶部与右侧步骤 Tab 栏齐平；右侧步骤 Tab
+                （解析提取 / 目录生成 …）随之右移，与子 Tab「文档解析」左对齐。 */}
+            {activeTab === "import" && (
+              <ImportSidePanel
+                importSubTab={importSubTab}
+                baGroups={baGroups}
+                baItems={baItems}
+                baDefs={baDefs}
+                baDefsError={baDefsError}
+                baLoading={baLoading}
+                baError={baError}
+                selectedBaItem={selectedBaItem}
+                sharedParseState={sharedParseState}
+                baRefreshResults={baRefreshResults}
+                onSelectItem={setSelectedBaItem}
+                onEditItem={openBaEdit}
+                onOpenFullView={setBaFullItem}
+              />
+            )}
 
-        {/* ✅ 全局事实 Tab 左侧面板：提取结果分类（替代目录树），点击 → 右侧项目资料下方展示该分类详情 */}
-        {activeTab === "facts" && (
-          <FactsCategoryPanel
-            entries={factCategoryEntries}
-            totalItems={factsSummary?.total || 0}
-            selected={activeFactCategory}
-            onSelect={setSelectedFactCategory}
-          />
-        )}
-
-        {/* 右侧 Tab 内容（内部滚动：各 Tab 长内容不再撑高整体布局） */}
-        <div
-          style={{
-            flex: 1,
-            minWidth: 0,
-            minHeight: 0,
-            display: "flex",
-            flexDirection: "column",
-            background: "var(--bp-bg-container)",
-            border: "1px solid var(--bp-border)",
-            borderRadius: 8,
-            padding: 16,
-            overflow: "hidden",
-          }}
-        >
+            {/* ✅ 全局事实 Tab 左侧面板：提取结果分类（替代目录树），点击 → 右侧项目资料下方展示该分类详情 */}
+            {activeTab === "facts" && (
+              <FactsCategoryPanel
+                entries={factCategoryEntries}
+                totalItems={factsSummary?.total || 0}
+                selected={activeFactCategory}
+                onSelect={setSelectedFactCategory}
+              />
+            )}
+          </>
+        }
+        second={
+          <div
+            style={{
+              flex: 1,
+              minWidth: 0,
+              minHeight: 0,
+              display: "flex",
+              flexDirection: "column",
+              background: "var(--bp-bg-container)",
+              border: "1px solid var(--bp-border)",
+              borderRadius: 8,
+              padding: 16,
+              overflow: "hidden",
+            }}
+          >
           <Tabs
             activeKey={activeTab}
             onChange={(key) => {
@@ -4481,7 +4501,8 @@ export default function SchemeWorkbenchPage() {
             tabBarStyle={{ flexShrink: 0, marginBottom: 4 }}
           />
         </div>
-      </div>
+        }
+      />
 
       {/* ✅ R179 N1：自动确认倒计时 Modal（开关关闭时 open=false，不渲染任何内容） */}
       {outlineAutoConfirmModal}

@@ -187,12 +187,14 @@ powershell -NoProfile -ExecutionPolicy Bypass -File "%~dp0kill_zombie_pytest.ps1
 
 REM ---- pass 4: cleanup_guard sweeps leftover frontend / timeout stubs -------
 REM (ASCII-only block - this file is GBK/CP936; keep it pure ASCII.)
-REM cleanup_guard.ps1 is the unified check+clean mechanism: it re-checks the
-REM ports, sweeps leftover node/npm/vite and titled toolbox console windows,
-REM kills timeout leftovers / orphaned python stubs, and re-sweeps zombie
-REM pytest. -Quiet keeps this file's console output clean; the exit code
-REM drives the messages below (0=clean, 1=not fully removed, 2=still found).
-powershell -NoProfile -ExecutionPolicy Bypass -File "%~dp0cleanup_guard.ps1" -Mode Startup -Quiet
+REM cleanup_guard.ps1 is the unified check+clean mechanism. Passes 2+3
+REM above already ran kill_port.ps1 and kill_zombie_pytest.ps1, so we pass
+REM -SkipPortClean -SkipPytestClean to skip redundant inline sweeps (saves
+REM ~15s). cleanup_guard still does its UNIQUE work: sweeping leftover
+REM node/npm/vite, titled toolbox console windows, timeout stubs, and the
+REM final verify pass. -Quiet keeps console output clean; exit code drives
+REM the messages below (0=clean, 1=not fully removed, 2=still found).
+powershell -NoProfile -ExecutionPolicy Bypass -File "%~dp0cleanup_guard.ps1" -Mode Startup -Quiet -SkipPortClean -SkipPytestClean
 if errorlevel 2 (
     echo   [!] cleanup_guard: leftover processes still detected after cleanup.
 ) else if errorlevel 1 (
@@ -249,76 +251,33 @@ if errorlevel 1 (
     exit /b 1
 )
 
-REM 强校验：直接 import 整个应用，等价于 uvicorn 启动时的完整导入图。
-REM 旧脚本只查 4 个包：pydantic 被降级到 v1、lxml / pymupdf 缺失等情况下
-REM 该检查会通过，但 uvicorn 一启动就崩，用户看到的是「已就绪」却打不开页面。
-"%PY%" -c "import app.main" >nul 2>&1
+REM 强校验 + 可选特性探测：合并进单次 preflight_check.py（2026-11-16 启动收口）。
+REM 旧脚本为此拉起 5 个独立 Python 解释器（import app.main / mermaid /
+REM rapidocr / win32com / ocr_capabilities），每个都重付「解释器启动 + 全量
+REM 库 import」，其中 import app.main 暖缓存约 2.3s、冷缓存可达 15s+，随后
+REM uvicorn 还要再付一次。合并进单个解释器后这些成本只付一次。
+REM 退出码：1 = 核心依赖/app 导入失败（阻断，提示装依赖）；0 = 通过或仅可选特性缺失。
+"%PY%" "%~dp0backend\preflight_check.py"
 if errorlevel 1 (
-    echo   正在安装/修复后端依赖 ^(首次可能较慢，请耐心等待^)...
+    echo   正在安装/修复依赖 ^(首次可能需要几分钟，请耐心等待^)...
     "%PY%" -m pip install --upgrade pip
     "%PY%" -m pip install -r requirements.txt
     if errorlevel 1 (
-        echo [错误] 后端依赖安装失败
-        echo   手动尝试: "%PY%" -m pip install -r requirements.txt
+        echo [错误] 依赖包安装失败
+        echo   手动重试: "%PY%" -m pip install -r requirements.txt
         pause
         exit /b 1
     )
-    "%PY%" -c "import app.main" >nul 2>&1
+    "%PY%" "%~dp0backend\preflight_check.py"
     if errorlevel 1 (
         echo [错误] 依赖已安装但应用仍无法导入，请手动排查：
         echo   cd backend ^&^& "%PY%" -c "import app.main"
         pause
         exit /b 1
     )
-    echo   [OK] 后端依赖已安装完成
+    echo   [OK] 依赖包已安装完成
 ) else (
-    echo   [OK] 后端依赖已就绪
-)
-
-REM 检查图表渲染器
-REM 注意：python -c 的参数里绝对不能写中文。当控制台 OEM 代码页不是 936 时
-REM （Windows 11，或开启「使用 Unicode UTF-8」后常见的 65001），cmd 会把本文件
-REM 里的 GBK 中文字节按错误代码页解码成 U+FFFD，python 再以 gbk 编码输出就抛
-REM UnicodeEncodeError，导致本行误报「渲染器加载异常」——而渲染器其实是好的。
-REM 所以 -c 里只放 ASCII，中文提示改由本脚本的 echo 输出。
-"%PY%" -c "from app.services.ai.mermaid_renderer import _chart_cache" >nul 2>&1 && (
-    echo   [OK] Mermaid 渲染器可用 ^(PIL v2 回退^)
-) || (
-    echo   [!] Mermaid 渲染器加载异常，首次启动时会自动重建
-)
-
-REM ========== 2.5 可选依赖（OCR 引擎 + Windows PDF 导出控件） ==========
-echo.
-echo [2.5] 可选依赖 (离线 OCR 引擎 / Windows PDF 导出控件)...
-
-REM 离线 OCR 引擎（扫描件/图片型资料文字识别，约 100~200MB，失败不影响主流程）
-"%PY%" -c "import rapidocr_onnxruntime" >nul 2>&1 || (
-    echo   正在安装 OCR 引擎 ^(requirements-ocr.txt^)...
-    "%PY%" -m pip install -r requirements-ocr.txt >nul 2>&1 && (
-        echo   [OK] OCR 引擎已安装
-    ) || (
-        echo   [!] OCR 引擎安装失败，扫描件识别将走 Tesseract/视觉模型兜底
-    )
-)
-
-REM Windows 专用：DOCX->PDF 高质量导出（需本机 Microsoft Word）
-"%PY%" -c "import win32com" >nul 2>&1 || (
-    echo   正在安装 Windows PDF 导出控件 ^(requirements-windows.txt^)...
-    "%PY%" -m pip install -r requirements-windows.txt >nul 2>&1 && (
-        echo   [OK] Windows PDF 导出控件已安装
-    ) || (
-        echo   [!] Windows PDF 控件安装失败，将回退 LibreOffice/soffice
-    )
-)
-
-REM 检查 OCR 引擎（扫描件 / 图片型资料的文字识别）
-"%PY%" -c "import sys; from app.services.ocr import ocr_capabilities as c; cap=c(); sys.exit(0 if (cap['tesseract'] or cap['rapidocr']) else 1)" >nul 2>&1 && (
-    echo   [OK] OCR 引擎已就绪，扫描件/图片型资料可提取
-) || (
-    echo   [!] 未检测到本地 OCR 引擎；若未配置视觉模型，扫描件将无法提取文字
-    echo      启用方式：cd backend ^&^& pip install -r requirements-ocr.txt
-    echo      或安装 Tesseract-OCR 并配置 TESSERACT_PATH，或在「AI 配置」添加视觉模型
-    echo      详情：http://localhost:8000/api/v1/diagnostics/capabilities
+    echo   [OK] 依赖包已经齐全
 )
 
 REM ========== 3. 前端依赖 ==========

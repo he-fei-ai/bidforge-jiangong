@@ -4612,6 +4612,10 @@ async def _auto_generate_ai_image_blocks(
     sections: list[dict],
     blocks_cache: dict[str, list[dict]],
     config: dict,
+    # ✅ R252 延续（2026-11-16 · 消费点接线）：db 用于 resolve_image_config
+    #    （DB 优先、settings 兜底）。缺省 None 兼容潜在外部调用（回落 settings，
+    #    与旧行为一致）。
+    db=None,
     # ✅ R106 FIX-1：本次导出的取消事件（缺省 None = 无取消登记，行为逐字不变）。
     #    逐占位码检查：已取消 → 不再发起新的生图调用（在飞的一次跑完即止，
     #    协作式停止口径），由调用方在 gather 后统一抛 ExportCancelled。
@@ -4645,16 +4649,24 @@ async def _auto_generate_ai_image_blocks(
     if not bool(True if _aig is None else _aig):
         return 0
     from app.config import settings as _settings
-    from app.services.ai.image_engine import generate_illustration_image
+    from app.services.ai.image_engine import generate_illustration_image, resolve_image_config
 
-    _img_cfg = {
-        "image_enabled": _settings.image_enabled,
-        "image_api_key_enc": _settings.image_api_key,
-        "image_base_url": _settings.image_base_url,
-        "image_model": _settings.image_model,
-        "image_default_size": _settings.image_default_size,
-        "image_price_per_image": _settings.image_price_per_image,
-    }
+    # ✅ R252 延续（2026-11-16 · 消费点接线）：改用 resolve_image_config（DB 优先、
+    #    settings 兜底），与 charts.py 同口径 —— 此前内联 _img_cfg 只读 settings
+    #    6 键，DB 配置（image_model_config / image_config 多行）完全不参与 export
+    #    生图路径（「服务层就绪 ≠ 功能可达」）。resolve_image_config 返回 dict
+    #    不抛 None；防御性兜底保留旧形态。
+    _img_cfg = await resolve_image_config(db, _settings)
+    if not isinstance(_img_cfg, dict):
+        _img_cfg = {
+            "image_enabled": _settings.image_enabled,
+            "image_api_key_enc": _settings.image_api_key,
+            "image_base_url": _settings.image_base_url,
+            "image_model": _settings.image_model,
+            "image_default_size": _settings.image_default_size,
+            "image_price_per_image": _settings.image_price_per_image,
+            "image_provider": getattr(_settings, "image_provider", "agnes"),
+        }
     # 按占位码分组（同码多块共享一次生成，全部改写）；每组只生成一次
     groups: dict[str, list[dict]] = {}
     # ✅ R242（2026-11-13 · 协同决策接线 · 观测不干预）：R237 落地的
@@ -4777,7 +4789,15 @@ async def _auto_generate_ai_image_blocks(
         title = str(obj.get("title") or blocks[0].get("title") or "AI 配图")
         async with sem:
             try:
-                url = await generate_illustration_image(None, prompt, style, "16:9", _settings.image_provider, _img_cfg)
+                # ✅ R252 延续（2026-11-16 · 消费点接线）：provider 走 DB 配置
+                #    （image_provider 优先、settings 兜底），与 charts.py 同口径 ——
+                #    旧实现第 5 位固定传 settings.image_provider，DB 配 custom 而
+                #    env=agnes 时错配（R238 FIND-1 同族）。
+                url = await generate_illustration_image(
+                    None, prompt, style, "16:9",
+                    _img_cfg.get("image_provider") or _settings.image_provider,
+                    _img_cfg,
+                )
             except Exception as e:
                 logger.warning("AI 配图自动生成异常（导出降级跳过）: %s", e)
                 return
@@ -5235,6 +5255,10 @@ async def _prepare_export(
     # ✅ R106 FIX-1：取消事件入 plan —— 渲染段（含本函数内的慢路径直调）与
     #    构建线程（经 _build_docx_task 末尾透传）共用同一份登记。
     plan["_cancel_event"] = cancel_event
+    # ✅ R252 延续（2026-11-16 · 消费点接线）：db 经 plan 透传渲染段 ——
+    #    _prepare_export_render 无 db 形参，AI 配图段据此走 resolve_image_config
+    #    （DB 优先、settings 兜底）。直接调用渲染段时缺省回落 settings。
+    plan["_db"] = db
     if not _export_cache_fast_path_enabled():
         await _prepare_export_render(plan)
     return plan
@@ -5578,7 +5602,9 @@ async def _prepare_export_render(plan: dict) -> dict:
     #    就地改写为 image 块 —— 随后下面的 URL 收集/下载循环会一并取回位图，
     #    write_section 走既有 image 分支插图与编号。生成失败的块保持占位、
     #    整块跳过（不占图号、无红字）。
-    _ai_converted = await _auto_generate_ai_image_blocks(sections, _blocks_cache, config, cancel_event=_cancel_ev)
+    _ai_converted = await _auto_generate_ai_image_blocks(
+        sections, _blocks_cache, config, db=plan.get("_db"), cancel_event=_cancel_ev
+    )
     # ✅ R106 FIX-1：AI 配图段后的取消检查点（在飞生图跑完即止，不再下载/构建）。
     _check_export_cancelled(_cancel_ev)
     # ✅ P1 修复（2026-09-27 · 残缺文档被写入缓存 → 永久缺图）：

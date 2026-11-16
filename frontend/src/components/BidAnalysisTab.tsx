@@ -51,6 +51,8 @@ import {
   type BaTextStats,
 } from "../utils/bidAnalysis";
 import { sourceNotice } from "../utils/parseSourceNotice";
+// ✅ 2026-11-16 可拖拽上下分隔：提取字段表单区 ↔ 原文内容对照预览区
+import { SplitPane } from "./SplitPane";
 
 const { Text } = Typography;
 
@@ -199,9 +201,17 @@ export function BidAnalysisItemBody({ item }: { item: BaStoredItem | null }) {
         {Object.entries(obj).map(([k, v]) => (
           <div
             key={k}
+            /* ✅ R251 加固：给 JSON 字段行 / 字段名加稳定语义钩子。
+               护栏此前靠 `.ba-item-body > div > div > div:first-child` 这类
+               **层级选择器**取字段名 —— 阅读区一旦被可拖拽面板包一层（DOM 深度
+               +1），选择器即失配假红。语义钩子不随结构调整而失效。 */
+            data-ba-field={k}
             style={{ marginBottom: 2, display: "flex", gap: 8, fontSize: 13, lineHeight: 1.4 }}
           >
-            <div style={{ minWidth: 160, color: "var(--bp-text-secondary)", flexShrink: 0 }}>
+            <div
+              data-ba-field-label={k}
+              style={{ minWidth: 160, color: "var(--bp-text-secondary)", flexShrink: 0 }}
+            >
               {isProjectInfo ? projectInfoFieldLabel(k) : k}
             </div>
             <div
@@ -747,7 +757,7 @@ function BidAnalysisTab({
 
   return (
     <div
-      className="scroll-area"
+      className="swb-pane-scroll"
       style={{ flex: 1, minHeight: 0, overflowY: "auto", paddingRight: 4 }}
     >
       {/* ===== 前置条件：本步依赖「解析提取」产出的纯文本 =====
@@ -1270,13 +1280,31 @@ function BidAnalysisTab({
                 </Space>
               )}
             </div>
-            <div className="ba-item-body" style={{ flex: 1, overflow: "auto", padding: 4 }}>
+            <div className="ba-item-body" style={{ flex: 1, overflow: "hidden", padding: 4 }}>
               {selectedItem ? (
-                <>
-                  <BidAnalysisItemBody item={selectedItem} />
-                  {/* 来源位置：有反查到的出处才展示（旧数据/未匹配/人工校正后无此块） */}
-                  <BidAnalysisEvidenceList item={selectedItem} />
-                </>
+                // ✅ 2026-11-16 可拖拽上下分隔：上半「提取字段表单/结果」↔ 下半「原文内容对照
+                //    （来源位置）」。两区独立滚动、可拖拽调高、双击分隔条复位。
+                <SplitPane
+                  orientation="vertical"
+                  storageKey="swb-split-extract-detail-height"
+                  defaultSize={320}
+                  minSize={140}
+                  maxSize={680}
+                  handleMargin={4}
+                  ariaLabel="拖拽调整提取字段表单区与原文内容对照预览区的大小"
+                  style={{ flex: 1, minHeight: 0 }}
+                  first={
+                    <div className="swb-pane-scroll" style={{ height: "100%", minHeight: 0, overflowY: "auto" }}>
+                      <BidAnalysisItemBody item={selectedItem} />
+                    </div>
+                  }
+                  second={
+                    <div className="swb-pane-scroll" style={{ height: "100%", minHeight: 0, overflowY: "auto" }}>
+                      {/* 来源位置：有反查到的出处才展示（旧数据/未匹配/人工校正后无此块） */}
+                      <BidAnalysisEvidenceList item={selectedItem} />
+                    </div>
+                  }
+                />
               ) : (
                 <div style={{ color: "var(--bp-text-tertiary)", textAlign: "center", padding: 40 }}>
                   从左侧选择一个解析项查看其完整提取结果

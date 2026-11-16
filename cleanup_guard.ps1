@@ -20,9 +20,11 @@
 #    * One mechanism, one report. Modes:
 #        -Check     inventory only, never kill (exit 2 if issues found, 0 else)
 #        -Clean     check + full cleanup (ports, zombie pytest, everything)
-#        -Startup   same as Clean (used by start_all.bat at boot; the bat's own
-#                   passes 1-3 made the work idempotent, so re-running them here
-#                   is free of side effects and keeps standalone Startup correct)
+#        -Startup   same as Clean (used by start_all.bat at boot). The bat's own
+#                   passes 1-3 already ran kill_port.ps1 and kill_zombie_pytest.ps1,
+#                   so it passes -SkipPortClean -SkipPytestClean to avoid repeating
+#                   ~15s of redundant WMI work. Standalone Startup (no skip flags)
+#                   remains fully self-contained.
 #        -Shutdown  Clean + sweep app-owned temp/lock/pytest .pt_* residue
 #    * Reuse the hardened sub-scripts as the single source of truth:
 #        - kill_port.ps1          port owners + orphan socket holders
@@ -47,7 +49,12 @@ param(
     [int]    $StubMinAgeSec = 60,
     [switch] $DryRun,
     [switch] $Quiet,
-    [switch] $SkipTempSweep
+    [switch] $SkipTempSweep,
+    # When the caller already ran kill_port.ps1 / kill_zombie_pytest.ps1
+    # (start_all.bat does this), skip the redundant inline port / pytest
+    # sweeps here to avoid repeating ~15s of WMI work for no benefit.
+    [switch] $SkipPortClean,
+    [switch] $SkipPytestClean
 )
 
 $ErrorActionPreference = 'SilentlyContinue'
@@ -150,9 +157,18 @@ $script:PortArr = @($Ports -split ',' | ForEach-Object { $_.Trim() } |
     Where-Object { $_ } | ForEach-Object { [int]$_ })
 $script:ListenPids = @{}
 if ($script:PortArr.Count -gt 0) {
-    $tcp = @(Get-NetTCPConnection -State Listen -ErrorAction SilentlyContinue |
-        Where-Object { $script:PortArr -contains [int]$_.LocalPort })
-    foreach ($c in $tcp) { $script:ListenPids[[int]$c.OwningProcess] = $true }
+    # Fast pre-check: .NET GetActiveTcpListeners (~19ms) before the expensive
+    # CIM query (~7s).  If none of our ports are listening, skip CIM entirely.
+    $listeners = [System.Net.NetworkInformation.IPGlobalProperties]::GetIPGlobalProperties().GetActiveTcpListeners()
+    $listenSet = @{}
+    foreach ($ep in $listeners) { $listenSet[[int]$ep.Port] = $true }
+    $anyOurs = $false
+    foreach ($p in $script:PortArr) { if ($listenSet.ContainsKey($p)) { $anyOurs = $true; break } }
+    if ($anyOurs) {
+        $tcp = @(Get-NetTCPConnection -State Listen -ErrorAction SilentlyContinue |
+            Where-Object { $script:PortArr -contains [int]$_.LocalPort })
+        foreach ($c in $tcp) { $script:ListenPids[[int]$c.OwningProcess] = $true }
+    }
 }
 
 # pid start-time lookup - built LAZILY, only when a STUB is matched. Stub
@@ -320,12 +336,28 @@ function Stop-ProcessId([int]$procId, $tag) {
 
 # ---- port helpers (mirror kill_port.ps1) ----------------------------------
 function Get-PortOwnerPidsInline($port) {
-    $pids = @()
-    foreach ($c in @(Get-NetTCPConnection -LocalPort $port -State Listen -ErrorAction SilentlyContinue)) {
-        $pids += [int]$c.OwningProcess
+    # Fast pre-check: .NET GetActiveTcpListeners is ~370x faster than
+    # Get-NetTCPConnection.  If the port is not listening, skip CIM entirely.
+    $listeners = [System.Net.NetworkInformation.IPGlobalProperties]::GetIPGlobalProperties().GetActiveTcpListeners()
+    $isListening = $false
+    foreach ($ep in $listeners) {
+        if ($ep.Port -eq $port) { $isListening = $true; break }
     }
-    if ($pids.Count -eq 0) {
-        # netstat fallback when the CIM/TCP stack is unavailable
+    if (-not $isListening) { return @() }
+
+    $pids = @()
+    $netErr = $false
+    try {
+        foreach ($c in @(Get-NetTCPConnection -LocalPort $port -State Listen -ErrorAction Stop)) {
+            $pids += [int]$c.OwningProcess
+        }
+    } catch {
+        $netErr = $true
+    }
+    # Only run netstat when Get-NetTCPConnection actually errored.
+    # When the port is free the cmdlet returns empty without error —
+    # running netstat -ano here wasted several seconds per port.
+    if ($pids.Count -eq 0 -and $netErr) {
         $needle = ":$port "
         foreach ($l in @(netstat -ano 2>$null | Select-String -SimpleMatch $needle | Select-String -Pattern 'LISTENING')) {
             $cols = @($l.Line -split '\s+' | Where-Object { $_ })
@@ -523,8 +555,12 @@ if ($Mode -eq 'Check' -or $DryRun) {
 Write-Info 'cleanup_guard: cleaning...'
 
 # 1. release the toolbox ports (kill_port walks orphan socket holders)
-Write-Info '  [1] release ports'
-Invoke-KillPort
+if ($SkipPortClean) {
+    Write-Info '  [1] release ports (skipped - caller already ran kill_port.ps1)'
+} else {
+    Write-Info '  [1] release ports'
+    Invoke-KillPort
+}
 
 # 2. close titled toolbox console windows FIRST (their /T tree kill gets
 #    npm/vite children before they can re-open ports)
@@ -536,8 +572,12 @@ foreach ($w in $windows) {
 }
 
 # 3. zombie pytest / test workers (pin logs/backend.log -> log rotation freeze)
-Write-Info '  [3] zombie pytest'
-if (-not $DryRun) { Invoke-KillPytest }
+if ($SkipPytestClean) {
+    Write-Info '  [3] zombie pytest (skipped - caller already ran kill_zombie_pytest.ps1)'
+} else {
+    Write-Info '  [3] zombie pytest'
+    if (-not $DryRun) { Invoke-KillPytest }
+}
 
 # 4. remaining toolkit processes: backend stragglers, frontend, stale stubs,
 #    and orphans of any class
@@ -566,7 +606,7 @@ $script:AllProcs = @(Get-CimInstance Win32_Process)
 $script:AlivePids = @{}
 foreach ($p in $script:AllProcs) { $script:AlivePids[[int]$p.ProcessId] = $true }
 $remaining = @(Get-Inventory)
-$pyLeft = @(Get-PytestLeaks)
+if ($SkipPytestClean) { $pyLeft = @() } else { $pyLeft = @(Get-PytestLeaks) }
 
 if ($remaining.Count -eq 0 -and $pyLeft.Count -eq 0) {
     Write-Info 'cleanup_guard: DONE - nothing left running.'

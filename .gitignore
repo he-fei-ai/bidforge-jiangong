@@ -37,6 +37,8 @@ htmlcov/
 .nose
 .hypothesis/
 .pytest_tmp*
+# AI Agent 按轮次隔离的 --basetemp 目录（R249：避免临时根目录污染 git status）
+.pytest_basetemp*/
 # AI Agent 临时 pytest 目录（.pt_ 前缀）
 .pt_*
 # AI Agent 临时覆盖率目录

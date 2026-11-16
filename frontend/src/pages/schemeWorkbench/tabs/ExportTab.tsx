@@ -28,6 +28,9 @@ import type { NumberingCheckInfo } from "../../../utils/exportResponse";
 import { numberingCheckWarning } from "../../../utils/exportResponse";
 import { DossierExportCard } from "../../../components/review/DossierExportCard";
 import { EXPORT_STAGE_LABEL, EXPORT_STAGE_ORDER } from "../exportShared";
+// ✅ 可拖拽分隔（2026-11-16）：导出 Tab 格式预设 ↔ 导出配置/操作之间可拖拽调整高度。
+//    ⚠️ 根元素保持 <Form>（保住 antd 表单上下文），SplitPane 放在 Form 内部。
+import { SplitPane } from "../../../components/SplitPane";
 
 const { Text } = Typography;
 
@@ -99,11 +102,13 @@ export function ExportTab({
   return (
     // ✅ 修复：导出配置表单（基本设置/正文样式/各级标题样式 + 统计 + 缓存）较长，
     //    Form 根元素需可滚动，避免低视口下底部按钮（导出预检/导出 DOCX/PDF）被裁剪
+    // ✅ 2026-11-16 可拖拽上下分隔：Form 仍为根（保住 antd 表单上下文），内部改为
+    //    纵向 SplitPane —— 首窗格=格式预设库（可拖拽调高），次窗格=导出配置表单 + 操作区
+    //    （独立滚动，避免低视口下底部按钮被裁剪）。
     <Form
       form={exportForm}
       layout="vertical"
-      className="scroll-area"
-      style={{ flex: 1, minHeight: 0, overflowY: "auto", paddingRight: 4 }}
+      style={{ flex: 1, minHeight: 0, display: "flex", flexDirection: "column", overflow: "hidden" }}
       initialValues={{
         font_name: "宋体",
         font_size: 12,
@@ -150,7 +155,18 @@ export function ExportTab({
         layout_preset: "",
       }}
     >
-      {/* ✅ 导出格式预设库：同项目排版格式一键复用（对标 OpenBidKit exportFormatPresets） */}
+      <SplitPane
+        orientation="vertical"
+        storageKey="swb-split-export-preset-height"
+        defaultSize={140}
+        minSize={60}
+        maxSize={480}
+        handleMargin={4}
+        ariaLabel="拖拽调整导出格式预设区与导出配置区的大小"
+        style={{ flex: 1, minHeight: 0 }}
+        first={
+      /* ✅ R251：格式预设区自带独立滚动（窄屏堆叠时限高 42vh，溢出内容可滚）。 */
+      <div className="swb-pane-scroll" style={{ height: "100%", minHeight: 0 }}>
       <Card size="small" style={{ marginBottom: 8 }} title="格式预设">
         <Space wrap>
           <Select
@@ -218,6 +234,10 @@ export function ExportTab({
           )}
         </Space>
       </Card>
+      </div>
+      }
+      second={
+        <div className="swb-pane-scroll" style={{ height: "100%", minHeight: 0, overflowY: "auto", paddingRight: 4 }}>
       <Collapse
         defaultActiveKey={["basic", "body", "headings"]}
         size="small"
@@ -917,6 +937,9 @@ export function ExportTab({
           </>
         )}
       </Card>
+        </div>
+      }
+      />
     </Form>
   );
 }

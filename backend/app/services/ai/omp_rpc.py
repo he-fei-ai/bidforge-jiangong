@@ -1,6 +1,8 @@
 """omp (oh-my-pi) RPC 客户端：与 ``omp --mode rpc`` 子进程的 NDJSON 协议通信（共享模块）。
 
-阶段 0 实测确认的协议事实（见 docs/集成oh-my-pi_OMP_AGENT可行性报告_20261112.md 第 10 章）：
+阶段 0 实测确认的协议事实（原始依据为历史归档报告
+  docs/集成oh-my-pi_OMP_AGENT可行性报告_20261112.md 第 10 章；该报告已从工作树清理，
+  非运行时依赖，下列事实已完整内联本文件）：
   - 启动即发 ``ready`` 握手帧（protocolVersion / maxFrameBytes / maxReassembledFrameBytes）；
   - ``prompt`` 受理返回 ``response{command:prompt,success:true}``（仅是受理确认，不是结束）；
   - 结束标记为 ``prompt_result``（或 ``error``）；

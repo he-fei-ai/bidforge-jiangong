@@ -55,7 +55,7 @@ export default memo(function BaItemFlatList({
     return m;
   }, [items]);
   return (
-    <div style={{ height: "100%", overflowY: "auto", padding: "4px 2px" }}>
+    <div className="swb-pane-scroll" style={{ height: "100%", overflowY: "auto", padding: "4px 2px" }}>
       {loading && defs.length === 0 && (
         <div style={{ padding: 20, textAlign: "center" }}>
           <Spin />

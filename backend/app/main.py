@@ -585,6 +585,9 @@ from app.routers import global_facts_docs as _gfd
 
 app.include_router(_gfd.router)
 
+# ✅ R252（2026-11-16）：图像模型配置多模型路由族（/api/v1/image-models）
+app.include_router(image_config.models_router)
+
 # ✅ R48（2026-10-06）：prompts 运行时指标 + 硬编码→DB 一键同步。
 #    这两个路由挂在独立前缀（/system、/admin/prompts），不在上面的
 #    /api/v1/prompts 命名空间下，故在此单独注册。

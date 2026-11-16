@@ -12,6 +12,7 @@
  *    进度回调保持原口径：done = 已处理条目数，total = items.length。
  */
 import { ensureMermaid, nextMermaidId } from "../components/mermaidRuntime";
+import { ensureGanttDeclaration } from "./fencePreprocess";
 
 export type ExportChartItem = { chart_type: string; mermaid_code: string };
 export type ExportChartImage = { chart_type: string; mermaid_code: string; png: string };
@@ -217,12 +218,16 @@ export async function renderChartsForExport(
 
   const renderOne = async (it: ExportChartItem): Promise<void> => {
     throwIfExportAborted(signal);
-    const code = (it.mermaid_code || "").trim();
-    if (!code || code.startsWith("{")) {
+    const rawCode = (it.mermaid_code || "").trim();
+    if (!rawCode || rawCode.startsWith("{")) {
       // JSON 数据载荷 → 后端 PIL 兜底（设计跳过，计入 skipped_json 口径）
       if (stats) stats.skipped_json = (stats.skipped_json || 0) + 1;
       return;
     }
+    // R252：mermaid.js 要求甘特图首行 `gantt`；AI 偶发从 `title …` 起笔会渲染失败
+    // （虽会降级到后端 PIL 兜底，但前端轨本可出图）。补首行后再渲染，回包 mermaid_code
+    // 仍用原始值（后端按其自身容忍逻辑处理，契约不变）。
+    const code = ensureGanttDeclaration(rawCode);
     const cacheKey = `${it.chart_type}\u0000${code}`;
     if (attempted.has(cacheKey)) {
       // ✅ R241：同 key 已渲染（成功或失败）—— 跳过但**计数**（多章共用同图是

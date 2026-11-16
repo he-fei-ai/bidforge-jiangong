@@ -357,6 +357,7 @@ export function ComplianceRepairDrawer({
                     <div style={{ marginBottom: 6 }}>
                       <Text type="secondary">修复前：</Text>
                       <div
+                        className="swb-pane-scroll"
                         style={{
                           background: "rgba(255,77,79,0.06)",
                           padding: "4px 8px",
@@ -372,6 +373,7 @@ export function ComplianceRepairDrawer({
                     <div style={{ marginBottom: 6 }}>
                       <Text type="secondary">修复后：</Text>
                       <div
+                        className="swb-pane-scroll"
                         style={{
                           background: "rgba(82,196,26,0.06)",
                           padding: "4px 8px",

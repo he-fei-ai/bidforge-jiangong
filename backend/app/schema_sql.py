@@ -1003,4 +1003,56 @@ CREATE INDEX IF NOT EXISTS idx_sc_status ON standard_clauses(status, verificatio
 CREATE INDEX IF NOT EXISTS idx_sc_hash   ON standard_clauses(excerpt_hash);
 """
 
-SCHEMA_SQL = SCHEMA_SQL + SCORING_DDL + DEFECT_LEDGER_DDL + STANDARD_CLAUSES_DDL
+# ---------------------------------------------------------------------------
+# ✅ R252（2026-11-16）：图像模型配置模块增强 —— 多模型多配置 / 场景路由 / 审计。
+#   旧「单条 primary 配置」（image_model_config）保留不动（零迁移）；
+#   新增三表全为 CREATE TABLE/INDEX IF NOT EXISTS（幂等、可重复执行）。
+#   语义：image_config.is_default=1 为主配置；env 空串=通用（多环境隔离）；
+#   default_params 为 JSON 参数模板（分辨率/采样步数/CFG/负面词/风格）。
+IMAGE_DDL = """
+CREATE TABLE IF NOT EXISTS image_config (
+    id TEXT PRIMARY KEY,
+    provider TEXT DEFAULT 'custom',
+    model TEXT DEFAULT '',
+    base_url TEXT DEFAULT '',
+    api_key_encrypted TEXT DEFAULT '',
+    enabled INTEGER DEFAULT 1,
+    default_size TEXT DEFAULT '2K',
+    concurrency INTEGER DEFAULT 2,
+    price_per_image REAL DEFAULT 0.0,
+    max_ai_images INTEGER DEFAULT 0,
+    is_default INTEGER DEFAULT 0,
+    status TEXT DEFAULT 'active',
+    env TEXT DEFAULT '',
+    priority INTEGER DEFAULT 0,
+    remark TEXT DEFAULT '',
+    default_params TEXT DEFAULT '{}',
+    config_version INTEGER DEFAULT 1,
+    created_at TEXT DEFAULT (datetime('now','localtime')),
+    updated_at TEXT DEFAULT (datetime('now','localtime'))
+);
+CREATE INDEX IF NOT EXISTS idx_image_config_default ON image_config(is_default);
+CREATE INDEX IF NOT EXISTS idx_image_config_env ON image_config(env);
+
+CREATE TABLE IF NOT EXISTS image_scene_routes (
+    scene TEXT PRIMARY KEY,
+    config_id TEXT DEFAULT '',
+    priority INTEGER DEFAULT 0,
+    updated_at TEXT DEFAULT (datetime('now','localtime'))
+);
+
+CREATE TABLE IF NOT EXISTS image_config_audit_logs (
+    id TEXT PRIMARY KEY,
+    action TEXT DEFAULT '',
+    config_id TEXT DEFAULT '',
+    provider_name TEXT DEFAULT '',
+    model TEXT DEFAULT '',
+    detail TEXT DEFAULT '',
+    client_ip TEXT DEFAULT '',
+    snapshot_json TEXT DEFAULT '',
+    created_at TEXT DEFAULT (datetime('now','localtime'))
+);
+CREATE INDEX IF NOT EXISTS idx_image_cfg_audit_config ON image_config_audit_logs(config_id, created_at);
+"""
+
+SCHEMA_SQL = SCHEMA_SQL + SCORING_DDL + DEFECT_LEDGER_DDL + STANDARD_CLAUSES_DDL + IMAGE_DDL

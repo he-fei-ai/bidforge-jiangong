@@ -2205,12 +2205,82 @@ def first_mermaid_keyword(code: str) -> str:
     return ""
 
 
+def _looks_like_gantt_body(code: str) -> bool:
+    """R252：代码体是否具备甘特图结构特征（用于首行 `gantt` 缺失时的兜底识别）。
+
+    生产实证：AI 偶发漏写首行 `gantt`，直接从 `title …` 起笔（截图第 33 页）：
+    ``title … / dateFormat YYYY-MM-DD / axisFormat %m-%d / section … / 任务 :日期,工期``。
+    此时 ``first_mermaid_keyword`` 取到 `title` → 映射表无此键 → 三侧判"不可渲染"
+    整块跳过（或当普通代码块 → 源码泄漏）。但 PIL 侧 ``_parse_mermaid_gantt`` 本就
+    逐行扫描、不依赖首行 gantt，故此类载荷**完全可渲染**，只差类型识别这一环。
+
+    判据刻意严格（避免把普通文本/其它代码块误判为 gantt），满足其一即可：
+      · ``dateFormat`` / ``axisFormat`` / ``section`` 至少命中 2 个；
+      · 或存在 ``section`` 分段行且至少 2 条「任务名 : 规格」任务行
+        （R253：AI 偶发连 dateFormat/axisFormat 都省，只剩 section + 任务，
+        此时仍应识别为甘特图，否则 repair 补不齐 dateFormat 又被删块）。
+      两者都要求至少 1 条「任务名 : 规格」形态的任务行（含 `:` 且不是
+      title/date/axis 行）。
+    """
+    if not code:
+        return False
+    lines = [ln.strip() for ln in str(code).split("\n") if ln.strip()]
+    directives = sum(
+        1
+        for ln in lines
+        if ln.startswith("dateFormat") or ln.startswith("axisFormat") or ln.startswith("section ")
+    )
+    has_section = any(ln.startswith("section ") for ln in lines)
+    task_lines = [
+        ln
+        for ln in lines
+        if ":" in ln
+        and not ln.startswith(("title", "date", "axis", "section", "%%"))
+        and ln.split(":", 1)[0].strip()
+    ]
+    if not task_lines:
+        return False
+    return directives >= 2 or (has_section and len(task_lines) >= 2)
+
+
 def detect_mermaid_chart_type(code: str, default: str = "flowchart") -> str:
     """从 Mermaid 代码推断内部图表类型；未识别的关键字返回 ``default``。
 
     传 ``default=""`` 可用来判断"这是否是一段我们认识的可渲染图表代码"。
+
+    ✅ R252：首关键字不在映射表（如 AI 漏写 `gantt` 首行、以 `title` 起笔）时，
+    以代码体结构特征兜底识别 gantt —— 与 PIL 解析器的容忍口径对齐，杜绝此类
+    载荷在三侧被误判"不可渲染"而整块跳过 / 源码泄漏。
     """
-    return MERMAID_KEYWORD_TO_CHART_TYPE.get(first_mermaid_keyword(code), default)
+    kw = first_mermaid_keyword(code)
+    hit = MERMAID_KEYWORD_TO_CHART_TYPE.get(kw)
+    if hit is not None:
+        return hit
+    if _looks_like_gantt_body(code):
+        return "gantt"
+    return default
+
+
+def ensure_gantt_declaration(code: str) -> str:
+    """R253：给「缺首行 `gantt` 声明」的甘特图代码补首行；其余原样返回。
+
+    R252 让三侧**识别**出 title-first 的甘特载荷为 gantt，但后端校验/AI 修复
+    （``image_engine.validate_mermaid`` / ``repair_mermaid``）与 PIL 主渲染
+    （``mermaid_renderer``）仍按首行 `gantt` 分流 —— 缺首行的载荷被判「不支持的
+    Mermaid 类型」而从正文删块，或丢 section 阶段带。本函数是这些消费点的**统一
+    前置归一**：只在确为甘特体（``_looks_like_gantt_body``）且首关键字不被映射表
+    认识时补 `gantt\\n`，一次归一、四处复用（校验/修复/渲染主分支/必要时的登记）。
+
+    幂等：已有合法声明的载荷原样返回，重复调用零叠加。
+    """
+    if not code:
+        return code
+    kw = first_mermaid_keyword(code)
+    if kw in MERMAID_KEYWORD_TO_CHART_TYPE:
+        return code  # 已有 gantt/flowchart/... 合法首行
+    if _looks_like_gantt_body(code):
+        return "gantt\n" + code.lstrip("\n")
+    return code
 
 
 def infer_chart_type_from_payload(payload) -> str:

@@ -18,6 +18,16 @@ from __future__ import annotations
 
 import re
 
+# ✅ 提示词注册表收口（2026-11-16）：本模块 8 条生成标准提示词片段此前是
+#    「字面量字典 + 纯函数 builder」形态，绕过了统一注册表 —— 既不能在提示词后台
+#    编辑、不能被 DB 定制覆盖，也不进审计 diff / 运行时指标 / 启动期契约校验
+#    （本仓头号反模式「服务层就绪 ≠ 功能可达」）。现按 R39 · T1 同构模式收口：
+#    字面量留在本模块作出厂默认（唯一事实源，未搬家），builder 改为
+#    「DB 优先（get_prompt）→ 出厂字面量回退」；注册走 `_reg` + 惰性钩子。
+#    `_reg` 定义在 `_registry.py`、先于本模块任何依赖完成加载，顶层 import 无环
+#    （本模块依赖链 content_fuzzy / content_trace / fence_common 均不反向 import prompts 包）。
+from app.services.ai.prompts._registry import _reg
+
 # ✅ 2026-10-01（模糊生成改造）：模糊表述判据、占位/空话/暴露/编造检测、
 #    提示词块、内部标记派生均已下沉到独立模块，本文件只做「生成标准」编排。
 #    收敛理由：这几份判据此前各有一份字面量（提示词一处、校验器一处、
@@ -42,6 +52,69 @@ from app.services.content_trace import build_trace as _build_trace
 #    与 2026-09-28 收敛注释钉住，不得改成行锚定严格口径（会把保护面收窄、事实校验
 #    重新看见 Mermaid 数字 → 新误报）。
 from app.services.fence_common import iter_all_blocks
+
+#: 生成标准提示词是否已完成注册（幂等锁，对齐 `_BID_PROMPTS_REGISTERED`）。
+_STANDARD_PROMPTS_REGISTERED = False
+
+
+def _reg_standard_prompts() -> None:
+    """把 8 条生成标准提示词登记进统一注册表（出厂默认 = 下方字面量字典）。
+
+    仅注册，不改渲染语义：读取仍由各 ``build_*`` builder 承担
+    （DB 定制优先 → 出厂字面量回退）。``requires=[]`` 与投标分析域一致 ——
+    这些片段是「完整文案块」、无 ``{var}`` 调用方变量，声明空白名单可让
+    :func:`check_prompt_variables` 监督「编辑时误引入未声明占位符」的漂移。
+    """
+    global _STANDARD_PROMPTS_REGISTERED
+    if _STANDARD_PROMPTS_REGISTERED:
+        return
+    _reg("content_standard_system_precise", "content", "正文生成标准 · 精准内容 system 段",
+         _SYSTEM_BLOCKS[PRECISE], requires=[])
+    _reg("content_standard_system_fuzzy", "content", "正文生成标准 · 模糊内容 system 段",
+         _SYSTEM_BLOCKS[FUZZY], requires=[])
+    _reg("content_standard_user_precise", "content", "正文生成标准 · 精准内容 user 块",
+         _USER_BLOCKS[PRECISE], requires=[])
+    _reg("content_standard_user_fuzzy", "content", "正文生成标准 · 模糊内容 user 块",
+         _USER_BLOCKS[FUZZY], requires=[])
+    _reg("content_standard_facts_header_precise", "content", "正文生成标准 · 精准事实引导语",
+         _FACTS_HEADERS[PRECISE], requires=[])
+    _reg("content_standard_facts_header_fuzzy", "content", "正文生成标准 · 模糊事实引导语",
+         _FACTS_HEADERS[FUZZY], requires=[])
+    _reg("content_standard_continue_hint_precise", "content", "正文生成标准 · 精准续写提醒",
+         _CONTINUE_HINTS[PRECISE], requires=[])
+    _reg("content_standard_continue_hint_fuzzy", "content", "正文生成标准 · 模糊续写提醒",
+         _CONTINUE_HINTS[FUZZY], requires=[])
+    _STANDARD_PROMPTS_REGISTERED = True
+
+
+#: `_cache.get_prompt` 的惰性绑定占位（None = 尚未绑定）。
+#: 首次调用发生在运行时（各模块已加载完），函数体内局部 import 安全；
+#: 仅在「惰性注册钩子半初始化反向 import 本模块」的窗口内避免循环导入。
+_get_prompt = None  # type: ignore[assignment]  # 实际类型: Callable[[str], str]
+
+
+def _bind_get_prompt():
+    """幂等地把 ``_cache.get_prompt`` 绑定到模块全局 ``_get_prompt``。"""
+    global _get_prompt
+    if _get_prompt is None:
+        from app.services.ai.prompts._cache import get_prompt as _gp
+
+        _get_prompt = _gp
+    return _get_prompt
+
+
+def _resolve_block(key: str, fallback: str) -> str:
+    """DB 定制优先读取一条生成标准片段，任何异常 fail-soft 回退出厂字面量。
+
+    默认配置下 ``get_prompt`` 返回注册表出厂默认（= ``fallback`` 逐字节相等），
+    故本函数对既有调用方**零行为变化**；只有用户在提示词后台定制该 key 时才
+    返回定制内容。
+    """
+    try:
+        text = _bind_get_prompt()(key)
+    except Exception:  # noqa: BLE001 - 读取失败不得影响生成主链，回退出厂默认
+        return fallback
+    return text if isinstance(text, str) and text.strip() else fallback
 
 # ---------------------------------------------------------------------------
 # 常量与基础解析
@@ -136,12 +209,14 @@ _CONTINUE_HINTS: dict[str, str] = {
 
 def build_system_block(standard: str) -> str:
     """system prompt 中插入的生成标准段落。"""
-    return _SYSTEM_BLOCKS.get(normalize_standard(standard) or DEFAULT_STANDARD, "")
+    eff = normalize_standard(standard) or DEFAULT_STANDARD
+    return _resolve_block(f"content_standard_system_{eff}", _SYSTEM_BLOCKS.get(eff, ""))
 
 
 def build_user_block(standard: str) -> str:
     """user 消息追加的生成标准块（DB 定制 system 模板缺占位符时的兜底通道）。"""
-    return _USER_BLOCKS.get(normalize_standard(standard) or DEFAULT_STANDARD, "")
+    eff = normalize_standard(standard) or DEFAULT_STANDARD
+    return _resolve_block(f"content_standard_user_{eff}", _USER_BLOCKS.get(eff, ""))
 
 
 #: 事实块引导语（**引用强度随模式变化**）
@@ -170,12 +245,21 @@ _FACTS_HEADERS: dict[str, str] = {
 
 def build_facts_header(standard: str) -> str:
     """user 消息中事实块的引导语（末尾已含换行，直接拼接事实正文）。"""
-    return _FACTS_HEADERS.get(normalize_standard(standard) or DEFAULT_STANDARD, _FACTS_HEADERS[DEFAULT_STANDARD])
+    eff = normalize_standard(standard) or DEFAULT_STANDARD
+    return _resolve_block(f"content_standard_facts_header_{eff}",
+                          _FACTS_HEADERS.get(eff, _FACTS_HEADERS[DEFAULT_STANDARD]))
 
 
 def build_continue_hint(standard: str) -> str:
     """续写后续轮 user 消息尾部的一行模式提醒。"""
-    return _CONTINUE_HINTS.get(normalize_standard(standard) or DEFAULT_STANDARD, "")
+    eff = normalize_standard(standard) or DEFAULT_STANDARD
+    return _resolve_block(f"content_standard_continue_hint_{eff}", _CONTINUE_HINTS.get(eff, ""))
+
+
+# 本模块被 import 时完成注册 —— 必须位于四个字面量字典（`_SYSTEM_BLOCKS` /
+#    `_USER_BLOCKS` / `_FACTS_HEADERS` / `_CONTINUE_HINTS`）定义之后，
+#    故收在本提示词文案段末尾（对齐 `_reg_bid_prompts()` 的 import 期注册语义）。
+_reg_standard_prompts()
 
 
 # ---------------------------------------------------------------------------

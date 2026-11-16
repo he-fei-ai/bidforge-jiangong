@@ -98,7 +98,7 @@ const PROMPT_MAX_CHARS = 200000;
  *   ③ 本组件 memo，输入区重渲不会带动结果区重算。
  * effect cleanup 用 alive 丢弃过期/卸载后的 Worker 回包，杜绝乱序与卸载后 setState。
  */
-const PromptVariableAnalysis = memo(function PromptVariableAnalysis({
+export const PromptVariableAnalysis = memo(function PromptVariableAnalysis({
   content,
   baseline,
 }: {
@@ -139,6 +139,16 @@ const PromptVariableAnalysis = memo(function PromptVariableAnalysis({
           type={result.diff.removed.length > 0 ? "warning" : "info"}
           showIcon
           style={{ marginBottom: 10 }}
+          // ✅ R252 D-3：占位符被删除时后端 .format 会因缺占位符 fail-soft 回退出厂骨架，
+          // 定制静默失效。此处明确告警，避免用户误以为删掉 {label} 等占位符仍能生效。
+          description={
+            result.diff.removed.length > 0 ? (
+              <span>
+                已删除占位符（红色 - 标记）。保存后运行时将因缺少该占位符回退到出厂骨架，
+                本次定制不会生效；如需保留定制，请把被删占位符补回正文。
+              </span>
+            ) : undefined
+          }
           message={
             <Space wrap>
               <span>相对默认模板的变量变化：</span>

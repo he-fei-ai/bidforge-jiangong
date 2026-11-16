@@ -22,6 +22,13 @@ from app.services.prompt_material_guard import clip_text_notice
 
 logger = logging.getLogger("genre_assist")
 
+# ✅ 提示词注册表收口（2026-11-16）：文种识别 system 此前是模块级字面量 `_SYSTEM`
+#    直接拼进 messages，绕过统一注册表（不能后台编辑 / 不能 DB 定制 / 不进审计与指标）。
+#    现按 R39 · T1 同构模式注册（出厂默认 = `_SYSTEM`，逐字节不变），消费点改
+#    「DB 优先 → 出厂字面量回退」。`_reg` 定义先于本模块依赖完成加载，顶层 import 无环
+#    （本模块顶层仅依赖 prompt_material_guard，不反向 import prompts 包）。
+from app.services.ai.prompts._registry import _reg
+
 _SYSTEM = (
     "你是建筑工程专项施工方案的文种识别助手。"
     "只根据给定方案名称与补充文本，判断它最可能属于哪一类危大工程。"
@@ -29,6 +36,38 @@ _SYSTEM = (
     '只输出 JSON：{"category_ids": [...], "sub_ids": [...], "reason": "..."}，'
     "无法判断时三个字段都为空。"
 )
+
+
+#: 文种识别 system 是否已完成注册（幂等锁）。
+_GENRE_PROMPT_REGISTERED = False
+
+
+def _reg_genre_prompt() -> None:
+    """把文种识别 system 登记进统一注册表（出厂默认 = `_SYSTEM`）。"""
+    global _GENRE_PROMPT_REGISTERED
+    if _GENRE_PROMPT_REGISTERED:
+        return
+    # 无 ``{var}`` 调用方变量，声明空白名单让契约校验监督「编辑误引入占位符」。
+    _reg("genre_assist_system", "analysis", "文种识别 · LLM 辅助 system", _SYSTEM, requires=[])
+    _GENRE_PROMPT_REGISTERED = True
+
+
+_reg_genre_prompt()
+
+
+def _system_prompt() -> str:
+    """文种识别 system（DB 定制优先 → 出厂字面量回退，任何异常 fail-soft）。
+
+    ``_cache.get_prompt`` 走函数体内惰性 import：本模块可能被惰性注册钩子
+    半初始化时反向 import，此时局部 import 可避免循环导入。
+    """
+    try:
+        from app.services.ai.prompts._cache import get_prompt
+
+        text = get_prompt("genre_assist_system")
+    except Exception:  # noqa: BLE001 - 辅助路径 fail-soft，回退出厂默认
+        return _SYSTEM
+    return text if isinstance(text, str) and text.strip() else _SYSTEM
 
 
 def _valid_ids(payload: dict) -> tuple[list[str], list[str]]:
@@ -64,7 +103,7 @@ async def suggest_category(scheme_name: str, extra_text: str = "", *, chat_fn=No
     # ✅ R181（2026-11-07）：进模型提示词的补充文本超长时留痕（模型可见 + 日志）。
     user = f"方案名称：{scheme_name}\n补充文本：{clip_text_notice(extra_text or '', 800, '文种识别补充文本')}"
     messages = [
-        {"role": "system", "content": _SYSTEM},
+        {"role": "system", "content": _system_prompt()},
         {"role": "user", "content": user},
     ]
     try:

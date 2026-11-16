@@ -271,6 +271,7 @@ export const GenerationProgressCard = memo(function GenerationProgressCard(
         {/* ---- 右侧：正文生成章节滚动日志 ---- */}
         {genType === "content" && (
           <div
+            className="swb-pane-scroll"
             style={{
               flex: 1,
               minHeight: 0,
@@ -295,6 +296,7 @@ export const GenerationProgressCard = memo(function GenerationProgressCard(
         {/* ---- 右侧：目录生成实时日志 ---- */}
         {genType === "outline" && (
           <div
+            className="swb-pane-scroll"
             style={{
               flex: 1,
               minHeight: 0,

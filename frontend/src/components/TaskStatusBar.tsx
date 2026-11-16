@@ -615,7 +615,7 @@ function TaskStatusBar({ collapsed }: { collapsed: boolean }) {
         </span>
       </div>
 
-      <div style={{ padding: "4px 10px 8px", maxHeight: 380, overflowY: "auto" }}>
+      <div className="scroll-area" style={{ padding: "4px 10px 8px", maxHeight: 380 }}>
         {/* ---- 运行中任务 ---- */}
         <div className="bp-task-panel-section">运行中（{running.length}）</div>
         {running.length === 0 ? (

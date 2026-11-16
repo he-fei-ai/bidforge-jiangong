@@ -188,7 +188,7 @@ export const SectionLogList = memo(function SectionLogList({ items }: { items: S
                   placement="leftTop"
                   title="生成标准校验（咨询性，不阻断生成）"
                   content={
-                    <div style={{ maxWidth: 420, maxHeight: 300, overflowY: "auto" }}>
+                    <div className="swb-pane-scroll" style={{ maxWidth: 420, maxHeight: 300, overflowY: "auto" }}>
                       {(item.standard_report?.issues || []).map((it, i) => (
                         <div key={i} style={{ marginBottom: 6, fontSize: 12 }}>
                           <Tag

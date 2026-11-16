@@ -32,12 +32,28 @@ const PAGE = RAW["pages/SchemeWorkbenchPage.tsx"] || "";
 const RECOVERY = RAW["pages/schemeWorkbench/useUnknownTaskRecovery.tsx"] || "";
 const BATCHER = RAW["utils/sseBatcher.ts"] || "";
 
-/** 截取「刷新接管」轮询循环源码段（以 R194 注释为锚；循环体约 6k 字符）。 */
+/**
+ * 截取「刷新接管」轮询循环源码段。
+ *
+ * ⚠️ R251 加固：旧实现以「下一个『检测到后台』出现处」作终点（找不到就退回
+ *    `i + 8000` 魔法长度）。两个问题：
+ *      ① 『检测到后台』在锚点**之前**出现（页面 1954 行的提示文案）⇒
+ *         indexOf(…, i) 恒为 -1，实际永远走魔法长度分支；
+ *      ② 固定 8000 字符窗口会随代码增长而截断 —— 并行会话在该循环内补了
+ *         注释后，窗口末端正好切在 `pollFailStreak >= 5` 之前 ⇒ 护栏假红。
+ *    现改为**语义终点锚**：循环自身的「耗尽收尾」标记（它必然位于所有待断言
+ *    代码之后：连续失败判定 → markUnknownTask → 循环耗尽收尾），窗口因此
+ *    恒定覆盖整个循环体，且不依赖任何字符长度。
+ */
 function takeoverLoopSrc(): string {
   const i = PAGE.indexOf("R194（FIX-12 · C-1 接管轮询韧性）");
   expect(i).toBeGreaterThan(0);
-  const j = PAGE.indexOf("检测到后台", i);
-  return PAGE.slice(i, j > 0 ? j : i + 8000);
+  // 语义终点：循环耗尽收尾标记（循环体内最后一处收尾，其后即循环外代码）。
+  const endAnchor = "接管轮询超限（400×3s）未获得任务终态";
+  const j = PAGE.indexOf(endAnchor, i);
+  // 兜底：终点锚缺失（代码结构大改）时放宽窗口，避免误报为「逻辑缺失」。
+  const end = j > 0 ? j + endAnchor.length : Math.min(PAGE.length, i + 40000);
+  return PAGE.slice(i, end);
 }
 
 describe("R194 前端护栏 · 接管轮询韧性（FE-1 / C-1）", () => {

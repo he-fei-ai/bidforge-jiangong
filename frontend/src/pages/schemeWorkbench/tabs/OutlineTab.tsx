@@ -49,6 +49,8 @@ import { OutlineTreeActions } from "../OutlineTreeActions";
 import { OutlineVersionsPanel } from "../OutlineVersionsPanel";
 import { OutlineNodeBudgetPanel } from "../OutlineNodeBudgetPanel";
 import { TaskControlButtons } from "../TaskControlButtons";
+// ✅ 可拖拽分隔（2026-11-16）：目录生成 Tab 顶部信息区 ↔ 目录树编辑卡之间可拖拽调整高度
+import { SplitPane } from "../../../components/SplitPane";
 
 const { Text } = Typography;
 
@@ -194,12 +196,22 @@ export function OutlineTab({
     el?.scrollIntoView({ behavior: "smooth", block: "center" });
   };
   return (
-    // ✅ 修复：目录生成内容（编制要求卡 + 多标段提示 + 编辑树 + 目录库/AI 生成区）较长，
-    //    与其余 Tab 同一模式：根容器必须 flex:1 + minHeight:0 + overflowY:auto，
-    //    否则超出视口的底部内容会被外层 overflow:hidden 裁掉，无法滚动查看/操作。
+    // ✅ 2026-11-16 可拖拽上下分隔：顶部信息区（编制要求 / 评分面板 / 操作按钮 / 版本列表）
+    //    与下方目录树编辑卡之间可拖拽调整高度，各自独立滚动。原「整块 scroll-area」改为
+    //    SplitPane 纵向双窗格——首窗格（顶部信息区）固定高度可拖、次窗格（目录树）flex:1。
+    <SplitPane
+      orientation="vertical"
+      storageKey="swb-split-outline-top-height"
+      defaultSize={300}
+      minSize={120}
+      maxSize={720}
+      handleMargin={4}
+      ariaLabel="拖拽调整目录生成顶部信息区与目录树的大小"
+      style={{ flex: 1, minHeight: 0, paddingRight: 4 }}
+      first={
     <div
-      className="scroll-area"
-      style={{ flex: 1, minHeight: 0, overflowY: "auto", paddingRight: 4 }}
+      className="swb-pane-scroll"
+      style={{ height: "100%", minHeight: 0, overflowY: "auto" }}
     >
       {/* ✅ R179 N1：自动确认风险提示（开关关闭时 autoConfirmNotice 为 null，不渲染） */}
       {autoConfirmNotice}
@@ -369,6 +381,16 @@ export function OutlineTab({
 
       {/* ✅ R181 N1：目录版本列表 + 二次确认回退（后端已强制失效缓存） */}
       <OutlineVersionsPanel schemeId={schemeId} msg={msg} onRestored={onOutlineRestored} />
+    </div>
+    }
+    second={
+      /* ✅ R251：目录树编辑区自带独立滚动 —— 拖拽顶部信息区时本窗格高度随
+         flex 链路收缩，内容超长时由本窗格滚动，不再依赖写死的
+         calc(100vh - 420px)（该值假设上半区固定 420px，与可拖拽冲突）。 */
+      <div
+        className="swb-pane-scroll"
+        style={{ height: "100%", minHeight: 0, display: "flex", flexDirection: "column" }}
+      >
 
       {/* 目录树编辑区 */}
       <Card
@@ -420,8 +442,11 @@ export function OutlineTab({
         ) : (
           <div
             ref={editTreeScrollRef}
-            className="scroll-area"
-            style={{ minHeight: 200, maxHeight: "calc(100vh - 420px)", overflow: "auto" }}
+            /* ✅ R251：删掉写死的 calc(100vh - 420px) 与自带滚动。
+               该值假设「顶部信息区固定 420px」，而顶部信息区自 2026-11-16 起
+               可拖拽（120~720px）⇒ 拖高后目录树被裁切、底部章节看不到。
+               现由上层 .swb-pane-scroll 统一滚动，树随内容自然增高。 */
+            style={{ minHeight: 200, overflow: "visible" }}
           >
             <Tree
               treeData={outlineEditTreeData}
@@ -446,6 +471,8 @@ export function OutlineTab({
           </div>
         )}
       </Card>
-    </div>
+      </div>
+      }
+    />
   );
 }

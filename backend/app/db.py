@@ -16,7 +16,13 @@ from pathlib import Path
 import aiosqlite
 
 from app.config import DATA_DIR, settings
-from app.schema_sql import DEFECT_LEDGER_DDL, SCHEMA_SQL, SCORING_DDL, STANDARD_CLAUSES_DDL
+from app.schema_sql import (
+    DEFECT_LEDGER_DDL,
+    IMAGE_DDL,
+    SCHEMA_SQL,
+    SCORING_DDL,
+    STANDARD_CLAUSES_DDL,
+)
 
 logger = logging.getLogger("db")
 
@@ -1407,6 +1413,14 @@ async def _migrate(conn: aiosqlite.Connection):
         await conn.executescript(STANDARD_CLAUSES_DDL)
     except Exception as e:
         _record_migration_degraded("Phase E 条款库基表迁移", e)
+
+    # --- ✅ R252（2026-11-16）：图像模型配置增强三表兜底 ---
+    #    纯 CREATE TABLE/INDEX IF NOT EXISTS，重复执行零副作用；
+    #    正常库由 init_db 的 executescript(SCHEMA_SQL) 建好，此处只覆盖老库/测试路径。
+    try:
+        await conn.executescript(IMAGE_DDL)
+    except Exception as e:
+        _record_migration_degraded("R252 图像模型配置增强迁移", e)
 
     # --- 迁移索引（CREATE INDEX IF NOT EXISTS 自带幂等性，无需先探存） ---
     index_migrations = [

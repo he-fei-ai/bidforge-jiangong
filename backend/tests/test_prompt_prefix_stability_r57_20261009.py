@@ -616,6 +616,7 @@ class TestSourceByteIntegrity:
     def test_every_touched_file_compiles(self):
         """语法正确性最终判据：行尾被玩坏的文件往往连 py_compile 都过不去。"""
         import py_compile
+        import tempfile
 
         for rel in _TOUCHED:
             p = None
@@ -625,4 +626,8 @@ class TestSourceByteIntegrity:
                     p = cand
                     break
             assert p is not None
-            py_compile.compile(str(p), doraise=True)
+            # 显式指定临时 cfile：默认会往 app/__pycache__ 写 .pyc，而该目录在
+            # 部分环境（只读挂载 / 沙箱）写封锁，会以 PermissionError 假红。
+            # 护栏意图是「源文件必须能编译」，与字节码落盘位置无关。
+            with tempfile.TemporaryDirectory() as tmp:
+                py_compile.compile(str(p), doraise=True, cfile=str(Path(tmp) / "chk.pyc"))

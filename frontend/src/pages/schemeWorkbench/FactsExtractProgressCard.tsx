@@ -25,7 +25,7 @@ export function FactsExtractProgressCard({
         </Text>
         <Progress percent={Math.round((progress || 0) * 100)} size="small" />
         {controls}
-        <div style={{ maxHeight: 180, overflow: "auto" }}>
+        <div className="swb-pane-scroll" style={{ maxHeight: 180, overflow: "auto" }}>
           {list.length === 0 ? (
             <Text type="secondary" style={{ fontSize: 12 }}>
               正在连接 AI，准备提取...

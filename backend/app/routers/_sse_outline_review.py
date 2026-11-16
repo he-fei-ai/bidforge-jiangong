@@ -2125,7 +2125,7 @@ async def _build_structured_brief(
         appendix = ""
         if raw_brief.strip():
             _appendix_src = raw_brief
-            _appendix_kept = raw_brief[:800]
+            _appendix_kept = raw_brief  # 保留完整内容，不再截断
             appendix = f"\n\n【原始资料摘录】\n{_appendix_kept}"
             if len(_appendix_kept) < len(_appendix_src):
                 _sh._record_context_degraded(

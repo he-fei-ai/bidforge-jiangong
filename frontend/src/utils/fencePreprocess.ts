@@ -24,6 +24,55 @@ export const CHART_FENCE_LANGS = ["mermaid", "chart-json", "ai_image"] as const;
 export type ChartFenceLang = (typeof CHART_FENCE_LANGS)[number];
 
 /**
+ * R252（2026-11-16）：与后端 fence_common._CHART_FENCE_LANG_ALIASES 同源的
+ * 「图表类型名被误当围栏语言标签」别名集合。AI 偶发写出 ```gantt / ```flowchart /
+ * ```pie 等，后端归一为 ```mermaid，前端须同步归一，否则「导出出图、预览显示源码」。
+ */
+export const CHART_FENCE_LANG_ALIASES = [
+  "gantt", "flowchart", "graph", "pie", "xychart", "xychart-beta", "timeline",
+  "architecture", "architecture-beta", "labor", "comparison", "layout",
+  "sequencediagram", "classdiagram", "statediagram", "statediagram-v2", "erdiagram",
+  "journey", "mindmap", "quadrantchart", "gitgraph", "sankey", "sankey-beta",
+  "block", "block-beta", "kanban",
+] as const;
+
+/** 围栏信息串首词 → 规范图表标签；非别名返回小写首词原样。与后端 canonical_chart_fence_lang 同源。 */
+export function canonicalChartFenceLang(info: string): string {
+  const lang = (info || "").trim().toLowerCase().split(/\s+/)[0] || "";
+  return (CHART_FENCE_LANG_ALIASES as readonly string[]).includes(lang) ? "mermaid" : lang;
+}
+
+/**
+ * R252：给缺首行 `gantt` 的甘特图代码补声明行（只改送入 mermaid.js 的 code，不动正文）。
+ * 生产实证：AI 直接从 `title …` 起笔，mermaid.js 要求首行 `gantt` 否则解析失败显示源码；
+ * 后端 PIL 解析器本就容忍缺首行，故仅需前端渲染输入补齐，保证预览与导出一致出图。
+ */
+export function ensureGanttDeclaration(code: string): string {
+  const lines = code.replace(/^\s+/, "").split("\n");
+  const first = (lines[0] || "").trim().toLowerCase();
+  // 已有合法声明（gantt / flowchart / graph / pie / timeline 等）则原样返回
+  if (first.startsWith("gantt") || first.startsWith("flowchart") || first.startsWith("graph")
+      || first.startsWith("pie") || first.startsWith("timeline") || first.startsWith("xychart")
+      || first.startsWith("sequencediagram") || first.startsWith("classdiagram")
+      || first.startsWith("statediagram") || first.startsWith("erdiagram")
+      || first.startsWith("journey") || first.startsWith("mindmap")
+      || first.startsWith("quadrantchart") || first.startsWith("gitgraph")
+      || first.startsWith("sankey") || first.startsWith("block") || first.startsWith("kanban")
+      || first.startsWith("architecture")) {
+    return code;
+  }
+  // R253：与后端 chart_validators._looks_like_gantt_body 同判据（parity）——
+  // directives>=2 或（有 section 且任务行>=2），且至少要有一条任务行。
+  const dirLines = lines.filter((ln) => /^(dateFormat|axisFormat|section\s)/.test(ln.trim()));
+  const hasSection = lines.some((ln) => /^section\s/.test(ln.trim()));
+  const taskLines = lines.filter(
+    (ln) => ln.includes(":") && !/^(title|date|axis|section|%%)/i.test(ln.trim()) && ln.split(":")[0].trim(),
+  );
+  const looksGantt = taskLines.length > 0 && (dirLines.length >= 2 || (hasSection && taskLines.length >= 2));
+  return looksGantt ? `gantt\n${code}` : code;
+}
+
+/**
  * 独立成行的围栏标记：≤3 前导空白 + 同种字符（反引号或波浪号）≥3 个 + 可选信息串。
  * 与后端 `fence_common.FENCE_LINE_RE` 逐字同构（JS 无 `\Z`，用 `$` + 非贪婪组）。
  */
@@ -63,15 +112,14 @@ export function isFenceClose(line: string, open: FenceLine): boolean {
   return pf.char === open.char && pf.info === "";
 }
 
-/** 语言标签是否属于图表家族（小写、去多余空白后比对）。 */
+/** 语言标签是否属于图表家族（R252：经别名归一后比对，gantt/flowchart 等也算）。 */
 export function isChartFenceLang(info: string): boolean {
-  const lang = info.trim().toLowerCase().split(/\s+/)[0] || "";
-  return (CHART_FENCE_LANGS as readonly string[]).includes(lang);
+  return (CHART_FENCE_LANGS as readonly string[]).includes(canonicalChartFenceLang(info));
 }
 
-/** 图表家族语言标签（已小写首词），非图表围栏返回空串。 */
+/** 图表家族语言标签（R252：归一后的规范标签；非图表围栏返回其小写首词原样）。 */
 export function chartFenceLang(info: string): string {
-  return info.trim().toLowerCase().split(/\s+/)[0] || "";
+  return canonicalChartFenceLang(info);
 }
 
 export interface FenceBlock {
@@ -389,6 +437,24 @@ export interface ChartFenceShapeResult {
 }
 
 /**
+ * R252：就地改写「图表类型名误当围栏语言标签」的开启行（与后端
+ * content_blocks._normalize_chart_fence_lang_alias 同构；幂等、行数不变）。
+ * 只改信息串首词，保留围栏字符/长度/其余信息串/前导缩进。
+ */
+function normalizeChartFenceLangAlias(lines: string[]): void {
+  for (let i = 0; i < lines.length; i += 1) {
+    const pf = parseFenceLine(lines[i]);
+    if (!pf) continue;
+    const canon = canonicalChartFenceLang(pf.info);
+    const first = pf.info.split(/\s+/)[0]?.toLowerCase() || "";
+    if (!first || canon === first || !["mermaid", "chart-json", "ai_image"].includes(canon)) continue;
+    const rest = pf.info.slice(first.length);
+    const leading = lines[i].slice(0, lines[i].length - lines[i].replace(/^[ \t]*/, "").length);
+    lines[i] = `${leading}${pf.char.repeat(pf.length)}${canon}${rest}`;
+  }
+}
+
+/**
  * 畸形图表围栏形态归一唯一出口（与后端 normalize_chart_fence_shapes 同名同义）。
  * 幂等、行数不变；文本不含围栏字符时零开销直返。
  */
@@ -399,5 +465,6 @@ export function normalizeChartFenceShapes(text: string): ChartFenceShapeResult {
   const lines = text.split("\n");
   const unwrapped =
     unwrapFigureTableChart(lines) + unwrapDocFenceWrappingChart(lines);
+  normalizeChartFenceLangAlias(lines);
   return { text: lines.join("\n"), unwrapped };
 }

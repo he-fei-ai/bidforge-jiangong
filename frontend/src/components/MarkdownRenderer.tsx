@@ -8,6 +8,7 @@ import { CHART_TITLE_FALLBACK, RENDERABLE_CHART_TYPES } from "../utils/chartType
 // ✅ R76（2026-10-13）：围栏判据唯一事实源（前端侧），与后端
 //   services/fence_common.py 同一语义。行锚定 + 同种字符 + 信息串必须为空 + 长度容错。
 import {
+  ensureGanttDeclaration,
   normalizeChartFenceShapes,
   normalizeFenceCloses,
   replaceChartFences,
@@ -217,7 +218,10 @@ function MarkdownRenderer({ content, sectionId, onContentReplaced }: MarkdownRen
         }
         placeholders.push({ marker, code: code.trim(), id, aiImage: { prompt, style, title } });
       } else {
-        placeholders.push({ marker, code: code.trim(), id });
+        // R252：mermaid 代码块——补缺首行 `gantt`（AI 偶发从 `title …` 起笔，
+        // mermaid.js 要求首行声明否则解析失败显示源码；后端 PIL 本就容忍缺首行）。
+        // 只改送来渲染的 code，不动正文（行数/源行契约不受影响）。
+        placeholders.push({ marker, code: ensureGanttDeclaration(code.trim()), id });
       }
       counter++;
       // 占位 div 单独成行：段间**空行**由 replaceChartFences 统一插入（`<div>` 开启的

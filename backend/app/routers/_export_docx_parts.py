@@ -24,6 +24,25 @@ _XML_ILLEGAL_RE = _sh.re.compile(
 )
 
 
+def _xml_illegal_chars(text: str) -> str:
+    """剥除 XML 1.0 非法字符（合法空白 \t/\n/\r 原样保留），不碰零宽字符。
+
+    ✅ R248：``_normalize_plain_segment`` 的实体解码循环跑在 ``clean_text``
+    控制字符剥离**之后**，``&#x0;`` / ``&amp;#x0;`` / ``&amp;amp;#x0;`` 等编码
+    形态在此被物化成 U+0000 且再无出口 —— 该串经 ``run.text`` 写进 ``w:t`` 时
+    lxml 抛 ``ValueError``（``All strings must be XML compatible``），整单导出
+    失败 / 产物无法打开。本函数只剥 XML 非法控制符与孤立代理项，零宽字符族
+    仍由 ``_xml_safe_text``（封面/表单直写出口）负责，两条守卫各司其职。
+    """
+    if not text:
+        return text
+    return _XML_CTRL_RE.sub("", text)
+
+
+# 与 _XML_ILLEGAL_RE 同源的控制符 + 孤立代理项子集（不含零宽字符族）。
+_XML_CTRL_RE = _sh.re.compile("[\x00-\x08\x0b\x0c\x0e-\x1f\x7f\ufffe\uffff\ud800-\udfff]")
+
+
 def _xml_safe_text(text) -> str:
     """剥除 XML 非法字符与零宽字符；``None`` → 空串，非字符串按 ``str`` 转换。
 
@@ -364,7 +383,10 @@ def _normalize_delivery_text(text: str, *, residual: bool = False) -> str:
             out.append(_normalize_plain_segment(inner))
         else:
             out.append(part)
-    return "".join(out)
+    # ✅ R248：解码循环可能把 ``&#x0;`` 等编码形态物化成 XML 非法字符（residual
+    #    分支剥的是公式定界符、非公式分支原样拼接），此处统一终末剥离，保证本
+    #    唯一入口的输出恒为 XML 安全（正常文本不含控制符，逐字不变）。
+    return _xml_illegal_chars("".join(out))
 
 
 def _add_runs_with_inline_format(paragraph, text: str):

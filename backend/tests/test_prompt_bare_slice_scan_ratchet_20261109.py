@@ -96,8 +96,8 @@ MODEL_FACING_REGISTRY: dict[tuple[str, str], str] = {
     ): "同级章节**条目数**上限（每条完整保留），非文本截断。",
     (
         "services/facts_enrich.py",
-        "for it in (items or [])[:_MAX_PROMPT_FACTS]:",
-    ): "事实**条目数**上限（每条完整保留），非文本截断。",
+        "for it in _items[:_MAX_PROMPT_FACTS]:",
+    ): "事实**条目数**上限（每条完整保留），非文本截断；R247 起超限另有 WARNING 留痕（总数/上限），非静默丢字。",
     (
         "services/facts_enrich.py",
         'for raw in obj["facts"][:_MAX_FINALIZE_FACT]:',

@@ -33,7 +33,7 @@ body,
 html,
 body {
   max-width: 100vw;
-  overflow-x: hidden;
+  overflow: hidden;
   -webkit-overflow-scrolling: touch;
   /* 支持 iOS 安全区（刘海/全面屏底部横条） */
   padding-top: env(safe-area-inset-top, 0);
@@ -42,8 +42,7 @@ body {
 
 #root {
   max-width: 100vw;
-  overflow-x: hidden;
-  min-height: 100dvh;
+  overflow: hidden;
 }
 
 * {
@@ -817,22 +816,36 @@ pre,
   background: rgba(0, 212, 255, 0.04) !important;
 }
 
-/* ---------- 主区域滚动条（浅色模式） ---------- */
+/* ---------- 主区域滚动条（商业级规范 · 2026-11-16）----------
+   覆盖未使用 .scroll-area 的页面（ProjectList / SecuritySettings 等）的
+   页面级滚动。与 .scroll-area / .swb-pane-scroll 保持同一视觉规范：
+   6px / 半透明滑块（R251：8px → 6px，与右窗格契约统一）。 */
 .ant-layout-content::-webkit-scrollbar {
-  width: 10px;
-  height: 10px;
+  width: 6px;
+  height: 6px;
 }
 .ant-layout-content::-webkit-scrollbar-track {
   background: transparent;
 }
 .ant-layout-content::-webkit-scrollbar-thumb {
-  background: #d8dfe8;
-  border-radius: 5px;
-  border: 2px solid transparent;
+  background: rgba(144, 147, 153, 0.3);
+  border-radius: 4px;
+  border: 1px solid transparent;
   background-clip: content-box;
 }
 .ant-layout-content::-webkit-scrollbar-thumb:hover {
-  background: #b8c4d4;
+  background: rgba(144, 147, 153, 0.5);
+  background-clip: content-box;
+  border: 1px solid transparent;
+}
+/* 暗色主题下主区域滚动条 */
+[data-bp-mode="dark"] .ant-layout-content::-webkit-scrollbar-thumb {
+  background: rgba(144, 147, 153, 0.25);
+  background-clip: content-box;
+  border: 2px solid transparent;
+}
+[data-bp-mode="dark"] .ant-layout-content::-webkit-scrollbar-thumb:hover {
+  background: rgba(144, 147, 153, 0.45);
   background-clip: content-box;
   border: 2px solid transparent;
 }
@@ -852,18 +865,36 @@ pre,
   background: rgba(0, 212, 255, 0.4);
 }
 
-/* ---------- 全局滚动条美化 ---------- */
+/* ---------- 全局滚动条美化（商业级规范 · 2026-11-16）----------
+   设计规范：
+   - 宽度 8px（极简不突兀）
+   - 轨道透明（不遮挡内容）
+   - 滑块半透明灰色，悬停加深，按下最深
+   - 暗色主题自动切换为深色系滑块
+   - Firefox 用 scrollbar-width/scrollbar-color 原生适配 */
 
-.scroll-area {
+/* ✅ 2026-11-16 右窗格独立滚动契约（R251）：
+   .swb-pane-scroll = 六大模块「右侧信息窗口」的统一滚动容器类
+   （解析提取 / 目录生成 / 全局事实 / 正文生成 / 审核预检 / 导出文档）。
+   与既有 .scroll-area **共用同一条契约**（同一组选择器）—— 两套规格会随
+   时间漂移，必须同源维护，不得各自复制一份滚动条样式。
+   契约内容：① 独立纵向滚动 ② 6px 圆角半透明滑块 ③ 滚动穿透隔离
+             ④ 长表格表头吸顶（见下方 sticky 规则）。 */
+.scroll-area,
+.swb-pane-scroll {
   /* 让滚动条占位不闪烁 */
   scrollbar-gutter: stable;
-  scrollbar-width: thin; /* Firefox */
-  scrollbar-color: #bfbfbf transparent;
-  /* ✅ 性能优化：布局/样式包含。长列表（目录树 260 节点、事实数百条、章节日志）
-     滚动时，浏览器可以把 layout/style 重算边界限制在滚动容器内，不必波及整页。
-     刻意不加 paint（会裁剪溢出）与 size（与 flex/百分比高度相互作用有反馈环风险）。
-     注意：本类不使用 position:fixed 子元素（唯一的 fixed 元素在侧栏 TaskStatusBar，
-     不在此容器内），故 contain: layout 不会改变现有定位基准。 */
+  /* Firefox：细滚动条 + 半透明灰色滑块 */
+  scrollbar-width: thin;
+  scrollbar-color: rgba(144, 147, 153, 0.3) transparent;
+  /* ✅ 滚动穿透防范：滚到边界即止于本容器，不向上传播到外层面板/整页。
+     防拖拽时误滚外层，也防触屏上面板内滑动带动整页。 */
+  overscroll-behavior: contain;
+  /* ✅ 纵向滚动兜底：不依赖内联样式，漏写 overflowY 也不会静默失效 */
+  overflow-y: auto;
+  /* ✅ 只保留纵向滚动，横向溢出一律裁剪（表格类自身有 overflow-x:auto） */
+  overflow-x: hidden;
+  /* ✅ 性能优化：布局/样式包含。长列表滚动时限制重算边界在容器内。 */
   contain: layout style;
 }
 
@@ -871,9 +902,13 @@ pre,
    content-visibility:auto 让浏览器跳过视口外行的 layout/paint（等价于行级
    「按需渲染」），contain-intrinsic-size 提供占位高度以保持滚动条与定位稳定；
    不删 DOM、不改 key、不影响 antd Tree/List 的展开与拖拽。
-   只对 .scroll-area 内的行生效，避免影响页面其它浮层。 */
+   只对滚动容器内的行生效，避免影响页面其它浮层。
+   ⚠️ R251：右窗格改为挂 .swb-pane-scroll 后，目录树/长列表的隔离规则必须
+   同步覆盖新类，否则目录树（树容器不再自带滚动）会失去渲染隔离。 */
 .scroll-area .ant-tree-treenode,
-.scroll-area .ant-list-item {
+.scroll-area .ant-list-item,
+.swb-pane-scroll .ant-tree-treenode,
+.swb-pane-scroll .ant-list-item {
   content-visibility: auto;
   contain-intrinsic-size: auto 32px;
 }
@@ -888,64 +923,152 @@ pre,
   contain-intrinsic-size: 320px 320px;
 }
 
-/* Webkit (Chrome / Edge / Safari) */
-.scroll-area::-webkit-scrollbar {
-  width: 10px;
-  height: 10px;
+/* Webkit (Chrome / Edge / Safari) — 6px 圆角滚动条（R251：8px → 6px，
+   与需求「6px 宽、圆角、默认半透明、悬停加深」一致）。
+   滑块用 1px 透明边框 + background-clip: content-box ⇒ 视觉滑块 4px。 */
+.scroll-area::-webkit-scrollbar,
+.swb-pane-scroll::-webkit-scrollbar {
+  width: 6px;
+  height: 6px;
 }
-.scroll-area::-webkit-scrollbar-track {
+.scroll-area::-webkit-scrollbar-track,
+.swb-pane-scroll::-webkit-scrollbar-track {
   background: transparent;
 }
-.scroll-area::-webkit-scrollbar-thumb {
-  background: #d9d9d9;
-  border-radius: 5px;
-  border: 2px solid transparent;
+.scroll-area::-webkit-scrollbar-thumb,
+.swb-pane-scroll::-webkit-scrollbar-thumb {
+  background: rgba(144, 147, 153, 0.3);
+  border-radius: 4px;
+  border: 1px solid transparent;
   background-clip: content-box;
+  transition: background 0.2s ease;
 }
-.scroll-area::-webkit-scrollbar-thumb:hover {
-  background: #bfbfbf;
+.scroll-area::-webkit-scrollbar-thumb:hover,
+.swb-pane-scroll::-webkit-scrollbar-thumb:hover {
+  background: rgba(144, 147, 153, 0.5);
   background-clip: content-box;
-  border: 2px solid transparent;
+  border: 1px solid transparent;
 }
-.scroll-area::-webkit-scrollbar-thumb:active {
-  background: #8c8c8c;
+.scroll-area::-webkit-scrollbar-thumb:active,
+.swb-pane-scroll::-webkit-scrollbar-thumb:active {
+  background: rgba(144, 147, 153, 0.75);
   background-clip: content-box;
-  border: 2px solid transparent;
+  border: 1px solid transparent;
 }
-.scroll-area::-webkit-scrollbar-button {
+.scroll-area::-webkit-scrollbar-button,
+.swb-pane-scroll::-webkit-scrollbar-button {
   height: 0;
   width: 0;
   display: none;
 }
 
-/* Ant Design Tree 滚动容器也应用 */
+/* 暗色主题下滚动条自动切换深色系 */
+[data-bp-mode="dark"] .scroll-area,
+[data-bp-mode="dark"] .swb-pane-scroll {
+  scrollbar-color: rgba(144, 147, 153, 0.28) transparent;
+}
+[data-bp-mode="dark"] .scroll-area::-webkit-scrollbar-thumb,
+[data-bp-mode="dark"] .swb-pane-scroll::-webkit-scrollbar-thumb {
+  background: rgba(144, 147, 153, 0.28);
+  background-clip: content-box;
+  border: 1px solid transparent;
+}
+[data-bp-mode="dark"] .scroll-area::-webkit-scrollbar-thumb:hover,
+[data-bp-mode="dark"] .swb-pane-scroll::-webkit-scrollbar-thumb:hover {
+  background: rgba(144, 147, 153, 0.45);
+  background-clip: content-box;
+  border: 1px solid transparent;
+}
+[data-bp-mode="dark"] .scroll-area::-webkit-scrollbar-thumb:active,
+[data-bp-mode="dark"] .swb-pane-scroll::-webkit-scrollbar-thumb:active {
+  background: rgba(144, 147, 153, 0.65);
+  background-clip: content-box;
+  border: 1px solid transparent;
+}
+
+/* ✅ 长表格表头吸顶：滚动容器内的表格滚动时表头固定在顶部 */
+.scroll-area .ant-table-thead > tr > th,
+.swb-pane-scroll .ant-table-thead > tr > th {
+  position: sticky;
+  top: 0;
+  z-index: 2;
+}
+
+/* Ant Design Tree / Table / Modal / Drawer / Collapse 内滚动容器也应用统一规范
+   （6px 圆角，与右窗格同源）。
+   .ba-cat-bar = 解析提取「提取项目」子页的纵向分类导航条（内滚动），
+   同样挂 6px 规格，避免同一界面出现两种滚动条样式。 */
 .ant-tree-list-holder-inner,
 .ant-table-body,
-.ant-table-body-inner {
+.ant-table-body-inner,
+.ba-cat-bar,
+.ant-modal-body,
+.ant-drawer-body,
+.ant-collapse-content-box {
   scrollbar-width: thin;
-  scrollbar-color: #bfbfbf transparent;
+  scrollbar-color: rgba(144, 147, 153, 0.3) transparent;
 }
 .ant-tree-list-holder-inner::-webkit-scrollbar,
 .ant-table-body::-webkit-scrollbar,
-.ant-table-body-inner::-webkit-scrollbar {
-  width: 10px;
+.ant-table-body-inner::-webkit-scrollbar,
+.ba-cat-bar::-webkit-scrollbar,
+.ant-modal-body::-webkit-scrollbar,
+.ant-drawer-body::-webkit-scrollbar,
+.ant-collapse-content-box::-webkit-scrollbar {
+  width: 6px;
 }
 .ant-tree-list-holder-inner::-webkit-scrollbar-thumb,
 .ant-table-body::-webkit-scrollbar-thumb,
-.ant-table-body-inner::-webkit-scrollbar-thumb {
-  background: #d9d9d9;
-  border-radius: 5px;
-  border: 2px solid transparent;
+.ant-table-body-inner::-webkit-scrollbar-thumb,
+.ba-cat-bar::-webkit-scrollbar-thumb,
+.ant-modal-body::-webkit-scrollbar-thumb,
+.ant-drawer-body::-webkit-scrollbar-thumb,
+.ant-collapse-content-box::-webkit-scrollbar-thumb {
+  background: rgba(144, 147, 153, 0.3);
+  border-radius: 4px;
+  border: 1px solid transparent;
   background-clip: content-box;
 }
-.ant-tree-list-holder-inner::-webkit-scrollbar-thumb:hover {
-  background: #bfbfbf;
+.ant-tree-list-holder-inner::-webkit-scrollbar-thumb:hover,
+.ant-table-body::-webkit-scrollbar-thumb:hover,
+.ant-table-body-inner::-webkit-scrollbar-thumb:hover,
+.ba-cat-bar::-webkit-scrollbar-thumb:hover,
+.ant-modal-body::-webkit-scrollbar-thumb:hover,
+.ant-drawer-body::-webkit-scrollbar-thumb:hover,
+.ant-collapse-content-box::-webkit-scrollbar-thumb:hover {
+  background: rgba(144, 147, 153, 0.5);
+  background-clip: content-box;
+  border: 1px solid transparent;
+}
+/* 暗色主题下 Tree / Table 内滚动条 */
+[data-bp-mode="dark"] .ant-tree-list-holder-inner,
+[data-bp-mode="dark"] .ant-table-body,
+[data-bp-mode="dark"] .ant-table-body-inner {
+  scrollbar-color: rgba(144, 147, 153, 0.25) transparent;
+}
+[data-bp-mode="dark"] .ant-tree-list-holder-inner::-webkit-scrollbar-thumb,
+[data-bp-mode="dark"] .ant-table-body::-webkit-scrollbar-thumb,
+[data-bp-mode="dark"] .ant-table-body-inner::-webkit-scrollbar-thumb {
+  background: rgba(144, 147, 153, 0.25);
+  background-clip: content-box;
+  border: 2px solid transparent;
+}
+[data-bp-mode="dark"] .ant-tree-list-holder-inner::-webkit-scrollbar-thumb:hover,
+[data-bp-mode="dark"] .ant-table-body::-webkit-scrollbar-thumb:hover,
+[data-bp-mode="dark"] .ant-table-body-inner::-webkit-scrollbar-thumb:hover {
+  background: rgba(144, 147, 153, 0.45);
   background-clip: content-box;
   border: 2px solid transparent;
 }
 
 /* ========== 布局高度链路修复 ========== */
-/* 让 antd Tabs 在 flex 父里真正撑满：content-holder / tabpane 必须能接收 flex 高度 */
+/* 让 antd Tabs 在 flex 父里真正撑满：content-holder / tabpane 必须能接收 flex 高度。
+   ✅ R253 根因修复（2026-11-17）：旧 flex:1 1 auto + height:100% 在 Tabs 组件
+   height 属性为 auto（USED 高度由 flex 分配但 height 属性仍 auto）时，
+   height:100% 解析为 auto → flex-basis:auto 退化为内容驱动 → 元素随内容增高 →
+   下游 swb-pane-scroll 的 overflow-y:auto 永不触发（六大模块右窗格无滚动条真因）。
+   改 flex:1 1 0%（flex-basis:0% 不依赖 height 属性解析，元素从 0 增长填满可用空间）
+   + overflow:hidden 安全网（防内容撑开）。 */
 
 .ant-tabs.swb-tabs-flex,
 .ant-tabs.swb-tabs-flex > .ant-tabs-content-holder,
@@ -954,11 +1077,11 @@ pre,
   > .ant-tabs-content-holder
   > .ant-tabs-content
   > .ant-tabs-tabpane:not(.ant-tabs-tabpane-hidden) {
-  display: flex;
-  flex-direction: column;
-  flex: 1 1 auto;
-  min-height: 0;
-  height: 100%;
+  display: flex !important;
+  flex-direction: column !important;
+  flex: 1 1 0% !important;
+  min-height: 0 !important;
+  overflow: hidden !important;
 }
 
 /* 🔴 关键修复：非激活 Tab 面板必须隐藏。
@@ -1107,27 +1230,17 @@ pre,
   display: none !important;
 }
 
-/* ant-tree 在 flex 父里：容器不能被内容撑爆 */
+/* ant-tree 高度与滚动：由外层滚动容器（.scroll-area / .swb-pane-scroll）管理，
+   树自身按内容自然增高。曾用 height:100% + position:absolute 强制填满父容器，
+   但当父容器无显式 height（flex 子项 / minHeight 容器 / SplitPane 次窗格）时，
+   height:100% 解析为 auto，而 position:absolute 的子元素不参与父高度计算，
+   导致整条高度链塌缩为 0 → 目录树不可见（R251 删除 maxHeight:calc(100vh-420px) 后暴露）。
+   移除强制高度链，恢复 antd Tree 默认渲染（内容高度）；virtual 模式由 antd 自管。 */
 .ant-tree {
   min-height: 0;
-  height: 100%;
-  overflow: hidden; /* 裁剪子元素溢出 */
-}
-/* ant-tree 直接子层：ant-tree-list / ant-tree-treenode 等都要能跟随父 */
-.ant-tree > .ant-tree-list {
-  height: 100%;
-  min-height: 0;
-  overflow: hidden;
 }
 .ant-tree-list-holder {
-  height: 100%;
   position: relative;
-  overflow: hidden;
-}
-.ant-tree-list-holder-inner {
-  position: absolute;
-  inset: 0;
-  overflow-y: auto !important;
 }
 
 /* ant-layout-content 高度链路：Content 是 flex 列锚点，所有页面根元素都变成 flex column */
@@ -1531,3 +1644,88 @@ pre,
     padding: 10px 6px !important;
   }
 }
+
+/* ---------- ✅ 可拖拽分隔面板（SplitPane · re-resizable，2026-11-16）---------- */
+/* 拖拽手柄：由 re-resizable 渲染在首窗格内缘（handleClasses="swb-split-handle"）。
+   本身尺寸/定位/光标由组件的 handleStyle 内联控制；这里只补 hover/焦点可视反馈。 */
+.swb-split-handle {
+  touch-action: none; /* 阻止触屏滚动劫持 pointermove */
+  user-select: none;
+  transition: background-color 0.15s ease;
+}
+.swb-split-handle:hover {
+  background: rgba(22, 119, 255, 0.18) !important;
+}
+.swb-split-handle:focus-visible {
+  outline: 2px solid #1677ff;
+  outline-offset: 1px;
+}
+/* 窗格内滚动：两个窗格各自独立滚动（避免整块内容把布局撑高）。 */
+.swb-split-first,
+.swb-split-second {
+  min-width: 0;
+  min-height: 0;
+}
+/* ✅ R252 窗格高度链传递（2026-11-16）：first/second 窗格成为 flex 容器（SplitPane.tsx
+   resizableStyle/secondStyle 的 display:flex），直接子元素 flex:1 填满窗格高度，使
+   .swb-pane-scroll 的 overflow-y:auto 生效。
+   根因：flex 子项（swb-split-second）computed height 为 auto（flex 引擎分配 used height
+   但 height 属性仍 auto），子元素 height:100% 解析为 auto → 容器随内容增高、不溢出 →
+   overflow-y:auto 不触发 → 内容被外层 overflow:hidden 裁切却无滚动条（六大模块右窗格
+   内容过多时底部被裁、无法查看的真因）。swb-split-first 同理（vertical 时缺 height:100%
+   致链路断裂，内容多时同样裁切）。
+   安全性：所有使用点 first/second 直接子元素均为单元素——六大模块 Tab 与 BidAnalysisTab
+   为单 div；SchemeWorkbenchPage 外层 first 为互斥条件渲染 Fragment（activeTab 决定
+   SchemeTreePanel/ImportSidePanel/FactsCategoryPanel 三选一），任意时刻只渲染单元素。 */
+.swb-split-first > *,
+.swb-split-second > * {
+  flex: 1 1 0%;
+  min-height: 0;
+  min-width: 0;
+}
+.swb-split > .swb-split-second {
+  overflow: hidden;
+}
+/* 拖拽中：全局禁用文本选中 + 光标异常（由 SplitPane 在 onResizeStart/Stop 切换 body class）。 */
+body.swb-resizing,
+body.swb-resizing * {
+  user-select: none !important;
+  cursor: inherit;
+}
+/* 窄屏：沿用 .swb-workbench-main 的上下堆叠断点，隐藏拖拽手柄、窗格恢复满宽。
+   手柄嵌在 <Resizable> 内，故用后代选择器命中。 */
+/* 窄屏降级（2026-11-16 由 768px 提升到 1024px，对齐需求「宽度 <1024px 即禁用拖拽」）：
+   平板/小窗下左右分栏的可拖拽意义有限且易误触，故 <1024px 直接隐藏拖拽手柄、
+   首窗格恢复满宽并按内容高度堆叠为单列，避免移动端拖拽困难。
+   断点不再「沿用 .swb-workbench-main」——该类已由 SplitPane 取代、无元素挂载，
+   故本断点独立生效，不会与页面级布局互相干扰。 */
+@media (max-width: 1024px) {
+  .swb-split {
+    flex-direction: column !important;
+  }
+  /* 禁用拖拽：隐藏手柄（拖拽入口消失即等价于禁用），窗格恢复满宽。 */
+  .swb-split .swb-split-handle {
+    display: none !important;
+  }
+  /* 首窗格满宽；高度按内容，但给个上限防止把次窗格挤到视口外。
+     ⚠️ R251：窄屏堆叠后首窗格限高 42vh，其内容（.swb-pane-scroll 的
+     height:100% 在 auto 高度父级里会塌陷）必须由首窗格自身兜底滚动，
+     否则窄屏下首窗格内容被裁且无法查看。inline 的 overflow:hidden
+     优先级高于类规则，故此处必须 !important。 */
+  .swb-split > .swb-split-first {
+    width: 100% !important;
+    min-width: 0 !important;
+    height: auto !important;
+    max-height: 42vh;
+    padding-right: 0 !important;
+    overflow-y: auto !important;
+    overscroll-behavior: contain;
+  }
+  .swb-split > .swb-split-second {
+    width: 100% !important;
+    flex: 1 1 auto;
+    padding-left: 0 !important;
+    padding-top: 8px !important;
+  }
+}
+

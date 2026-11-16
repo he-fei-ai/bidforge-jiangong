@@ -395,12 +395,80 @@ def test_router_paths_registered():
 
 @pytest.mark.asyncio
 async def test_diagnostics_endpoint_contract():
+    """诊断端点契约（R235 建立 + R239 扩展可达性面）。
+
+    R239：``engine_config`` / ``paused`` 是 agent_engine 单轨网关的**可达性出口** ——
+    此前 ``public_config()`` / ``OmpAgentGateway.list_paused()`` 是「服务层就绪但零消费点」
+    （本仓头号反模式），诊断端点把它们接成运维可观测面。护栏必须锁「键在场 + 脱敏 +
+    挂起任务真实可见」，否则端点新增键会重新退化成零覆盖。
+    """
     from app.routers import omp_ops
 
     out = await omp_ops.omp_diagnostics()
     assert {"enabled", "ok", "checks", "problems", "snapshot", "safety"} <= set(out.keys())
+    # R239 可达性面（加法式）
+    assert {"engine_config", "paused"} <= set(out.keys())
     assert isinstance(out["enabled"], bool)
     assert out["safety"]["redlines_ok"] is True
+
+    # engine_config：单轨语义 + 凭据绝不外泄（脱敏是本面的硬约束）
+    ec = out["engine_config"]
+    assert ec["engine"] == "omp"
+    assert ec["primary"] == "omp"
+    # ⚠️ fallback 是**引擎层**三档降级链（R236 ENGINE_ORDER）的档位清单，**不是**
+    #    agent_engine 的回退面 —— agent_engine 失败即挂起，绝不改走 local/main。
+    #    这里只锁「可查 + 不含 agent_engine 回退语义」，不锁其具体取值（R236 设计）。
+    assert isinstance(ec["fallback"], list)
+    assert isinstance(ec["fallback_enabled"], bool)
+    assert isinstance(ec["provider_auth_configured"], bool)
+    blob = repr(ec)
+    for leak in ("api_key", "secret", "token", "password", ".json"):
+        assert leak not in blob, f"engine_config 泄漏敏感字段 {leak}"
+
+
+@pytest.mark.asyncio
+async def test_diagnostics_paused_tasks_are_reachable(tmp_path, monkeypatch):
+    """挂起任务必须能从诊断端点看到（可达性正向实证）。
+
+    构造一条挂起记录 → ``GET /omp/diagnostics`` 的 ``paused`` 必须包含它，
+    且带 ``resume_url`` 供人工恢复入口。若 ``list_paused`` 未接线，本用例必红。
+    """
+    from app.routers import omp_ops
+    from app.services.ai.agent_engine import OmpAgentGateway
+    from app.services.ai.agent_engine import gateway as gw_mod
+
+    # 隔离状态目录（避免污染真实挂起区 / 跨用例串扰）
+    gw = OmpAgentGateway(state_dir=str(tmp_path / "paused"))
+    monkeypatch.setattr(gw_mod, "_gateway", gw, raising=False)
+
+    from app.services.ai.agent_engine.contracts import AgentResult, AgentTask
+
+    paused_result = AgentResult(
+        ok=False,
+        task_id="r239-paused-1",
+        task_type="outline",
+        engine="omp",
+        requested_engine="omp",
+        status="paused",
+        paused=True,
+        attempts=1,
+        errors=["[execution] 模拟挂起（护栏用）"],
+        reason="omp 执行失败（execution）⇒ 任务挂起，待人工介入",
+        elapsed_ms=10,
+        manual_review="模拟挂起（护栏用）",
+        scene_preserved=True,
+        meta={"kind": "execution"},
+    )
+    gw._persist(
+        AgentTask(task_id="r239-paused-1", instruction="写目录", task_type="outline"),
+        paused_result,
+    )
+
+    out = await omp_ops.omp_diagnostics()
+    ids = [str(item.get("task_id")) for item in out["paused"]]
+    assert "r239-paused-1" in ids, "挂起任务未从诊断端点暴露（可达性断裂）"
+    item = next(i for i in out["paused"] if i.get("task_id") == "r239-paused-1")
+    assert "resume" in str(item.get("resume_url") or "")
 
 
 @pytest.mark.asyncio

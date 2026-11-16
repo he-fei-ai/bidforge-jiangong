@@ -253,7 +253,7 @@ function AutoFixModal({ schemeId, finding, open, onClose, onFixed }: AutoFixModa
                 }
                 description="确认无误后点击右下角按钮，AI 将在这些位置做最小必要修改，其余内容保持原样。"
               />
-              <div style={{ maxHeight: 260, overflowY: "auto", marginBottom: 8 }}>
+              <div className="swb-pane-scroll" style={{ maxHeight: 260, overflowY: "auto", marginBottom: 8 }}>
                 {plan.targets.map((t, i) => (
                   <div
                     key={`${t.section_id}-${t.line}-${i}`}
@@ -340,6 +340,7 @@ function AutoFixModal({ schemeId, finding, open, onClose, onFixed }: AutoFixModa
                 <div style={{ fontSize: 11 }}>
                   <Text type="secondary">修复前：</Text>
                   <pre
+                    className="swb-pane-scroll"
                     style={{
                       margin: "2px 0",
                       fontSize: 11,
@@ -354,6 +355,7 @@ function AutoFixModal({ schemeId, finding, open, onClose, onFixed }: AutoFixModa
                   </pre>
                   <Text type="secondary">修复后：</Text>
                   <pre
+                    className="swb-pane-scroll"
                     style={{
                       margin: "2px 0 0",
                       fontSize: 11,

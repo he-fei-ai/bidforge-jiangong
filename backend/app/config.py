@@ -339,6 +339,17 @@ class Settings(BaseSettings):
     sse_total_timeout_default: int = 1800
     sse_total_timeout_hard_max: int = 14400
     ai_request_timeout: int = 900
+    # 文本模型配置模块的运行时数值默认值（R249 续 · 2026-11-16）。
+    # 此前仅 ai_request_timeout 在 config.py 声明，max_tokens/temperature/concurrency
+    # 由 provider_factory.DEFAULT_CONFIG_NUMBERS 字面量承担，数据库 schema 与
+    # 前端表单各保留一份，改默认只能改三处代码。现新增三个设置项，默认值与
+    # 既有字面量逐字一致（不再由本文件改默认值，运行时按 _RANGE 钳制）。
+    # ⚠️ AI_DEFAULT_CONCURRENCY 是「AI 配置的新建默认并发数」（既有 schema 默认 4）；
+    #     DEFAULT_CONCURRENCY 是「正文/目录生成链路的并发控制器初始档位」（默认 3），
+    #     两者语义不同，不要混用。
+    ai_default_max_tokens: int = 8192
+    ai_default_temperature: float = 0.7
+    ai_default_concurrency: int = 4
     # ✅ R175（2026-11-03 · SSRF 防护）：是否允许 AI Base URL 指向内网/回环/
     #    链路本地地址。默认 False = 拒绝（含 127.0.0.0/8、::1、10/8、172.16/12、
     #    192.168/16、169.254/16、0.0.0.0、localhost 及解析后落到这些网段的域名）。

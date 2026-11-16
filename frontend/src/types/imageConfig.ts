@@ -39,3 +39,91 @@ export interface ImageConfigSavePayload {
   price_per_image: number;
   max_ai_images: number;
 }
+
+// ✅ R252（2026-11-16）：图像模型配置增强 —— 多模型多配置 / 场景路由 / 参数模板。
+export interface ImageModelItem {
+  id: string;
+  provider: string;
+  model: string;
+  base_url: string;
+  enabled: boolean;
+  default_size: string;
+  concurrency: number;
+  price_per_image: number;
+  max_ai_images: number;
+  is_default: boolean;
+  status: string;
+  env: string;
+  priority: number;
+  remark: string;
+  default_params: Record<string, unknown>;
+  config_version: number;
+  key_hint: string;
+  has_key: boolean;
+  key_broken: boolean;
+  created_at?: string;
+  updated_at?: string;
+}
+
+export interface ImageModelListResponse {
+  items: ImageModelItem[];
+  presets: Record<string, ImageConfigPreset>;
+  active_id: string;
+  count: number;
+  generation: number;
+  scenes: Record<string, string>;
+}
+
+export interface ImageModelSavePayload {
+  provider: string;
+  model: string;
+  base_url: string;
+  api_key: string;
+  enabled: boolean;
+  default_size: string;
+  concurrency: number;
+  price_per_image: number;
+  max_ai_images: number;
+  is_default: boolean;
+  status: string;
+  env: string;
+  priority: number;
+  remark: string;
+  default_params: Record<string, unknown>;
+}
+
+export interface ImageSceneRouteItem {
+  scene: string;
+  label: string;
+  config_id: string;
+  missing: boolean;
+}
+
+export interface ImageSceneRoutesResponse {
+  items: ImageSceneRouteItem[];
+  known_scenes: { value: string; label: string }[];
+  configured_count: number;
+}
+
+export interface ImageAuditItem {
+  id: string;
+  action: string;
+  config_id: string;
+  provider_name: string;
+  model: string;
+  detail: string;
+  client_ip: string;
+  created_at: string;
+}
+
+export interface ImageAuditResponse {
+  items: ImageAuditItem[];
+  count: number;
+}
+
+export interface ImageModelMutationResponse {
+  ok: boolean;
+  id?: string;
+  default_id?: string;
+  generation: number;
+}

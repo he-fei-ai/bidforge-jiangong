@@ -2422,7 +2422,7 @@ export default function AIConfigPage() {
                       }
                     />
                     {/* 场景较多（20+），限高滚动避免把页面撑得过长 */}
-                    <div style={{ maxHeight: 300, overflowY: "auto" }}>
+                    <div className="swb-pane-scroll" style={{ maxHeight: 300, overflowY: "auto" }}>
                       <Row gutter={[8, 8]}>
                         {sceneRoutes.map((s) => (
                           <Col span={12} key={s.scene}>
